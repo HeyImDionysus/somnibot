@@ -1,0 +1,30 @@
+{
+  "name": "@somnibot/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.ts",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@somnibot/shared": "workspace:*",
+    "discord.js": "^14.24.0",
+    "shoukaku": "^4.1.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "iovalkey": "^0.3.0",
+    "zod": "^3.24.0",
+    "node-cron": "^3.0.3",
+    "@napi-rs/canvas": "^0.1.67"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11"
+  }
+}
