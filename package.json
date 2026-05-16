@@ -1,0 +1,21 @@
+{
+  "name": "somnibot",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "type-check": "turbo type-check",
+    "clean": "turbo clean",
+    "bot:dev": "turbo dev --filter=@somnibot/bot",
+    "dashboard:dev": "turbo dev --filter=@somnibot/dashboard",
+    "db:migrate": "supabase db push --db-url $SUPABASE_DB_URL",
+    "db:reset": "supabase db reset",
+    "docker:dev": "docker compose up -d",
+    "docker:down": "docker compose down"
+  }
+}

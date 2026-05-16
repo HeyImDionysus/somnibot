@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: packages/bot/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - lavalink
+      - valkey
+    env_file: .env
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: packages/dashboard/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - valkey
+    env_file: .env
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    restart: unless-stopped
+    volumes:
+      - ./services/lavalink/application.yml:/opt/Lavalink/application.yml
+    environment:
+      - _JAVA_OPTIONS=-Xmx512m
+
+  valkey:
+    image: valkey/valkey:7.2-alpine
+    restart: unless-stopped
+    volumes:
+      - valkey-data:/data
+    command: valkey-server --save 60 1 --loglevel warning
+
+volumes:
+  valkey-data:
