@@ -102,14 +102,59 @@ export async function GET() {
       }
     }
 
-    // Step 3: Determine connection statuses based on what's actually configured
-    const statuses: Record<string, 'connected' | 'disconnected'> = {
-      supabase: (values.supabase_url && values.supabase_service_role_key) ? 'connected' : 'disconnected',
-      discord: (values.discord_bot_token && values.discord_guild_id) ? 'connected' : 'disconnected',
-      paypal: (values.paypal_client_id && values.paypal_client_secret) ? 'connected' : 'disconnected',
-      lavalink: (values.lavalink_host && values.lavalink_port) ? 'connected' : 'disconnected',
-      valkey: values.valkey_url ? 'connected' : 'disconnected',
+    // Step 3: Determine connection statuses.
+    // Check env vars AND actual database state (the bot writes guild data on startup).
+    const statuses: Record<string, 'connected' | 'disconnected' | 'bot-side'> = {
+      supabase: 'disconnected',
+      discord: 'disconnected',
+      paypal: 'disconnected',
+      lavalink: 'disconnected',
+      valkey: 'disconnected',
     };
+
+    // Supabase: if we got this far, Supabase IS connected (we just queried it)
+    if (values.supabase_url && values.supabase_service_role_key) {
+      statuses.supabase = 'connected';
+    }
+
+    // Check if the bot has connected by looking for a guild record in the DB.
+    // The bot upserts a guild row on startup with role position data.
+    let botHasConnected = false;
+    const { data: guildRecord } = await admin
+      .from('guild')
+      .select('id, bot_role_position')
+      .limit(1)
+      .single();
+    if (guildRecord) {
+      botHasConnected = true;
+    }
+
+    // Discord: connected if env vars are present OR the bot has connected
+    if (values.discord_bot_token && values.discord_guild_id) {
+      statuses.discord = 'connected';
+    } else if (botHasConnected) {
+      statuses.discord = 'connected';
+    }
+
+    // PayPal: only from env/db config
+    if (values.paypal_client_id && values.paypal_client_secret) {
+      statuses.paypal = 'connected';
+    }
+
+    // Lavalink & Valkey: these run on the bot server (Docker), not on Vercel.
+    // If the dashboard has env vars, show connected. If the bot has connected
+    // (meaning the bot server is running with Docker), show "bot-side".
+    if (values.lavalink_host && values.lavalink_port) {
+      statuses.lavalink = 'connected';
+    } else if (botHasConnected) {
+      statuses.lavalink = 'bot-side';
+    }
+
+    if (values.valkey_url) {
+      statuses.valkey = 'connected';
+    } else if (botHasConnected) {
+      statuses.valkey = 'bot-side';
+    }
 
     return NextResponse.json({ values, statuses, sources });
   } catch (err) {

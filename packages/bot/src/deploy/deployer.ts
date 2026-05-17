@@ -475,6 +475,7 @@ export async function deployServerState(
           setup_completed: false,
           bot_role_id: guild.members.me?.roles.highest.id ?? null,
           bot_role_position: guild.members.me?.roles.highest.position ?? null,
+          total_roles: guild.roles.cache.size,
         })
         .eq('id', guild.id);
 
