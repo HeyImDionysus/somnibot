@@ -16,6 +16,7 @@ import { StatsChannelManager } from './features/stats-channels/index.js';
 import { ScheduledMessageRunner } from './features/scheduled-messages/index.js';
 import { GiveawayManager, buildGiveawayCommands } from './features/giveaways/index.js';
 import { MusicPlayerManager, buildMusicCommands } from './features/music/index.js';
+import { EntitlementService, buildStoreCommand, buildLicenseCommand } from './features/commerce/index.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -297,7 +298,48 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-11 systems initialized');
+    // Phase 12: Commerce & Universal Licensing
+    if (guild) {
+      try {
+        const { data: commerceConfig } = await client.supabase
+          .from('guild_config')
+          .select('paypal_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (commerceConfig?.paypal_enabled !== false) {
+          const entitlementService = new EntitlementService(
+            guild,
+            client.supabase,
+            client.eventBus,
+          );
+          (client as unknown as Record<string, unknown>)._entitlementService = entitlementService;
+
+          // Register commerce slash commands
+          const rest12 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+          const commerceCmds = [buildStoreCommand(), buildLicenseCommand()];
+          let registered = 0;
+          for (const cmd of commerceCmds) {
+            try {
+              await rest12.post(
+                Routes.applicationGuildCommands(client.user!.id, client.guildId),
+                { body: cmd.toJSON() },
+              );
+              registered++;
+            } catch (regErr) {
+              console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
+            }
+          }
+          console.log(`[Boot] ✅ Commerce system started + ${registered}/${commerceCmds.length} commands registered (/store, /license)`);
+        } else {
+          console.log('[Boot] ⏸️  Commerce system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 12 (Commerce) initialization error:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-12 systems initialized');
   });
 
   // Graceful shutdown

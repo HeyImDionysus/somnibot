@@ -1,0 +1,172 @@
+/**
+ * Receipt Builder — Creates Components v2 receipt DMs for customers.
+ *
+ * Architecture doc §31.2 — container with accent color, order details, license key.
+ */
+import {
+  ContainerBuilder,
+  SectionBuilder,
+  SeparatorBuilder,
+  SeparatorSpacingSize,
+  TextDisplayBuilder,
+  EmbedBuilder,
+  type User,
+} from 'discord.js';
+
+const HOT_PINK = 0xFF1493;
+
+interface ReceiptData {
+  orderNumber: string;
+  productName: string;
+  amountCents: number;
+  currency: string;
+  licenseKey: string | null; // Plaintext — shown once
+  date: Date;
+}
+
+/**
+ * Build a Components v2 receipt for DM delivery.
+ *
+ * Falls back to standard embed if Components v2 isn't available.
+ */
+export function buildReceiptEmbed(data: ReceiptData): EmbedBuilder {
+  const amount = (data.amountCents / 100).toFixed(2);
+  const dateStr = data.date.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(HOT_PINK)
+    .setTitle('🧾 Order Confirmed')
+    .addFields(
+      { name: 'Order', value: data.orderNumber, inline: true },
+      { name: 'Product', value: data.productName, inline: true },
+      { name: 'Amount', value: `$${amount} ${data.currency}`, inline: true },
+      { name: 'Date', value: dateStr, inline: true },
+    );
+
+  if (data.licenseKey) {
+    embed.addFields(
+      { name: '\u200B', value: '─'.repeat(30) },
+      { name: '🔑 Your License Key', value: `\`${data.licenseKey}\`` },
+      {
+        name: '⚠️ Important',
+        value: '**Save this key!** It will not be shown again.',
+      },
+      { name: '\u200B', value: '─'.repeat(30) },
+      {
+        name: 'Activation',
+        value: `Use \`/license activate ${data.licenseKey}\` in the server to activate.`,
+      },
+    );
+  }
+
+  embed.setFooter({ text: 'SomniBot Commerce' });
+  embed.setTimestamp(data.date);
+
+  return embed;
+}
+
+/**
+ * Try to build Components v2 receipt container.
+ * Falls back to standard embed if container APIs aren't available.
+ */
+export function buildReceiptComponents(data: ReceiptData): ContainerBuilder | null {
+  try {
+    const amount = (data.amountCents / 100).toFixed(2);
+    const dateStr = data.date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+
+    const container = new ContainerBuilder()
+      .setAccentColor(HOT_PINK)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('🧾 **Order Confirmed**'),
+      )
+      .addSeparatorComponents(
+        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small),
+      )
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`**Order:** ${data.orderNumber}`),
+      )
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`**Product:** ${data.productName}`),
+      )
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`**Amount:** $${amount} ${data.currency}`),
+      )
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`**Date:** ${dateStr}`),
+      );
+
+    if (data.licenseKey) {
+      container
+        .addSeparatorComponents(
+          new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small),
+        )
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent('**Your License Key:**'),
+        )
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(`\`${data.licenseKey}\``),
+        )
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(''),
+        )
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent('⚠️ **Save this key!** It will not be shown again.'),
+        )
+        .addSeparatorComponents(
+          new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small),
+        )
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `To activate: \`/license activate ${data.licenseKey}\``,
+          ),
+        );
+    }
+
+    return container;
+  } catch {
+    // Components v2 not fully available — caller should fall back to embed
+    return null;
+  }
+}
+
+/**
+ * Send receipt DM to a user. Tries Components v2, falls back to embed.
+ */
+export async function sendReceiptDM(
+  user: User,
+  data: ReceiptData,
+): Promise<boolean> {
+  try {
+    const dm = await user.createDM();
+
+    // Try Components v2 first
+    const container = buildReceiptComponents(data);
+    if (container) {
+      try {
+        await dm.send({
+          components: [container],
+          flags: [4096], // IS_COMPONENTS_V2
+        } as never);
+        return true;
+      } catch {
+        // Fall through to embed
+      }
+    }
+
+    // Fallback: standard embed
+    const embed = buildReceiptEmbed(data);
+    await dm.send({ embeds: [embed] });
+    return true;
+  } catch (err) {
+    console.error(`[Commerce] Failed to DM receipt to ${user.id}:`, err);
+    return false;
+  }
+}

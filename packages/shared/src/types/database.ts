@@ -550,18 +550,25 @@ export interface DbGiveaway {
 // Commerce
 // ============================================================
 
+// ============================================================
+// Commerce — Products
+// ============================================================
+
 export interface DbProduct {
   id: string; // UUID
   guild_id: string;
   name: string;
-  description: string;
-  price: number;
+  description: string | null;
+  type: 'one_time' | 'subscription';
+  delivery_type: 'file' | 'link' | 'access_pass' | 'mixed';
+  paypal_product_id: string | null;
+  price_cents: number;
   currency: string;
-  product_type: 'one_time' | 'subscription';
-  entitlement_role_id: string | null;
+  granted_role_ids: string[];
+  granted_channel_ids: string[];
   active: boolean;
   sort_order: number;
-  image_url: string | null;
+  metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -569,87 +576,161 @@ export interface DbProduct {
 export interface DbProductFile {
   id: string; // UUID
   product_id: string;
-  file_name: string;
-  storage_path: string;
-  file_size: number;
-  mime_type: string;
+  name: string;
+  description: string | null;
+  file_path: string | null;
+  external_url: string | null;
+  file_size_bytes: number | null;
+  mime_type: string | null;
+  download_count: number;
+  sort_order: number;
   created_at: string;
 }
 
 export interface DbPlan {
   id: string; // UUID
   product_id: string;
-  paypal_plan_id: string;
+  guild_id: string;
   name: string;
-  interval: 'monthly' | 'quarterly' | 'yearly';
-  price: number;
+  paypal_plan_id: string | null;
+  interval_unit: 'DAY' | 'WEEK' | 'MONTH' | 'YEAR';
+  interval_count: number;
+  price_cents: number;
   currency: string;
+  trial_days: number;
   active: boolean;
   created_at: string;
+  updated_at: string;
 }
+
+// ============================================================
+// Commerce — Customers
+// ============================================================
 
 export interface DbCustomer {
   id: string; // UUID
+  user_id: string | null;
   guild_id: string;
   discord_id: string;
   discord_username: string;
+  paypal_customer_id: string | null;
   email: string | null;
-  paypal_payer_id: string | null;
-  total_spent: number;
-  order_count: number;
+  first_purchase_at: string | null;
+  total_spent_cents: number;
+  notes: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface DbOrder {
+// ============================================================
+// Commerce — Promotions
+// ============================================================
+
+export interface DbPromotion {
   id: string; // UUID
   guild_id: string;
-  customer_id: string;
-  product_id: string;
-  order_number: string; // SMNI-XXXXX
-  status: 'pending' | 'completed' | 'refunded' | 'cancelled';
-  amount: number;
-  currency: string;
-  paypal_order_id: string | null;
+  name: string;
+  type: 'percentage' | 'fixed_amount';
+  value: number;
+  coupon_code: string | null;
+  applies_to_product_ids: string[];
+  applies_to_plan_ids: string[];
+  start_date: string | null;
+  end_date: string | null;
+  max_uses: number | null;
+  current_uses: number;
+  min_purchase_cents: number | null;
+  first_purchase_only: boolean;
+  active: boolean;
   created_at: string;
   updated_at: string;
 }
+
+// ============================================================
+// Commerce — Orders
+// ============================================================
+
+export interface DbOrder {
+  id: string; // UUID
+  order_number: string; // INS-XXXXX
+  customer_id: string;
+  guild_id: string;
+  product_id: string;
+  plan_id: string | null;
+  paypal_order_id: string | null;
+  paypal_subscription_id: string | null;
+  amount_cents: number;
+  currency: string;
+  discount_cents: number;
+  promotion_id: string | null;
+  source: 'purchase' | 'giveaway' | 'manual' | 'automation';
+  status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled';
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Commerce — License Keys
+// ============================================================
 
 export interface DbLicenseKey {
   id: string; // UUID
   order_id: string;
+  customer_id: string;
   product_id: string;
+  guild_id: string;
   key_hash: string;
-  key_prefix: string; // SMNI-XXXX (display)
+  key_prefix: string; // SMNI
+  key_suffix: string; // last 4 chars
   bound_discord_id: string;
-  status: 'active' | 'suspended' | 'revoked';
+  status: 'pending_activation' | 'active' | 'expired' | 'revoked' | 'suspended';
+  activated_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  revocation_reason: string | null;
   created_at: string;
   updated_at: string;
 }
+
+// ============================================================
+// Commerce — Entitlements
+// ============================================================
 
 export interface DbEntitlement {
   id: string; // UUID
-  guild_id: string;
   customer_id: string;
+  guild_id: string;
   product_id: string;
+  plan_id: string | null;
+  license_key_id: string | null;
   order_id: string;
-  discord_id: string;
-  role_id: string | null;
-  status: 'active' | 'suspended' | 'revoked' | 'expired';
+  type: 'one_time' | 'subscription';
+  status: 'active' | 'expired' | 'suspended' | 'cancelled' | 'pending' | 'grace_period';
+  source: 'purchase' | 'giveaway' | 'manual' | 'automation';
+  granted_role_ids: string[];
+  granted_channel_ids: string[];
+  grace_period_ends_at: string | null;
+  starts_at: string;
   expires_at: string | null;
+  cancelled_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+// ============================================================
+// Commerce — License Config & Sessions
+// ============================================================
+
 export interface DbProductLicenseConfig {
-  id: string; // UUID
-  product_id: string;
+  product_id: string; // PK, FK to products
   license_mode: 'portal_only' | 'portal_watermark' | 'embedded' | 'access_pass';
   max_devices: number;
   heartbeat_interval_seconds: number;
-  offline_grace_seconds: number;
-  feature_flags: Record<string, boolean>;
-  watermark_enabled: boolean;
+  offline_grace_period_seconds: number;
+  feature_flags: string[];
+  tier: string | null;
+  watermark_config: Record<string, unknown> | null;
+  require_discord_guild_membership: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -657,73 +738,70 @@ export interface DbProductLicenseConfig {
 export interface DbLicenseSession {
   id: string; // UUID
   license_key_id: string;
-  device_hash: string;
-  platform: string;
+  device_fingerprint: string;
+  device_name: string | null;
+  app_version: string | null;
   ip_address: string | null;
-  last_heartbeat_at: string;
-  session_token: string;
   active: boolean;
-  created_at: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  deactivated_at: string | null;
+  deactivation_reason: 'user_deactivated' | 'admin_revoked' | 'device_limit' | 'heartbeat_timeout' | 'entitlement_revoked' | null;
 }
 
 export interface DbLicenseValidation {
   id: string; // UUID
   license_key_id: string;
-  action: 'validate' | 'heartbeat' | 'deactivate';
-  success: boolean;
-  device_hash: string | null;
-  platform: string | null;
+  product_id: string;
+  device_fingerprint: string | null;
+  result: 'valid' | 'invalid_key' | 'expired' | 'suspended' | 'revoked' | 'over_device_limit' | 'product_mismatch';
   ip_address: string | null;
-  failure_reason: string | null;
+  app_version: string | null;
   created_at: string;
 }
 
-export interface DbPromotion {
-  id: string; // UUID
-  guild_id: string;
-  code: string;
-  discount_type: 'percentage' | 'fixed';
-  discount_value: number;
-  product_ids: string[] | null; // null = all products
-  max_uses: number | null;
-  use_count: number;
-  starts_at: string | null;
-  expires_at: string | null;
-  active: boolean;
-  created_at: string;
-}
+// ============================================================
+// Commerce — Payments
+// ============================================================
 
 export interface DbPayment {
   id: string; // UUID
   order_id: string;
-  paypal_capture_id: string;
-  amount: number;
+  customer_id: string;
+  guild_id: string;
+  paypal_payment_id: string | null;
+  paypal_event_id: string | null;
+  amount_cents: number;
   currency: string;
-  status: 'completed' | 'refunded' | 'partially_refunded';
-  refund_amount: number;
+  status: 'completed' | 'refunded' | 'reversed' | 'pending' | 'failed';
   created_at: string;
 }
+
+// ============================================================
+// Audit & Operations
+// ============================================================
 
 export interface DbAuditLog {
   id: string; // UUID
   guild_id: string;
-  actor_discord_id: string | null;
-  actor_type: 'user' | 'bot' | 'system' | 'webhook';
+  timestamp: string;
+  actor_type: string;
+  actor_id: string;
   action: string;
-  entity_type: string;
-  entity_id: string | null;
-  details: Record<string, unknown> | null;
-  created_at: string;
+  target_type: string | null;
+  target_id: string | null;
+  details: Record<string, unknown>;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
+  success: boolean;
+  error_message: string | null;
 }
 
 export interface DbWebhookEvent {
-  id: string; // UUID
-  guild_id: string;
-  source: 'paypal' | 'discord' | 'supabase';
+  event_id: string; // PK
   event_type: string;
+  processed_at: string;
   payload: Record<string, unknown>;
-  status: 'received' | 'processed' | 'failed';
-  error: string | null;
-  processed_at: string | null;
-  created_at: string;
+  result: 'success' | 'error' | 'duplicate' | null;
+  error_details: string | null;
 }

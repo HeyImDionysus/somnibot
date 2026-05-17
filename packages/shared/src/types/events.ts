@@ -218,6 +218,22 @@ export interface DeployFailedData {
 // Event Type Map
 // ============================================================
 
+export interface EntitlementGrantedData {
+  discordId: string;
+  entitlementId: string;
+  productId: string;
+  productName: string;
+  roleIds: string[];
+}
+
+export interface EntitlementRevokedData {
+  discordId: string;
+  entitlementId: string;
+  productId: string;
+  productName: string;
+  reason: 'expired' | 'cancelled' | 'suspended' | 'revoked' | 'refund';
+}
+
 export interface PlatformEventMap {
   'member.joined': MemberJoinedData;
   'member.left': MemberLeftData;
@@ -230,6 +246,8 @@ export interface PlatformEventMap {
   'subscription.activated': SubscriptionChangedData;
   'subscription.lapsed': SubscriptionChangedData;
   'subscription.changed': SubscriptionChangedData;
+  'entitlement.granted': EntitlementGrantedData;
+  'entitlement.revoked': EntitlementRevokedData;
   'ticket.opened': TicketEventData;
   'ticket.claimed': TicketEventData;
   'ticket.closed': TicketEventData;
