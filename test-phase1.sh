@@ -163,6 +163,28 @@ else
 
   info "Project ref: $PROJECT_REF"
 
+  # First check if the project is active (free-tier projects can pause)
+  info "Checking project status..."
+  PROJECT_STATUS=$(curl -s \
+    -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+    "${MGMT_BASE}/v1/projects/${PROJECT_REF}" 2>/dev/null)
+
+  if echo "$PROJECT_STATUS" | grep -q '"status":"INACTIVE_PAUSED"'; then
+    info "Project is paused — restoring..."
+    RESTORE_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+      -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+      "${MGMT_BASE}/v1/projects/${PROJECT_REF}/restore" 2>/dev/null)
+    RESTORE_STATUS=$(echo "$RESTORE_RESP" | tail -1)
+    info "Restore response: $RESTORE_STATUS"
+    info "Waiting 60s for project to come online..."
+    sleep 60
+  elif echo "$PROJECT_STATUS" | grep -q '"status":"ACTIVE_HEALTHY"'; then
+    info "Project is active"
+  else
+    PROJ_STATUS=$(echo "$PROJECT_STATUS" | grep -o '"status":"[^"]*"' || echo "unknown")
+    info "Project status: $PROJ_STATUS"
+  fi
+
   # Check if tables already exist via REST API
   info "Checking existing schema..."
   CHECK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -177,29 +199,35 @@ else
     info "Running migration via Management API..."
 
     # Nuke existing schema first
-    NUKE_SQL="DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('spatial_ref_sys')) LOOP EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;"
+    NUKE_SQL='DO $$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = '"'"'public'"'"' AND tablename NOT IN ('"'"'spatial_ref_sys'"'"')) LOOP EXECUTE '"'"'DROP TABLE IF EXISTS public.'"'"' || quote_ident(r.tablename) || '"'"' CASCADE'"'"'; END LOOP; END $$;'
 
-    curl -s -o /tmp/nuke_result.txt -w "%{http_code}" \
+    NUKE_JSON=$(python3 -c "import sys, json; print(json.dumps({'query': sys.argv[1]}))" "$NUKE_SQL")
+
+    NUKE_STATUS=$(curl -s -o /tmp/nuke_result.txt -w "%{http_code}" \
       -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
-      -d "{\"query\": $(echo "$NUKE_SQL" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}" \
-      > /tmp/nuke_status.txt 2>/dev/null
+      -d "$NUKE_JSON" 2>/dev/null)
 
-    NUKE_STATUS=$(cat /tmp/nuke_status.txt)
     if [ "$NUKE_STATUS" = "201" ] || [ "$NUKE_STATUS" = "200" ]; then
       info "Schema nuked"
     else
       info "Nuke response: $NUKE_STATUS (may be fine if schema was empty)"
+      cat /tmp/nuke_result.txt 2>/dev/null | head -5
     fi
 
     # Run migration
     MIGRATION_FILE="packages/supabase/migrations/20260516000000_initial_schema.sql"
     if [ -f "$MIGRATION_FILE" ]; then
-      MIGRATION_SQL=$(cat "$MIGRATION_FILE")
-      MIGRATION_JSON=$(python3 -c "import sys,json; print(json.dumps({'query': sys.stdin.read()}))" < "$MIGRATION_FILE")
+      MIGRATION_JSON=$(python3 -c "
+import sys, json
+with open(sys.argv[1], 'r') as f:
+    sql = f.read()
+print(json.dumps({'query': sql}))
+" "$MIGRATION_FILE")
 
       MIGRATE_STATUS=$(curl -s -o /tmp/migrate_result.txt -w "%{http_code}" \
+        --max-time 120 \
         -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
@@ -218,9 +246,15 @@ else
     # Run seed
     SEED_FILE="packages/supabase/seed.sql"
     if [ -f "$SEED_FILE" ]; then
-      SEED_JSON=$(python3 -c "import sys,json; print(json.dumps({'query': sys.stdin.read()}))" < "$SEED_FILE")
+      SEED_JSON=$(python3 -c "
+import sys, json
+with open(sys.argv[1], 'r') as f:
+    sql = f.read()
+print(json.dumps({'query': sql}))
+" "$SEED_FILE")
 
       SEED_STATUS=$(curl -s -o /tmp/seed_result.txt -w "%{http_code}" \
+        --max-time 30 \
         -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
@@ -234,10 +268,10 @@ else
     fi
 
     # Verify tables
-    VERIFY_SQL="SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
-    VERIFY_JSON=$(python3 -c "import json; print(json.dumps({'query': '$VERIFY_SQL'}))")
+    VERIFY_JSON=$(python3 -c "import json; print(json.dumps({'query': \"SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename\"}))")
 
     VERIFY_STATUS=$(curl -s -o /tmp/verify_result.txt -w "%{http_code}" \
+      --max-time 15 \
       -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
@@ -263,8 +297,8 @@ header "Discord Bot Connection"
 
 info "Testing Discord bot login..."
 
-# Use a standalone script file to avoid shell quoting issues
-cat > /tmp/test_discord.mjs << 'DISCORD_SCRIPT'
+# Write test file INSIDE the project so it can resolve discord.js from node_modules
+cat > .test_discord.mjs << 'DISCORD_SCRIPT'
 import { Client, GatewayIntentBits } from 'discord.js';
 
 const client = new Client({
@@ -309,7 +343,7 @@ client.login(process.env.DISCORD_TOKEN).catch(err => {
 });
 DISCORD_SCRIPT
 
-node /tmp/test_discord.mjs 2>&1 | tee /tmp/discord_result.txt
+node .test_discord.mjs 2>&1 | tee /tmp/discord_result.txt
 
 if grep -q "BOT_TAG:" /tmp/discord_result.txt; then
   BOT_TAG=$(grep "BOT_TAG:" /tmp/discord_result.txt | cut -d: -f2-)
@@ -329,6 +363,9 @@ if grep -q "ROLE_WARNING:" /tmp/discord_result.txt; then
   ROLE_WARN=$(grep "ROLE_WARNING:" /tmp/discord_result.txt | cut -d: -f2-)
   echo -e "${YELLOW}⚠️  WARNING${NC} — $ROLE_WARN"
 fi
+
+# Clean up test file
+rm -f .test_discord.mjs
 
 # ────────────────────────────────────────
 # 6. Valkey connection test
@@ -386,7 +423,7 @@ fi
 # ────────────────────────────────────────
 info "Stopping Docker containers..."
 docker compose down 2>/dev/null || true
-rm -f /tmp/test_discord.mjs /tmp/discord_result.txt /tmp/supabase_result.txt /tmp/nuke_result.txt /tmp/nuke_status.txt /tmp/migrate_result.txt /tmp/seed_result.txt /tmp/verify_result.txt
+rm -f /tmp/discord_result.txt /tmp/nuke_result.txt /tmp/migrate_result.txt /tmp/seed_result.txt /tmp/verify_result.txt
 
 echo ""
 echo "Done. Paste this output to Viktor in Slack if anything failed."
