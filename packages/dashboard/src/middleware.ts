@@ -52,7 +52,7 @@ export async function middleware(request: NextRequest) {
   // Redirect authenticated users away from login
   if (user && request.nextUrl.pathname === '/login') {
     const url = request.nextUrl.clone();
-    url.pathname = '/setup';
+    url.pathname = '/dashboard';
     return NextResponse.redirect(url);
   }
 
