@@ -239,7 +239,7 @@ export default function SetupPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/setup');
+        const res = await fetch('/api/server-setup');
         if (res.ok) {
           const data: SetupData = await res.json();
           setSetupData(data);
@@ -886,7 +886,7 @@ function Step7GoLive({
     setConfirming(true);
     setError(null);
     try {
-      const res = await fetch('/api/setup', {
+      const res = await fetch('/api/server-setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'confirm' }),

@@ -27,7 +27,7 @@ export class SomniClient extends Client {
   public readonly supabase: SupabaseClient;
   public readonly valkey: Valkey;
   public readonly eventBus = eventBus;
-  public readonly guildId: string;
+  public guildId: string;
   public readonly env: BotEnv;
 
   constructor() {
