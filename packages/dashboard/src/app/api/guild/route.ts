@@ -51,6 +51,7 @@ export async function GET() {
     return NextResponse.json({
       guild: anyGuild,
       config: anyGuild.guild_config?.[0] ?? null,
+      totalRoles: anyGuild.total_roles ?? null,
     });
   }
 
@@ -65,6 +66,7 @@ export async function GET() {
     guild,
     config: guild.guild_config?.[0] ?? null,
     desiredState,
+    totalRoles: guild.total_roles ?? null,
   });
 }
 

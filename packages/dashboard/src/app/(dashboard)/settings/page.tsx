@@ -76,7 +76,7 @@ const SECTIONS: ConnectionSection[] = [
   {
     id: 'lavalink',
     title: 'Lavalink',
-    description: 'Audio streaming for the music system',
+    description: 'Audio streaming for the music system — configured on the bot server, not here',
     icon: Music,
     iconColor: 'text-[#D770AD]',
     fields: [
@@ -88,7 +88,7 @@ const SECTIONS: ConnectionSection[] = [
   {
     id: 'valkey',
     title: 'Valkey / Redis',
-    description: 'In-memory cache for sessions, rate limits, and queues',
+    description: 'In-memory cache for sessions, rate limits, and queues — configured on the bot server, not here',
     icon: Server,
     iconColor: 'text-red-400',
     fields: [
@@ -138,21 +138,28 @@ function SecretField({
   );
 }
 
-function StatusDot({ status }: { status: 'connected' | 'disconnected' | 'checking' }) {
+function StatusDot({ status }: { status: 'connected' | 'disconnected' | 'checking' | 'bot-side' }) {
   return (
     <div className="flex items-center gap-1.5">
       {status === 'checking' ? (
         <Loader2 size={14} className="animate-spin text-discord-text-muted" />
       ) : status === 'connected' ? (
         <CheckCircle2 size={14} className="text-green-500" />
+      ) : status === 'bot-side' ? (
+        <CheckCircle2 size={14} className="text-yellow-500" />
       ) : (
         <XCircle size={14} className="text-discord-text-muted/50" />
       )}
       <span className={cn(
         'text-xs font-medium',
-        status === 'connected' ? 'text-green-500' : 'text-discord-text-muted',
+        status === 'connected' ? 'text-green-500'
+          : status === 'bot-side' ? 'text-yellow-500'
+          : 'text-discord-text-muted',
       )}>
-        {status === 'checking' ? 'Checking...' : status === 'connected' ? 'Connected' : 'Not configured'}
+        {status === 'checking' ? 'Checking...'
+          : status === 'connected' ? 'Connected'
+          : status === 'bot-side' ? 'Bot-side only'
+          : 'Not configured'}
       </span>
     </div>
   );
