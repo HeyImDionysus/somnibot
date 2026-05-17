@@ -33,18 +33,30 @@ export interface DbGuild {
 
 export interface DbGuildConfig {
   guild_id: string;
-  // Moderation
-  mod_log_channel_id: string | null;
-  mute_role_id: string | null;
+  // Onboarding
+  member_role_id: string | null;
+  onboarding_enabled: boolean;
+  interest_role_mapping: Record<string, string>; // Discord onboarding option → role ID
+  returning_member_skip_welcome_dm: boolean;
+  returning_member_restore_entitlements: boolean;
+  returning_member_restore_levels: boolean;
   // Welcome
   welcome_enabled: boolean;
   welcome_channel_id: string | null;
   welcome_message: string | null;
+  welcome_card_enabled: boolean;
+  welcome_card_background: string | null;
   welcome_dm_enabled: boolean;
   welcome_dm_message: string | null;
+  welcome_auto_roles: string[];
+  // Goodbye
   goodbye_enabled: boolean;
   goodbye_channel_id: string | null;
   goodbye_message: string | null;
+  // Moderation
+  mod_log_channel_id: string | null;
+  escalation_chain: unknown[];
+  infraction_expiry_days: number;
   // Levels
   levels_enabled: boolean;
   level_up_channel_id: string | null;
@@ -66,6 +78,26 @@ export interface DbGuildConfig {
   purchase_log_channel_id: string | null;
   // Audit
   audit_log_channel_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Members
+// ============================================================
+
+export interface DbMember {
+  guild_id: string;
+  discord_id: string;
+  username: string;
+  avatar_url: string | null;
+  roles: string[];           // Role IDs at time of last update/leave
+  joined_at: string;
+  left_at: string | null;
+  onboarding_completed: boolean;
+  is_returning: boolean;
+  member_number: number;     // Sequential member join number
+  total_time_seconds: number; // Cumulative time in server
   created_at: string;
   updated_at: string;
 }
