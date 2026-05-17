@@ -2,7 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils/cn';
+import { createClient } from '@/lib/supabase/client';
 import {
   LayoutDashboard,
   Settings,
@@ -23,6 +25,7 @@ import {
   Sparkles,
   FileCode2,
   Key,
+  Rocket,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -30,8 +33,8 @@ interface NavItem {
   label: string;
   href: string;
   icon: LucideIcon;
-  locked?: boolean;
-  phase?: number;
+  /** Which integration is required — if not connected, item is greyed out */
+  requires?: 'discord' | 'paypal' | 'lavalink';
 }
 
 interface NavGroup {
@@ -44,64 +47,88 @@ const navigation: NavGroup[] = [
     title: 'Overview',
     items: [
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-      { label: 'Setup', href: '/setup', icon: Settings },
+      { label: 'Setup', href: '/setup', icon: Rocket },
     ],
   },
   {
     title: 'Server',
     items: [
-      { label: 'Roles & Permissions', href: '/roles', icon: Shield },
-      { label: 'Channels', href: '/channels', icon: MessageSquare },
-      { label: 'Onboarding', href: '/onboarding', icon: Users, locked: true, phase: 3 },
-      { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, locked: true, phase: 3 },
-      { label: 'Sync', href: '/sync', icon: Zap },
+      { label: 'Roles & Permissions', href: '/roles', icon: Shield, requires: 'discord' },
+      { label: 'Channels', href: '/channels', icon: MessageSquare, requires: 'discord' },
+      { label: 'Onboarding', href: '/onboarding', icon: Users, requires: 'discord' },
+      { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, requires: 'discord' },
+      { label: 'Sync', href: '/sync', icon: Zap, requires: 'discord' },
     ],
   },
   {
     title: 'Moderation',
     items: [
-      { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield },
-      { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2 },
-      { label: 'Ticket Panels', href: '/tickets', icon: Ticket, locked: true, phase: 4 },
+      { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield, requires: 'discord' },
+      { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2, requires: 'discord' },
+      { label: 'Ticket Panels', href: '/tickets', icon: Ticket, requires: 'discord' },
     ],
   },
   {
     title: 'Engagement',
     items: [
-      { label: 'Levels & XP', href: '/levels', icon: Trophy, locked: true, phase: 5 },
-      { label: 'Reaction Roles', href: '/reaction-roles', icon: Palette, locked: true, phase: 5 },
-      { label: 'Giveaways', href: '/giveaways', icon: Gift, locked: true, phase: 6 },
-      { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, locked: true, phase: 6 },
+      { label: 'Levels & XP', href: '/levels', icon: Trophy, requires: 'discord' },
+      { label: 'Reaction Roles', href: '/reaction-roles', icon: Palette, requires: 'discord' },
+      { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord' },
+      { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
     ],
   },
   {
     title: 'Features',
     items: [
-      { label: 'Music', href: '/music', icon: Music, locked: true, phase: 7 },
-      { label: 'Temp Channels', href: '/temp-channels', icon: Mic2, locked: true, phase: 8 },
-      { label: 'Stats Channels', href: '/stats-channels', icon: BarChart3, locked: true, phase: 8 },
-      { label: 'Embed Builder', href: '/embeds', icon: Palette, locked: true, phase: 6 },
+      { label: 'Music', href: '/music', icon: Music, requires: 'lavalink' },
+      { label: 'Temp Channels', href: '/temp-channels', icon: Mic2, requires: 'discord' },
+      { label: 'Stats Channels', href: '/stats-channels', icon: BarChart3, requires: 'discord' },
+      { label: 'Embed Builder', href: '/embeds', icon: Palette, requires: 'discord' },
     ],
   },
   {
     title: 'Automation',
     items: [
-      { label: 'Automations', href: '/automations', icon: Zap, locked: true, phase: 9 },
-      { label: 'Custom Commands', href: '/commands', icon: Terminal, locked: true, phase: 9 },
+      { label: 'Automations', href: '/automations', icon: Zap, requires: 'discord' },
+      { label: 'Custom Commands', href: '/commands', icon: Terminal, requires: 'discord' },
     ],
   },
   {
     title: 'Commerce',
     items: [
-      { label: 'Store', href: '/store', icon: ShoppingCart, locked: true, phase: 10 },
-      { label: 'Customers', href: '/customers', icon: Users, locked: true, phase: 10 },
-      { label: 'License Keys', href: '/licenses', icon: Key, locked: true, phase: 10 },
+      { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
+      { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
+      { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
     ],
   },
 ];
 
+interface UserInfo {
+  name: string;
+  avatarUrl: string | null;
+}
+
 export function Sidebar() {
   const pathname = usePathname();
+  const [user, setUser] = useState<UserInfo | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const supabase = createClient();
+        const { data: { user: authUser } } = await supabase.auth.getUser();
+        if (authUser) {
+          const meta = authUser.user_metadata;
+          setUser({
+            name: meta?.full_name || meta?.name || meta?.custom_claims?.global_name || 'User',
+            avatarUrl: meta?.avatar_url || null,
+          });
+        }
+      } catch {
+        // Ignore — sidebar still renders
+      }
+    })();
+  }, []);
 
   return (
     <aside className="flex h-screen w-60 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary">
@@ -120,48 +147,78 @@ export function Sidebar() {
             {group.items.map((item) => {
               const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
               const Icon = item.icon;
+              // For now, nothing is locked — all items are navigable.
+              // In the future, feature gating will check integration status from context.
+              const isLocked = false;
 
               return (
                 <Link
                   key={item.href}
-                  href={item.locked ? '#' : item.href}
+                  href={isLocked ? '#' : item.href}
                   className={cn(
                     'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
-                    isActive && !item.locked
+                    isActive && !isLocked
                       ? 'bg-discord-accent/20 text-white'
-                      : item.locked
+                      : isLocked
                         ? 'cursor-not-allowed text-discord-text-muted/50'
                         : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
                   )}
-                  onClick={item.locked ? (e) => e.preventDefault() : undefined}
-                  aria-disabled={item.locked}
+                  onClick={isLocked ? (e) => e.preventDefault() : undefined}
+                  aria-disabled={isLocked}
                 >
                   <Icon
                     size={18}
                     className={cn(
-                      isActive && !item.locked ? 'text-discord-accent' : '',
-                      item.locked ? 'opacity-40' : '',
+                      isActive && !isLocked ? 'text-discord-accent' : '',
+                      isLocked ? 'opacity-40' : '',
                     )}
                   />
                   <span className="flex-1 truncate">{item.label}</span>
-                  {item.locked && (
-                    <span className="rounded-sm bg-discord-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-discord-text-muted">
-                      P{item.phase}
-                    </span>
-                  )}
                 </Link>
               );
             })}
           </div>
         ))}
+
+        {/* Settings — always at bottom of nav */}
+        <div className="mb-4">
+          <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
+            System
+          </h3>
+          <Link
+            href="/settings"
+            className={cn(
+              'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
+              pathname === '/settings'
+                ? 'bg-discord-accent/20 text-white'
+                : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
+            )}
+          >
+            <Settings
+              size={18}
+              className={pathname === '/settings' ? 'text-discord-accent' : ''}
+            />
+            <span className="flex-1 truncate">Settings</span>
+          </Link>
+        </div>
       </nav>
 
-      {/* Footer — user info placeholder */}
+      {/* Footer — user info */}
       <div className="border-t border-discord-border-subtle px-3 py-2">
         <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-full bg-discord-bg-tertiary" />
+          {user?.avatarUrl ? (
+            <img
+              src={user.avatarUrl}
+              alt=""
+              className="h-8 w-8 rounded-full"
+            />
+          ) : (
+            <div className="h-8 w-8 rounded-full bg-discord-bg-tertiary" />
+          )}
           <div className="flex-1 min-w-0">
-            <p className="truncate text-sm font-medium text-discord-text-primary">Owner</p>
+            <p className="truncate text-sm font-medium text-discord-text-primary">
+              {user?.name || 'Loading...'}
+            </p>
             <p className="truncate text-xs text-discord-text-muted">Online</p>
           </div>
         </div>
