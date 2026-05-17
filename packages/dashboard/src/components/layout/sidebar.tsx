@@ -27,6 +27,8 @@ import {
   Key,
   Receipt,
   Tag,
+  ScrollText,
+  Activity,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -101,6 +103,13 @@ const navigation: NavGroup[] = [
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
       { label: 'Promotions', href: '/store/promotions', icon: Tag, requires: 'paypal' },
+    ],
+  },
+  {
+    title: 'Operations',
+    items: [
+      { label: 'Audit Log', href: '/audit', icon: ScrollText },
+      { label: 'Diagnostics', href: '/diagnostics', icon: Activity },
     ],
   },
 ];
