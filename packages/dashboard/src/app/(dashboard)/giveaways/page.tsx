@@ -1,25 +1,413 @@
-import Link from 'next/link';
-
 /**
- * Giveaways — Not yet available.
+ * Giveaways — Manage timed giveaways with entry requirements and winner selection.
+ *
+ * Architecture doc §28
  */
-export default function giveawaysPage() {
+'use client';
+
+import { useEffect, useState, useCallback } from 'react';
+
+// ── Types ─────────────────────────────────────────────────
+
+interface Giveaway {
+  id: string;
+  guild_id: string;
+  channel_id: string;
+  message_id: string | null;
+  prize: string;
+  prize_product_id: string | null;
+  prize_license_count: number;
+  winner_count: number;
+  ends_at: string;
+  required_role_id: string | null;
+  required_level: number | null;
+  required_entitlement_product_id: string | null;
+  entries: string[];
+  winners: string[];
+  status: 'active' | 'ended' | 'cancelled';
+  created_by: string;
+  created_at: string;
+}
+
+const emptyForm = {
+  channel_id: '',
+  prize: '',
+  winner_count: '1',
+  duration_hours: '24',
+  required_role_id: '',
+  required_level: '',
+  prize_product_id: '',
+  prize_license_count: '1',
+};
+
+// ── Helpers ───────────────────────────────────────────────
+
+function timeRemaining(endsAt: string): string {
+  const diff = new Date(endsAt).getTime() - Date.now();
+  if (diff <= 0) return 'Ended';
+  const hours = Math.floor(diff / 3_600_000);
+  const mins = Math.floor((diff % 3_600_000) / 60_000);
+  if (hours > 24) {
+    const days = Math.floor(hours / 24);
+    return `${days}d ${hours % 24}h`;
+  }
+  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+}
+
+function statusBadge(status: string) {
+  switch (status) {
+    case 'active':
+      return { label: 'Active', color: 'bg-discord-success/20 text-discord-success' };
+    case 'ended':
+      return { label: 'Ended', color: 'bg-discord-text-muted/20 text-discord-text-muted' };
+    case 'cancelled':
+      return { label: 'Cancelled', color: 'bg-discord-danger/20 text-discord-danger' };
+    default:
+      return { label: status, color: 'bg-discord-bg-tertiary text-discord-text-muted' };
+  }
+}
+
+// ── Main Component ────────────────────────────────────────
+
+export default function GiveawaysPage() {
+  const [giveaways, setGiveaways] = useState<Giveaway[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(emptyForm);
+  const [filter, setFilter] = useState<'all' | 'active' | 'ended'>('all');
+
+  const flash = (msg: string) => {
+    setSuccess(msg);
+    setTimeout(() => setSuccess(null), 3000);
+  };
+
+  const fetchGiveaways = useCallback(async () => {
+    try {
+      const res = await fetch('/api/giveaways');
+      const json = await res.json();
+      if (json.success) setGiveaways(json.data);
+      else setError(json.error);
+    } catch {
+      setError('Failed to load giveaways');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchGiveaways();
+  }, [fetchGiveaways]);
+
+  const createGiveaway = async () => {
+    setError(null);
+    if (!form.channel_id || !form.prize) {
+      setError('Channel ID and Prize are required');
+      return;
+    }
+
+    const hours = parseFloat(form.duration_hours) || 24;
+    const endsAt = new Date(Date.now() + hours * 3_600_000);
+
+    const payload = {
+      channel_id: form.channel_id,
+      prize: form.prize,
+      winner_count: parseInt(form.winner_count, 10) || 1,
+      ends_at: endsAt.toISOString(),
+      required_role_id: form.required_role_id || null,
+      required_level: form.required_level ? parseInt(form.required_level, 10) : null,
+      prize_product_id: form.prize_product_id || null,
+      prize_license_count: parseInt(form.prize_license_count, 10) || 1,
+      created_by: 'dashboard',
+    };
+
+    try {
+      const res = await fetch('/api/giveaways', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setGiveaways([json.data, ...giveaways]);
+        setShowForm(false);
+        setForm({ ...emptyForm });
+        flash('Giveaway created! The bot will post the entry embed in the channel.');
+      } else {
+        setError(json.error);
+      }
+    } catch {
+      setError('Failed to create giveaway');
+    }
+  };
+
+  const endGiveaway = async (id: string) => {
+    try {
+      const res = await fetch('/api/giveaways', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, status: 'ended' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setGiveaways(giveaways.map((g) => (g.id === id ? json.data : g)));
+        flash('Giveaway ended');
+      }
+    } catch {
+      setError('Failed to end giveaway');
+    }
+  };
+
+  const cancelGiveaway = async (id: string) => {
+    try {
+      const res = await fetch('/api/giveaways', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, status: 'cancelled' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setGiveaways(giveaways.map((g) => (g.id === id ? json.data : g)));
+        flash('Giveaway cancelled');
+      }
+    } catch {
+      setError('Failed to cancel giveaway');
+    }
+  };
+
+  const deleteGiveaway = async (id: string) => {
+    try {
+      const res = await fetch(`/api/giveaways?id=${id}`, { method: 'DELETE' });
+      const json = await res.json();
+      if (json.success) {
+        setGiveaways(giveaways.filter((g) => g.id !== id));
+        flash('Giveaway deleted');
+      }
+    } catch {
+      setError('Failed to delete giveaway');
+    }
+  };
+
+  const filtered = giveaways.filter((g) => {
+    if (filter === 'active') return g.status === 'active';
+    if (filter === 'ended') return g.status === 'ended' || g.status === 'cancelled';
+    return true;
+  });
+
+  const activeCount = giveaways.filter((g) => g.status === 'active').length;
+  const totalEntries = giveaways.reduce((sum, g) => sum + g.entries.length, 0);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="animate-pulse text-discord-text-muted">Loading giveaways…</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center">
-      <div className="text-center max-w-sm">
-        <div className="mb-4 text-5xl">🚧</div>
-        <h1 className="text-xl font-bold text-discord-text-primary">
-          Giveaways
-        </h1>
-        <p className="mt-2 text-sm text-discord-text-muted">
-          This feature is under development and will be available soon.
-        </p>
-        <Link
-          href="/settings"
-          className="mt-4 inline-block rounded-input bg-discord-bg-secondary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary transition-standard"
+    <div className="mx-auto max-w-4xl space-y-6 p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-discord-text-primary">Giveaways</h1>
+          <p className="text-sm text-discord-text-muted">Create and manage timed giveaways with button entry</p>
+        </div>
+        <button
+          onClick={() => { setForm({ ...emptyForm }); setShowForm(true); }}
+          className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard"
         >
-          Go to Settings
-        </Link>
+          + New Giveaway
+        </button>
+      </div>
+
+      {/* Stats Cards */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 text-center">
+          <p className="text-2xl font-bold text-discord-accent">{activeCount}</p>
+          <p className="text-xs text-discord-text-muted">Active</p>
+        </div>
+        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 text-center">
+          <p className="text-2xl font-bold text-discord-text-primary">{giveaways.length}</p>
+          <p className="text-xs text-discord-text-muted">Total</p>
+        </div>
+        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 text-center">
+          <p className="text-2xl font-bold text-discord-success">{totalEntries}</p>
+          <p className="text-xs text-discord-text-muted">Total Entries</p>
+        </div>
+      </div>
+
+      {/* Filter */}
+      <div className="flex gap-2">
+        {(['all', 'active', 'ended'] as const).map((f) => (
+          <button key={f} onClick={() => setFilter(f)}
+            className={`rounded-input px-3 py-1.5 text-xs font-medium transition-standard ${filter === f ? 'bg-discord-accent text-white' : 'bg-discord-bg-tertiary text-discord-text-muted hover:text-discord-text-primary'}`}>
+            {f.charAt(0).toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {/* Alerts */}
+      {error && (
+        <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
+      )}
+      {success && (
+        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
+      )}
+
+      {/* ── Create Modal ─────────────────────────────── */}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-lg rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-6 shadow-xl">
+            <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">New Giveaway</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Prize *</label>
+                <input type="text" value={form.prize} onChange={(e) => setForm({ ...form, prize: e.target.value })}
+                  placeholder="e.g. Nitro, custom role, product key"
+                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Channel ID *</label>
+                <input type="text" value={form.channel_id} onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
+                  placeholder="Channel to post the giveaway in"
+                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Duration (hours)</label>
+                  <input type="number" value={form.duration_hours} onChange={(e) => setForm({ ...form, duration_hours: e.target.value })}
+                    min="0.1" step="0.5" placeholder="24"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Winner Count</label>
+                  <input type="number" value={form.winner_count} onChange={(e) => setForm({ ...form, winner_count: e.target.value })}
+                    min="1" max="50" placeholder="1"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Role ID</label>
+                  <input type="text" value={form.required_role_id} onChange={(e) => setForm({ ...form, required_role_id: e.target.value })}
+                    placeholder="Optional role restriction"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Level</label>
+                  <input type="number" value={form.required_level} onChange={(e) => setForm({ ...form, required_level: e.target.value })}
+                    min="1" placeholder="Min level"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Prize Product ID</label>
+                  <input type="text" value={form.prize_product_id} onChange={(e) => setForm({ ...form, prize_product_id: e.target.value })}
+                    placeholder="Commerce integration"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">License Count</label>
+                  <input type="number" value={form.prize_license_count} onChange={(e) => setForm({ ...form, prize_license_count: e.target.value })}
+                    min="1" placeholder="1"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+              </div>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button onClick={() => setShowForm(false)} className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard">
+                Cancel
+              </button>
+              <button onClick={createGiveaway} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Giveaway List ────────────────────────────── */}
+      {filtered.length === 0 ? (
+        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
+          <div className="text-4xl mb-3">🎉</div>
+          <h2 className="text-lg font-semibold text-discord-text-primary mb-1">No Giveaways</h2>
+          <p className="text-sm text-discord-text-muted mb-4">Create a giveaway to engage your community!</p>
+          <button onClick={() => { setForm({ ...emptyForm }); setShowForm(true); }} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
+            + Create First Giveaway
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {filtered.map((g) => {
+            const badge = statusBadge(g.status);
+            return (
+              <div key={g.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
+                <div className="flex items-center justify-between px-5 py-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">🎉</span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-discord-text-primary">{g.prize}</p>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.color}`}>
+                            {badge.label}
+                          </span>
+                        </div>
+                        <p className="text-xs text-discord-text-muted">
+                          {g.entries.length} entries · {g.winner_count} winner{g.winner_count > 1 ? 's' : ''} · Channel: {g.channel_id}
+                        </p>
+                        <p className="text-xs text-discord-text-muted mt-0.5">
+                          {g.status === 'active'
+                            ? `⏰ Ends in ${timeRemaining(g.ends_at)}`
+                            : `Ended ${new Date(g.ends_at).toLocaleDateString()}`}
+                          {g.required_role_id ? ` · Role: ${g.required_role_id}` : ''}
+                          {g.required_level ? ` · Level ${g.required_level}+` : ''}
+                        </p>
+                        {g.winners.length > 0 && (
+                          <p className="text-xs text-discord-success mt-0.5">
+                            🏆 Winners: {g.winners.join(', ')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 ml-4">
+                    {g.status === 'active' && (
+                      <>
+                        <button onClick={() => endGiveaway(g.id)}
+                          className="rounded-input bg-discord-success/20 px-3 py-1.5 text-xs font-medium text-discord-success hover:bg-discord-success/30 transition-standard">
+                          End
+                        </button>
+                        <button onClick={() => cancelGiveaway(g.id)}
+                          className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                          Cancel
+                        </button>
+                      </>
+                    )}
+                    <button onClick={() => deleteGiveaway(g.id)}
+                      className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Commands Reference ────────────────────────── */}
+      <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
+        <h3 className="text-sm font-semibold text-discord-text-primary mb-3">Giveaway Commands</h3>
+        <div className="grid gap-2 text-xs text-discord-text-muted sm:grid-cols-2">
+          <div><code className="text-discord-accent">/giveaway start</code> — Start a new giveaway</div>
+          <div><code className="text-discord-accent">/giveaway end</code> — End early &amp; pick winners</div>
+          <div><code className="text-discord-accent">/giveaway reroll</code> — Re-pick winners</div>
+          <div><code className="text-discord-accent">/giveaway list</code> — List active giveaways</div>
+        </div>
       </div>
     </div>
   );
