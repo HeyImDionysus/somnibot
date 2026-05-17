@@ -300,6 +300,62 @@ export default function MusicSettingsPage() {
             </div>
           </div>
 
+          {/* Lavalink Health */}
+          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+            <h2 className="text-lg font-semibold text-discord-text-primary">Lavalink Node</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Music audio is powered by a Lavalink v4 server with YouTube plugin.
+            </p>
+            <div className="mt-4 grid grid-cols-2 gap-4">
+              <div className="rounded-md bg-discord-bg-tertiary p-3">
+                <span className="text-xs font-medium text-discord-text-muted">Server</span>
+                <p className="mt-1 text-sm font-mono text-discord-text-primary">Lavalink v4.0.8</p>
+              </div>
+              <div className="rounded-md bg-discord-bg-tertiary p-3">
+                <span className="text-xs font-medium text-discord-text-muted">Client</span>
+                <p className="mt-1 text-sm font-mono text-discord-text-primary">Shoukaku v4.x</p>
+              </div>
+              <div className="rounded-md bg-discord-bg-tertiary p-3">
+                <span className="text-xs font-medium text-discord-text-muted">YouTube Plugin</span>
+                <p className="mt-1 text-sm font-mono text-discord-text-primary">v1.17.0</p>
+              </div>
+              <div className="rounded-md bg-discord-bg-tertiary p-3">
+                <span className="text-xs font-medium text-discord-text-muted">Enabled Filters</span>
+                <p className="mt-1 text-sm font-mono text-discord-text-primary">EQ, Timescale, Rotation</p>
+              </div>
+            </div>
+            <div className="mt-4 flex items-center gap-2 text-sm">
+              <span className="h-2 w-2 rounded-full bg-discord-success animate-pulse" />
+              <span className="text-discord-text-secondary">Node connected via WebSocket</span>
+            </div>
+          </div>
+
+          {/* Filter Presets Reference */}
+          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
+            <h2 className="text-lg font-semibold text-discord-text-primary">Audio Filter Presets</h2>
+            <p className="mt-1 text-sm text-discord-text-muted mb-4">
+              Available via the <code className="rounded bg-discord-bg-tertiary px-1 py-0.5 text-xs">/filter</code> command. Custom speed/pitch/rate values (0.1–3.0) are also supported.
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {[
+                { emoji: '🔊', name: 'Bass Boost', desc: 'Heavy low-end' },
+                { emoji: '🔔', name: 'Treble Boost', desc: 'Crisp high-end' },
+                { emoji: '🌙', name: 'Nightcore', desc: '1.25x speed + pitch' },
+                { emoji: '🌊', name: 'Vaporwave', desc: '0.8x speed + pitch' },
+                { emoji: '🎧', name: '8D Audio', desc: 'Rotating spatial' },
+                { emoji: '🔄', name: 'Reset', desc: 'Clear all filters' },
+              ].map((preset) => (
+                <div key={preset.name} className="rounded-md bg-discord-bg-tertiary p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">{preset.emoji}</span>
+                    <span className="text-sm font-medium text-discord-text-primary">{preset.name}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-discord-text-muted">{preset.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* Commands Reference */}
           <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
             <h2 className="text-lg font-semibold text-discord-text-primary">Music Commands</h2>
@@ -328,6 +384,7 @@ export default function MusicSettingsPage() {
                     { cmd: '/shuffle', desc: 'Shuffle upcoming tracks', dj: true },
                     { cmd: '/seek <position>', desc: 'Seek to position (e.g., 1:30)', dj: true },
                     { cmd: '/remove <position>', desc: 'Remove a track by position', dj: true },
+                    { cmd: '/filter [preset]', desc: 'Audio filters (bass, nightcore, 8D, etc.)', dj: true },
                   ].map((row) => (
                     <tr key={row.cmd} className="bg-discord-bg-secondary">
                       <td className="px-4 py-2 font-mono text-discord-text-primary">{row.cmd}</td>
