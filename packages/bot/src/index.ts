@@ -7,6 +7,10 @@ import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
 import { registerTicketCommands } from './features/tickets/register-commands.js';
 import { AutomationEngine } from './features/automations/index.js';
+import { initVoiceTracking, startVoiceXpTicker, buildLevelCommands } from './features/levels/index.js';
+import { loadReactionRoles } from './features/reaction-roles/index.js';
+import { loadCustomCommands } from './features/custom-commands/index.js';
+import { REST, Routes } from 'discord.js';
 
 /**
  * SomniBot entry point.
@@ -130,7 +134,52 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-8 systems initialized');
+    // Phase 9: Levels, Reaction Roles, Custom Commands
+    if (guild) {
+      try {
+        // Register /rank and /leaderboard slash commands
+        const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+        const { rankCmd, leaderboardCmd } = buildLevelCommands();
+
+        // Register level commands as guild commands
+        try {
+          await rest.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: rankCmd.toJSON() },
+          );
+          await rest.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: leaderboardCmd.toJSON() },
+          );
+          console.log('[Boot] ✅ Level commands registered (/rank, /leaderboard)');
+        } catch (err) {
+          console.error('[Boot] ⚠️  Failed to register level commands:', err);
+        }
+
+        // Initialize voice XP tracking
+        await initVoiceTracking(guild);
+        const voiceXpTimer = startVoiceXpTicker(
+          guild,
+          client.supabase,
+          client.valkey,
+          client.eventBus,
+        );
+        (client as unknown as Record<string, unknown>)._voiceXpTimer = voiceXpTimer;
+        console.log('[Boot] ✅ Voice XP ticker started');
+
+        // Load reaction roles into Valkey cache
+        await loadReactionRoles(client.supabase, client.valkey, client.guildId);
+        console.log('[Boot] ✅ Reaction roles cached');
+
+        // Load custom commands and register with Discord
+        await loadCustomCommands(client.supabase, guild, rest);
+        console.log('[Boot] ✅ Custom commands loaded');
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 9 initialization error:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-9 systems initialized');
   });
 
   // Graceful shutdown
@@ -139,6 +188,9 @@ async function main(): Promise<void> {
     // Stop sync scheduler
     const syncHandle = (client as unknown as Record<string, unknown>)._syncHandle as { stop: () => void } | undefined;
     if (syncHandle) syncHandle.stop();
+    // Stop voice XP ticker
+    const voiceXpTimer = (client as unknown as Record<string, unknown>)._voiceXpTimer as NodeJS.Timeout | undefined;
+    if (voiceXpTimer) clearInterval(voiceXpTimer);
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});

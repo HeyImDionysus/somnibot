@@ -69,6 +69,6 @@ export function levelProgress(totalXp: number): {
 /**
  * Generate a random XP value between min and max.
  */
-export function randomXp(min = LEVEL_CONFIG.DEFAULT_MIN_XP, max = LEVEL_CONFIG.DEFAULT_MAX_XP): number {
+export function randomXp(min: number = LEVEL_CONFIG.DEFAULT_MIN_XP, max: number = LEVEL_CONFIG.DEFAULT_MAX_XP): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
