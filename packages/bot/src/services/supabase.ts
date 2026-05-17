@@ -11,7 +11,8 @@ export function getSupabase(): SupabaseClient {
   if (_client) return _client;
 
   const config = getConfig();
-  _client = createClient(config.SUPABASE_URL, config.SUPABASE_SECRET_KEY, {
+  // Use the legacy service_role JWT key — the sb_secret format doesn't grant table access
+  _client = createClient(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,

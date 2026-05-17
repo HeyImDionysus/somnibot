@@ -2,6 +2,8 @@ import { loadConfig } from './config.js';
 import { SomniClient } from './client.js';
 import { registerEvents } from './events/handler.js';
 import { connectValkey } from './services/valkey.js';
+import { startDeployListener } from './deploy/deploy-listener.js';
+import { checkBotRolePosition } from './guards/bot-role-guard.js';
 
 /**
  * SomniBot entry point.
@@ -12,10 +14,11 @@ import { connectValkey } from './services/valkey.js';
  * 3. Create SomniClient (Supabase + Shoukaku initialized)
  * 4. Register event handlers
  * 5. Login to Discord gateway
+ * 6. Post-ready: bot role guard + deploy listener
  */
 async function main(): Promise<void> {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  SomniBot v0.1.0 — Starting...');
+  console.log('  SomniBot v0.3.0 — Starting...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   // 1. Validate environment
@@ -28,7 +31,6 @@ async function main(): Promise<void> {
     await connectValkey();
   } catch (error) {
     console.warn('[Boot] Valkey connection failed — continuing without cache:', error);
-    // Bot can operate without Valkey; features that need it will degrade gracefully
   }
 
   // 3. Create client
@@ -40,6 +42,45 @@ async function main(): Promise<void> {
   // 5. Login
   console.log('[Boot] Connecting to Discord gateway...');
   await client.login(config.DISCORD_TOKEN);
+
+  // 6. Post-ready initialization (wait for ready event)
+  client.once('ready', async () => {
+    console.log('[Boot] Discord ready — initializing Phase 3 systems...');
+
+    // Check bot role position
+    const guild = client.guilds.cache.get(client.guildId);
+    if (guild) {
+      const roleCheck = await checkBotRolePosition(guild);
+      if (roleCheck.isTopPosition) {
+        console.log('[Boot] ✅ Bot role is at position #1');
+      } else {
+        console.warn(`[Boot] ⚠️  Bot role is NOT at position #1 (${roleCheck.rolesAboveBot.length} roles above)`);
+        console.warn('[Boot] Features that modify roles/channels will be blocked.');
+      }
+
+      // Record bot role position to Supabase
+      const botMember = guild.members.me;
+      if (botMember) {
+        await client.supabase
+          .from('guild')
+          .upsert({
+            id: client.guildId,
+            name: guild.name,
+            owner_discord_id: guild.ownerId,
+            bot_role_position: botMember.roles.highest.position,
+          }, { onConflict: 'id' })
+          .then(({ error }) => {
+            if (error) console.error('[Boot] Failed to update guild record:', error.message);
+            else console.log('[Boot] Guild record updated in Supabase');
+          });
+      }
+    }
+
+    // Start deploy listener
+    startDeployListener(client);
+
+    console.log('[Boot] ✅ All Phase 3 systems initialized');
+  });
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
