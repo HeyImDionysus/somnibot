@@ -25,6 +25,8 @@ import {
   Sparkles,
   FileCode2,
   Key,
+  Receipt,
+  Tag,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -95,8 +97,10 @@ const navigation: NavGroup[] = [
     title: 'Commerce',
     items: [
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
+      { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal' },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
+      { label: 'Promotions', href: '/store/promotions', icon: Tag, requires: 'paypal' },
     ],
   },
 ];

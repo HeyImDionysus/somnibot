@@ -26,6 +26,14 @@ export const BotEnvSchema = z.object({
   // Valkey
   VALKEY_URL: z.string().default('redis://127.0.0.1:6379'),
 
+  // PayPal (Commerce)
+  PAYPAL_CLIENT_ID: z.string().optional().default(''),
+  PAYPAL_CLIENT_SECRET: z.string().optional().default(''),
+  PAYPAL_SANDBOX: z.string().optional().default('true'),
+  PAYPAL_API_BASE: z.string().optional().default('https://api-m.sandbox.paypal.com'),
+  PAYPAL_WEBHOOK_ID: z.string().optional().default(''),
+  PAYPAL_WEBHOOK_URL: z.string().optional().default(''),
+
   // Optional
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 });
@@ -46,6 +54,15 @@ export const DashboardEnvSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
   DISCORD_CLIENT_SECRET: z.string().min(1, 'DISCORD_CLIENT_SECRET is required'),
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
+  DISCORD_GUILD_ID: z.string().optional().default(''),
+
+  // PayPal (Commerce)
+  PAYPAL_CLIENT_ID: z.string().optional().default(''),
+  PAYPAL_CLIENT_SECRET: z.string().optional().default(''),
+  PAYPAL_SANDBOX: z.string().optional().default('true'),
+  PAYPAL_API_BASE: z.string().optional().default('https://api-m.sandbox.paypal.com'),
+  PAYPAL_WEBHOOK_ID: z.string().optional().default(''),
+  PAYPAL_WEBHOOK_URL: z.string().optional().default(''),
 
   // Optional
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),

@@ -61,12 +61,9 @@
     },
     "packages/license-sdk": {
       "name": "@somnibot/license-sdk",
-      "version": "0.1.0",
-      "dependencies": {
-        "zod": "^3.24.0",
-      },
+      "version": "1.0.0",
       "devDependencies": {
-        "typescript": "^5.7.0",
+        "typescript": "^5.4.0",
       },
     },
     "packages/shared": {
