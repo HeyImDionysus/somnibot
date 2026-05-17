@@ -469,6 +469,8 @@ async function createRole(guild: Guild, desired: DesiredRole): Promise<Role> {
   return guild.roles.create({
     name: desired.name,
     permissions: new PermissionsBitField(BigInt(desired.permissions)),
+    // discord.js v14.24 deprecated 'color' in favor of 'colors', but the
+    // type signature still accepts 'color'. Use 'color' until v15 migration.
     color: desired.color,
     hoist: desired.hoist,
     mentionable: desired.mentionable,

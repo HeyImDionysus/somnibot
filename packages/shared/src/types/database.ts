@@ -23,8 +23,8 @@ export interface DbGuild {
   name: string;
   icon: string | null;
   owner_discord_id: string;
-  bot_role_id: string | null;
-  bot_role_position: number | null;
+  bot_role_id: string | null;    // Discord snowflake of the bot's managed role
+  bot_role_position: number | null; // Position in role hierarchy
   setup_completed: boolean;
   setup_confirmed_at: string | null;
   created_at: string;
