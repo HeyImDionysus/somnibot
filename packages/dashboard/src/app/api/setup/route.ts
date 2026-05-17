@@ -2,12 +2,13 @@
  * First-Run Setup API — Manages the initial deployment wizard.
  *
  * GET  /api/setup         — Returns first-run status (is DB initialized? is bot online? guild detected?)
- * POST /api/setup         — Verify credentials, run migrations, detect guild
+ * POST /api/setup         — Verify credentials, save to instance_settings, configure auth, run migrations, detect guild
  *
  * This endpoint does NOT require authentication — it's used before Discord OAuth is configured.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 
 /**
  * Create a Supabase client from provided credentials (not from env vars).
@@ -32,6 +33,7 @@ export async function GET() {
     guildName: null as string | null,
     dashboardUrl: process.env.NEXT_PUBLIC_APP_URL || null,
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
+    discordAuthConfigured: false,
   };
 
   if (!supabase) {
@@ -51,6 +53,11 @@ export async function GET() {
     }
   } catch {
     status.supabaseConnected = false;
+  }
+
+  // Check Discord auth provider status
+  if (process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET) {
+    status.discordAuthConfigured = true;
   }
 
   // Check if bot is online and guild is detected
@@ -86,6 +93,18 @@ export async function GET() {
     if (!status.botOnline && guild) {
       status.botOnline = true; // Guild record exists = bot connected at least once
     }
+
+    // Check if Discord creds exist in instance_settings (for display purposes)
+    if (!status.discordAuthConfigured) {
+      const { data: settings } = await supabase
+        .from('instance_settings')
+        .select('key')
+        .in('key', ['discord_application_id', 'discord_client_secret']);
+
+      if (settings && settings.length >= 2) {
+        status.discordAuthConfigured = true;
+      }
+    }
   }
 
   return NextResponse.json(status);
@@ -96,7 +115,7 @@ export async function POST(request: NextRequest) {
 
   // Step 1: Verify Discord credentials
   if (body.action === 'verify-discord') {
-    const { token, clientId } = body;
+    const { token, clientId, clientSecret } = body;
     if (!token || !clientId) {
       return NextResponse.json({ error: 'Missing token or clientId' }, { status: 400 });
     }
@@ -111,6 +130,43 @@ export async function POST(request: NextRequest) {
       }
 
       const botUser = await res.json();
+
+      // Save validated Discord credentials to instance_settings
+      const supabase = createSetupSupabase();
+      if (supabase) {
+        const creds: Record<string, { value: string; section: string }> = {
+          discord_bot_token: { value: token, section: 'discord' },
+          discord_application_id: { value: clientId, section: 'discord' },
+        };
+        if (clientSecret) {
+          creds.discord_client_secret = { value: clientSecret, section: 'discord' };
+        }
+
+        for (const [key, { value, section }] of Object.entries(creds)) {
+          await supabase
+            .from('instance_settings')
+            .upsert(
+              { key, value, section, updated_at: new Date().toISOString() },
+              { onConflict: 'key' },
+            );
+        }
+        console.log('[Setup] ✅ Discord credentials saved to instance_settings');
+
+        // Auto-configure Discord OAuth in Supabase if we have the access token
+        if (clientSecret) {
+          const authResult = await ensureDiscordAuthProvider();
+          if (authResult.success) {
+            console.log(
+              authResult.alreadyConfigured
+                ? '[Setup] Discord auth provider already configured'
+                : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
+            );
+          } else {
+            console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
+          }
+        }
+      }
+
       return NextResponse.json({
         valid: true,
         botUsername: botUser.username,
@@ -118,6 +174,7 @@ export async function POST(request: NextRequest) {
         botAvatar: botUser.avatar
           ? `https://cdn.discordapp.com/avatars/${botUser.id}/${botUser.avatar}.png`
           : null,
+        credentialsSaved: true,
       });
     } catch (err) {
       return NextResponse.json({ valid: false, error: String(err) });
@@ -137,9 +194,28 @@ export async function POST(request: NextRequest) {
       const { error } = await supabase.from('guild').select('id').limit(0);
 
       if (!error || error.code === '42P01') {
+        // Save Supabase credentials to instance_settings (if tables exist)
+        if (!error) {
+          const creds: Record<string, { value: string; section: string }> = {
+            supabase_url: { value: url, section: 'supabase' },
+            supabase_service_role_key: { value: serviceRoleKey, section: 'supabase' },
+          };
+
+          for (const [key, { value, section }] of Object.entries(creds)) {
+            await supabase
+              .from('instance_settings')
+              .upsert(
+                { key, value, section, updated_at: new Date().toISOString() },
+                { onConflict: 'key' },
+              );
+          }
+          console.log('[Setup] ✅ Supabase credentials saved to instance_settings');
+        }
+
         return NextResponse.json({
           valid: true,
           initialized: !error, // true if tables exist
+          credentialsSaved: !error,
         });
       }
 
@@ -161,6 +237,56 @@ export async function POST(request: NextRequest) {
     const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=${permissions}&scope=${scopes}`;
 
     return NextResponse.json({ inviteUrl });
+  }
+
+  // Step 4: Configure Discord OAuth in Supabase (can be called independently)
+  if (body.action === 'configure-auth') {
+    const result = await ensureDiscordAuthProvider();
+    return NextResponse.json(result);
+  }
+
+  // Step 5: Finalize setup — save any remaining credentials and ensure auth is configured
+  if (body.action === 'finalize') {
+    const supabase = createSetupSupabase();
+    if (!supabase) {
+      return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
+    }
+
+    // Save any additional credentials passed in
+    const { credentials } = body as { credentials?: Record<string, string> };
+    if (credentials) {
+      for (const [key, value] of Object.entries(credentials)) {
+        if (!value?.trim()) continue;
+        // Determine section from key prefix
+        const section = key.startsWith('discord_')
+          ? 'discord'
+          : key.startsWith('supabase_')
+            ? 'supabase'
+            : key.startsWith('paypal_')
+              ? 'paypal'
+              : key.startsWith('lavalink_')
+                ? 'lavalink'
+                : key.startsWith('valkey_')
+                  ? 'valkey'
+                  : 'general';
+
+        await supabase
+          .from('instance_settings')
+          .upsert(
+            { key, value, section, updated_at: new Date().toISOString() },
+            { onConflict: 'key' },
+          );
+      }
+    }
+
+    // Ensure Discord auth provider is configured
+    const authResult = await ensureDiscordAuthProvider();
+
+    return NextResponse.json({
+      ok: true,
+      authConfigured: authResult.success,
+      authError: authResult.error || null,
+    });
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

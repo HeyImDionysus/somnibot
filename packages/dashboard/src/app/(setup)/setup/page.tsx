@@ -136,6 +136,7 @@ export default function SetupWizardPage() {
           action: 'verify-discord',
           token: discordToken,
           clientId: discordClientId,
+          clientSecret: discordClientSecret,
         }),
       });
       const data = await res.json();
@@ -427,7 +428,7 @@ export default function SetupWizardPage() {
                       <CheckCircle2 className="inline h-4 w-4 mr-1" />
                       Connected as {discordBotName}
                     </p>
-                    <p className="text-xs text-green-400/70">Discord credentials verified</p>
+                    <p className="text-xs text-green-400/70">Credentials verified &amp; saved</p>
                   </div>
                 </div>
               )}
@@ -556,7 +557,7 @@ export default function SetupWizardPage() {
                     <p className="text-sm font-medium text-green-400">Database connected</p>
                     <p className="text-xs text-green-400/70">
                       {supabaseInitialized
-                        ? 'Tables are ready'
+                        ? 'Tables are ready — credentials saved'
                         : 'Tables will be created automatically when the bot starts'}
                     </p>
                   </div>
