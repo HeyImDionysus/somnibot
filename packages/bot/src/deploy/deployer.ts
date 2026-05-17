@@ -163,8 +163,40 @@ export async function deployServerState(
       });
     }
 
-    // === Step 2: Delete old channels (if cleanExisting) ===
+    // === Step 2: Purge bot messages + delete old channels/roles (if cleanExisting) ===
     if (options.cleanExisting) {
+      // First, purge all bot messages from every text channel
+      step++;
+      report('Purging bot messages from all channels');
+      try {
+        const botId = guild.client.user?.id;
+        const textChannels = guild.channels.cache.filter(
+          (c) => c.type === ChannelType.GuildText,
+        );
+        let purgedCount = 0;
+        for (const [, channel] of textChannels) {
+          try {
+            const messages = await (channel as any).messages.fetch({ limit: 100 });
+            const botMessages = messages.filter((m: any) => m.author.id === botId);
+            for (const [, msg] of botMessages) {
+              try {
+                await (msg as any).delete();
+                purgedCount++;
+                await sleep(300);
+              } catch { /* skip undeletable messages */ }
+            }
+          } catch { /* skip channels we can't read */ }
+        }
+        actions.push({
+          step, action: 'delete', entityType: 'channel',
+          entityName: `Bot messages purged (${purgedCount})`, success: true,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push({ step, entityType: 'channel', entityName: 'Bot message purge', error: msg });
+      }
+
+      // Then delete channels (skip Discord-required channels)
       const existingChannels = guild.channels.cache.filter(
         (c) => c.id !== guild.rulesChannelId && c.id !== guild.publicUpdatesChannelId,
       );
@@ -368,12 +400,11 @@ export async function deployServerState(
           drift_details: null,
         });
 
-      // Mark setup as completed
+      // Update guild record — setup_completed stays false until owner confirms (Step 7 of wizard)
       await supabase
         .from('guild')
         .update({
-          setup_completed: false, // Still needs owner confirmation (Step 7 of wizard)
-          setup_step: 6,
+          setup_completed: false,
           bot_role_id: guild.members.me?.roles.highest.id ?? null,
           bot_role_position: guild.members.me?.roles.highest.position ?? null,
         })
