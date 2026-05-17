@@ -76,6 +76,11 @@ export interface DbGuildConfig {
   store_enabled: boolean;
   store_channel_id: string | null;
   purchase_log_channel_id: string | null;
+  // Sync
+  sync_enabled: boolean;
+  sync_interval_minutes: number;
+  sync_auto_repair: boolean;
+  sync_auto_repair_everyone: boolean;
   // Audit
   audit_log_channel_id: string | null;
   created_at: string;
