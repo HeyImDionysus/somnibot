@@ -17,6 +17,7 @@ import { ScheduledMessageRunner } from './features/scheduled-messages/index.js';
 import { GiveawayManager, buildGiveawayCommands } from './features/giveaways/index.js';
 import { MusicPlayerManager, buildMusicCommands } from './features/music/index.js';
 import { EntitlementService, buildStoreCommand, buildLicenseCommand } from './features/commerce/index.js';
+import { AuditService, DiagnosticsService } from './features/audit/index.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -339,7 +340,34 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-12 systems initialized');
+    // Phase 13: Audit & Diagnostics
+    try {
+      const auditService = new AuditService(
+        client.guildId,
+        client.supabase,
+        client.eventBus,
+      );
+      auditService.start();
+      (client as unknown as Record<string, unknown>)._auditService = auditService;
+
+      // Log bot start
+      await auditService.log({
+        action: 'bot.started',
+        actorType: 'system',
+        actorId: 'system',
+        details: { version: '0.5.0' },
+      });
+
+      const diagnosticsService = new DiagnosticsService(client, client.supabase);
+      diagnosticsService.start();
+      (client as unknown as Record<string, unknown>)._diagnosticsService = diagnosticsService;
+
+      console.log('[Boot] ✅ Phase 13 (Audit & Diagnostics) initialized');
+    } catch (err) {
+      console.error('[Boot] ⚠️  Phase 13 (Audit & Diagnostics) initialization error:', err);
+    }
+
+    console.log('[Boot] ✅ All Phase 3-13 systems initialized');
   });
 
   // Graceful shutdown
@@ -363,6 +391,11 @@ async function main(): Promise<void> {
     // Phase 11: Stop music player
     const musicPlayer = (client as unknown as Record<string, unknown>)._musicPlayer as { shutdown?: () => void } | undefined;
     if (musicPlayer?.shutdown) musicPlayer.shutdown();
+    // Phase 13: Stop audit & diagnostics
+    const auditSvc = (client as unknown as Record<string, unknown>)._auditService as { stop?: () => void } | undefined;
+    if (auditSvc?.stop) auditSvc.stop();
+    const diagSvc = (client as unknown as Record<string, unknown>)._diagnosticsService as { stop?: () => void } | undefined;
+    if (diagSvc?.stop) diagSvc.stop();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});
