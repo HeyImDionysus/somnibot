@@ -1,0 +1,13 @@
+# ============================================================
+# SomniBot — Railway Configuration
+# Defines the bot service build & deploy settings
+# ============================================================
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "packages/bot/Dockerfile"
+
+[deploy]
+startCommand = "bun run packages/bot/dist/index.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
