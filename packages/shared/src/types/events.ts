@@ -106,6 +106,44 @@ export interface GiveawayEndedData {
   prizeProductId: string | null;
 }
 
+export interface MessageSentData {
+  discordId: string;
+  username: string;
+  channelId: string;
+  messageId: string;
+  content: string;
+}
+
+export interface ReactionAddedData {
+  discordId: string;
+  username: string;
+  emoji: string;
+  channelId: string;
+  messageId: string;
+}
+
+export interface VoiceJoinedData {
+  discordId: string;
+  username: string;
+  channelId: string;
+  channelName: string;
+}
+
+export interface VoiceLeftData {
+  discordId: string;
+  username: string;
+  channelId: string;
+  channelName: string;
+}
+
+export interface ButtonClickedData {
+  discordId: string;
+  username: string;
+  buttonId: string;
+  channelId: string;
+  messageId: string;
+}
+
 export interface ConfigChangedData {
   section: string;
   changes: Record<string, unknown>;
@@ -165,10 +203,13 @@ export interface PlatformEventMap {
   'member.joined': MemberJoinedData;
   'member.left': MemberLeftData;
   'member.verified': MemberVerifiedData;
+  'message.sent': MessageSentData;
   'role.gained': RoleChangedData;
   'role.lost': RoleChangedData;
   'level.up': LevelUpData;
   'purchase.completed': PurchaseCompletedData;
+  'subscription.activated': SubscriptionChangedData;
+  'subscription.lapsed': SubscriptionChangedData;
   'subscription.changed': SubscriptionChangedData;
   'ticket.opened': TicketEventData;
   'ticket.claimed': TicketEventData;
@@ -179,6 +220,10 @@ export interface PlatformEventMap {
   'member.kicked': MemberKickedData;
   'member.banned': MemberBannedData;
   'giveaway.ended': GiveawayEndedData;
+  'button.clicked': ButtonClickedData;
+  'reaction.added': ReactionAddedData;
+  'voice.joined': VoiceJoinedData;
+  'voice.left': VoiceLeftData;
   'config.changed': ConfigChangedData;
   'server.deployed': ServerDeployedData;
   'deploy.requested': DeployRequestedData;
