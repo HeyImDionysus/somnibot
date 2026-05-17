@@ -5,6 +5,7 @@ import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
+import { registerTicketCommands } from './features/tickets/register-commands.js';
 
 /**
  * SomniBot entry point.
@@ -107,7 +108,10 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-5 systems initialized');
+    // Register slash commands (Phase 7: Tickets)
+    await registerTicketCommands(client);
+
+    console.log('[Boot] ✅ All Phase 3-7 systems initialized');
   });
 
   // Graceful shutdown

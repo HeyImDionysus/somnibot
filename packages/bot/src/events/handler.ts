@@ -5,6 +5,7 @@ import {
   handleMemberLeave,
 } from '../features/welcome/index.js';
 import { processMessage, expireInfractions } from '../features/moderation/index.js';
+import { handleTicketInteraction, handleTicketCommand } from '../features/tickets/index.js';
 import {
   handleRoleCreate,
   handleRoleUpdate,
@@ -116,10 +117,34 @@ export function registerEvents(client: SomniClient): void {
     // Music + temp channels added in later phases
   });
 
-  // ── Interaction Handler ────────────────────────────────
+  // ── Interaction Handler (Phase 7: Tickets) ─────────────
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild || interaction.guild.id !== client.guildId) return;
-    // Command handling added in later phases
+
+    try {
+      // Handle ticket button/dropdown interactions
+      if (interaction.isButton() || interaction.isStringSelectMenu()) {
+        const handled = await handleTicketInteraction(interaction, client);
+        if (handled) return;
+      }
+
+      // Handle slash commands
+      if (interaction.isChatInputCommand()) {
+        if (interaction.commandName === 'ticket') {
+          await handleTicketCommand(interaction, client);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('[Events] Interaction handler error:', err);
+      try {
+        if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
+        }
+      } catch {
+        // Ignore reply failures
+      }
+    }
   });
 
   // ── Error Handling ─────────────────────────────────────
