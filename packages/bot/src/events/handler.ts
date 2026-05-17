@@ -31,6 +31,8 @@ import { handleTempChannelCommand } from '../features/temp-channels/commands.js'
 import type { TempChannelManager } from '../features/temp-channels/temp-channel-manager.js';
 import type { GiveawayManager } from '../features/giveaways/giveaway-manager.js';
 import { handleGiveawayCommand } from '../features/giveaways/commands.js';
+import type { MusicPlayerManager } from '../features/music/music-player.js';
+import { handleMusicCommand } from '../features/music/commands.js';
 import type { EscalationStep } from '@somnibot/shared';
 
 /**
@@ -267,6 +269,17 @@ export function registerEvents(client: SomniClient): void {
     // Phase 9: Track voice state for voice XP
     onVoiceStateUpdate(oldState, newState);
 
+    // Phase 11: Music voice state handling (auto-pause, auto-leave)
+    const musicPlayer = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
+    if (musicPlayer) {
+      const affectedChannelId = oldState.channelId ?? newState.channelId;
+      if (affectedChannelId) {
+        musicPlayer.handleVoiceStateChange(affectedChannelId).catch((err) => {
+          console.error('[Events] Music voice state handler error:', err);
+        });
+      }
+    }
+
     // Phase 10: Temp channel creation/cleanup
     const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
     if (tempMgr) {
@@ -331,6 +344,30 @@ export function registerEvents(client: SomniClient): void {
           }
         }
 
+        // Phase 11: Music button interactions
+        if (interaction.isButton() && interaction.customId.startsWith('music:')) {
+          const musicMgr = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
+          if (musicMgr) {
+            // Queue pagination buttons
+            if (interaction.customId.startsWith('music:queue_page:')) {
+              const page = parseInt(interaction.customId.split(':')[2] ?? '1', 10);
+              const queue = await musicMgr.queueManager.getQueue(client.guildId);
+              if (queue) {
+                const { buildQueueEmbed } = await import('../features/music/music-embeds.js');
+                const { embeds, components } = buildQueueEmbed(queue, page);
+                await interaction.update({ embeds, components: components as never[] });
+              } else {
+                await interaction.reply({ content: '📭 No active queue.', ephemeral: true });
+              }
+              return;
+            }
+            // Playback control buttons
+            const result = await musicMgr.handleButton(interaction.customId, interaction.user.id);
+            await interaction.reply({ content: result.message, ephemeral: true });
+            return;
+          }
+        }
+
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
           client.eventBus.emit('button.clicked', client.guildId, {
@@ -382,6 +419,18 @@ export function registerEvents(client: SomniClient): void {
             await handleGiveawayCommand(interaction, giveawayMgr);
           } else {
             await interaction.reply({ content: '❌ Giveaways are not enabled.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 11: Music commands
+        const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause']);
+        if (musicCommands.has(interaction.commandName)) {
+          const musicMgr = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
+          if (musicMgr) {
+            await handleMusicCommand(interaction, musicMgr);
+          } else {
+            await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true });
           }
           return;
         }
