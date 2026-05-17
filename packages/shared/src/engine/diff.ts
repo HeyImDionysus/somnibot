@@ -487,7 +487,9 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         entityName: roleDiff.name,
         entityDiscordId: roleDiff.discordId,
         description: `Role "${roleDiff.name}" was modified outside the dashboard`,
-        details: roleDiff.changes as Record<string, { expected: unknown; actual: unknown }>,
+        details: Object.fromEntries(
+          Object.entries(roleDiff.changes).map(([k, v]) => [k, { expected: v.to, actual: v.from }]),
+        ),
         suggestedAction: 'repair',
       });
     } else if (roleDiff.action === 'create' && roleDiff.discordId) {
@@ -522,7 +524,9 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         entityName: chanDiff.name,
         entityDiscordId: chanDiff.discordId,
         description: `Channel "${chanDiff.name}" was modified outside the dashboard`,
-        details: chanDiff.changes as Record<string, { expected: unknown; actual: unknown }>,
+        details: Object.fromEntries(
+          Object.entries(chanDiff.changes).map(([k, v]) => [k, { expected: v.to, actual: v.from }]),
+        ),
         suggestedAction: 'repair',
       });
     } else if (chanDiff.action === 'delete') {
