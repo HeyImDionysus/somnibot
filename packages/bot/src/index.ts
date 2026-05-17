@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
-    client.shoukaku.nodes.forEach((node) => node.disconnect());
+    client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});
     console.log('[Bot] Goodbye.');

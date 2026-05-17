@@ -1,4 +1,5 @@
 import { BotEnvSchema, type BotEnv } from '@somnibot/shared';
+export type { BotEnv };
 
 /**
  * Validated bot configuration.
