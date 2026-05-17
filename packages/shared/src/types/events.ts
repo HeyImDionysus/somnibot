@@ -77,6 +77,26 @@ export interface InfractionCreatedData {
   type: 'warn' | 'mute' | 'kick' | 'ban';
   reason: string | null;
   totalInfractions: number;
+  autoModRuleId?: string;
+}
+
+export interface MemberMutedData {
+  discordId: string;
+  moderatorId: string;
+  reason: string;
+  durationMinutes: number;
+}
+
+export interface MemberKickedData {
+  discordId: string;
+  moderatorId: string;
+  reason: string;
+}
+
+export interface MemberBannedData {
+  discordId: string;
+  moderatorId: string;
+  reason: string;
 }
 
 export interface GiveawayEndedData {
@@ -153,6 +173,9 @@ export interface PlatformEventMap {
   'ticket.opened': TicketEventData;
   'ticket.closed': TicketEventData;
   'infraction.created': InfractionCreatedData;
+  'member.muted': MemberMutedData;
+  'member.kicked': MemberKickedData;
+  'member.banned': MemberBannedData;
   'giveaway.ended': GiveawayEndedData;
   'config.changed': ConfigChangedData;
   'server.deployed': ServerDeployedData;

@@ -1,0 +1,330 @@
+/**
+ * Auto-Mod Actions — Execute the configured action for a rule violation.
+ *
+ * Each auto-mod rule has a configured action: delete, warn, mute, kick, ban.
+ * This module handles executing that action + logging + infraction recording.
+ *
+ * Architecture doc §18.2
+ */
+
+import type { Message } from 'discord.js';
+import type { SomniClient } from '../../client.js';
+import type { DbAutomodRule, EscalationStep } from '@somnibot/shared';
+import {
+  createInfraction,
+  getActiveWarningCount,
+  calculateExpiryDate,
+} from './infraction-service.js';
+import { executeEscalation } from './escalation.js';
+import { postModLogEntry } from './mod-log.js';
+import { writeAuditLog } from '../../services/audit.js';
+
+/**
+ * Execute the action configured for an auto-mod rule violation.
+ */
+export async function executeAutoModAction(
+  client: SomniClient,
+  message: Message,
+  rule: DbAutomodRule,
+  violationReason: string,
+  modConfig: {
+    escalationChain: EscalationStep[];
+    infractionExpiryDays: number;
+    modLogChannelId: string | null;
+  },
+): Promise<void> {
+  const member = message.member;
+  if (!member) return;
+
+  const fullReason = `[Auto-Mod: ${rule.name}] ${violationReason}`;
+
+  // Always try to delete the offending message (except 'warn'-only with no delete)
+  if (rule.action !== 'warn') {
+    try {
+      if (message.deletable) {
+        await message.delete();
+      }
+    } catch (err) {
+      console.error(`[AutoMod] Failed to delete message:`, err);
+    }
+  }
+
+  switch (rule.action) {
+    case 'delete': {
+      // Delete only — no infraction, but delete the message
+      try {
+        if (message.deletable) {
+          await message.delete();
+        }
+      } catch {
+        // Already deleted or can't delete
+      }
+
+      if (rule.log_to_mod_channel) {
+        await postModLogEntry(client, {
+          action: 'delete',
+          member,
+          moderator: 'System (Auto-Mod)',
+          reason: fullReason,
+          channelId: modConfig.modLogChannelId,
+          ruleType: rule.type,
+        });
+      }
+
+      await writeAuditLog(client.supabase, {
+        guildId: client.guildId,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: 'automod.delete',
+        targetType: 'message',
+        targetId: message.id,
+        details: {
+          rule: rule.name,
+          ruleType: rule.type,
+          violation: violationReason,
+          channelId: message.channel.id,
+        },
+      });
+      break;
+    }
+
+    case 'warn': {
+      // Create warning infraction
+      const infraction = await createInfraction(client.supabase, {
+        guildId: client.guildId,
+        memberId: member.id,
+        moderatorId: 'system',
+        type: 'warn',
+        reason: fullReason,
+        automodRuleId: rule.id,
+        expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+      });
+
+      const activeWarnings = await getActiveWarningCount(
+        client.supabase,
+        client.guildId,
+        member.id,
+      );
+
+      // Emit infraction event
+      client.eventBus.emit('infraction.created', client.guildId, {
+        userId: member.id,
+        moderatorId: 'system',
+        type: 'warn',
+        reason: fullReason,
+        totalInfractions: activeWarnings,
+        autoModRuleId: rule.id,
+      });
+
+      // Check escalation chain
+      await executeEscalation(client, member, fullReason, modConfig);
+
+      if (rule.log_to_mod_channel) {
+        const chain = modConfig.escalationChain.length > 0
+          ? modConfig.escalationChain
+          : undefined;
+        const nextStep = chain
+          ? chain.sort((a, b) => a.threshold - b.threshold).find((s) => s.threshold > activeWarnings)
+          : undefined;
+        const nextEsc = nextStep
+          ? `${nextStep.action === 'mute' ? `Mute (${nextStep.durationMinutes ?? 60}m)` : nextStep.action.charAt(0).toUpperCase() + nextStep.action.slice(1)} at ${nextStep.threshold} warnings`
+          : null;
+
+        await postModLogEntry(client, {
+          action: 'warn',
+          member,
+          moderator: 'System (Auto-Mod)',
+          reason: fullReason,
+          activeWarnings,
+          nextEscalation: nextEsc,
+          channelId: modConfig.modLogChannelId,
+          ruleType: rule.type,
+        });
+      }
+
+      await writeAuditLog(client.supabase, {
+        guildId: client.guildId,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: 'automod.warn',
+        targetType: 'member',
+        targetId: member.id,
+        details: {
+          rule: rule.name,
+          ruleType: rule.type,
+          violation: violationReason,
+          infractionId: infraction?.id,
+          activeWarnings,
+        },
+      });
+      break;
+    }
+
+    case 'mute': {
+      const durationMinutes = rule.mute_duration_minutes ?? 5;
+      const durationMs = durationMinutes * 60 * 1000;
+
+      try {
+        await member.timeout(durationMs, fullReason);
+      } catch (err) {
+        console.error(`[AutoMod] Failed to timeout member:`, err);
+      }
+
+      await createInfraction(client.supabase, {
+        guildId: client.guildId,
+        memberId: member.id,
+        moderatorId: 'system',
+        type: 'mute',
+        reason: fullReason,
+        automodRuleId: rule.id,
+        durationMinutes,
+        expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+      });
+
+      client.eventBus.emit('member.muted', client.guildId, {
+        discordId: member.id,
+        moderatorId: 'system',
+        reason: fullReason,
+        durationMinutes,
+      });
+
+      if (rule.log_to_mod_channel) {
+        await postModLogEntry(client, {
+          action: 'mute',
+          member,
+          moderator: 'System (Auto-Mod)',
+          reason: fullReason,
+          duration: durationMinutes,
+          channelId: modConfig.modLogChannelId,
+          ruleType: rule.type,
+        });
+      }
+
+      await writeAuditLog(client.supabase, {
+        guildId: client.guildId,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: 'automod.mute',
+        targetType: 'member',
+        targetId: member.id,
+        details: {
+          rule: rule.name,
+          ruleType: rule.type,
+          violation: violationReason,
+          durationMinutes,
+        },
+      });
+      break;
+    }
+
+    case 'kick': {
+      // DM before kick
+      try {
+        await member.send(
+          `You have been **kicked** from **${member.guild.name}** by Auto-Mod.\n**Reason:** ${fullReason}`,
+        );
+      } catch {
+        // DMs disabled
+      }
+
+      try {
+        await member.kick(fullReason);
+      } catch (err) {
+        console.error(`[AutoMod] Failed to kick member:`, err);
+      }
+
+      await createInfraction(client.supabase, {
+        guildId: client.guildId,
+        memberId: member.id,
+        moderatorId: 'system',
+        type: 'kick',
+        reason: fullReason,
+        automodRuleId: rule.id,
+        expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+      });
+
+      client.eventBus.emit('member.kicked', client.guildId, {
+        discordId: member.id,
+        moderatorId: 'system',
+        reason: fullReason,
+      });
+
+      if (rule.log_to_mod_channel) {
+        await postModLogEntry(client, {
+          action: 'kick',
+          member,
+          moderator: 'System (Auto-Mod)',
+          reason: fullReason,
+          channelId: modConfig.modLogChannelId,
+          ruleType: rule.type,
+        });
+      }
+
+      await writeAuditLog(client.supabase, {
+        guildId: client.guildId,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: 'automod.kick',
+        targetType: 'member',
+        targetId: member.id,
+        details: { rule: rule.name, ruleType: rule.type, violation: violationReason },
+      });
+      break;
+    }
+
+    case 'ban': {
+      // DM before ban
+      try {
+        await member.send(
+          `You have been **banned** from **${member.guild.name}** by Auto-Mod.\n**Reason:** ${fullReason}`,
+        );
+      } catch {
+        // DMs disabled
+      }
+
+      try {
+        await member.ban({ reason: fullReason, deleteMessageSeconds: 0 });
+      } catch (err) {
+        console.error(`[AutoMod] Failed to ban member:`, err);
+      }
+
+      await createInfraction(client.supabase, {
+        guildId: client.guildId,
+        memberId: member.id,
+        moderatorId: 'system',
+        type: 'ban',
+        reason: fullReason,
+        automodRuleId: rule.id,
+        expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
+      });
+
+      client.eventBus.emit('member.banned', client.guildId, {
+        discordId: member.id,
+        moderatorId: 'system',
+        reason: fullReason,
+      });
+
+      if (rule.log_to_mod_channel) {
+        await postModLogEntry(client, {
+          action: 'ban',
+          member,
+          moderator: 'System (Auto-Mod)',
+          reason: fullReason,
+          channelId: modConfig.modLogChannelId,
+          ruleType: rule.type,
+        });
+      }
+
+      await writeAuditLog(client.supabase, {
+        guildId: client.guildId,
+        actorType: 'bot',
+        actorId: 'automod',
+        action: 'automod.ban',
+        targetType: 'member',
+        targetId: member.id,
+        details: { rule: rule.name, ruleType: rule.type, violation: violationReason },
+      });
+      break;
+    }
+  }
+}
