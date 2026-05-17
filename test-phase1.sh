@@ -5,16 +5,17 @@
 #
 # What this does:
 #   1. Loads env from .env.example
-#   2. Starts Docker containers (Lavalink + Valkey)
-#   3. Nukes existing Supabase schema (FIRST RUN ONLY)
-#   4. Runs the full migration + seed
-#   5. Verifies all tables exist
-#   6. Tests bot login to Discord
+#   2. TypeScript compilation check
+#   3. Starts Docker containers (Lavalink + Valkey)
+#   4. Runs Supabase migration + seed via Management API
+#   5. Tests Discord bot login
+#   6. Tests Valkey connectivity
 #   7. Tests dashboard build
 #   8. Prints pass/fail report
 # ============================================================
 
-set -euo pipefail
+# Don't exit on errors — we track pass/fail ourselves
+set -uo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -99,20 +100,18 @@ header "TypeScript Compilation"
 
 # Build shared package first (other packages depend on it)
 info "Building @somnibot/shared..."
-if cd packages/shared && npx tsc --noEmit 2>&1; then
+if (cd packages/shared && npx tsc 2>&1); then
   pass "Shared package compiles"
 else
   fail "Shared package" "TypeScript errors"
 fi
-cd "$OLDPWD"
 
 info "Type-checking @somnibot/bot..."
-if cd packages/bot && npx tsc --noEmit 2>&1; then
+if (cd packages/bot && npx tsc --noEmit 2>&1); then
   pass "Bot package compiles"
 else
   fail "Bot package" "TypeScript errors"
 fi
-cd "$OLDPWD"
 
 # ────────────────────────────────────────
 # 3. Docker containers (Lavalink + Valkey)
@@ -135,7 +134,7 @@ if command -v docker &> /dev/null; then
     if docker compose ps | grep -q "lavalink.*running\|lavalink.*Up"; then
       pass "Lavalink container running"
     else
-      # Lavalink may take longer to start
+      # Lavalink may take longer to start (Java)
       info "Waiting for Lavalink (Java startup)..."
       sleep 15
       if docker compose ps | grep -q "lavalink.*running\|lavalink.*Up"; then
@@ -152,217 +151,108 @@ else
 fi
 
 # ────────────────────────────────────────
-# 4. Supabase — Nuke & Migrate
+# 4. Supabase — Migrate via Management API
 # ────────────────────────────────────────
 header "Supabase Schema"
 
-# We use the Supabase REST API via the secret key to run SQL
-SUPABASE_DB_API="${SUPABASE_URL}/rest/v1/rpc"
-SUPABASE_SQL_URL="${SUPABASE_URL}/pg"  # Not available via REST — use direct connection
-
-# Install a small Node script to run SQL against Supabase
-info "Running schema setup via Node.js..."
-
-node -e "
-const fs = require('fs');
-
-// Use fetch to interact with Supabase
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
-
-async function runSQL(sql) {
-  // Use Supabase's pg endpoint (available via management API)
-  // For schema operations, we use the Supabase Management API
-  const resp = await fetch(SUPABASE_URL + '/rest/v1/rpc/exec_sql', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'apikey': SUPABASE_SECRET_KEY,
-      'Authorization': 'Bearer ' + SUPABASE_SECRET_KEY,
-    },
-    body: JSON.stringify({ query: sql }),
-  });
-  return resp;
-}
-
-async function main() {
-  // Check if this is a first run by looking for a known table
-  console.log('Checking existing schema...');
-
-  const checkResp = await fetch(SUPABASE_URL + '/rest/v1/guild?select=id&limit=1', {
-    headers: {
-      'apikey': SUPABASE_SECRET_KEY,
-      'Authorization': 'Bearer ' + SUPABASE_SECRET_KEY,
-    },
-  });
-
-  const isFirstRun = checkResp.status === 404 || checkResp.status >= 400;
-
-  if (isFirstRun) {
-    console.log('FIRST RUN — nuking existing schema...');
-
-    // Drop all tables in public schema
-    const nukeSQL = \`
-      DO \\\$\\\$ DECLARE
-        r RECORD;
-      BEGIN
-        FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-          EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
-        END LOOP;
-        -- Drop functions
-        FOR r IN (SELECT proname, oidvectortypes(proargtypes) as args FROM pg_proc
-                  INNER JOIN pg_namespace ns ON (pg_proc.pronamespace = ns.oid)
-                  WHERE ns.nspname = 'public') LOOP
-          EXECUTE 'DROP FUNCTION IF EXISTS public.' || quote_ident(r.proname) || '(' || r.args || ') CASCADE';
-        END LOOP;
-        -- Drop sequences
-        FOR r IN (SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public') LOOP
-          EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequence_name) || ' CASCADE';
-        END LOOP;
-        -- Drop types
-        FOR r IN (SELECT typname FROM pg_type t JOIN pg_namespace n ON t.typnamespace = n.oid
-                  WHERE n.nspname = 'public' AND t.typtype = 'e') LOOP
-          EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
-        END LOOP;
-      END \\\$\\\$;
-    \`;
-    const nukeResp = await runSQL(nukeSQL);
-    if (nukeResp.ok) {
-      console.log('Schema nuked successfully.');
-    } else {
-      console.log('Nuke via RPC not available — trying direct migration...');
-    }
-  } else {
-    console.log('Tables already exist — skipping nuke (not first run).');
-  }
-
-  // Run migration
-  console.log('Running migration...');
-  const migrationSQL = fs.readFileSync('packages/supabase/migrations/20260516000000_initial_schema.sql', 'utf-8');
-
-  // Supabase doesn't expose raw SQL via REST easily.
-  // We'll use the Supabase Management API instead.
-  const mgmtBase = 'https://api.supabase.com';
-  const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
-  const projectRef = new URL(SUPABASE_URL).hostname.split('.')[0];
-
-  if (accessToken) {
-    console.log('Using Management API (project: ' + projectRef + ')...');
-
-    // Run the nuke first if first run
-    if (isFirstRun) {
-      const nukeSQL = \`
-        DO \\\$\\\$ DECLARE r RECORD;
-        BEGIN
-          FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('spatial_ref_sys')) LOOP
-            EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
-          END LOOP;
-        END \\\$\\\$;
-      \`;
-
-      const nukeResp = await fetch(mgmtBase + '/v1/projects/' + projectRef + '/database/query', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + accessToken,
-        },
-        body: JSON.stringify({ query: nukeSQL }),
-      });
-
-      if (nukeResp.ok) {
-        console.log('✅ Schema nuked via Management API');
-      } else {
-        const err = await nukeResp.text();
-        console.log('⚠️  Nuke response: ' + nukeResp.status + ' — ' + err);
-      }
-    }
-
-    // Run migration in chunks (Management API may have size limits)
-    // Split on major section comments
-    const migrationResp = await fetch(mgmtBase + '/v1/projects/' + projectRef + '/database/query', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessToken,
-      },
-      body: JSON.stringify({ query: migrationSQL }),
-    });
-
-    if (migrationResp.ok) {
-      console.log('✅ Migration applied successfully');
-    } else {
-      const err = await migrationResp.text();
-      console.error('❌ Migration failed: ' + migrationResp.status + ' — ' + err.substring(0, 500));
-      process.exit(1);
-    }
-
-    // Run seed
-    console.log('Running seed data...');
-    const seedSQL = fs.readFileSync('packages/supabase/seed.sql', 'utf-8');
-    const seedResp = await fetch(mgmtBase + '/v1/projects/' + projectRef + '/database/query', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessToken,
-      },
-      body: JSON.stringify({ query: seedSQL }),
-    });
-
-    if (seedResp.ok) {
-      console.log('✅ Seed data applied');
-    } else {
-      const err = await seedResp.text();
-      console.error('⚠️  Seed response: ' + seedResp.status + ' — ' + err.substring(0, 300));
-    }
-
-    // Verify tables
-    console.log('Verifying tables...');
-    const verifyResp = await fetch(mgmtBase + '/v1/projects/' + projectRef + '/database/query', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + accessToken,
-      },
-      body: JSON.stringify({ query: \"SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename\" }),
-    });
-
-    if (verifyResp.ok) {
-      const tables = await verifyResp.json();
-      console.log('TABLES_FOUND:' + JSON.stringify(tables));
-    } else {
-      console.error('❌ Could not verify tables');
-      process.exit(1);
-    }
-  } else {
-    console.error('❌ SUPABASE_ACCESS_TOKEN not set — cannot run migration via API.');
-    console.log('Set it in .env to enable schema management.');
-    process.exit(1);
-  }
-}
-
-main().catch(err => { console.error('❌ ' + err.message); process.exit(1); });
-" 2>&1 | tee /tmp/supabase_result.txt
-
-if grep -q "Migration applied successfully" /tmp/supabase_result.txt; then
-  pass "Supabase migration"
-elif grep -q "Tables already exist" /tmp/supabase_result.txt; then
-  pass "Supabase schema (already exists)"
+if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+  fail "Supabase" "SUPABASE_ACCESS_TOKEN not set — add it to .env to enable schema management"
 else
-  fail "Supabase migration" "Check output above"
-fi
+  PROJECT_REF=$(echo "$SUPABASE_URL" | sed 's|https://||' | sed 's|\.supabase\.co.*||')
+  MGMT_BASE="https://api.supabase.com"
 
-if grep -q "Seed data applied" /tmp/supabase_result.txt; then
-  pass "Supabase seed data"
-fi
+  info "Project ref: $PROJECT_REF"
 
-# Count tables
-if grep -q "TABLES_FOUND:" /tmp/supabase_result.txt; then
-  TABLE_LINE=$(grep "TABLES_FOUND:" /tmp/supabase_result.txt)
-  TABLE_COUNT=$(echo "$TABLE_LINE" | grep -o '"tablename"' | wc -l)
-  if [ "$TABLE_COUNT" -ge 35 ]; then
-    pass "Table count: $TABLE_COUNT tables found (expected 35+)"
+  # Check if tables already exist via REST API
+  info "Checking existing schema..."
+  CHECK_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "apikey: ${SUPABASE_SECRET_KEY}" \
+    -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+    "${SUPABASE_URL}/rest/v1/guild?select=id&limit=1" 2>/dev/null || echo "000")
+
+  if [ "$CHECK_STATUS" = "200" ]; then
+    info "Tables already exist — skipping migration"
+    pass "Supabase schema (already exists)"
   else
-    fail "Table count" "Only $TABLE_COUNT tables found (expected 35+)"
+    info "Running migration via Management API..."
+
+    # Nuke existing schema first
+    NUKE_SQL="DO \$\$ DECLARE r RECORD; BEGIN FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT IN ('spatial_ref_sys')) LOOP EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE'; END LOOP; END \$\$;"
+
+    curl -s -o /tmp/nuke_result.txt -w "%{http_code}" \
+      -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+      -d "{\"query\": $(echo "$NUKE_SQL" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}" \
+      > /tmp/nuke_status.txt 2>/dev/null
+
+    NUKE_STATUS=$(cat /tmp/nuke_status.txt)
+    if [ "$NUKE_STATUS" = "201" ] || [ "$NUKE_STATUS" = "200" ]; then
+      info "Schema nuked"
+    else
+      info "Nuke response: $NUKE_STATUS (may be fine if schema was empty)"
+    fi
+
+    # Run migration
+    MIGRATION_FILE="packages/supabase/migrations/20260516000000_initial_schema.sql"
+    if [ -f "$MIGRATION_FILE" ]; then
+      MIGRATION_SQL=$(cat "$MIGRATION_FILE")
+      MIGRATION_JSON=$(python3 -c "import sys,json; print(json.dumps({'query': sys.stdin.read()}))" < "$MIGRATION_FILE")
+
+      MIGRATE_STATUS=$(curl -s -o /tmp/migrate_result.txt -w "%{http_code}" \
+        -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+        -d "$MIGRATION_JSON" 2>/dev/null)
+
+      if [ "$MIGRATE_STATUS" = "201" ] || [ "$MIGRATE_STATUS" = "200" ]; then
+        pass "Supabase migration applied"
+      else
+        MIGRATE_ERR=$(head -c 500 /tmp/migrate_result.txt 2>/dev/null)
+        fail "Supabase migration" "HTTP $MIGRATE_STATUS — $MIGRATE_ERR"
+      fi
+    else
+      fail "Supabase migration" "Migration file not found: $MIGRATION_FILE"
+    fi
+
+    # Run seed
+    SEED_FILE="packages/supabase/seed.sql"
+    if [ -f "$SEED_FILE" ]; then
+      SEED_JSON=$(python3 -c "import sys,json; print(json.dumps({'query': sys.stdin.read()}))" < "$SEED_FILE")
+
+      SEED_STATUS=$(curl -s -o /tmp/seed_result.txt -w "%{http_code}" \
+        -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+        -d "$SEED_JSON" 2>/dev/null)
+
+      if [ "$SEED_STATUS" = "201" ] || [ "$SEED_STATUS" = "200" ]; then
+        pass "Supabase seed data applied"
+      else
+        info "Seed response: $SEED_STATUS (non-critical)"
+      fi
+    fi
+
+    # Verify tables
+    VERIFY_SQL="SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+    VERIFY_JSON=$(python3 -c "import json; print(json.dumps({'query': '$VERIFY_SQL'}))")
+
+    VERIFY_STATUS=$(curl -s -o /tmp/verify_result.txt -w "%{http_code}" \
+      -X POST "${MGMT_BASE}/v1/projects/${PROJECT_REF}/database/query" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+      -d "$VERIFY_JSON" 2>/dev/null)
+
+    if [ "$VERIFY_STATUS" = "201" ] || [ "$VERIFY_STATUS" = "200" ]; then
+      TABLE_COUNT=$(grep -o '"tablename"' /tmp/verify_result.txt 2>/dev/null | wc -l)
+      if [ "$TABLE_COUNT" -ge 35 ]; then
+        pass "Table count: $TABLE_COUNT tables found (expected 35+)"
+      else
+        fail "Table count" "Only $TABLE_COUNT tables found (expected 35+)"
+      fi
+    else
+      fail "Table verification" "HTTP $VERIFY_STATUS"
+    fi
   fi
 fi
 
@@ -373,8 +263,9 @@ header "Discord Bot Connection"
 
 info "Testing Discord bot login..."
 
-node -e "
-const { Client, GatewayIntentBits } = require('discord.js');
+# Use a standalone script file to avoid shell quoting issues
+cat > /tmp/test_discord.mjs << 'DISCORD_SCRIPT'
+import { Client, GatewayIntentBits } from 'discord.js';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
@@ -395,7 +286,6 @@ client.once('ready', () => {
     console.log('GUILD_NAME:' + guild.name);
     console.log('GUILD_MEMBERS:' + guild.memberCount);
 
-    // Check bot role position
     const botMember = guild.members.cache.get(client.user.id);
     if (botMember) {
       const highestRole = botMember.roles.highest;
@@ -417,7 +307,9 @@ client.login(process.env.DISCORD_TOKEN).catch(err => {
   console.error('LOGIN_FAILED:' + err.message);
   process.exit(1);
 });
-" 2>&1 | tee /tmp/discord_result.txt
+DISCORD_SCRIPT
+
+node /tmp/test_discord.mjs 2>&1 | tee /tmp/discord_result.txt
 
 if grep -q "BOT_TAG:" /tmp/discord_result.txt; then
   BOT_TAG=$(grep "BOT_TAG:" /tmp/discord_result.txt | cut -d: -f2-)
@@ -443,7 +335,7 @@ fi
 # ────────────────────────────────────────
 header "Valkey Connection"
 
-if command -v docker &> /dev/null && docker compose ps | grep -q "valkey"; then
+if command -v docker &> /dev/null && docker compose ps 2>/dev/null | grep -q "valkey"; then
   info "Testing Valkey PING..."
   if docker compose exec -T valkey valkey-cli PING 2>/dev/null | grep -q "PONG"; then
     pass "Valkey responds to PING"
@@ -460,12 +352,11 @@ fi
 header "Dashboard Build"
 
 info "Testing Next.js build..."
-if cd packages/dashboard && npx next build 2>&1 | tail -20; then
+if (cd packages/dashboard && npx next build 2>&1 | tail -20); then
   pass "Dashboard builds successfully"
 else
   fail "Dashboard build" "Build failed — check output above"
 fi
-cd "$OLDPWD"
 
 # ────────────────────────────────────────
 # REPORT
@@ -495,6 +386,7 @@ fi
 # ────────────────────────────────────────
 info "Stopping Docker containers..."
 docker compose down 2>/dev/null || true
+rm -f /tmp/test_discord.mjs /tmp/discord_result.txt /tmp/supabase_result.txt /tmp/nuke_result.txt /tmp/nuke_status.txt /tmp/migrate_result.txt /tmp/seed_result.txt /tmp/verify_result.txt
 
 echo ""
 echo "Done. Paste this output to Viktor in Slack if anything failed."
