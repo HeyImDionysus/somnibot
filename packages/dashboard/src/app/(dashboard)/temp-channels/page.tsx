@@ -1,25 +1,340 @@
-import Link from 'next/link';
-
 /**
- * Temp Channels — Not yet available.
+ * Temp Channels — Hub-based temporary voice channel configuration.
+ *
+ * Architecture doc §25
  */
-export default function temp_channelsPage() {
+'use client';
+
+import { useEffect, useState, useCallback } from 'react';
+
+// ── Types ─────────────────────────────────────────────────
+
+interface TempChannelHub {
+  id: string;
+  guild_id: string;
+  hub_channel_id: string;
+  category_id: string;
+  naming_format: string;
+  default_user_limit: number;
+  default_bitrate: number;
+  keep_alive_minutes: number;
+  allow_text_channel: boolean;
+  moderator_roles: string[];
+  active: boolean;
+  created_at: string;
+}
+
+const emptyForm = {
+  hub_channel_id: '',
+  category_id: '',
+  naming_format: "{username}'s Channel",
+  default_user_limit: '0',
+  default_bitrate: '64000',
+  keep_alive_minutes: '1',
+  allow_text_channel: false,
+  moderator_roles: '',
+};
+
+// ── Main Component ────────────────────────────────────────
+
+export default function TempChannelsPage() {
+  const [hubs, setHubs] = useState<TempChannelHub[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState(emptyForm);
+
+  const flash = (msg: string) => {
+    setSuccess(msg);
+    setTimeout(() => setSuccess(null), 3000);
+  };
+
+  const fetchHubs = useCallback(async () => {
+    try {
+      const res = await fetch('/api/temp-channels');
+      const json = await res.json();
+      if (json.success) setHubs(json.data);
+      else setError(json.error);
+    } catch {
+      setError('Failed to load temp channel hubs');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchHubs();
+  }, [fetchHubs]);
+
+  const openEditor = (hub?: TempChannelHub) => {
+    if (hub) {
+      setEditingId(hub.id);
+      setForm({
+        hub_channel_id: hub.hub_channel_id,
+        category_id: hub.category_id,
+        naming_format: hub.naming_format,
+        default_user_limit: String(hub.default_user_limit),
+        default_bitrate: String(hub.default_bitrate),
+        keep_alive_minutes: String(hub.keep_alive_minutes),
+        allow_text_channel: hub.allow_text_channel,
+        moderator_roles: hub.moderator_roles.join(', '),
+      });
+    } else {
+      setEditingId(null);
+      setForm({ ...emptyForm });
+    }
+    setShowForm(true);
+  };
+
+  const save = async () => {
+    setError(null);
+    if (!form.hub_channel_id || !form.category_id) {
+      setError('Hub Channel ID and Category ID are required');
+      return;
+    }
+
+    const payload = {
+      ...(editingId ? { id: editingId } : {}),
+      hub_channel_id: form.hub_channel_id,
+      category_id: form.category_id,
+      naming_format: form.naming_format || "{username}'s Channel",
+      default_user_limit: parseInt(form.default_user_limit, 10) || 0,
+      default_bitrate: parseInt(form.default_bitrate, 10) || 64000,
+      keep_alive_minutes: parseInt(form.keep_alive_minutes, 10) || 1,
+      allow_text_channel: form.allow_text_channel,
+      moderator_roles: form.moderator_roles ? form.moderator_roles.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    };
+
+    try {
+      const res = await fetch('/api/temp-channels', {
+        method: editingId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (json.success) {
+        if (editingId) {
+          setHubs(hubs.map((h) => (h.id === editingId ? json.data : h)));
+        } else {
+          setHubs([...hubs, json.data]);
+        }
+        setShowForm(false);
+        flash(editingId ? 'Hub updated' : 'Hub created');
+      } else {
+        setError(json.error);
+      }
+    } catch {
+      setError('Failed to save hub');
+    }
+  };
+
+  const toggleActive = async (hub: TempChannelHub) => {
+    try {
+      const res = await fetch('/api/temp-channels', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: hub.id, active: !hub.active }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setHubs(hubs.map((h) => (h.id === hub.id ? json.data : h)));
+      }
+    } catch {
+      setError('Failed to toggle hub');
+    }
+  };
+
+  const deleteHub = async (id: string) => {
+    try {
+      const res = await fetch(`/api/temp-channels?id=${id}`, { method: 'DELETE' });
+      const json = await res.json();
+      if (json.success) {
+        setHubs(hubs.filter((h) => h.id !== id));
+        flash('Hub deleted');
+      }
+    } catch {
+      setError('Failed to delete hub');
+    }
+  };
+
+  const bitrateLabel = (br: number) => `${Math.round(br / 1000)} kbps`;
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="animate-pulse text-discord-text-muted">Loading temp channels…</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center">
-      <div className="text-center max-w-sm">
-        <div className="mb-4 text-5xl">🚧</div>
-        <h1 className="text-xl font-bold text-discord-text-primary">
-          Temp Channels
-        </h1>
-        <p className="mt-2 text-sm text-discord-text-muted">
-          This feature is under development and will be available soon.
-        </p>
-        <Link
-          href="/settings"
-          className="mt-4 inline-block rounded-input bg-discord-bg-secondary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-tertiary hover:text-discord-text-primary transition-standard"
+    <div className="mx-auto max-w-4xl space-y-6 p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-discord-text-primary">Temporary Voice Channels</h1>
+          <p className="text-sm text-discord-text-muted">Members join a hub → bot creates a personal voice channel → deleted when empty</p>
+        </div>
+        <button
+          onClick={() => openEditor()}
+          className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard"
         >
-          Go to Settings
-        </Link>
+          + Add Hub
+        </button>
+      </div>
+
+      {/* Alerts */}
+      {error && (
+        <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
+      )}
+      {success && (
+        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
+      )}
+
+      {/* ── Editor Modal ─────────────────────────────── */}
+      {showForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-lg rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-6 shadow-xl">
+            <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">
+              {editingId ? 'Edit Hub' : 'New Hub'}
+            </h2>
+            <div className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Hub Voice Channel ID *</label>
+                  <input type="text" value={form.hub_channel_id} onChange={(e) => setForm({ ...form, hub_channel_id: e.target.value })}
+                    placeholder="Right-click voice channel → Copy ID"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Category ID *</label>
+                  <input type="text" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}
+                    placeholder="Category for new channels"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Naming Format</label>
+                <input type="text" value={form.naming_format} onChange={(e) => setForm({ ...form, naming_format: e.target.value })}
+                  placeholder="{username}'s Channel"
+                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <p className="mt-1 text-xs text-discord-text-muted">Variables: {'{username}'}, {'{user}'}, {'{tag}'}, {'{count}'}</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">User Limit</label>
+                  <input type="number" value={form.default_user_limit} onChange={(e) => setForm({ ...form, default_user_limit: e.target.value })}
+                    min="0" max="99" placeholder="0 = unlimited"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Bitrate</label>
+                  <select value={form.default_bitrate} onChange={(e) => setForm({ ...form, default_bitrate: e.target.value })}
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none">
+                    <option value="8000">8 kbps</option>
+                    <option value="32000">32 kbps</option>
+                    <option value="64000">64 kbps</option>
+                    <option value="96000">96 kbps</option>
+                    <option value="128000">128 kbps</option>
+                    <option value="256000">256 kbps</option>
+                    <option value="384000">384 kbps</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Keep-Alive (min)</label>
+                  <input type="number" value={form.keep_alive_minutes} onChange={(e) => setForm({ ...form, keep_alive_minutes: e.target.value })}
+                    min="0" max="60"
+                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Moderator Roles (comma-separated IDs)</label>
+                <input type="text" value={form.moderator_roles} onChange={(e) => setForm({ ...form, moderator_roles: e.target.value })}
+                  placeholder="Role IDs that can control any temp channel"
+                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+              </div>
+              <label className="flex items-center gap-2 text-sm text-discord-text-secondary cursor-pointer">
+                <input type="checkbox" checked={form.allow_text_channel} onChange={(e) => setForm({ ...form, allow_text_channel: e.target.checked })} className="rounded" />
+                Create paired text channel
+              </label>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button onClick={() => setShowForm(false)} className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard">
+                Cancel
+              </button>
+              <button onClick={save} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
+                {editingId ? 'Update' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Hub List ─────────────────────────────────── */}
+      {hubs.length === 0 ? (
+        <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
+          <div className="text-4xl mb-3">🔊</div>
+          <h2 className="text-lg font-semibold text-discord-text-primary mb-1">No Temp Channel Hubs</h2>
+          <p className="text-sm text-discord-text-muted mb-4">Create a hub to let members generate personal voice channels by joining a designated voice channel.</p>
+          <button onClick={() => openEditor()} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
+            + Create First Hub
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {hubs.map((hub) => (
+            <div key={hub.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
+              <div className="flex items-center justify-between px-5 py-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">🔊</span>
+                    <div>
+                      <p className="text-sm font-medium text-discord-text-primary">Hub: {hub.hub_channel_id}</p>
+                      <p className="text-xs text-discord-text-muted">
+                        Category: {hub.category_id} · Format: <code className="bg-discord-bg-tertiary px-1 rounded">{hub.naming_format}</code>
+                      </p>
+                      <p className="text-xs text-discord-text-muted mt-0.5">
+                        {bitrateLabel(hub.default_bitrate)} · {hub.default_user_limit === 0 ? 'No limit' : `${hub.default_user_limit} users`} · Keep-alive: {hub.keep_alive_minutes}m
+                        {hub.allow_text_channel ? ' · +Text' : ''}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 ml-4">
+                  <div
+                    className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${hub.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+                    onClick={() => toggleActive(hub)}
+                  >
+                    <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${hub.active ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                  </div>
+                  <button onClick={() => openEditor(hub)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
+                    Edit
+                  </button>
+                  <button onClick={() => deleteHub(hub.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Owner Commands Reference ─────────────────── */}
+      <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
+        <h3 className="text-sm font-semibold text-discord-text-primary mb-3">Voice Commands (for channel owners)</h3>
+        <div className="grid gap-2 text-xs text-discord-text-muted sm:grid-cols-2">
+          <div><code className="text-discord-accent">/voice lock</code> — Lock the channel</div>
+          <div><code className="text-discord-accent">/voice unlock</code> — Unlock the channel</div>
+          <div><code className="text-discord-accent">/voice limit</code> — Set user limit</div>
+          <div><code className="text-discord-accent">/voice name</code> — Rename the channel</div>
+          <div><code className="text-discord-accent">/voice permit @user</code> — Allow a user in</div>
+          <div><code className="text-discord-accent">/voice deny @user</code> — Remove access</div>
+          <div><code className="text-discord-accent">/voice ban @user</code> — Kick + deny</div>
+          <div><code className="text-discord-accent">/voice claim</code> — Claim ownership</div>
+        </div>
       </div>
     </div>
   );

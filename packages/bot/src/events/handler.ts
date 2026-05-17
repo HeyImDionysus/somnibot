@@ -26,6 +26,11 @@ import {
   handleReactionRemove,
 } from '../features/reaction-roles/index.js';
 import { handleCustomCommand, isCustomCommand } from '../features/custom-commands/index.js';
+import { handleVoiceStateForTempChannels } from '../features/temp-channels/index.js';
+import { handleTempChannelCommand } from '../features/temp-channels/commands.js';
+import type { TempChannelManager } from '../features/temp-channels/temp-channel-manager.js';
+import type { GiveawayManager } from '../features/giveaways/giveaway-manager.js';
+import { handleGiveawayCommand } from '../features/giveaways/commands.js';
 import type { EscalationStep } from '@somnibot/shared';
 
 /**
@@ -262,6 +267,14 @@ export function registerEvents(client: SomniClient): void {
     // Phase 9: Track voice state for voice XP
     onVoiceStateUpdate(oldState, newState);
 
+    // Phase 10: Temp channel creation/cleanup
+    const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
+    if (tempMgr) {
+      handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
+        console.error('[Events] Temp channel voice handler error:', err);
+      });
+    }
+
     // Joined a voice channel
     if (!oldState.channelId && newState.channelId) {
       client.eventBus.emit('voice.joined', client.guildId, {
@@ -309,6 +322,15 @@ export function registerEvents(client: SomniClient): void {
         const handled = await handleTicketInteraction(interaction, client);
         if (handled) return;
 
+        // Phase 10: Giveaway entry buttons
+        if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
+          const giveawayMgr = (client as unknown as Record<string, unknown>)._giveawayManager as GiveawayManager | undefined;
+          if (giveawayMgr) {
+            const gHandled = await giveawayMgr.handleEntry(interaction);
+            if (gHandled) return;
+          }
+        }
+
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
           client.eventBus.emit('button.clicked', client.guildId, {
@@ -339,6 +361,28 @@ export function registerEvents(client: SomniClient): void {
         if (interaction.commandName === 'leaderboard') {
           const { handleLeaderboardCommand } = await import('../features/levels/commands.js');
           await handleLeaderboardCommand(interaction, client);
+          return;
+        }
+
+        // Phase 10: Voice commands (temp channels)
+        if (interaction.commandName === 'voice') {
+          const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
+          if (tempMgr) {
+            await handleTempChannelCommand(interaction, tempMgr);
+          } else {
+            await interaction.reply({ content: '❌ Temp channels are not enabled.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 10: Giveaway commands
+        if (interaction.commandName === 'giveaway') {
+          const giveawayMgr = (client as unknown as Record<string, unknown>)._giveawayManager as GiveawayManager | undefined;
+          if (giveawayMgr) {
+            await handleGiveawayCommand(interaction, giveawayMgr);
+          } else {
+            await interaction.reply({ content: '❌ Giveaways are not enabled.', ephemeral: true });
+          }
           return;
         }
 

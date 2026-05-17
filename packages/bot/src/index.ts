@@ -10,6 +10,11 @@ import { AutomationEngine } from './features/automations/index.js';
 import { initVoiceTracking, startVoiceXpTicker, buildLevelCommands } from './features/levels/index.js';
 import { loadReactionRoles } from './features/reaction-roles/index.js';
 import { loadCustomCommands } from './features/custom-commands/index.js';
+import { TempChannelManager } from './features/temp-channels/temp-channel-manager.js';
+import { buildTempChannelCommands } from './features/temp-channels/commands.js';
+import { StatsChannelManager } from './features/stats-channels/index.js';
+import { ScheduledMessageRunner } from './features/scheduled-messages/index.js';
+import { GiveawayManager, buildGiveawayCommands } from './features/giveaways/index.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -179,7 +184,75 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-9 systems initialized');
+    // Phase 10: Community Features
+    if (guild) {
+      try {
+        // Load guild config for Phase 10 feature flags
+        const { data: guildConfig } = await client.supabase
+          .from('guild_config')
+          .select('temp_channels_enabled, stats_enabled, stats_update_interval_minutes, scheduled_messages_enabled, giveaways_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        const rest10 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+
+        // 10a: Temp Channels
+        if (guildConfig?.temp_channels_enabled !== false) {
+          const tempChannelManager = new TempChannelManager(guild, client.supabase);
+          await tempChannelManager.start();
+          (client as unknown as Record<string, unknown>)._tempChannelManager = tempChannelManager;
+
+          // Register /voice command
+          const voiceCmd = buildTempChannelCommands();
+          await rest10.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: voiceCmd.toJSON() },
+          );
+          console.log('[Boot] ✅ Temp channels started + /voice command registered');
+        }
+
+        // 10b: Stats Channels
+        if (guildConfig?.stats_enabled !== false) {
+          const intervalMins = guildConfig?.stats_update_interval_minutes ?? 10;
+          const statsManager = new StatsChannelManager(guild, client.supabase, intervalMins);
+          await statsManager.start();
+          (client as unknown as Record<string, unknown>)._statsManager = statsManager;
+          console.log('[Boot] ✅ Stats channels started');
+        }
+
+        // 10c: Scheduled Messages
+        if (guildConfig?.scheduled_messages_enabled !== false) {
+          const scheduledRunner = new ScheduledMessageRunner(guild, client.supabase);
+          await scheduledRunner.start();
+          (client as unknown as Record<string, unknown>)._scheduledRunner = scheduledRunner;
+          console.log('[Boot] ✅ Scheduled message runner started');
+        }
+
+        // 10d: Giveaways
+        if (guildConfig?.giveaways_enabled !== false) {
+          const giveawayManager = new GiveawayManager(
+            guild,
+            client.supabase,
+            client.valkey,
+            client.eventBus,
+          );
+          await giveawayManager.start();
+          (client as unknown as Record<string, unknown>)._giveawayManager = giveawayManager;
+
+          // Register /giveaway command
+          const giveawayCmd = buildGiveawayCommands();
+          await rest10.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: giveawayCmd.toJSON() },
+          );
+          console.log('[Boot] ✅ Giveaway manager started + /giveaway command registered');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 10 initialization error:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-10 systems initialized');
   });
 
   // Graceful shutdown
@@ -191,6 +264,15 @@ async function main(): Promise<void> {
     // Stop voice XP ticker
     const voiceXpTimer = (client as unknown as Record<string, unknown>)._voiceXpTimer as NodeJS.Timeout | undefined;
     if (voiceXpTimer) clearInterval(voiceXpTimer);
+    // Stop Phase 10 managers
+    const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as { stop?: () => void } | undefined;
+    if (tempMgr?.stop) tempMgr.stop();
+    const statsMgr = (client as unknown as Record<string, unknown>)._statsManager as { stop?: () => void } | undefined;
+    if (statsMgr?.stop) statsMgr.stop();
+    const schedRunner = (client as unknown as Record<string, unknown>)._scheduledRunner as { stop?: () => void } | undefined;
+    if (schedRunner?.stop) schedRunner.stop();
+    const giveawayMgr = (client as unknown as Record<string, unknown>)._giveawayManager as { stop?: () => void } | undefined;
+    if (giveawayMgr?.stop) giveawayMgr.stop();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});
