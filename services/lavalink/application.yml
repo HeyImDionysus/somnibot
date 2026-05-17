@@ -6,13 +6,24 @@ lavalink:
   server:
     password: "youshallnotpass"
     sources:
-      youtube: false
+      youtube: false     # Disabled — using plugin
       bandcamp: true
       soundcloud: true
       twitch: true
       vimeo: true
       http: true
       local: false
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: false
+      timescale: true
+      tremolo: false
+      vibrato: false
+      distortion: false
+      rotation: true
+      channelMix: false
+      lowPass: false
     bufferDurationMs: 400
     frameBufferDurationMs: 5000
     youtubePlaylistLoadLimit: 6
@@ -35,6 +46,7 @@ plugins:
       - MUSIC
       - WEB
       - ANDROID_TESTSUITE
+      - TVHTML5EMBEDDED
     oauth:
       enabled: true
       # Set via environment or replace with your refresh token

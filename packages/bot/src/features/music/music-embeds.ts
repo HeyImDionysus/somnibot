@@ -49,26 +49,38 @@ export function buildNowPlayingEmbed(
   entry: QueueEntry,
   positionMs: number,
   queue: GuildQueue,
+  activeFilters?: string,
 ): { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } {
-  const progress = buildProgressBar(positionMs, entry.duration);
-  const posStr = formatDuration(positionMs);
-  const durStr = formatDuration(entry.duration);
+  const isStream = entry.isStream ?? false;
+
+  let progressLine: string;
+  if (isStream) {
+    progressLine = '🔴 **LIVE**';
+  } else {
+    const progress = buildProgressBar(positionMs, entry.duration);
+    const posStr = formatDuration(positionMs);
+    const durStr = formatDuration(entry.duration);
+    progressLine = `${progress}\n\`${posStr}\` / \`${durStr}\``;
+  }
 
   const embed = new EmbedBuilder()
     .setColor(MUSIC_COLOR)
-    .setAuthor({ name: '🎵 Now Playing' })
+    .setAuthor({ name: isStream ? '📡 Now Streaming' : '🎵 Now Playing' })
     .setTitle(entry.title)
     .setURL(entry.uri)
     .setDescription(
       `by **${entry.author}**\n\n` +
-      `${progress}\n` +
-      `\`${posStr}\` / \`${durStr}\``,
+      progressLine,
     )
     .addFields(
       { name: 'Requested by', value: `<@${entry.requestedBy}>`, inline: true },
       { name: 'Volume', value: `${queue.volume}%`, inline: true },
       { name: 'Loop', value: loopModeLabel(queue.loopMode), inline: true },
     );
+
+  if (activeFilters && activeFilters !== 'None') {
+    embed.addFields({ name: 'Filters', value: activeFilters, inline: false });
+  }
 
   if (entry.artworkUrl) {
     embed.setThumbnail(entry.artworkUrl);
@@ -131,7 +143,8 @@ export function buildQueueEmbed(
   let description = '';
 
   if (current) {
-    description += `**Now Playing:**\n[${current.title}](${current.uri}) — \`${formatDuration(current.duration)}\` — <@${current.requestedBy}>\n\n`;
+    const durLabel = current.isStream ? '🔴 LIVE' : formatDuration(current.duration);
+    description += `**Now Playing:**\n[${current.title}](${current.uri}) — \`${durLabel}\` — <@${current.requestedBy}>\n\n`;
   }
 
   // Upcoming tracks for this page
@@ -145,7 +158,8 @@ export function buildQueueEmbed(
       const entry = queue.entries[i];
       if (!entry) continue;
       const position = i - upcomingStart + 1;
-      description += `\`${position}.\` [${entry.title}](${entry.uri}) — \`${formatDuration(entry.duration)}\` — <@${entry.requestedBy}>\n`;
+      const durLabel = entry.isStream ? '🔴 LIVE' : formatDuration(entry.duration);
+      description += `\`${position}.\` [${entry.title}](${entry.uri}) — \`${durLabel}\` — <@${entry.requestedBy}>\n`;
     }
   }
 
@@ -224,6 +238,15 @@ export function buildMusicInfoEmbed(message: string): EmbedBuilder {
   return new EmbedBuilder()
     .setColor(MUSIC_COLOR)
     .setDescription(message);
+}
+
+// ── Filter Embed ──────────────────────────────────────────
+
+export function buildFilterEmbed(message: string, activeFilters: string): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(MUSIC_COLOR)
+    .setDescription(message)
+    .addFields({ name: 'Active Filters', value: activeFilters || 'None' });
 }
 
 export { formatDuration };
