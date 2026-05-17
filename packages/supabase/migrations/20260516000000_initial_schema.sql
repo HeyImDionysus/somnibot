@@ -26,6 +26,7 @@ CREATE TABLE guild (
   bot_joined_at TIMESTAMPTZ DEFAULT now(),
   setup_completed BOOLEAN DEFAULT false,
   setup_confirmed_at TIMESTAMPTZ,
+  bot_role_id TEXT,
   bot_role_position INTEGER,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
