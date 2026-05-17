@@ -273,16 +273,22 @@ async function main(): Promise<void> {
           await musicPlayer.init();
           (client as unknown as Record<string, unknown>)._musicPlayer = musicPlayer;
 
-          // Register music slash commands
+          // Register music slash commands (individual POST to avoid clobbering other commands)
           const rest11 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
           const musicCmds = buildMusicCommands();
+          let registered = 0;
           for (const cmd of musicCmds) {
-            await rest11.post(
-              Routes.applicationGuildCommands(client.user!.id, client.guildId),
-              { body: cmd.toJSON() },
-            );
+            try {
+              await rest11.post(
+                Routes.applicationGuildCommands(client.user!.id, client.guildId),
+                { body: cmd.toJSON() },
+              );
+              registered++;
+            } catch (regErr) {
+              console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
+            }
           }
-          console.log('[Boot] ✅ Music system started + commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter)');
+          console.log(`[Boot] ✅ Music system started + ${registered}/${musicCmds.length} commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter)`);
         } else {
           console.log('[Boot] ⏸️  Music system disabled in config');
         }
