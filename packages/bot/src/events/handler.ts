@@ -1,9 +1,14 @@
 import type { SomniClient } from '../client.js';
+import {
+  handleMemberJoin,
+  handleMemberUpdate,
+  handleMemberLeave,
+} from '../features/welcome/index.js';
 
 /**
  * Register all Discord gateway event listeners.
- * Each event is handled minimally in Phase 1 — just logging.
- * Full implementations come in later phases.
+ * Phase 1: bot-role guard, basic logging.
+ * Phase 4: onboarding detection, welcome/goodbye flows.
  */
 export function registerEvents(client: SomniClient): void {
   // ── Ready ──────────────────────────────────────────────
@@ -12,7 +17,6 @@ export function registerEvents(client: SomniClient): void {
     console.log(`[Bot] Guild: ${client.guildId}`);
     console.log(`[Bot] Gateway: ${readyClient.ws.ping}ms`);
 
-    // Verify bot role position
     const guild = readyClient.guilds.cache.get(client.guildId);
     if (guild) {
       const botMember = guild.members.me;
@@ -20,7 +24,6 @@ export function registerEvents(client: SomniClient): void {
         const highestRole = botMember.roles.highest;
         console.log(`[Bot] Highest role: "${highestRole.name}" (position ${highestRole.position})`);
 
-        // Check if bot role is position #1 (highest non-owner role)
         const sortedRoles = [...guild.roles.cache.values()]
           .sort((a, b) => b.position - a.position);
 
@@ -36,72 +39,36 @@ export function registerEvents(client: SomniClient): void {
     }
   });
 
-  // ── Guild Member Events ────────────────────────────────
+  // ── Guild Member Events (Phase 4: Onboarding + Welcome + Goodbye) ──
   client.on('guildMemberAdd', async (member) => {
-    if (member.guild.id !== client.guildId) return;
-    console.log(`[Event] Member joined: ${member.user.tag}`);
-    client.eventBus.emit('member.joined', client.guildId, {
-      discordId: member.id,
-      username: member.user.tag,
-      isReturning: false, // TODO: check returning member status in DB
-    });
+    await handleMemberJoin(client, member);
   });
 
   client.on('guildMemberRemove', async (member) => {
-    if (member.guild.id !== client.guildId) return;
-    console.log(`[Event] Member left: ${member.user.tag}`);
-    client.eventBus.emit('member.left', client.guildId, {
-      discordId: member.id,
-      username: member.user.tag,
-      roles: member.roles.cache.map((r) => r.id),
-    });
+    await handleMemberLeave(client, member);
   });
 
-  // ── Role Updates ───────────────────────────────────────
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    if (newMember.guild.id !== client.guildId) return;
-
-    // Detect role changes
-    const addedRoles = newMember.roles.cache.filter((r) => !oldMember.roles.cache.has(r.id));
-    const removedRoles = oldMember.roles.cache.filter((r) => !newMember.roles.cache.has(r.id));
-
-    for (const [, role] of addedRoles) {
-      client.eventBus.emit('role.gained', client.guildId, {
-        discordId: newMember.id,
-        roleId: role.id,
-        roleName: role.name,
-        source: 'discord',
-      });
-    }
-
-    for (const [, role] of removedRoles) {
-      client.eventBus.emit('role.lost', client.guildId, {
-        discordId: newMember.id,
-        roleId: role.id,
-        roleName: role.name,
-        source: 'discord',
-      });
-    }
+    await handleMemberUpdate(client, oldMember, newMember);
   });
 
   // ── Message Events ─────────────────────────────────────
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (message.guild?.id !== client.guildId) return;
-    // Phase 1: no-op — XP processing added in Phase 5 (Levels)
+    // XP processing added in Phase 9 (Levels)
   });
 
   // ── Voice State ────────────────────────────────────────
-  client.on('voiceStateUpdate', async (oldState, newState) => {
+  client.on('voiceStateUpdate', async (_oldState, newState) => {
     if (newState.guild.id !== client.guildId) return;
-    // Phase 1: no-op — music + temp channels added in later phases
+    // Music + temp channels added in later phases
   });
 
   // ── Interaction Handler ────────────────────────────────
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild || interaction.guild.id !== client.guildId) return;
-    // Phase 1: no slash commands registered yet
-    // Command handling added in Phase 2
+    // Command handling added in later phases
   });
 
   // ── Error Handling ─────────────────────────────────────

@@ -1,0 +1,55 @@
+/**
+ * /api/welcome — GET/PUT welcome + goodbye configuration.
+ */
+import { NextRequest, NextResponse } from 'next/server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+
+const GUILD_ID = process.env.DISCORD_GUILD_ID!;
+
+export async function GET() {
+  const supabase = createAdminSupabase();
+
+  const { data, error } = await supabase
+    .from('guild_config')
+    .select(
+      'welcome_enabled, welcome_channel_id, welcome_message, welcome_card_enabled, ' +
+      'welcome_card_background, welcome_dm_enabled, welcome_dm_message, welcome_auto_roles, ' +
+      'goodbye_enabled, goodbye_channel_id, goodbye_message',
+    )
+    .eq('guild_id', GUILD_ID)
+    .maybeSingle();
+
+  if (error) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true, data });
+}
+
+export async function PUT(req: NextRequest) {
+  const supabase = createAdminSupabase();
+  const body = await req.json();
+
+  const allowed: Record<string, unknown> = {};
+  const fields = [
+    'welcome_enabled', 'welcome_channel_id', 'welcome_message',
+    'welcome_card_enabled', 'welcome_card_background',
+    'welcome_dm_enabled', 'welcome_dm_message', 'welcome_auto_roles',
+    'goodbye_enabled', 'goodbye_channel_id', 'goodbye_message',
+  ];
+
+  for (const key of fields) {
+    if (key in body) allowed[key] = body[key];
+  }
+
+  const { error } = await supabase
+    .from('guild_config')
+    .update(allowed)
+    .eq('guild_id', GUILD_ID);
+
+  if (error) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true });
+}
