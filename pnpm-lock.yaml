@@ -126,13 +126,9 @@ importers:
         version: 5.9.3
 
   packages/license-sdk:
-    dependencies:
-      zod:
-        specifier: ^3.24.0
-        version: 3.25.76
     devDependencies:
       typescript:
-        specifier: ^5.7.0
+        specifier: ^5.4.0
         version: 5.9.3
 
   packages/shared:
