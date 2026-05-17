@@ -16,6 +16,16 @@ import {
   handleChannelUpdate,
   handleChannelDelete,
 } from '../sync/channel-events.js';
+import {
+  processMessageXp,
+  handleLevelUp,
+} from '../features/levels/index.js';
+import { onVoiceStateUpdate } from '../features/levels/voice-xp.js';
+import {
+  handleReactionAdd,
+  handleReactionRemove,
+} from '../features/reaction-roles/index.js';
+import { handleCustomCommand, isCustomCommand } from '../features/custom-commands/index.js';
 import type { EscalationStep } from '@somnibot/shared';
 
 /**
@@ -23,6 +33,7 @@ import type { EscalationStep } from '@somnibot/shared';
  * Phase 1: bot-role guard, basic logging.
  * Phase 4: onboarding detection, welcome/goodbye flows.
  * Phase 8: Automation engine event wiring.
+ * Phase 9: Levels/XP, reaction roles, custom commands.
  */
 export function registerEvents(client: SomniClient): void {
   // ── Ready ──────────────────────────────────────────────
@@ -95,7 +106,7 @@ export function registerEvents(client: SomniClient): void {
     await handleChannelDelete(client, channel);
   });
 
-  // ── Message Events (Phase 6: Auto-Mod + Phase 8: Automations) ──
+  // ── Message Events (Phase 6: Auto-Mod + Phase 8: Automations + Phase 9: XP) ──
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (message.guild?.id !== client.guildId) return;
@@ -133,14 +144,57 @@ export function registerEvents(client: SomniClient): void {
       });
     }
 
-    // XP processing added in Phase 9 (Levels)
+    // Phase 9: XP processing
+    try {
+      const xpResult = await processMessageXp(
+        message,
+        client.supabase,
+        client.valkey,
+        client.guildId,
+      );
+
+      if (xpResult.leveledUp && xpResult.newLevel != null && xpResult.oldLevel != null && xpResult.newXp != null) {
+        const guild = message.guild;
+        if (guild) {
+          await handleLevelUp(
+            guild,
+            client.supabase,
+            client.eventBus,
+            message.author.id,
+            xpResult.oldLevel,
+            xpResult.newLevel,
+            xpResult.newXp,
+          );
+        }
+      }
+    } catch (err) {
+      console.error('[Events] XP processing error:', err);
+    }
   });
 
-  // ── Reaction Events (Phase 8: Automations) ────────────
+  // ── Reaction Events (Phase 8: Automations + Phase 9: Reaction Roles) ────────────
   client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
     const message = reaction.message;
     if (message.guild?.id !== client.guildId) return;
+
+    // Phase 9: Reaction roles (check first — higher priority)
+    const guild = message.guild;
+    if (guild) {
+      try {
+        const handled = await handleReactionAdd(
+          reaction,
+          user,
+          guild,
+          client.supabase,
+          client.valkey,
+          client.eventBus,
+        );
+        if (handled) return; // Was a reaction role interaction
+      } catch (err) {
+        console.error('[Events] Reaction role add error:', err);
+      }
+    }
 
     // Emit reaction.added event for automations
     const reactionEvent = {
@@ -176,11 +230,37 @@ export function registerEvents(client: SomniClient): void {
     client.eventBus.emit('reaction.added', client.guildId, reactionEvent.data);
   });
 
-  // ── Voice State (Phase 8: Automations + future Music/Temp Channels) ──
+  // Phase 9: Reaction role remove
+  client.on('messageReactionRemove', async (reaction, user) => {
+    if (user.bot) return;
+    const message = reaction.message;
+    if (message.guild?.id !== client.guildId) return;
+
+    const guild = message.guild;
+    if (guild) {
+      try {
+        await handleReactionRemove(
+          reaction,
+          user,
+          guild,
+          client.supabase,
+          client.valkey,
+          client.eventBus,
+        );
+      } catch (err) {
+        console.error('[Events] Reaction role remove error:', err);
+      }
+    }
+  });
+
+  // ── Voice State (Phase 8: Automations + Phase 9: Voice XP + future Music/Temp Channels) ──
   client.on('voiceStateUpdate', async (oldState, newState) => {
     if (newState.guild.id !== client.guildId) return;
     const member = newState.member ?? oldState.member;
     if (!member || member.user.bot) return;
+
+    // Phase 9: Track voice state for voice XP
+    onVoiceStateUpdate(oldState, newState);
 
     // Joined a voice channel
     if (!oldState.channelId && newState.channelId) {
@@ -219,7 +299,7 @@ export function registerEvents(client: SomniClient): void {
     }
   });
 
-  // ── Interaction Handler (Phase 7: Tickets + Phase 8: Button automations) ──
+  // ── Interaction Handler (Phase 7: Tickets + Phase 8: Button automations + Phase 9: Commands) ──
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild || interaction.guild.id !== client.guildId) return;
 
@@ -243,8 +323,33 @@ export function registerEvents(client: SomniClient): void {
 
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
+        // Phase 7: Ticket commands
         if (interaction.commandName === 'ticket') {
           await handleTicketCommand(interaction, client);
+          return;
+        }
+
+        // Phase 9: Level commands
+        if (interaction.commandName === 'rank') {
+          const { handleRankCommand } = await import('../features/levels/commands.js');
+          await handleRankCommand(interaction, client);
+          return;
+        }
+
+        if (interaction.commandName === 'leaderboard') {
+          const { handleLeaderboardCommand } = await import('../features/levels/commands.js');
+          await handleLeaderboardCommand(interaction, client);
+          return;
+        }
+
+        // Phase 9: Custom commands (check registry)
+        if (isCustomCommand(interaction.commandName)) {
+          await handleCustomCommand(
+            interaction,
+            client.supabase,
+            client.valkey,
+            interaction.guild,
+          );
           return;
         }
       }

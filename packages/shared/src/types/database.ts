@@ -68,6 +68,11 @@ export interface DbGuildConfig {
   voice_xp_enabled: boolean;
   voice_xp_per_interval: number;
   voice_xp_interval_minutes: number;
+  xp_multiplier_mode: 'highest' | 'additive';
+  xp_channel_mode: 'blacklist' | 'whitelist';
+  xp_channel_list: string[];
+  rank_card_accent_color: number | null;
+  rank_card_background: string | null;
   // Music
   default_volume: number;
   max_queue_length: number;
@@ -177,8 +182,13 @@ export interface DbReactionRole {
   message_id: string;
   emoji: string;
   role_id: string;
-  group_id: string | null; // for exclusive groups
-  group_max: number | null;
+  exclusive_group: string | null;
+  require_role: string | null;
+  require_level: number | null;
+  max_per_group: number | null;
+  remove_on_unreact: boolean;
+  log_actions: boolean;
+  active: boolean;
   created_at: string;
 }
 
@@ -396,12 +406,14 @@ export interface DbCustomCommand {
   guild_id: string;
   name: string;
   description: string;
-  enabled: boolean;
   actions: Record<string, unknown>[];
-  required_role_ids: string[];
-  allowed_channel_ids: string[];
+  allowed_roles: string[];
+  allowed_channels: string[];
+  denied_roles: string[];
+  denied_channels: string[];
   cooldown_seconds: number;
   ephemeral: boolean;
+  enabled: boolean;
   discord_command_id: string | null;
   created_at: string;
   updated_at: string;
@@ -411,8 +423,20 @@ export interface DbEmbedConfig {
   id: string; // UUID
   guild_id: string;
   name: string;
-  embed_data: Record<string, unknown>;
-  is_template: boolean;
+  title: string | null;
+  description: string | null;
+  color: number | null;
+  fields: Record<string, unknown>[];
+  image_url: string | null;
+  thumbnail_url: string | null;
+  footer_text: string | null;
+  footer_icon_url: string | null;
+  author_name: string | null;
+  author_url: string | null;
+  author_icon_url: string | null;
+  include_timestamp: boolean;
+  use_components_v2: boolean;
+  components_v2_data: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }
@@ -422,12 +446,11 @@ export interface DbEmbedConfig {
 // ============================================================
 
 export interface DbMemberLevel {
-  id: string; // UUID
   guild_id: string;
-  user_discord_id: string;
-  total_xp: number;
+  member_id: string;
+  xp: number;
   level: number;
-  message_count: number;
+  total_messages: number;
   voice_minutes: number;
   last_xp_at: string | null;
   created_at: string;
@@ -439,27 +462,28 @@ export interface DbLevelReward {
   guild_id: string;
   level: number;
   role_id: string;
-  remove_previous_reward: boolean;
+  remove_at_level: number | null;
+  announce: boolean;
   created_at: string;
 }
 
 export interface DbXpMultiplier {
   id: string; // UUID
   guild_id: string;
-  target_type: 'role' | 'channel';
-  target_id: string;
+  role_id: string;
   multiplier: number;
   created_at: string;
 }
 
 export interface DbMemberRankSettings {
-  id: string; // UUID
   guild_id: string;
-  user_discord_id: string;
+  member_id: string;
   background_url: string | null;
+  background_storage_path: string | null;
   accent_color: number | null;
-  opacity: number;
   progress_bar_color: number | null;
+  overlay_opacity: number;
+  font_color_override: 'light' | 'dark' | null;
   created_at: string;
   updated_at: string;
 }
