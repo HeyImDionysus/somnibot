@@ -1,0 +1,288 @@
+/**
+ * Entitlement Service — Grant, revoke, and manage product entitlements.
+ *
+ * Handles the lifecycle: PENDING → ACTIVE → EXPIRED/CANCELLED/SUSPENDED/REVOKED
+ * Grants/revokes Discord roles on status changes.
+ */
+import type { Guild, GuildMember } from 'discord.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { PlatformEventBus } from '../../services/event-bus.js';
+
+export interface EntitlementGrantOptions {
+  customerId: string;
+  productId: string;
+  productName: string;
+  orderId: string;
+  licenseKeyId?: string;
+  planId?: string;
+  discordId: string;
+  type: 'one_time' | 'subscription';
+  source: 'purchase' | 'giveaway' | 'manual' | 'automation';
+  grantedRoleIds: string[];
+  grantedChannelIds: string[];
+  expiresAt?: string | null;
+}
+
+export class EntitlementService {
+  constructor(
+    private guild: Guild,
+    private supabase: SupabaseClient,
+    private eventBus: PlatformEventBus,
+  ) {}
+
+  /**
+   * Grant a new entitlement — creates DB record and adds Discord roles.
+   */
+  async grant(opts: EntitlementGrantOptions): Promise<string | null> {
+    const guildId = this.guild.id;
+
+    // Create entitlement record
+    const { data: entitlement, error } = await this.supabase
+      .from('entitlements')
+      .insert({
+        customer_id: opts.customerId,
+        guild_id: guildId,
+        product_id: opts.productId,
+        plan_id: opts.planId ?? null,
+        license_key_id: opts.licenseKeyId ?? null,
+        order_id: opts.orderId,
+        type: opts.type,
+        status: 'active',
+        source: opts.source,
+        granted_role_ids: opts.grantedRoleIds,
+        granted_channel_ids: opts.grantedChannelIds,
+        starts_at: new Date().toISOString(),
+        expires_at: opts.expiresAt ?? null,
+      })
+      .select('id')
+      .single();
+
+    if (error || !entitlement) {
+      console.error('[Commerce] Failed to create entitlement:', error?.message);
+      return null;
+    }
+
+    // Grant Discord roles
+    await this.grantRoles(opts.discordId, opts.grantedRoleIds);
+
+    // Fire event
+    this.eventBus.emit('entitlement.granted', guildId, {
+      discordId: opts.discordId,
+      entitlementId: entitlement.id,
+      productId: opts.productId,
+      productName: opts.productName,
+      roleIds: opts.grantedRoleIds,
+    });
+
+    // Audit log
+    await this.supabase.from('audit_logs').insert({
+      guild_id: guildId,
+      actor_type: 'system',
+      actor_id: 'commerce',
+      action: 'entitlement.granted',
+      target_type: 'entitlement',
+      target_id: entitlement.id,
+      details: {
+        discordId: opts.discordId,
+        productId: opts.productId,
+        source: opts.source,
+        roleIds: opts.grantedRoleIds,
+      },
+    });
+
+    console.log(`[Commerce] Entitlement granted: ${entitlement.id} for ${opts.discordId}`);
+    return entitlement.id;
+  }
+
+  /**
+   * Revoke an entitlement — updates status and removes Discord roles.
+   */
+  async revoke(
+    entitlementId: string,
+    reason: 'expired' | 'cancelled' | 'suspended' | 'revoked' | 'refund',
+  ): Promise<boolean> {
+    const guildId = this.guild.id;
+
+    // Fetch entitlement
+    const { data: ent } = await this.supabase
+      .from('entitlements')
+      .select('*, products(name)')
+      .eq('id', entitlementId)
+      .single();
+
+    if (!ent) {
+      console.error('[Commerce] Entitlement not found:', entitlementId);
+      return false;
+    }
+
+    // Determine new status
+    const statusMap: Record<string, string> = {
+      expired: 'expired',
+      cancelled: 'cancelled',
+      suspended: 'suspended',
+      revoked: 'expired', // forced revoke → expired
+      refund: 'expired',
+    };
+    const newStatus = statusMap[reason] ?? 'expired';
+
+    // Update DB
+    const { error } = await this.supabase
+      .from('entitlements')
+      .update({
+        status: newStatus,
+        cancelled_at: reason === 'cancelled' ? new Date().toISOString() : undefined,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', entitlementId);
+
+    if (error) {
+      console.error('[Commerce] Failed to revoke entitlement:', error.message);
+      return false;
+    }
+
+    // Get customer discord_id
+    const { data: customer } = await this.supabase
+      .from('customers')
+      .select('discord_id')
+      .eq('id', ent.customer_id)
+      .single();
+
+    const discordId = customer?.discord_id;
+    if (discordId) {
+      // Revoke Discord roles
+      await this.revokeRoles(discordId, ent.granted_role_ids ?? []);
+
+      // Fire event
+      this.eventBus.emit('entitlement.revoked', guildId, {
+        discordId,
+        entitlementId,
+        productId: ent.product_id,
+        productName: ent.products?.name ?? 'Unknown',
+        reason,
+      });
+    }
+
+    // Also revoke associated license sessions
+    if (ent.license_key_id) {
+      await this.supabase
+        .from('license_sessions')
+        .update({
+          active: false,
+          deactivated_at: new Date().toISOString(),
+          deactivation_reason: 'entitlement_revoked',
+        })
+        .eq('license_key_id', ent.license_key_id)
+        .eq('active', true);
+    }
+
+    // Audit log
+    await this.supabase.from('audit_logs').insert({
+      guild_id: guildId,
+      actor_type: 'system',
+      actor_id: 'commerce',
+      action: 'entitlement.revoked',
+      target_type: 'entitlement',
+      target_id: entitlementId,
+      details: { discordId, reason, productId: ent.product_id },
+    });
+
+    console.log(`[Commerce] Entitlement revoked: ${entitlementId} (${reason})`);
+    return true;
+  }
+
+  /**
+   * Suspend an entitlement (payment failure → grace period).
+   */
+  async suspend(entitlementId: string, gracePeriodDays: number = 3): Promise<boolean> {
+    const gracePeriodEnds = new Date();
+    gracePeriodEnds.setDate(gracePeriodEnds.getDate() + gracePeriodDays);
+
+    const { error } = await this.supabase
+      .from('entitlements')
+      .update({
+        status: 'grace_period',
+        grace_period_ends_at: gracePeriodEnds.toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', entitlementId);
+
+    if (error) {
+      console.error('[Commerce] Failed to suspend entitlement:', error.message);
+      return false;
+    }
+
+    console.log(`[Commerce] Entitlement suspended (grace until ${gracePeriodEnds.toISOString()}): ${entitlementId}`);
+    return true;
+  }
+
+  /**
+   * Reactivate a suspended/grace entitlement.
+   */
+  async reactivate(entitlementId: string): Promise<boolean> {
+    const { data: ent } = await this.supabase
+      .from('entitlements')
+      .select('*')
+      .eq('id', entitlementId)
+      .single();
+
+    if (!ent) return false;
+
+    const { error } = await this.supabase
+      .from('entitlements')
+      .update({
+        status: 'active',
+        grace_period_ends_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', entitlementId);
+
+    if (error) {
+      console.error('[Commerce] Failed to reactivate entitlement:', error.message);
+      return false;
+    }
+
+    // Re-grant roles
+    const { data: customer } = await this.supabase
+      .from('customers')
+      .select('discord_id')
+      .eq('id', ent.customer_id)
+      .single();
+
+    if (customer?.discord_id) {
+      await this.grantRoles(customer.discord_id, ent.granted_role_ids ?? []);
+    }
+
+    console.log(`[Commerce] Entitlement reactivated: ${entitlementId}`);
+    return true;
+  }
+
+  // ── Role helpers ──────────────────────────────────
+
+  private async grantRoles(discordId: string, roleIds: string[]): Promise<void> {
+    if (!roleIds.length) return;
+    try {
+      const member = await this.guild.members.fetch(discordId);
+      for (const roleId of roleIds) {
+        if (!member.roles.cache.has(roleId)) {
+          await member.roles.add(roleId, 'Commerce: entitlement granted');
+        }
+      }
+    } catch (err) {
+      console.error(`[Commerce] Failed to grant roles to ${discordId}:`, err);
+    }
+  }
+
+  private async revokeRoles(discordId: string, roleIds: string[]): Promise<void> {
+    if (!roleIds.length) return;
+    try {
+      const member = await this.guild.members.fetch(discordId);
+      for (const roleId of roleIds) {
+        if (member.roles.cache.has(roleId)) {
+          await member.roles.remove(roleId, 'Commerce: entitlement revoked');
+        }
+      }
+    } catch (err) {
+      console.error(`[Commerce] Failed to revoke roles from ${discordId}:`, err);
+    }
+  }
+}

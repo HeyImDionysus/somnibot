@@ -33,6 +33,9 @@ import type { GiveawayManager } from '../features/giveaways/giveaway-manager.js'
 import { handleGiveawayCommand } from '../features/giveaways/commands.js';
 import type { MusicPlayerManager } from '../features/music/music-player.js';
 import { handleMusicCommand } from '../features/music/commands.js';
+import { handleStoreCommand } from '../features/commerce/store-command.js';
+import { handleLicenseCommand } from '../features/commerce/license-commands.js';
+import { handleBuyButton } from '../features/commerce/payment-handler.js';
 import type { EscalationStep } from '@somnibot/shared';
 
 /**
@@ -344,6 +347,26 @@ export function registerEvents(client: SomniClient): void {
           }
         }
 
+        // Phase 12: Commerce buy buttons
+        if (interaction.isButton() && interaction.customId.startsWith('store:buy:')) {
+          const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
+          const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
+          const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
+          const dashboardUrl = process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://dashboard.somnibot.com';
+          if (paypalClientId) {
+            await handleBuyButton(
+              interaction,
+              client.supabase,
+              client.guildId,
+              paypalApiBase,
+              paypalClientId,
+              paypalClientSecret,
+              dashboardUrl,
+            );
+            return;
+          }
+        }
+
         // Phase 11: Music button interactions
         if (interaction.isButton() && interaction.customId.startsWith('music:')) {
           const musicMgr = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
@@ -432,6 +455,26 @@ export function registerEvents(client: SomniClient): void {
           } else {
             await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true });
           }
+          return;
+        }
+
+        // Phase 12: Commerce commands
+        if (interaction.commandName === 'store') {
+          await handleStoreCommand(
+            interaction,
+            client.supabase,
+            client.guildId,
+            process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com',
+          );
+          return;
+        }
+
+        if (interaction.commandName === 'license') {
+          await handleLicenseCommand(
+            interaction,
+            client.supabase,
+            client.guildId,
+          );
           return;
         }
 
