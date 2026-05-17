@@ -473,7 +473,7 @@ async function createChannel(
     }
   }
 
-  const channelType = desired.type as ChannelType;
+  const channelType = desired.type as Exclude<ChannelType, ChannelType.DM | ChannelType.GroupDM | ChannelType.GuildDirectory | ChannelType.PublicThread | ChannelType.PrivateThread | ChannelType.AnnouncementThread>;
   const parentId = desired.categoryKey
     ? categoryKeyToDiscordId.get(desired.categoryKey) ?? undefined
     : undefined;
