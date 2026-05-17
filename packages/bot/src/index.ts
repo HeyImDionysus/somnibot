@@ -1,4 +1,5 @@
 import { loadConfig } from './config.js';
+import { loadConfigFromDatabase } from './services/config-loader.js';
 import { SomniClient } from './client.js';
 import { registerEvents } from './events/handler.js';
 import { connectValkey } from './services/valkey.js';
@@ -46,6 +47,13 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     console.warn('[Boot] Migration check failed (non-fatal):', err);
+  }
+
+  // 0.5. Load missing config from instance_settings DB table
+  try {
+    await loadConfigFromDatabase();
+  } catch (err) {
+    console.warn('[Boot] Config DB fallback failed (non-fatal):', err);
   }
 
   // 1. Validate environment
