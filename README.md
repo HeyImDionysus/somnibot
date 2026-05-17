@@ -6,74 +6,6 @@ A full-featured Discord bot with a web dashboard. Moderation, levels, music, tic
 
 ---
 
-## Quick Setup (4 steps)
-
-### 1. Create a Discord Bot
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application** → name it → **Create**
-3. **Bot** tab → **Reset Token** → copy the token
-4. Enable all three **Privileged Gateway Intents** (Presence, Server Members, Message Content)
-5. **OAuth2** tab → copy **Client ID** and **Client Secret**
-
-### 2. Create a Supabase Project
-1. Go to [supabase.com/dashboard](https://supabase.com/dashboard) and sign up (free)
-2. **New Project** → name it → set a password → **Create**
-3. Go to **Settings → API** → copy the **Project URL**
-4. Copy the **service_role** key (under "Project API keys")
-
-### 3. Deploy to Railway
-Click the **Deploy on Railway** button above. When prompted, enter:
-
-| Variable | Where to find it |
-|---|---|
-| `DISCORD_TOKEN` | Bot tab → Token |
-| `DISCORD_APPLICATION_ID` | OAuth2 tab → Client ID |
-| `DISCORD_CLIENT_SECRET` | OAuth2 tab → Client Secret |
-| `SUPABASE_URL` | Supabase → Settings → API → Project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → service_role key |
-
-Railway will deploy three services:
-- **Bot** — the Discord bot (Node.js)
-- **Lavalink** — music audio server
-- **Valkey** — Redis-compatible cache
-
-### 4. Deploy the Dashboard
-1. Fork this repo on GitHub
-2. Go to [vercel.com](https://vercel.com) → **New Project** → import the fork
-3. Set the root directory to `packages/dashboard`
-4. Add these environment variables:
-   - `NEXT_PUBLIC_SUPABASE_URL` — same Supabase URL
-   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — Supabase **anon** key
-   - `SUPABASE_SERVICE_ROLE_KEY` — same service role key
-   - `DISCORD_APPLICATION_ID` — same Client ID
-   - `DISCORD_CLIENT_SECRET` — same Client Secret
-5. Deploy → open the dashboard → go to `/setup` to finish configuration
-
-That's it. The bot auto-runs database migrations on first boot.
-
----
-
-## Architecture
-
-```
-packages/
-├── bot/           Discord.js bot (Shoukaku, Supabase, Valkey)
-├── dashboard/     Next.js App Router dashboard
-├── shared/        Shared types, constants, validators
-├── supabase/      Database migrations
-└── license-sdk/   @somnibot/license-sdk for third-party integrations
-```
-
-| Service | Platform | Purpose |
-|---|---|---|
-| Bot | Railway | Discord gateway, slash commands, all features |
-| Dashboard | Vercel | Web UI for configuration and management |
-| Lavalink | Railway | Audio streaming for music player |
-| Valkey | Railway | Caching, rate limiting, queue state |
-| Supabase | Supabase.com | PostgreSQL database, auth, storage |
-
----
-
 ## Features
 
 - **Moderation** — Auto-mod rules, infractions, escalation, mod log
@@ -94,40 +26,238 @@ packages/
 
 ---
 
-## Self-Hosting
+## Quick Start (Local)
 
-If you want to self-host everything (no Railway/Vercel):
+### What You Need
+
+Before starting, make sure you have these installed on your computer:
+
+| Tool | Why | How to get it |
+|---|---|---|
+| **Node.js 22+** | Runs the bot and dashboard | [nodejs.org](https://nodejs.org) — download the LTS version |
+| **pnpm** | Installs packages | After installing Node, open a terminal and run: `corepack enable && corepack prepare pnpm@9 --activate` |
+| **Docker Desktop** | Runs Lavalink (music) and Valkey (cache) | [docker.com/get-started](https://docker.com/get-started) — install and make sure the whale icon appears in your menu bar |
+| **Git** | Clones the code | [git-scm.com](https://git-scm.com) (you probably already have this) |
+
+### Step 1: Create a Discord Bot
+
+1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and log in.
+2. Click **New Application** → give it a name (e.g., "SomniBot") → **Create**.
+3. On the left sidebar, click **Bot**.
+4. Click **Reset Token** → copy the token and save it somewhere safe. You'll need this.
+5. Scroll down and enable **all three** Privileged Gateway Intents:
+   - ✅ Presence Intent
+   - ✅ Server Members Intent
+   - ✅ Message Content Intent
+6. Click **Save Changes**.
+7. On the left sidebar, click **OAuth2**.
+8. Copy the **Client ID** (also called Application ID) — save this.
+9. Click **Reset Secret** → copy the **Client Secret** — save this.
+
+### Step 2: Create a Supabase Project
+
+1. Go to [supabase.com/dashboard](https://supabase.com/dashboard) and sign up (free tier works fine).
+2. Click **New Project** → give it a name → set a password → pick a region → **Create new project**.
+3. Wait for the project to finish setting up (about 1 minute).
+4. Go to **Settings** (gear icon in the left sidebar) → **API**.
+5. Copy the **Project URL** — save this.
+6. Under "Project API keys," copy the **service_role** key (click the eye icon to reveal it) — save this.
+7. Also copy the **anon/public** key — save this too (needed for the dashboard).
+
+### Step 3: Clone and Set Up
+
+Open a terminal (Mac: Spotlight → "Terminal" / Windows: search "PowerShell") and run:
 
 ```bash
-# Clone and install
 git clone https://github.com/HeyImDionysus/somnibot.git
 cd somnibot
-pnpm install
-
-# Copy .env.example to .env and fill in values
-cp .env.example .env
-
-# Start infrastructure (Lavalink + Valkey)
-docker compose up -d
-
-# Build and run
-pnpm build
-node packages/bot/dist/index.js
 ```
 
-For the dashboard:
+Then run the setup script:
+
+**Mac / Linux:**
 ```bash
-cd packages/dashboard
-pnpm build
-pnpm start
+./scripts/setup.sh
 ```
 
-Or use Docker Compose for everything:
+**Windows:**
+```
+scripts\setup.bat
+```
+
+This will:
+- Check that Node.js, pnpm, and Docker are installed
+- Create a `.env` file from the template
+- Install all dependencies
+- Build all packages
+
+### Step 4: Fill In Your .env File
+
+Open the `.env` file in any text editor (it's in the `somnibot` folder). Fill in the values you saved:
+
+```env
+# These 5 are required — paste your values after the =
+DISCORD_TOKEN=paste-your-bot-token-here
+DISCORD_APPLICATION_ID=paste-your-client-id-here
+DISCORD_CLIENT_SECRET=paste-your-client-secret-here
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbG...your-service-role-key
+
+# Also fill these for the dashboard:
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=eyJhbG...your-anon-key
+```
+
+> **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **anon/public** key from Supabase (not the service role key).
+
+Save the file.
+
+### Step 5: Invite the Bot to Your Server
+
+1. Go back to [discord.com/developers/applications](https://discord.com/developers/applications) → your app → **OAuth2** → **URL Generator**.
+2. Under "Scopes," check: `bot` and `applications.commands`.
+3. Under "Bot Permissions," check: `Administrator` (or individually select the permissions you want).
+4. Copy the generated URL at the bottom and open it in your browser.
+5. Select your Discord server from the dropdown → **Authorize**.
+
+### Step 6: Start Everything
+
+**Mac / Linux:**
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+./scripts/start.sh
 ```
 
-> **Note:** If distributing this project to a new owner, they will need to create their own Supabase project and run the migrations in `packages/supabase/migrations/` against it. The bot auto-runs migrations on first boot if the `SUPABASE_ACCESS_TOKEN` or `SUPABASE_DB_URL` environment variable is set.
+**Windows:**
+```
+scripts\start.bat
+```
+
+This starts Docker (Lavalink + Valkey), the bot, and the dashboard — all in one command.
+
+You should see:
+```
+✅ Everything is running!
+
+🤖 Bot:        Running
+🌐 Dashboard:  http://localhost:3000
+🎵 Lavalink:   http://localhost:2333
+📦 Valkey:     redis://localhost:6379
+```
+
+**Open [http://localhost:3000](http://localhost:3000)** in your browser to see the dashboard.
+
+### Step 7: First-Time Dashboard Setup
+
+1. Go to [http://localhost:3000/setup](http://localhost:3000/setup).
+2. Follow the 4-step wizard — it verifies your Discord and Supabase connections and configures authentication.
+3. Once complete, go to [http://localhost:3000/login](http://localhost:3000/login) and click "Continue with Discord."
+4. You're in! Configure features from the sidebar.
+
+---
+
+## Scripts Reference
+
+All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., `./scripts/start.sh`). On Windows, use backslashes (e.g., `scripts\start.bat`).
+
+| Script | What it does |
+|---|---|
+| `setup.sh` / `setup.bat` | First-time setup — checks prerequisites, installs deps, builds |
+| `start.sh` / `start.bat` | Starts everything (Docker + bot + dashboard). Press Ctrl+C to stop |
+| `start-bot.sh` | Starts Docker + bot only (no dashboard) |
+| `start-dashboard.sh` | Starts the dashboard only (on port 3000) |
+| `stop.sh` / `stop.bat` | Stops all running services |
+| `rebuild.sh` | Pulls latest code, reinstalls deps, and rebuilds |
+
+### Common Workflows
+
+**Daily use:**
+```bash
+./scripts/start.sh        # Start everything
+# Ctrl+C to stop
+```
+
+**After pulling updates from GitHub:**
+```bash
+./scripts/rebuild.sh      # Pull, reinstall, rebuild
+./scripts/start.sh        # Start
+```
+
+**Running bot and dashboard in separate terminals** (useful for development — each gets its own log output):
+```bash
+# Terminal 1:
+./scripts/start-bot.sh
+
+# Terminal 2:
+./scripts/start-dashboard.sh
+```
+
+---
+
+## Deploy to the Cloud (Railway + Vercel)
+
+If you want to run SomniBot 24/7 without keeping your computer on:
+
+### Bot → Railway
+
+1. Click the **Deploy on Railway** button at the top of this README.
+2. When prompted, enter these 5 environment variables:
+
+| Variable | Where to find it |
+|---|---|
+| `DISCORD_TOKEN` | Discord Developer Portal → Bot → Token |
+| `DISCORD_APPLICATION_ID` | Discord Developer Portal → OAuth2 → Client ID |
+| `DISCORD_CLIENT_SECRET` | Discord Developer Portal → OAuth2 → Client Secret |
+| `SUPABASE_URL` | Supabase → Settings → API → Project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → service_role key |
+
+Railway will deploy three services:
+- **Bot** — the Discord bot
+- **Lavalink** — music audio server
+- **Valkey** — cache
+
+### Dashboard → Vercel
+
+1. Fork this repo on GitHub (click the "Fork" button on the repo page).
+2. Go to [vercel.com](https://vercel.com) → sign up (free) → **Add New Project** → import your fork.
+3. Set the **Root Directory** to `packages/dashboard`.
+4. Add these environment variables:
+
+| Variable | Value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Same Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon** key (Settings → API → anon/public) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Same service role key |
+| `DISCORD_APPLICATION_ID` | Same Client ID |
+| `DISCORD_CLIENT_SECRET` | Same Client Secret |
+
+5. Click **Deploy**. Once deployed, open your dashboard URL → go to `/setup` to finish configuration.
+
+---
+
+## Architecture
+
+```
+somnibot/
+├── packages/
+│   ├── bot/           Discord.js bot (Shoukaku, Supabase, Valkey)
+│   ├── dashboard/     Next.js App Router dashboard
+│   ├── shared/        Shared types, constants, validators
+│   ├── supabase/      Database migrations (auto-run on first boot)
+│   └── license-sdk/   @somnibot/license-sdk for third-party integrations
+├── services/
+│   └── lavalink/      Lavalink configuration
+├── scripts/           Startup and setup scripts
+├── docker-compose.yml Lavalink + Valkey for local dev
+└── .env.example       Environment variable template
+```
+
+| Service | Local | Cloud | Purpose |
+|---|---|---|---|
+| Bot | `node packages/bot/dist/index.js` | Railway | Discord gateway, slash commands, all features |
+| Dashboard | `next dev` on port 3000 | Vercel | Web UI for configuration and management |
+| Lavalink | Docker on port 2333 | Railway | Audio streaming for music player |
+| Valkey | Docker on port 6379 | Railway | Caching, rate limiting, queue state |
+| Supabase | supabase.com | supabase.com | PostgreSQL database, auth, storage |
 
 ---
 
@@ -142,7 +272,13 @@ docker compose -f docker-compose.prod.yml up -d
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key |
 
-### Auto-Configured
+### Dashboard (also required for the web UI)
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Same as `SUPABASE_URL` |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon/public** key |
+
+### Auto-Configured (defaults work with Docker Compose)
 | Variable | Default | Notes |
 |---|---|---|
 | `DISCORD_GUILD_ID` | Auto-detected | Detected on first bot login |
@@ -154,28 +290,42 @@ docker compose -f docker-compose.prod.yml up -d
 ### Optional
 | Variable | Description |
 |---|---|
-| `PAYPAL_CLIENT_ID` | PayPal app client ID (for commerce) |
+| `PAYPAL_CLIENT_ID` | PayPal app client ID (for commerce features) |
 | `PAYPAL_CLIENT_SECRET` | PayPal app secret |
-| `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music) |
+| `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music reliability) |
 | `SUPABASE_ACCESS_TOKEN` | Supabase Management API token (for auto-migration) |
-| `SUPABASE_DB_URL` | Direct database URL (for auto-migration) |
+
+---
+
+## Troubleshooting
+
+### "Docker is not running"
+Make sure Docker Desktop is open. On Mac, look for the whale icon in the menu bar. On Windows, look for it in the system tray. If you just installed it, restart your computer.
+
+### Bot starts but no slash commands appear
+Slash commands can take up to an hour to register with Discord the first time. If they don't appear after an hour, kick the bot from your server and re-invite it using the URL from Step 5.
+
+### "Lavalink node error" / Music doesn't work
+1. Make sure Docker is running: `docker ps` should show `somni-lavalink`.
+2. If Lavalink crashed, restart it: `docker compose restart lavalink`
+3. Check Lavalink logs: `docker compose logs lavalink`
+
+### Dashboard shows blank pages
+1. Make sure the `.env` file has `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` filled in.
+2. Restart the dashboard (Ctrl+C → `./scripts/start-dashboard.sh`).
+
+### "Login redirects back to login"
+The Supabase Discord auth provider needs to be configured. Run the setup wizard at `/setup` — step 2 handles this automatically.
+
+### PayPal checkout errors
+1. Make sure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are set in `.env`.
+2. For testing, use sandbox credentials from [developer.paypal.com](https://developer.paypal.com).
+3. The dashboard Settings page also shows PayPal connection status.
 
 ---
 
 <details>
-<summary><strong>Developer Setup</strong></summary>
-
-### Prerequisites
-- Node.js 22+
-- pnpm 9+
-- Docker (for Lavalink and Valkey)
-
-### Development
-```bash
-pnpm install
-docker compose up -d          # Start Lavalink + Valkey
-pnpm dev                      # Start bot + dashboard in dev mode
-```
+<summary><strong>Developer Notes</strong></summary>
 
 ### Type Checking
 ```bash
@@ -184,16 +334,14 @@ cd packages/bot && bun x tsc --noEmit
 cd packages/dashboard && bun x tsc --noEmit
 ```
 
-### Build
-```bash
-pnpm build                    # Build all packages via Turborepo
-```
-
-### Project Structure
+### Build Order
 - `packages/shared/` builds first (types + validators)
 - `packages/bot/` and `packages/dashboard/` depend on shared
 - Dashboard has zero runtime imports from `@somnibot/shared` (inlined for Vercel)
 - Turborepo handles build ordering via `^build` dependency
+
+### Database Migrations
+Migrations live in `packages/supabase/migrations/`. The bot auto-runs them on first boot if `SUPABASE_ACCESS_TOKEN` or `SUPABASE_DB_URL` is set. Otherwise, apply them manually via the Supabase SQL editor.
 
 </details>
 
