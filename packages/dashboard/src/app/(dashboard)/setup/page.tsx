@@ -54,12 +54,31 @@ interface DeployData {
 // Default Templates
 // ============================================================
 
+// Role permission bitfields computed from architecture doc §10.1.
+// Every single Discord permission is deliberately assigned to exactly one tier.
+// ADMINISTRATOR (1 << 3) is NEVER granted — it bypasses all overrides.
+const PERM = {
+  MEMBER:    '1764069874191937', // 22 perms: VIEW_CHANNEL, SEND_MESSAGES, SEND_MESSAGES_IN_THREADS, CREATE_PUBLIC_THREADS, EMBED_LINKS, ATTACH_FILES, ADD_REACTIONS, USE_EXTERNAL_EMOJIS, USE_EXTERNAL_STICKERS, READ_MESSAGE_HISTORY, USE_APPLICATION_COMMANDS, CONNECT, SPEAK, USE_VAD, STREAM, USE_SOUNDBOARD, SEND_VOICE_MESSAGES, SEND_POLLS, USE_EXTERNAL_APPS, CHANGE_NICKNAME, CREATE_INSTANT_INVITE, REQUEST_TO_SPEAK
+  MODERATOR: '1818040596955079', // 39 perms: Member + MANAGE_MESSAGES, MANAGE_THREADS, CREATE_PRIVATE_THREADS, MODERATE_MEMBERS, KICK, BAN, MUTE, DEAFEN, MOVE_MEMBERS, PRIORITY_SPEAKER, MANAGE_NICKNAMES, VIEW_AUDIT_LOG, MENTION_EVERYONE, MANAGE_EVENTS, CREATE_EVENTS, USE_EXTERNAL_SOUNDS, SEND_TTS_MESSAGES
+  ADMIN:     '1829037592805367', // 47 perms: Moderator + MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_GUILD, MANAGE_WEBHOOKS, MANAGE_GUILD_EXPRESSIONS, CREATE_GUILD_EXPRESSIONS, VIEW_GUILD_INSIGHTS, VIEW_CREATOR_MONETIZATION_ANALYTICS
+} as const;
+
 const DEFAULT_ROLES = [
+  {
+    key: 'owner',
+    name: 'Owner',
+    tier: 'admin',
+    permissions: PERM.ADMIN, // Same as Admin — NEVER ADMINISTRATOR. Server owner has implicit full access.
+    color: 0xFF1493, // SOMNI_PALETTE HOT_PINK
+    hoist: true,
+    mentionable: false,
+    position: 5,
+  },
   {
     key: 'admin',
     name: 'Admin',
     tier: 'admin',
-    permissions: '8', // ADMINISTRATOR
+    permissions: PERM.ADMIN,
     color: 0xED4245,
     hoist: true,
     mentionable: false,
@@ -69,66 +88,126 @@ const DEFAULT_ROLES = [
     key: 'moderator',
     name: 'Moderator',
     tier: 'moderator',
-    permissions: '1099780063318', // KICK+BAN+MANAGE_MESSAGES+MANAGE_CHANNELS+MUTE+DEAFEN+MOVE+VIEW_AUDIT_LOG+MANAGE_NICKNAMES+MANAGE_ROLES+MANAGE_THREADS+MODERATE_MEMBERS
+    permissions: PERM.MODERATOR,
     color: 0xFEE75C,
     hoist: true,
     mentionable: false,
     position: 3,
   },
   {
-    key: 'member',
-    name: 'Member',
-    tier: 'member',
-    permissions: '1024', // VIEW_CHANNEL only as base (channel overrides grant the rest)
-    color: 0x57F287,
+    key: 'dj',
+    name: 'DJ',
+    tier: 'moderator',
+    permissions: PERM.MEMBER, // Same as Member — DJ-specific perms are channel overrides on music channels
+    color: 0x00D4FF, // SOMNI_PALETTE CYAN
     hoist: false,
     mentionable: false,
     position: 2,
   },
   {
-    key: 'vip',
-    name: 'VIP',
-    tier: 'cosmetic',
-    permissions: '0',
-    color: 0xFF1493,
-    hoist: true,
+    key: 'member',
+    name: 'Member',
+    tier: 'member',
+    permissions: PERM.MEMBER,
+    color: 0x57F287,
+    hoist: false,
     mentionable: false,
     position: 1,
   },
-  {
-    key: 'subscriber',
-    name: 'Subscriber',
-    tier: 'cosmetic',
-    permissions: '0',
-    color: 0x00D4FF,
-    hoist: true,
-    mentionable: false,
-    position: 0,
-  },
 ];
 
+// Channel override bitfields from architecture doc §11.1.
+// These match the per-channel permission templates exactly.
+const CH = {
+  // View Only: can see & react, cannot send messages or use commands
+  VIEW_ONLY_ALLOW: '66624',       // VIEW_CHANNEL + READ_MESSAGE_HISTORY + ADD_REACTIONS
+  VIEW_ONLY_DENY:  '380104607744', // SEND_MESSAGES + SEND_MESSAGES_IN_THREADS + CREATE_PUBLIC_THREADS + CREATE_PRIVATE_THREADS + USE_APPLICATION_COMMANDS
+
+  // View & Use: full Member-level text access
+  VIEW_USE_ALLOW: '1759667428904000', // VIEW_CHANNEL + READ_MESSAGE_HISTORY + SEND_MESSAGES + SEND_MESSAGES_IN_THREADS + CREATE_PUBLIC_THREADS + ADD_REACTIONS + EMBED_LINKS + ATTACH_FILES + USE_APPLICATION_COMMANDS + SEND_VOICE_MESSAGES + SEND_POLLS + USE_EXTERNAL_EMOJIS + USE_EXTERNAL_STICKERS + USE_EXTERNAL_APPS
+
+  // Staff Only: @everyone denied, mod+ allowed
+  STAFF_DENY: '1024',              // VIEW_CHANNEL
+  STAFF_ALLOW: '19327478848',      // VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY + MANAGE_MESSAGES + MANAGE_THREADS + EMBED_LINKS + ATTACH_FILES + ADD_REACTIONS + USE_APPLICATION_COMMANDS
+
+  // Voice: standard voice access
+  VOICE_ALLOW: '4398083212800',    // VIEW_CHANNEL + CONNECT + SPEAK + USE_VAD + STREAM + USE_SOUNDBOARD
+} as const;
+
+// Helper: build Staff Only overrides (hidden from @everyone, visible to mod+)
+const staffOverrides = () => [
+  { roleKey: 'everyone', allow: '0', deny: CH.STAFF_DENY },
+  { roleKey: 'moderator', allow: CH.STAFF_ALLOW, deny: '0' },
+  { roleKey: 'admin', allow: CH.STAFF_ALLOW, deny: '0' },
+  { roleKey: 'owner', allow: CH.STAFF_ALLOW, deny: '0' },
+];
+
+// Helper: build View Only overrides (Member can see + react, cannot send)
+const viewOnlyOverrides = () => [
+  { roleKey: 'member', allow: CH.VIEW_ONLY_ALLOW, deny: CH.VIEW_ONLY_DENY },
+];
+
+// Helper: build View & Use overrides (Member has full text access)
+const viewUseOverrides = () => [
+  { roleKey: 'member', allow: CH.VIEW_USE_ALLOW, deny: '0' },
+];
+
+// Helper: build voice overrides
+const voiceOverrides = () => [
+  { roleKey: 'member', allow: CH.VOICE_ALLOW, deny: '0' },
+];
+
+// Helper: build staff-only voice overrides
+const staffVoiceOverrides = () => [
+  { roleKey: 'everyone', allow: '0', deny: CH.STAFF_DENY },
+  { roleKey: 'moderator', allow: CH.VOICE_ALLOW, deny: '0' },
+  { roleKey: 'admin', allow: CH.VOICE_ALLOW, deny: '0' },
+  { roleKey: 'owner', allow: CH.VOICE_ALLOW, deny: '0' },
+];
+
+// Optimal default server structure — based on web research + architecture doc §11.4.
+// Follows Discord best practices:
+//   - "Rule of Seven": new servers start lean, add channels as features activate
+//   - 4-5 channels per category (Discord's recommendation)
+//   - Important channels at top, main chat middle, less important at bottom
+//   - Only includes channels for features that exist or are imminent
+//   - Staff/logging channels ready from day one
+// Total: ~20 channels in 7 categories = clean, functional, not overwhelming.
 const DEFAULT_CHANNELS = [
-  // INFORMATION
-  { key: 'rules', name: 'rules', type: 0, categoryKey: 'cat-information', position: 0, topic: 'Server rules and guidelines', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
-  { key: 'announcements', name: 'announcements', type: 5, categoryKey: 'cat-information', position: 1, topic: 'Important server announcements', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
-  { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'cat-information', position: 2, topic: 'Welcome new members!', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
-  // GENERAL
-  { key: 'general', name: 'general', type: 0, categoryKey: 'cat-general', position: 0, topic: 'General discussion', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
-  { key: 'media', name: 'media', type: 0, categoryKey: 'cat-general', position: 1, topic: 'Share images, videos, and links', slowmode: 5, nsfw: false, templateId: 'open', overrides: [] },
-  { key: 'bot-commands', name: 'bot-commands', type: 0, categoryKey: 'cat-general', position: 2, topic: 'Bot commands go here', slowmode: 3, nsfw: false, templateId: 'open', overrides: [] },
-  // COMMUNITY
-  { key: 'lounge', name: 'lounge', type: 0, categoryKey: 'cat-community', position: 0, topic: 'Relax and chat', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
-  // MUSIC
-  { key: 'music-chat', name: 'music-chat', type: 0, categoryKey: 'cat-music', position: 0, topic: 'Discuss music and request songs', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
-  { key: 'now-playing', name: 'now-playing', type: 0, categoryKey: 'cat-music', position: 1, topic: 'Currently playing track info', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
-  { key: 'listening-room', name: 'Listening Room', type: 2, categoryKey: 'cat-music', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
-  // VOICE
-  { key: 'vc-general', name: 'General', type: 2, categoryKey: 'cat-voice', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
-  { key: 'vc-gaming', name: 'Gaming', type: 2, categoryKey: 'cat-voice', position: 1, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
-  // STAFF
-  { key: 'staff-chat', name: 'staff-chat', type: 0, categoryKey: 'cat-staff', position: 0, topic: 'Staff-only discussion', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
-  { key: 'mod-log', name: 'mod-log', type: 0, categoryKey: 'cat-staff', position: 1, topic: 'Moderation action log', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
-  { key: 'bot-log', name: 'bot-log', type: 0, categoryKey: 'cat-staff', position: 2, topic: 'Bot system log', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
+  // ── INFORMATION (3 channels) ──────────────────────────────
+  // Top of server. View-only. Rules, announcements, welcome info.
+  { key: 'rules', name: 'rules', type: 0, categoryKey: 'cat-information', position: 0, topic: 'Server rules and guidelines', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+  { key: 'announcements', name: 'announcements', type: 5, categoryKey: 'cat-information', position: 1, topic: 'Important server announcements', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+  { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'cat-information', position: 2, topic: 'Welcome new members! Introduce yourself here.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+
+  // ── GENERAL (3 channels) ──────────────────────────────────
+  // Main community chat. Open to all Members.
+  { key: 'general', name: 'general', type: 0, categoryKey: 'cat-general', position: 0, topic: 'General discussion', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+  { key: 'off-topic', name: 'off-topic', type: 0, categoryKey: 'cat-general', position: 1, topic: 'Anything goes', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+  { key: 'media', name: 'media', type: 0, categoryKey: 'cat-general', position: 2, topic: 'Share images, videos, and links', slowmode: 5, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+
+  // ── SUPPORT (1 channel) ───────────────────────────────────
+  // Ticket panel lives here. View-only so members can't clutter it.
+  // Ticket channels are created dynamically by the bot (not a template).
+  { key: 'support', name: 'support', type: 0, categoryKey: 'cat-support', position: 0, topic: 'Need help? Open a ticket below.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+
+  // ── MUSIC (3 channels) ────────────────────────────────────
+  // Music system channels. Lavalink-powered.
+  { key: 'music-chat', name: 'music-chat', type: 0, categoryKey: 'cat-music', position: 0, topic: 'Discuss music and request songs', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+  { key: 'now-playing', name: 'now-playing', type: 0, categoryKey: 'cat-music', position: 1, topic: 'Currently playing — updated by SomniBot', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+  { key: 'listening-room', name: 'Listening Room', type: 2, categoryKey: 'cat-music', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+
+  // ── VOICE (3 channels) ────────────────────────────────────
+  // Standard voice channels + staff voice.
+  { key: 'vc-general', name: 'General', type: 2, categoryKey: 'cat-voice', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+  { key: 'vc-gaming', name: 'Gaming', type: 2, categoryKey: 'cat-voice', position: 1, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+  { key: 'vc-staff', name: 'Staff Voice', type: 2, categoryKey: 'cat-voice', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'staff-voice', overrides: staffVoiceOverrides() },
+
+  // ── STAFF (3 channels) ────────────────────────────────────
+  // Hidden from members. Mod+ only.
+  { key: 'staff-chat', name: 'staff-chat', type: 0, categoryKey: 'cat-staff', position: 0, topic: 'Staff-only discussion', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
+  { key: 'mod-log', name: 'mod-log', type: 0, categoryKey: 'cat-staff', position: 1, topic: 'Moderation action log — automated by SomniBot', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
+  { key: 'bot-log', name: 'bot-log', type: 0, categoryKey: 'cat-staff', position: 2, topic: 'Bot system events & deploy logs', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
 ];
 
 // ============================================================
@@ -464,7 +543,7 @@ function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isC
   const categories = [
     { cat: 'INFORMATION', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-information') },
     { cat: 'GENERAL', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-general') },
-    { cat: 'COMMUNITY', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-community') },
+    { cat: 'SUPPORT', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-support') },
     { cat: 'MUSIC', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-music') },
     { cat: 'VOICE', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-voice') },
     { cat: 'STAFF', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-staff') },
@@ -555,7 +634,7 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
           <li>3. Delete existing non-managed roles</li>
           <li>4. Create {DEFAULT_ROLES.length} roles ({DEFAULT_ROLES.map(r => r.name).join(', ')})</li>
           <li>5. Set role hierarchy positions</li>
-          <li>6. Create 6 categories</li>
+          <li>6. Create 7 categories</li>
           <li>7. Create {DEFAULT_CHANNELS.length} channels with permission overrides</li>
           <li>8. Store ID mappings for drift detection</li>
         </ul>
