@@ -98,10 +98,13 @@ export async function POST(req: NextRequest) {
   const rawBody = await req.text();
   const supabase = createAdminSupabase();
 
-  // Verify signature
-  const valid = await verifyWebhookSignature(req, rawBody);
-  if (!valid) {
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+  // Skip signature verification on replays
+  const isReplay = req.headers.get('X-Replay') === 'true';
+  if (!isReplay) {
+    const valid = await verifyWebhookSignature(req, rawBody);
+    if (!valid) {
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+    }
   }
 
   let event: { event_type: string; resource: Record<string, unknown>; id?: string };
