@@ -124,6 +124,19 @@ export interface SyncCompletedData {
   duration: number;
 }
 
+export interface DeployRequestedData {
+  roleCount: number;
+  channelCount: number;
+  categoryCount: number;
+  cleanExisting: boolean;
+}
+
+export interface DeployFailedData {
+  deployId: string;
+  error: string;
+  duration: number;
+}
+
 // ============================================================
 // Event Type Map
 // ============================================================
@@ -143,7 +156,9 @@ export interface PlatformEventMap {
   'giveaway.ended': GiveawayEndedData;
   'config.changed': ConfigChangedData;
   'server.deployed': ServerDeployedData;
+  'deploy.requested': DeployRequestedData;
   'deploy.action': DeployActionData;
+  'deploy.failed': DeployFailedData;
   'drift.detected': DriftDetectedData;
   'sync.completed': SyncCompletedData;
 }
