@@ -17,8 +17,10 @@ import {
   buildPlaylistAddedEmbed,
   buildMusicErrorEmbed,
   buildMusicInfoEmbed,
+  buildFilterEmbed,
   formatDuration,
 } from './music-embeds.js';
+import type { FilterPreset } from './music-filters.js';
 
 // ── Command Builders ──────────────────────────────────────
 
@@ -112,7 +114,49 @@ export function buildMusicCommands(): SlashCommandBuilder[] {
     .setName('pause')
     .setDescription('Pause or resume playback');
 
-  return [play, skip, stop, queue, np, volume, loop, shuffle, seek, remove, pause];
+  const filter = new SlashCommandBuilder()
+    .setName('filter')
+    .setDescription('Apply audio filters (DJ only)')
+    .addStringOption((opt) =>
+      opt
+        .setName('preset')
+        .setDescription('Filter preset to apply')
+        .setRequired(false)
+        .addChoices(
+          { name: '🔊 Bass Boost', value: 'bassboost' },
+          { name: '🔔 Treble Boost', value: 'treble' },
+          { name: '🌙 Nightcore', value: 'nightcore' },
+          { name: '🌊 Vaporwave', value: 'vaporwave' },
+          { name: '🎧 8D Audio', value: '8d' },
+          { name: '🔄 Reset (clear all)', value: 'reset' },
+        ),
+    )
+    .addNumberOption((opt) =>
+      opt
+        .setName('speed')
+        .setDescription('Playback speed (0.1–3.0, default 1.0)')
+        .setMinValue(0.1)
+        .setMaxValue(3.0)
+        .setRequired(false),
+    )
+    .addNumberOption((opt) =>
+      opt
+        .setName('pitch')
+        .setDescription('Pitch multiplier (0.1–3.0, default 1.0)')
+        .setMinValue(0.1)
+        .setMaxValue(3.0)
+        .setRequired(false),
+    )
+    .addNumberOption((opt) =>
+      opt
+        .setName('rate')
+        .setDescription('Audio rate (0.1–3.0, default 1.0)')
+        .setMinValue(0.1)
+        .setMaxValue(3.0)
+        .setRequired(false),
+    ) as SlashCommandBuilder;
+
+  return [play, skip, stop, queue, np, volume, loop, shuffle, seek, remove, pause, filter];
 }
 
 // ── Command Handlers ──────────────────────────────────────
@@ -157,6 +201,9 @@ export async function handleMusicCommand(
       break;
     case 'pause':
       await handlePause(interaction, musicPlayer, guildId);
+      break;
+    case 'filter':
+      await handleFilter(interaction, musicPlayer, guildId);
       break;
     default:
       await interaction.reply({ content: '❌ Unknown music command', ephemeral: true });
@@ -304,7 +351,8 @@ async function handleNowPlaying(
   }
 
   const position = musicPlayer.getPlayerPosition(guildId);
-  const { embeds, components } = buildNowPlayingEmbed(current, position, queue);
+  const activeFilters = musicPlayer.getActiveFilters(guildId);
+  const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
   await interaction.reply({ embeds, components: components as never[] });
 }
 
@@ -450,6 +498,79 @@ async function handlePause(
       ? buildMusicInfoEmbed(result.message)
       : buildMusicErrorEmbed(result.message)],
   });
+}
+
+async function handleFilter(
+  interaction: ChatInputCommandInteraction,
+  musicPlayer: MusicPlayerManager,
+  guildId: string,
+): Promise<void> {
+  const isDj = await musicPlayer.isDJ(interaction.user.id);
+  if (!isDj) {
+    await interaction.reply({
+      embeds: [buildMusicErrorEmbed('You need the DJ role to change filters')],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const preset = interaction.options.getString('preset') as FilterPreset | null;
+  const speed = interaction.options.getNumber('speed');
+  const pitch = interaction.options.getNumber('pitch');
+  const rate = interaction.options.getNumber('rate');
+
+  // If neither preset nor custom values provided, show current filters
+  if (!preset && speed === null && pitch === null && rate === null) {
+    const active = musicPlayer.getActiveFilters(guildId);
+    await interaction.reply({
+      embeds: [buildFilterEmbed('🎛️ Current audio filters', active)],
+    });
+    return;
+  }
+
+  // Apply preset first (if given)
+  if (preset) {
+    const result = await musicPlayer.applyFilter(guildId, preset);
+    if (!result.success) {
+      await interaction.reply({
+        embeds: [buildMusicErrorEmbed(result.message)],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // If only preset, respond with it
+    if (speed === null && pitch === null && rate === null) {
+      const active = musicPlayer.getActiveFilters(guildId);
+      await interaction.reply({
+        embeds: [buildFilterEmbed(result.message, active)],
+      });
+      return;
+    }
+  }
+
+  // Apply custom timescale (speed/pitch/rate)
+  if (speed !== null || pitch !== null || rate !== null) {
+    const result = await musicPlayer.applyCustomSpeed(
+      guildId,
+      speed ?? undefined,
+      pitch ?? undefined,
+      rate ?? undefined,
+    );
+    if (!result.success) {
+      await interaction.reply({
+        embeds: [buildMusicErrorEmbed(result.message)],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const active = musicPlayer.getActiveFilters(guildId);
+    await interaction.reply({
+      embeds: [buildFilterEmbed(result.message, active)],
+    });
+    return;
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────

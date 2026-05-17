@@ -25,6 +25,8 @@ import {
   buildMusicInfoEmbed,
 } from './music-embeds.js';
 import { MusicSelfHealer, type SearchProvider } from './music-self-healer.js';
+import { applyFilterPreset, applyCustomTimescale, describeActiveFilters, type FilterPreset } from './music-filters.js';
+import type { Band, TimescaleSettings } from 'shoukaku';
 
 // ── Config ────────────────────────────────────────────────
 
@@ -363,6 +365,10 @@ export class MusicPlayerManager {
     const current = await this.queueManager.getCurrentTrack(guildId);
     if (!current) return { success: false, message: 'No track is playing' };
 
+    if (current.isStream) {
+      return { success: false, message: 'Cannot seek in a live stream' };
+    }
+
     if (positionMs < 0 || positionMs > current.duration) {
       return { success: false, message: 'Invalid seek position' };
     }
@@ -442,6 +448,51 @@ export class MusicPlayerManager {
     return player?.position ?? 0;
   }
 
+  // ── Filters ─────────────────────────────────────────────
+
+  /** Apply a filter preset. */
+  async applyFilter(guildId: string, preset: FilterPreset): Promise<{ success: boolean; message: string }> {
+    const player = this.shoukaku.players.get(guildId);
+    if (!player) return { success: false, message: 'Nothing is playing' };
+
+    await applyFilterPreset(player, preset);
+
+    if (preset === 'reset') {
+      return { success: true, message: '🔄 All filters cleared' };
+    }
+
+    const { FILTER_PRESETS } = await import('./music-filters.js');
+    const info = FILTER_PRESETS[preset];
+    return { success: true, message: `${info.emoji} Applied **${info.name}** filter` };
+  }
+
+  /** Apply custom speed/pitch/rate. */
+  async applyCustomSpeed(guildId: string, speed?: number, pitch?: number, rate?: number): Promise<{ success: boolean; message: string }> {
+    const player = this.shoukaku.players.get(guildId);
+    if (!player) return { success: false, message: 'Nothing is playing' };
+
+    const settings: TimescaleSettings = {};
+    if (speed !== undefined) settings.speed = Math.max(0.1, Math.min(3.0, speed));
+    if (pitch !== undefined) settings.pitch = Math.max(0.1, Math.min(3.0, pitch));
+    if (rate !== undefined) settings.rate = Math.max(0.1, Math.min(3.0, rate));
+
+    await applyCustomTimescale(player, settings);
+
+    const parts: string[] = [];
+    if (settings.speed !== undefined) parts.push(`speed: ${settings.speed}x`);
+    if (settings.pitch !== undefined) parts.push(`pitch: ${settings.pitch}x`);
+    if (settings.rate !== undefined) parts.push(`rate: ${settings.rate}x`);
+
+    return { success: true, message: `⏱️ Applied timescale — ${parts.join(', ')}` };
+  }
+
+  /** Get a description of the active filters. */
+  getActiveFilters(guildId: string): string {
+    const player = this.shoukaku.players.get(guildId);
+    if (!player) return 'None';
+    return describeActiveFilters(player);
+  }
+
   // ── Now Playing Updates ─────────────────────────────────
 
   /** Send or update the now-playing embed. */
@@ -456,7 +507,8 @@ export class MusicPlayerManager {
     if (!textChannel || textChannel.type !== ChannelType.GuildText) return;
 
     const position = this.getPlayerPosition(guildId);
-    const { embeds, components } = buildNowPlayingEmbed(current, position, queue);
+    const activeFilters = this.getActiveFilters(guildId);
+    const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
 
     // Try to edit existing now-playing message
     const existingMsgId = await this.queueManager.getNowPlayingMessage(guildId);
@@ -570,11 +622,12 @@ export class MusicPlayerManager {
       track: track.encoded,
       title: track.info.title || 'Unknown',
       author: track.info.author || 'Unknown',
-      duration: track.info.length || 0,
+      duration: track.info.isStream ? 0 : (track.info.length || 0),
       uri: track.info.uri || '',
       artworkUrl: track.info.artworkUrl ?? null,
       requestedBy,
       addedAt: Date.now(),
+      isStream: track.info.isStream || false,
     };
   }
 

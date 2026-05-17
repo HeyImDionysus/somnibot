@@ -282,7 +282,7 @@ async function main(): Promise<void> {
               { body: cmd.toJSON() },
             );
           }
-          console.log('[Boot] ✅ Music system started + commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause)');
+          console.log('[Boot] ✅ Music system started + commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter)');
         } else {
           console.log('[Boot] ⏸️  Music system disabled in config');
         }
