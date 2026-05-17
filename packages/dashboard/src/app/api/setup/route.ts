@@ -1,153 +1,166 @@
 /**
- * Setup API — Manages the setup wizard state.
+ * First-Run Setup API — Manages the initial deployment wizard.
  *
- * GET  /api/setup — Returns setup status (completed, confirmed, guild info)
- * POST /api/setup — Confirm setup completion (Step 7: owner clicks "Confirm")
+ * GET  /api/setup         — Returns first-run status (is DB initialized? is bot online? guild detected?)
+ * POST /api/setup         — Verify credentials, run migrations, detect guild
+ *
+ * This endpoint does NOT require authentication — it's used before Discord OAuth is configured.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createServerSupabase } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
 
-async function getGuildId(): Promise<string | null> {
-  const supabase = await createServerSupabase();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
+/**
+ * Create a Supabase client from provided credentials (not from env vars).
+ * Used during setup when env vars may not be fully configured yet.
+ */
+function createSetupSupabase(url?: string, key?: string) {
+  const supabaseUrl = url || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const serviceKey = key || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
 
-  const admin = createAdminSupabase();
-  const { data: dbUser } = await admin
-    .from('users')
-    .select('discord_id')
-    .eq('id', user.id)
-    .single();
-  if (!dbUser) return null;
-
-  const { data: guild } = await admin
-    .from('guild')
-    .select('id')
-    .eq('owner_discord_id', dbUser.discord_id)
-    .single();
-
-  return guild?.id ?? null;
+  if (!supabaseUrl || !serviceKey) return null;
+  return createClient(supabaseUrl, serviceKey);
 }
 
 export async function GET() {
-  const guildId = await getGuildId();
-  if (!guildId)
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const supabase = createSetupSupabase();
+  const status = {
+    supabaseConnected: false,
+    databaseInitialized: false,
+    botOnline: false,
+    guildDetected: false,
+    guildId: null as string | null,
+    guildName: null as string | null,
+    dashboardUrl: process.env.NEXT_PUBLIC_APP_URL || null,
+    discordClientId: process.env.DISCORD_APPLICATION_ID || null,
+  };
 
-  const admin = createAdminSupabase();
+  if (!supabase) {
+    return NextResponse.json(status);
+  }
 
-  // Get guild info
-  const { data: guild } = await admin
-    .from('guild')
-    .select('*')
-    .eq('id', guildId)
-    .single();
+  // Check Supabase connection
+  try {
+    const { error } = await supabase.from('guild').select('id').limit(0);
+    if (!error) {
+      status.supabaseConnected = true;
+      status.databaseInitialized = true;
+    } else if (error.code === '42P01') {
+      // Table doesn't exist — connected but not initialized
+      status.supabaseConnected = true;
+      status.databaseInitialized = false;
+    }
+  } catch {
+    status.supabaseConnected = false;
+  }
 
-  // Get desired state
-  const { data: desiredState } = await admin
-    .from('guild_desired_state')
-    .select('applied_at, roles, channels, updated_at')
-    .eq('guild_id', guildId)
-    .single();
+  // Check if bot is online and guild is detected
+  if (status.databaseInitialized) {
+    const { data: guild } = await supabase
+      .from('guild')
+      .select('id, name')
+      .limit(1)
+      .maybeSingle();
 
-  // Get discord ID mappings (populated after deploy)
-  const { data: idMappings } = await admin
-    .from('discord_id_map')
-    .select('entity_type, template_key, discord_id')
-    .eq('guild_id', guildId);
+    if (guild) {
+      status.guildDetected = true;
+      status.guildId = guild.id;
+      status.guildName = guild.name;
+    }
 
-  // Get role templates
-  const { data: roleTemplates } = await admin
-    .from('role_templates')
-    .select('*')
-    .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
+    // Check if bot has written a recent diagnostics snapshot (indicates it's online)
+    const { data: diag } = await supabase
+      .from('diagnostics_snapshots')
+      .select('created_at')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-  // Get channel templates
-  const { data: channelTemplates } = await admin
-    .from('channel_templates')
-    .select('*')
-    .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
+    if (diag) {
+      const lastSnapshot = new Date(diag.created_at).getTime();
+      const now = Date.now();
+      // Bot is considered online if last snapshot was within 5 minutes
+      status.botOnline = now - lastSnapshot < 5 * 60 * 1000;
+    }
 
-  const isDeployed = desiredState?.applied_at !== null && desiredState?.applied_at !== undefined;
-  const hasDesiredState = desiredState?.roles && desiredState.roles.length > 0;
+    // Fallback: check if guild record exists and was recently updated
+    if (!status.botOnline && guild) {
+      status.botOnline = true; // Guild record exists = bot connected at least once
+    }
+  }
 
-  return NextResponse.json({
-    guild: guild
-      ? {
-          id: guild.id,
-          name: guild.name,
-          setupCompleted: guild.setup_completed,
-          setupConfirmedAt: guild.setup_confirmed_at,
-          botRolePosition: guild.bot_role_position,
-        }
-      : null,
-    isDeployed,
-    hasDesiredState,
-    desiredState: desiredState ?? null,
-    idMappings: idMappings ?? [],
-    roleTemplates: roleTemplates ?? [],
-    channelTemplates: channelTemplates ?? [],
-  });
+  return NextResponse.json(status);
 }
 
 export async function POST(request: NextRequest) {
-  const guildId = await getGuildId();
-  if (!guildId)
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const body = await request.json();
-  const admin = createAdminSupabase();
 
-  // Step 7: Confirm setup complete
-  if (body.action === 'confirm') {
-    // Check that deployment actually happened
-    const { data: desiredState } = await admin
-      .from('guild_desired_state')
-      .select('applied_at')
-      .eq('guild_id', guildId)
-      .single();
-
-    if (!desiredState?.applied_at) {
-      return NextResponse.json(
-        { error: 'Cannot confirm — deployment not completed yet' },
-        { status: 400 },
-      );
+  // Step 1: Verify Discord credentials
+  if (body.action === 'verify-discord') {
+    const { token, clientId } = body;
+    if (!token || !clientId) {
+      return NextResponse.json({ error: 'Missing token or clientId' }, { status: 400 });
     }
 
-    // Mark setup as completed
-    const { error } = await admin
-      .from('guild')
-      .update({
-        setup_completed: true,
-        setup_confirmed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', guildId);
+    try {
+      const res = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${token}` },
+      });
 
-    if (error)
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      if (!res.ok) {
+        return NextResponse.json({ valid: false, error: 'Invalid bot token' });
+      }
 
-    // Audit log
-    await admin.from('audit_logs').insert({
-      guild_id: guildId,
-      actor_type: 'dashboard',
-      actor_id: 'setup-wizard',
-      action: 'setup.confirmed',
-      target_type: 'guild',
-      target_id: guildId,
-      details: { confirmedAt: new Date().toISOString() },
-      success: true,
-    });
+      const botUser = await res.json();
+      return NextResponse.json({
+        valid: true,
+        botUsername: botUser.username,
+        botId: botUser.id,
+        botAvatar: botUser.avatar
+          ? `https://cdn.discordapp.com/avatars/${botUser.id}/${botUser.avatar}.png`
+          : null,
+      });
+    } catch (err) {
+      return NextResponse.json({ valid: false, error: String(err) });
+    }
+  }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Setup confirmed — all features are now unlocked',
-    });
+  // Step 2: Verify Supabase credentials
+  if (body.action === 'verify-supabase') {
+    const { url, serviceRoleKey } = body;
+    if (!url || !serviceRoleKey) {
+      return NextResponse.json({ error: 'Missing url or serviceRoleKey' }, { status: 400 });
+    }
+
+    try {
+      const supabase = createClient(url, serviceRoleKey);
+      // Try a simple query — if table doesn't exist yet, that's OK (connection works)
+      const { error } = await supabase.from('guild').select('id').limit(0);
+
+      if (!error || error.code === '42P01') {
+        return NextResponse.json({
+          valid: true,
+          initialized: !error, // true if tables exist
+        });
+      }
+
+      return NextResponse.json({ valid: false, error: error.message });
+    } catch (err) {
+      return NextResponse.json({ valid: false, error: String(err) });
+    }
+  }
+
+  // Step 3: Generate bot invite URL
+  if (body.action === 'generate-invite') {
+    const clientId = body.clientId || process.env.DISCORD_APPLICATION_ID;
+    if (!clientId) {
+      return NextResponse.json({ error: 'No client ID available' }, { status: 400 });
+    }
+
+    const permissions = '8'; // Administrator
+    const scopes = 'bot%20applications.commands';
+    const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=${permissions}&scope=${scopes}`;
+
+    return NextResponse.json({ inviteUrl });
   }
 
   return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

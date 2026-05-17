@@ -18,28 +18,40 @@ import { GiveawayManager, buildGiveawayCommands } from './features/giveaways/ind
 import { MusicPlayerManager, buildMusicCommands } from './features/music/index.js';
 import { EntitlementService, buildStoreCommand, buildLicenseCommand } from './features/commerce/index.js';
 import { AuditService, DiagnosticsService } from './features/audit/index.js';
+import { runMigrations } from './services/migration-runner.js';
 import { REST, Routes } from 'discord.js';
 
 /**
  * SomniBot entry point.
  *
  * Boot sequence:
+ * 0. Run database migrations (first boot only)
  * 1. Validate environment
  * 2. Connect Valkey
  * 3. Create SomniClient (Supabase + Shoukaku initialized)
  * 4. Register event handlers
  * 5. Login to Discord gateway
- * 6. Post-ready: bot role guard + deploy listener
+ * 6. Post-ready: auto-detect guild ID + initialize all systems
  */
 async function main(): Promise<void> {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  SomniBot v0.4.0 — Starting...');
+  console.log('  SomniBot v0.5.0 — Starting...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+  // 0. Auto-migrate database on first boot
+  try {
+    const migrationResult = await runMigrations();
+    if (migrationResult.ran && migrationResult.errors.length > 0) {
+      console.error('[Boot] ⚠️  Migration errors — some features may not work');
+    }
+  } catch (err) {
+    console.warn('[Boot] Migration check failed (non-fatal):', err);
+  }
 
   // 1. Validate environment
   const config = loadConfig();
   console.log(`[Boot] Environment: ${config.NODE_ENV}`);
-  console.log(`[Boot] Guild: ${config.DISCORD_GUILD_ID}`);
+  console.log(`[Boot] Guild: ${config.DISCORD_GUILD_ID || '(auto-detect on ready)'}`);
 
   // 2. Connect Valkey
   try {
@@ -60,7 +72,22 @@ async function main(): Promise<void> {
 
   // 6. Post-ready initialization (wait for ready event)
   client.once('ready', async () => {
-    console.log('[Boot] Discord ready — initializing Phase 3 systems...');
+    console.log('[Boot] Discord ready — initializing systems...');
+
+    // Auto-detect guild ID if not set
+    if (!client.guildId) {
+      const guilds = client.guilds.cache;
+      if (guilds.size === 0) {
+        console.error('[Boot] ❌ Bot is not in any guild. Invite the bot first, then restart.');
+        console.log('[Boot] Waiting for guild... (bot will remain online for setup wizard)');
+        return;
+      }
+      const detectedGuild = guilds.first()!;
+      (client as unknown as Record<string, string>)._guildId = detectedGuild.id;
+      // Override the guildId property
+      Object.defineProperty(client, 'guildId', { value: detectedGuild.id, writable: false });
+      console.log(`[Boot] 🔍 Auto-detected guild: ${detectedGuild.name} (${detectedGuild.id})`);
+    }
 
     // Check bot role position
     const guild = client.guilds.cache.get(client.guildId);
