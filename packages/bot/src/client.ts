@@ -99,9 +99,8 @@ export class SomniClient extends Client {
       console.warn(`[Shoukaku] Node "${name}" closed: ${code} — ${reason}`);
     });
 
-    this.shoukaku.on('disconnect', (name, players, moved) => {
-      if (moved) return;
-      console.warn(`[Shoukaku] Node "${name}" disconnected, ${players.size} players affected`);
+    this.shoukaku.on('disconnect', (name, count) => {
+      console.warn(`[Shoukaku] Node "${name}" disconnected, ${count} player(s) affected`);
     });
   }
 }

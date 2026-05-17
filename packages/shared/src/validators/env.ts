@@ -7,7 +7,7 @@ export const BotEnvSchema = z.object({
   // Discord
   DISCORD_TOKEN: z.string().min(1, 'DISCORD_TOKEN is required'),
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
-  DISCORD_CLIENT_SECRET: z.string().min(1, 'DISCORD_CLIENT_SECRET is required'),
+  DISCORD_CLIENT_SECRET: z.string().optional().default(''),
   DISCORD_GUILD_ID: z.string().min(1, 'DISCORD_GUILD_ID is required'),
   DISCORD_PERMISSIONS: z.coerce.number().default(8),
 
