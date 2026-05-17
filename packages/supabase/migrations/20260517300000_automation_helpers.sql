@@ -1,6 +1,10 @@
 -- Phase 8: Automation Engine helpers
 -- ============================================================
 
+-- Add rate limit columns if missing
+ALTER TABLE automations ADD COLUMN IF NOT EXISTS rate_limit_per_user INTEGER;
+ALTER TABLE automations ADD COLUMN IF NOT EXISTS rate_limit_window_seconds INTEGER;
+
 -- RPC to atomically increment automation execution count
 CREATE OR REPLACE FUNCTION increment_automation_count(automation_uuid UUID)
 RETURNS void AS $$
