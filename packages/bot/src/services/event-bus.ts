@@ -70,5 +70,7 @@ class PlatformEventBus {
   }
 }
 
+export type { PlatformEventBus };
+
 /** Singleton event bus instance */
 export const eventBus = new PlatformEventBus();
