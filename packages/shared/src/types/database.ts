@@ -26,7 +26,7 @@ export interface DbGuild {
   bot_role_id: string | null;
   bot_role_position: number | null;
   setup_completed: boolean;
-  setup_step: number;
+  setup_confirmed_at: string | null;
   created_at: string;
   updated_at: string;
 }
