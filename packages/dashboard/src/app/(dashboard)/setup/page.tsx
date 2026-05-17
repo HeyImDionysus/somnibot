@@ -1,16 +1,16 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { Button } from '@/components/shared/button';
 import { Badge } from '@/components/shared/badge';
-import { Toggle } from '@/components/shared/input';
 import { cn } from '@/lib/utils/cn';
 import {
   CheckCircle2, Circle, ChevronRight, Shield, Hash,
-  Rocket, Eye, Settings, Users, Zap, AlertTriangle,
-  ExternalLink, Copy, Loader2,
+  Rocket, Eye, Settings, Zap, AlertTriangle,
+  Copy, Loader2, RefreshCw,
 } from 'lucide-react';
+import { deployApi } from '@/lib/api/client';
 
 // ============================================================
 // Types
@@ -24,6 +24,112 @@ interface StepConfig {
   description: string;
   icon: React.ElementType;
 }
+
+interface GuildInfo {
+  id: string;
+  name: string;
+  setupCompleted: boolean;
+  setupConfirmedAt: string | null;
+  botRolePosition: number | null;
+}
+
+interface SetupData {
+  guild: GuildInfo | null;
+  isDeployed: boolean;
+  hasDesiredState: boolean;
+  desiredState: Record<string, unknown> | null;
+  idMappings: Array<{ entity_type: string; template_key: string; discord_id: string }>;
+  roleTemplates: unknown[];
+  channelTemplates: unknown[];
+}
+
+interface DeployData {
+  desiredState: Record<string, unknown> | null;
+  setupCompleted: boolean;
+  isDeploying: boolean;
+  recentActions: Array<Record<string, unknown>>;
+}
+
+// ============================================================
+// Default Templates
+// ============================================================
+
+const DEFAULT_ROLES = [
+  {
+    key: 'admin',
+    name: 'Admin',
+    tier: 'admin',
+    permissions: '8', // ADMINISTRATOR
+    color: 0xED4245,
+    hoist: true,
+    mentionable: false,
+    position: 4,
+  },
+  {
+    key: 'moderator',
+    name: 'Moderator',
+    tier: 'moderator',
+    permissions: '1099780063318', // KICK+BAN+MANAGE_MESSAGES+MANAGE_CHANNELS+MUTE+DEAFEN+MOVE+VIEW_AUDIT_LOG+MANAGE_NICKNAMES+MANAGE_ROLES+MANAGE_THREADS+MODERATE_MEMBERS
+    color: 0xFEE75C,
+    hoist: true,
+    mentionable: false,
+    position: 3,
+  },
+  {
+    key: 'member',
+    name: 'Member',
+    tier: 'member',
+    permissions: '1024', // VIEW_CHANNEL only as base (channel overrides grant the rest)
+    color: 0x57F287,
+    hoist: false,
+    mentionable: false,
+    position: 2,
+  },
+  {
+    key: 'vip',
+    name: 'VIP',
+    tier: 'cosmetic',
+    permissions: '0',
+    color: 0xFF1493,
+    hoist: true,
+    mentionable: false,
+    position: 1,
+  },
+  {
+    key: 'subscriber',
+    name: 'Subscriber',
+    tier: 'cosmetic',
+    permissions: '0',
+    color: 0x00D4FF,
+    hoist: true,
+    mentionable: false,
+    position: 0,
+  },
+];
+
+const DEFAULT_CHANNELS = [
+  // INFORMATION
+  { key: 'rules', name: 'rules', type: 0, categoryKey: 'cat-information', position: 0, topic: 'Server rules and guidelines', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
+  { key: 'announcements', name: 'announcements', type: 5, categoryKey: 'cat-information', position: 1, topic: 'Important server announcements', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
+  { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'cat-information', position: 2, topic: 'Welcome new members!', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
+  // GENERAL
+  { key: 'general', name: 'general', type: 0, categoryKey: 'cat-general', position: 0, topic: 'General discussion', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
+  { key: 'media', name: 'media', type: 0, categoryKey: 'cat-general', position: 1, topic: 'Share images, videos, and links', slowmode: 5, nsfw: false, templateId: 'open', overrides: [] },
+  { key: 'bot-commands', name: 'bot-commands', type: 0, categoryKey: 'cat-general', position: 2, topic: 'Bot commands go here', slowmode: 3, nsfw: false, templateId: 'open', overrides: [] },
+  // COMMUNITY
+  { key: 'lounge', name: 'lounge', type: 0, categoryKey: 'cat-community', position: 0, topic: 'Relax and chat', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
+  // MUSIC
+  { key: 'music-chat', name: 'music-chat', type: 0, categoryKey: 'cat-music', position: 0, topic: 'Discuss music and request songs', slowmode: 0, nsfw: false, templateId: 'open', overrides: [] },
+  { key: 'now-playing', name: 'now-playing', type: 0, categoryKey: 'cat-music', position: 1, topic: 'Currently playing track info', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: [] },
+  { key: 'listening-room', name: 'Listening Room', type: 2, categoryKey: 'cat-music', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
+  // VOICE
+  { key: 'vc-general', name: 'General', type: 2, categoryKey: 'cat-voice', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
+  { key: 'vc-gaming', name: 'Gaming', type: 2, categoryKey: 'cat-voice', position: 1, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: [] },
+  // STAFF
+  { key: 'staff-chat', name: 'staff-chat', type: 0, categoryKey: 'cat-staff', position: 0, topic: 'Staff-only discussion', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
+  { key: 'mod-log', name: 'mod-log', type: 0, categoryKey: 'cat-staff', position: 1, topic: 'Moderation action log', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
+  { key: 'bot-log', name: 'bot-log', type: 0, categoryKey: 'cat-staff', position: 2, topic: 'Bot system log', slowmode: 0, nsfw: false, templateId: 'staff', overrides: [{ roleKey: 'everyone', allow: '0', deny: '1024' }, { roleKey: 'moderator', allow: '1024', deny: '0' }, { roleKey: 'admin', allow: '1024', deny: '0' }] },
+];
 
 // ============================================================
 // Constants
@@ -47,12 +153,49 @@ export default function SetupPage() {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
   const [deploying, setDeploying] = useState(false);
+  const [setupData, setSetupData] = useState<SetupData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch setup status on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/setup');
+        if (res.ok) {
+          const data: SetupData = await res.json();
+          setSetupData(data);
+
+          // If setup is already completed, mark all steps done
+          if (data.guild?.setupCompleted) {
+            setCompletedSteps(new Set([1, 2, 3, 4, 5, 6, 7] as WizardStep[]));
+            setCurrentStep(7);
+          } else if (data.isDeployed) {
+            // Deployed but not confirmed
+            setCompletedSteps(new Set([1, 2, 3, 4, 5] as WizardStep[]));
+            setCurrentStep(6);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load setup status:', e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   const markComplete = (step: WizardStep) => {
     setCompletedSteps((prev) => new Set([...prev, step]));
   };
 
   const canAdvance = completedSteps.has(currentStep);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="h-8 w-8 animate-spin text-discord-accent" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -116,28 +259,16 @@ export default function SetupPage() {
         {/* Right: Step content */}
         <Card>
           {currentStep === 1 && (
-            <Step1BotStatus
-              onComplete={() => markComplete(1)}
-              isComplete={completedSteps.has(1)}
-            />
+            <Step1BotStatus onComplete={() => markComplete(1)} isComplete={completedSteps.has(1)} />
           )}
           {currentStep === 2 && (
-            <Step2Roles
-              onComplete={() => markComplete(2)}
-              isComplete={completedSteps.has(2)}
-            />
+            <Step2Roles onComplete={() => markComplete(2)} isComplete={completedSteps.has(2)} />
           )}
           {currentStep === 3 && (
-            <Step3Channels
-              onComplete={() => markComplete(3)}
-              isComplete={completedSteps.has(3)}
-            />
+            <Step3Channels onComplete={() => markComplete(3)} isComplete={completedSteps.has(3)} />
           )}
           {currentStep === 4 && (
-            <Step4Review
-              onComplete={() => markComplete(4)}
-              isComplete={completedSteps.has(4)}
-            />
+            <Step4Review onComplete={() => markComplete(4)} isComplete={completedSteps.has(4)} />
           )}
           {currentStep === 5 && (
             <Step5Deploy
@@ -148,15 +279,13 @@ export default function SetupPage() {
             />
           )}
           {currentStep === 6 && (
-            <Step6Verification
-              onComplete={() => markComplete(6)}
-              isComplete={completedSteps.has(6)}
-            />
+            <Step6Verification onComplete={() => markComplete(6)} isComplete={completedSteps.has(6)} />
           )}
           {currentStep === 7 && (
             <Step7GoLive
               onComplete={() => markComplete(7)}
               isComplete={completedSteps.has(7)}
+              setupData={setupData}
             />
           )}
 
@@ -186,7 +315,7 @@ export default function SetupPage() {
 }
 
 // ============================================================
-// Step Components
+// Step 1: Bot Status — calls /api/guild for real bot info
 // ============================================================
 
 function Step1BotStatus({
@@ -199,23 +328,33 @@ function Step1BotStatus({
   const [checking, setChecking] = useState(false);
   const [status, setStatus] = useState<{
     connected: boolean;
-    rolePosition: string;
-    permissions: string[];
+    rolePosition: number;
     guildName: string;
+    memberCount: number;
+    error?: string;
   } | null>(null);
 
   const runCheck = async () => {
     setChecking(true);
-    // Simulated — in production this calls the API
-    await new Promise((r) => setTimeout(r, 1500));
-    setStatus({
-      connected: true,
-      rolePosition: '#1 (highest)',
-      permissions: ['Administrator'],
-      guildName: 'Test Server',
-    });
-    setChecking(false);
-    onComplete();
+    try {
+      const res = await fetch('/api/guild');
+      if (res.ok) {
+        const data = await res.json();
+        setStatus({
+          connected: true,
+          rolePosition: data.botRolePosition ?? -1,
+          guildName: data.name ?? 'Unknown',
+          memberCount: data.memberCount ?? 0,
+        });
+        onComplete();
+      } else {
+        setStatus({ connected: false, rolePosition: -1, guildName: '', memberCount: 0, error: 'Failed to verify bot connection' });
+      }
+    } catch (err) {
+      setStatus({ connected: false, rolePosition: -1, guildName: '', memberCount: 0, error: 'Network error' });
+    } finally {
+      setChecking(false);
+    }
   };
 
   return (
@@ -236,24 +375,28 @@ function Step1BotStatus({
 
       {status ? (
         <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-discord-success" />
-            <span className="text-sm text-discord-text-primary">
-              Connected to <strong>{status.guildName}</strong>
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-discord-success" />
-            <span className="text-sm text-discord-text-primary">
-              Bot role at position: <strong>{status.rolePosition}</strong>
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={14} className="text-discord-success" />
-            <span className="text-sm text-discord-text-primary">
-              Permissions: {status.permissions.join(', ')}
-            </span>
-          </div>
+          {status.connected ? (
+            <>
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={14} className="text-discord-success" />
+                <span className="text-sm text-discord-text-primary">
+                  Connected to <strong>{status.guildName}</strong> ({status.memberCount} members)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <CheckCircle2 size={14} className="text-discord-success" />
+                <span className="text-sm text-discord-text-primary">
+                  Bot role position: <strong>#{status.rolePosition}</strong>
+                  {status.rolePosition >= 1 && ' (top — ready to manage roles)'}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 text-discord-danger">
+              <AlertTriangle size={14} />
+              <span className="text-sm">{status.error}</span>
+            </div>
+          )}
         </div>
       ) : (
         <Button onClick={runCheck} disabled={checking}>
@@ -264,6 +407,10 @@ function Step1BotStatus({
     </div>
   );
 }
+
+// ============================================================
+// Step 2: Role Templates — uses default templates
+// ============================================================
 
 function Step2Roles({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
   return (
@@ -285,17 +432,11 @@ function Step2Roles({ onComplete, isComplete }: { onComplete: () => void; isComp
 
       <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3">
         <p className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
-          Default Roles (pre-configured)
+          Default Roles (will be created)
         </p>
-        {[
-          { name: 'Admin', tier: 'admin', color: '#ED4245' },
-          { name: 'Moderator', tier: 'moderator', color: '#FEE75C' },
-          { name: 'Member', tier: 'member', color: '#57F287' },
-          { name: 'VIP', tier: 'cosmetic', color: '#FF1493' },
-          { name: 'Subscriber', tier: 'cosmetic', color: '#00D4FF' },
-        ].map((role) => (
-          <div key={role.name} className="flex items-center gap-2">
-            <div className="h-3 w-3 rounded-full" style={{ backgroundColor: role.color }} />
+        {DEFAULT_ROLES.map((role) => (
+          <div key={role.key} className="flex items-center gap-2">
+            <div className="h-3 w-3 rounded-full" style={{ backgroundColor: `#${role.color.toString(16).padStart(6, '0')}` }} />
             <span className="text-sm text-discord-text-primary">{role.name}</span>
             <Badge variant={role.tier === 'admin' ? 'danger' : role.tier === 'moderator' ? 'warning' : role.tier === 'member' ? 'success' : 'pink'}>
               {role.tier}
@@ -305,23 +446,30 @@ function Step2Roles({ onComplete, isComplete }: { onComplete: () => void; isComp
       </div>
 
       <p className="text-xs text-discord-text-muted">
-        You can customize these on the <strong>Roles</strong> page, or accept the defaults for now.
+        You can customize these on the <strong>Roles</strong> page after setup, or accept the defaults.
       </p>
 
-      <div className="flex gap-2">
-        <Button size="sm" onClick={onComplete}>
-          Accept Defaults
-        </Button>
-        <Button size="sm" variant="secondary">
-          <ExternalLink size={12} />
-          Customize Roles
-        </Button>
-      </div>
+      <Button size="sm" onClick={onComplete}>
+        Accept Defaults
+      </Button>
     </div>
   );
 }
 
+// ============================================================
+// Step 3: Channel Structure — uses default templates
+// ============================================================
+
 function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
+  const categories = [
+    { cat: 'INFORMATION', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-information') },
+    { cat: 'GENERAL', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-general') },
+    { cat: 'COMMUNITY', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-community') },
+    { cat: 'MUSIC', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-music') },
+    { cat: 'VOICE', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-voice') },
+    { cat: 'STAFF', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-staff') },
+  ];
+
   return (
     <div className="space-y-4">
       <CardHeader>
@@ -335,39 +483,37 @@ function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isC
       </CardHeader>
 
       <CardDescription>
-        Define the channels and categories for your server. Default structure includes 6 categories and 15 channels.
+        Your server will be set up with {DEFAULT_CHANNELS.length} channels in {categories.length} categories.
       </CardDescription>
 
-      <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
-        {[
-          { cat: 'INFORMATION', channels: ['rules', 'announcements', 'welcome'] },
-          { cat: 'GENERAL', channels: ['general', 'media', 'bot-commands'] },
-          { cat: 'COMMUNITY', channels: ['lounge'] },
-          { cat: 'MUSIC', channels: ['music-chat', 'now-playing', '🔊 Listening Room'] },
-          { cat: 'VOICE', channels: ['🔊 General', '🔊 Gaming'] },
-          { cat: 'STAFF', channels: ['staff-chat', 'mod-log', 'bot-log'] },
-        ].map((g) => (
+      <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
+        {categories.map((g) => (
           <div key={g.cat}>
             <p className="text-[10px] font-bold uppercase tracking-wider text-discord-text-muted">
               {g.cat}
             </p>
-            <p className="text-discord-text-secondary">
-              {g.channels.map((c) => (c.startsWith('🔊') ? c : `#${c}`)).join(', ')}
-            </p>
+            <div className="ml-2 space-y-0.5">
+              {g.channels.map((ch) => (
+                <p key={ch.key} className="text-discord-text-secondary">
+                  {ch.type === 2 ? '🔊' : '#'} {ch.name}
+                  {ch.topic && <span className="ml-1 text-discord-text-muted">— {ch.topic}</span>}
+                </p>
+              ))}
+            </div>
           </div>
         ))}
       </div>
 
-      <div className="flex gap-2">
-        <Button size="sm" onClick={onComplete}>Accept Defaults</Button>
-        <Button size="sm" variant="secondary">
-          <ExternalLink size={12} />
-          Customize Channels
-        </Button>
-      </div>
+      <Button size="sm" onClick={onComplete}>
+        Accept Defaults
+      </Button>
     </div>
   );
 }
+
+// ============================================================
+// Step 4: Review — shows what will happen
+// ============================================================
 
 function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
   return (
@@ -395,7 +541,7 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
             </p>
             <p className="text-xs text-discord-text-muted">
               The bot will <strong>delete all existing channels and non-managed roles</strong> in your Discord server,
-              then recreate everything from the templates defined above. This cannot be undone.
+              then recreate everything from the templates. This cannot be undone.
             </p>
           </div>
         </div>
@@ -404,13 +550,14 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
       <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Deploy plan:</p>
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>1. Set @everyone permissions to zero</li>
-          <li>2. Delete existing channels and roles</li>
-          <li>3. Create 5 roles (Admin → Member tier hierarchy)</li>
-          <li>4. Set role hierarchy positions</li>
-          <li>5. Create 6 categories</li>
-          <li>6. Create 15 channels with permission overrides</li>
-          <li>7. Store ID mappings for drift detection</li>
+          <li>1. Set @everyone permissions to zero (lockout model)</li>
+          <li>2. Delete {DEFAULT_CHANNELS.length} existing channels</li>
+          <li>3. Delete existing non-managed roles</li>
+          <li>4. Create {DEFAULT_ROLES.length} roles ({DEFAULT_ROLES.map(r => r.name).join(', ')})</li>
+          <li>5. Set role hierarchy positions</li>
+          <li>6. Create 6 categories</li>
+          <li>7. Create {DEFAULT_CHANNELS.length} channels with permission overrides</li>
+          <li>8. Store ID mappings for drift detection</li>
         </ul>
       </div>
 
@@ -420,6 +567,10 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
     </div>
   );
 }
+
+// ============================================================
+// Step 5: Deploy — calls /api/deploy POST
+// ============================================================
 
 function Step5Deploy({
   onComplete,
@@ -434,33 +585,97 @@ function Step5Deploy({
 }) {
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   const handleDeploy = async () => {
     onDeploy();
+    setError(null);
+    setStatusText('Sending deploy request to bot...');
+    setProgress(5);
 
-    // Simulated progress — in production this reads Realtime updates
-    const steps = [
-      'Setting @everyone to zero...',
-      'Deleting existing channels...',
-      'Deleting existing roles...',
-      'Creating Admin role...',
-      'Creating Moderator role...',
-      'Creating Member role...',
-      'Setting role positions...',
-      'Creating INFORMATION category...',
-      'Creating channels...',
-      'Applying permission overrides...',
-      'Storing ID mappings...',
-      'Complete!',
-    ];
+    try {
+      // POST the desired state to trigger the bot
+      const res = await fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roles: DEFAULT_ROLES,
+          channels: DEFAULT_CHANNELS,
+          categories: [
+            { key: 'cat-information', name: 'Information', position: 0 },
+            { key: 'cat-general', name: 'General', position: 1 },
+            { key: 'cat-community', name: 'Community', position: 2 },
+            { key: 'cat-music', name: 'Music', position: 3 },
+            { key: 'cat-voice', name: 'Voice', position: 4 },
+            { key: 'cat-staff', name: 'Staff', position: 5 },
+          ],
+          cleanExisting: true,
+        }),
+      });
 
-    for (let i = 0; i < steps.length; i++) {
-      setStatusText(steps[i]);
-      setProgress(((i + 1) / steps.length) * 100);
-      await new Promise((r) => setTimeout(r, 800));
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error ?? 'Deploy request failed');
+      }
+
+      setStatusText('Deploy request sent! Bot is now executing...');
+      setProgress(20);
+
+      // Poll for deploy completion
+      let attempts = 0;
+      const maxAttempts = 60; // 2 minutes
+      while (attempts < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 2000));
+        attempts++;
+
+        try {
+          const statusRes = await fetch('/api/deploy');
+          if (statusRes.ok) {
+            const statusData: DeployData = await statusRes.json();
+
+            if (!statusData.isDeploying && statusData.desiredState) {
+              // Check if deployment completed (applied_at is set)
+              const appliedAt = (statusData.desiredState as Record<string, unknown>).applied_at;
+              if (appliedAt) {
+                setProgress(100);
+                setStatusText('Deployment complete!');
+                onComplete();
+                return;
+              }
+            }
+
+            // Check recent actions for progress
+            if (statusData.recentActions?.length > 0) {
+              const latest = statusData.recentActions[0];
+              if (latest.action === 'deploy.completed') {
+                setProgress(100);
+                setStatusText('Deployment complete!');
+                onComplete();
+                return;
+              } else if (latest.action === 'deploy.failed') {
+                throw new Error('Deployment failed — check the audit log');
+              }
+            }
+          }
+        } catch (pollErr) {
+          // Polling errors are non-fatal, keep trying
+        }
+
+        // Simulate visual progress
+        setProgress(Math.min(90, 20 + (attempts / maxAttempts) * 70));
+        setStatusText(`Bot is deploying... (${attempts * 2}s elapsed)`);
+      }
+
+      // Timeout — bot might still be working
+      setStatusText('Deploy request sent. The bot may still be processing — check Discord to verify.');
+      setProgress(100);
+      onComplete();
+
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      setError(msg);
+      setStatusText(`Error: ${msg}`);
     }
-
-    onComplete();
   };
 
   return (
@@ -493,14 +708,24 @@ function Step5Deploy({
           <div className="h-3 overflow-hidden rounded-full bg-discord-bg-tertiary">
             <div
               className={cn(
-                'h-full rounded-full transition-all duration-300',
-                progress >= 100 ? 'bg-discord-success' : 'bg-discord-accent',
+                'h-full rounded-full transition-all duration-500',
+                error ? 'bg-discord-danger' : progress >= 100 ? 'bg-discord-success' : 'bg-discord-accent',
               )}
               style={{ width: `${progress}%` }}
             />
           </div>
           <p className="text-sm text-discord-text-secondary">{statusText}</p>
-          {isComplete && (
+
+          {error && (
+            <Card variant="danger">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={16} className="text-discord-danger" />
+                <p className="text-sm text-discord-text-primary">{error}</p>
+              </div>
+            </Card>
+          )}
+
+          {isComplete && !error && (
             <Card variant="success">
               <div className="flex items-center gap-2">
                 <CheckCircle2 size={16} className="text-discord-success" />
@@ -515,6 +740,10 @@ function Step5Deploy({
     </div>
   );
 }
+
+// ============================================================
+// Step 6: Verification — user checks Discord manually
+// ============================================================
 
 function Step6Verification({
   onComplete,
@@ -542,10 +771,10 @@ function Step6Verification({
       <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Check these items:</p>
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>✅ All categories and channels are visible</li>
-          <li>✅ Roles appear in the correct hierarchy order</li>
+          <li>✅ All 6 categories and 15 channels are visible</li>
+          <li>✅ Roles appear in the correct hierarchy order (Admin → Moderator → Member → VIP → Subscriber)</li>
           <li>✅ @everyone has zero permissions (can&apos;t see channels without a role)</li>
-          <li>✅ Staff channels are hidden from regular members</li>
+          <li>✅ Staff channels are hidden from non-staff members</li>
           <li>✅ Bot is at the top of the role hierarchy</li>
         </ul>
       </div>
@@ -557,14 +786,46 @@ function Step6Verification({
   );
 }
 
+// ============================================================
+// Step 7: Go Live — confirms setup, unlocks features
+// ============================================================
+
 function Step7GoLive({
   onComplete,
   isComplete,
+  setupData,
 }: {
   onComplete: () => void;
   isComplete: boolean;
+  setupData: SetupData | null;
 }) {
-  const [inviteLink, setInviteLink] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [confirmed, setConfirmed] = useState(setupData?.guild?.setupCompleted ?? false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConfirm = async () => {
+    setConfirming(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'confirm' }),
+      });
+
+      if (res.ok) {
+        setConfirmed(true);
+        onComplete();
+      } else {
+        const data = await res.json();
+        setError(data.error ?? 'Confirmation failed');
+      }
+    } catch (err) {
+      setError('Network error — try again');
+    } finally {
+      setConfirming(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -575,47 +836,49 @@ function Step7GoLive({
             Step 7: Go Live
           </div>
         </CardTitle>
-        {isComplete && <Badge variant="success">Complete</Badge>}
+        {(isComplete || confirmed) && <Badge variant="success">Complete</Badge>}
       </CardHeader>
 
       <CardDescription>
-        Your server is configured! Here&apos;s what&apos;s next:
+        {confirmed
+          ? 'Your server is fully configured! All features are now unlocked.'
+          : 'Click Confirm to finalize setup and unlock all dashboard features.'
+        }
       </CardDescription>
 
-      <div className="space-y-3">
-        <Card>
-          <h4 className="text-sm font-medium text-discord-text-primary">Admin Invite Link</h4>
-          <p className="text-xs text-discord-text-muted">
-            Share this link with your admins. They&apos;ll join with Administrator permission.
-          </p>
-          <div className="mt-2 flex items-center gap-2">
-            <code className="flex-1 rounded-input bg-discord-bg-tertiary px-3 py-1.5 text-xs text-somni-cyan">
-              https://discord.gg/your-invite
-            </code>
-            <Button variant="ghost" size="sm">
-              <Copy size={12} />
-            </Button>
+      {confirmed ? (
+        <Card variant="success">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 size={16} className="text-discord-success" />
+            <p className="text-sm font-medium text-discord-text-primary">
+              Setup complete! All features are now unlocked. Explore the sidebar to configure each module.
+            </p>
           </div>
         </Card>
+      ) : (
+        <>
+          {error && (
+            <Card variant="danger">
+              <p className="text-sm text-discord-danger">{error}</p>
+            </Card>
+          )}
+          <Button onClick={handleConfirm} disabled={confirming}>
+            {confirming ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+            {confirming ? 'Confirming...' : 'Confirm Setup Complete'}
+          </Button>
+        </>
+      )}
 
-        <Card>
-          <h4 className="text-sm font-medium text-discord-text-primary">Next Phases</h4>
-          <p className="text-xs text-discord-text-muted">
-            Phase 2 setup is complete. The following features will be available in future phases:
-          </p>
-          <div className="mt-2 space-y-1 text-xs text-discord-text-secondary">
-            <p>• <strong>Phase 3:</strong> Server Setup &amp; Deployment automation</p>
-            <p>• <strong>Phase 4:</strong> Member Onboarding &amp; Role Assignment</p>
-            <p>• <strong>Phase 5:</strong> Sync Engine &amp; Drift Detection (live)</p>
-            <p>• <strong>Phase 6:</strong> Music System</p>
-          </div>
-        </Card>
-      </div>
-
-      <Button onClick={onComplete}>
-        <Zap size={14} />
-        Complete Setup
-      </Button>
+      <Card>
+        <h4 className="text-sm font-medium text-discord-text-primary">What&apos;s Next</h4>
+        <div className="mt-2 space-y-1 text-xs text-discord-text-secondary">
+          <p>• <strong>Onboarding:</strong> Configure Discord native onboarding &amp; welcome messages</p>
+          <p>• <strong>Moderation:</strong> Set up auto-mod rules &amp; escalation chains</p>
+          <p>• <strong>Music:</strong> Configure DJ roles &amp; the music player</p>
+          <p>• <strong>Store:</strong> Set up products, plans, and the commerce system</p>
+          <p>• <strong>Automations:</strong> Build custom automation workflows</p>
+        </div>
+      </Card>
     </div>
   );
 }
