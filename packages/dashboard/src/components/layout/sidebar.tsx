@@ -60,8 +60,8 @@ const navigation: NavGroup[] = [
   {
     title: 'Moderation',
     items: [
-      { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield, locked: true, phase: 4 },
-      { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2, locked: true, phase: 4 },
+      { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield },
+      { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2 },
       { label: 'Ticket Panels', href: '/tickets', icon: Ticket, locked: true, phase: 4 },
     ],
   },

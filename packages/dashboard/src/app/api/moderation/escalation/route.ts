@@ -1,0 +1,99 @@
+/**
+ * /api/moderation/escalation — GET/PUT escalation chain + moderation settings.
+ *
+ * GET: Returns escalation chain, mod_log_channel_id, infraction_expiry_days
+ * PUT: Updates escalation chain, mod_log_channel_id, infraction_expiry_days
+ */
+import { NextRequest, NextResponse } from 'next/server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+
+const GUILD_ID = process.env.DISCORD_GUILD_ID!;
+
+export async function GET() {
+  const supabase = createAdminSupabase();
+
+  const { data, error } = await supabase
+    .from('guild_config')
+    .select('escalation_chain, mod_log_channel_id, infraction_expiry_days')
+    .eq('guild_id', GUILD_ID)
+    .maybeSingle();
+
+  if (error) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({
+    success: true,
+    data: {
+      escalation_chain: data?.escalation_chain ?? [],
+      mod_log_channel_id: data?.mod_log_channel_id ?? null,
+      infraction_expiry_days: data?.infraction_expiry_days ?? 30,
+    },
+  });
+}
+
+export async function PUT(req: NextRequest) {
+  const supabase = createAdminSupabase();
+  const body = await req.json();
+
+  const updates: Record<string, unknown> = {};
+
+  if (body.escalation_chain !== undefined) {
+    // Validate escalation chain structure
+    if (!Array.isArray(body.escalation_chain)) {
+      return NextResponse.json(
+        { success: false, error: 'escalation_chain must be an array' },
+        { status: 400 },
+      );
+    }
+
+    for (const step of body.escalation_chain) {
+      if (typeof step.threshold !== 'number' || step.threshold < 1) {
+        return NextResponse.json(
+          { success: false, error: 'Each step must have a threshold >= 1' },
+          { status: 400 },
+        );
+      }
+      if (!['warn', 'mute', 'kick', 'ban'].includes(step.action)) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid action in escalation step' },
+          { status: 400 },
+        );
+      }
+    }
+
+    updates.escalation_chain = body.escalation_chain;
+  }
+
+  if (body.mod_log_channel_id !== undefined) {
+    updates.mod_log_channel_id = body.mod_log_channel_id || null;
+  }
+
+  if (body.infraction_expiry_days !== undefined) {
+    const days = parseInt(body.infraction_expiry_days);
+    if (isNaN(days) || days < 1 || days > 365) {
+      return NextResponse.json(
+        { success: false, error: 'infraction_expiry_days must be between 1 and 365' },
+        { status: 400 },
+      );
+    }
+    updates.infraction_expiry_days = days;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return NextResponse.json({ success: false, error: 'No valid fields to update' }, { status: 400 });
+  }
+
+  updates.updated_at = new Date().toISOString();
+
+  const { error } = await supabase
+    .from('guild_config')
+    .update(updates)
+    .eq('guild_id', GUILD_ID);
+
+  if (error) {
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true });
+}

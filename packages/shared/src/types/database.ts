@@ -181,32 +181,128 @@ export interface DbReactionRole {
   created_at: string;
 }
 
+// ============================================================
+// Auto-Mod Rule Types (per-rule config shapes)
+// ============================================================
+
+export type AutoModRuleType =
+  | 'word_filter'
+  | 'link_filter'
+  | 'invite_filter'
+  | 'spam_filter'
+  | 'duplicate_filter'
+  | 'caps_filter'
+  | 'mention_spam'
+  | 'newline_spam';
+
+export type AutoModAction = 'delete' | 'warn' | 'mute' | 'kick' | 'ban';
+
+export interface WordFilterConfig {
+  words: string[];          // Banned words/phrases
+  matchMode: 'exact' | 'wildcard' | 'regex';
+  caseSensitive: boolean;
+}
+
+export interface LinkFilterConfig {
+  mode: 'whitelist' | 'blacklist';
+  domains: string[];         // Domain list
+}
+
+export interface InviteFilterConfig {
+  allowOwnServer: boolean;   // Allow invites to this server
+}
+
+export interface SpamFilterConfig {
+  maxMessages: number;        // X messages
+  intervalSeconds: number;    // in Y seconds
+}
+
+export interface DuplicateFilterConfig {
+  threshold: number;          // Number of identical messages to trigger
+  intervalSeconds: number;    // Time window
+}
+
+export interface CapsFilterConfig {
+  maxPercent: number;         // e.g. 70 = 70% uppercase
+  minLength: number;          // Minimum message length to check
+}
+
+export interface MentionSpamConfig {
+  maxMentions: number;        // Max user/role mentions per message
+}
+
+export interface NewlineSpamConfig {
+  maxNewlines: number;        // Max newlines per message
+}
+
+export type AutoModRuleConfig =
+  | WordFilterConfig
+  | LinkFilterConfig
+  | InviteFilterConfig
+  | SpamFilterConfig
+  | DuplicateFilterConfig
+  | CapsFilterConfig
+  | MentionSpamConfig
+  | NewlineSpamConfig;
+
 export interface DbAutomodRule {
   id: string; // UUID
   guild_id: string;
   name: string;
-  rule_type: 'word_filter' | 'link_filter' | 'invite_filter' | 'spam_detection' |
-             'caps_detection' | 'emoji_spam' | 'mention_spam' | 'attachment_spam';
+  type: AutoModRuleType;
   enabled: boolean;
-  config: Record<string, unknown>;
-  action: 'delete' | 'warn' | 'mute' | 'kick' | 'ban';
-  exempt_role_ids: string[];
-  exempt_channel_ids: string[];
+  config: AutoModRuleConfig;
+  action: AutoModAction;
+  mute_duration_minutes: number | null;
+  exempt_roles: string[];
+  exempt_channels: string[];
+  log_to_mod_channel: boolean;
   created_at: string;
   updated_at: string;
 }
 
+// ============================================================
+// Infractions
+// ============================================================
+
+export type InfractionType = 'warn' | 'mute' | 'kick' | 'ban';
+
 export interface DbInfraction {
   id: string; // UUID
   guild_id: string;
-  user_discord_id: string;
-  moderator_discord_id: string;
-  type: 'warn' | 'mute' | 'kick' | 'ban' | 'unmute' | 'unban';
-  reason: string | null;
-  expires_at: string | null;
+  member_id: string;
+  moderator_id: string;       // 'system' for auto-mod
+  type: InfractionType;
+  reason: string;
+  automod_rule_id: string | null;
+  duration_minutes: number | null;  // For mutes
   active: boolean;
+  pardoned: boolean;
+  pardoned_by: string | null;
+  pardoned_at: string | null;
+  expires_at: string | null;   // When warning falls off (infraction expiry)
   created_at: string;
 }
+
+// ============================================================
+// Escalation Chain
+// ============================================================
+
+export interface EscalationStep {
+  threshold: number;                   // Number of active warnings
+  action: 'warn' | 'mute' | 'kick' | 'ban';
+  durationMinutes?: number;            // For mutes
+  dmMember: boolean;                   // DM the member about the action
+}
+
+export const DEFAULT_ESCALATION_CHAIN: EscalationStep[] = [
+  { threshold: 1, action: 'warn', dmMember: true },
+  { threshold: 2, action: 'warn', dmMember: true },
+  { threshold: 3, action: 'mute', durationMinutes: 60, dmMember: true },
+  { threshold: 4, action: 'mute', durationMinutes: 1440, dmMember: true },
+  { threshold: 5, action: 'kick', dmMember: true },
+  { threshold: 6, action: 'ban', dmMember: true },
+];
 
 export interface DbTicketPanel {
   id: string; // UUID
