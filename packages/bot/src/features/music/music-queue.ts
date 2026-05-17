@@ -15,7 +15,7 @@ export interface QueueEntry {
   track: string;
   title: string;
   author: string;
-  /** Duration in milliseconds */
+  /** Duration in milliseconds (0 for live streams) */
   duration: number;
   uri: string;
   artworkUrl: string | null;
@@ -23,6 +23,8 @@ export interface QueueEntry {
   requestedBy: string;
   /** Timestamp when added */
   addedAt: number;
+  /** Whether this is a live stream (no seek, no progress bar) */
+  isStream?: boolean;
 }
 
 export type LoopMode = 'off' | 'track' | 'queue';

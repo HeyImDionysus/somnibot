@@ -424,7 +424,7 @@ export function registerEvents(client: SomniClient): void {
         }
 
         // Phase 11: Music commands
-        const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause']);
+        const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause', 'filter']);
         if (musicCommands.has(interaction.commandName)) {
           const musicMgr = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
           if (musicMgr) {
