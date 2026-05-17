@@ -25,6 +25,7 @@ export interface DbGuild {
   owner_discord_id: string;
   bot_role_id: string | null;    // Discord snowflake of the bot's managed role
   bot_role_position: number | null; // Position in role hierarchy
+  total_roles: number | null;      // Total roles in the guild
   setup_completed: boolean;
   setup_confirmed_at: string | null;
   created_at: string;

@@ -69,6 +69,7 @@ async function main(): Promise<void> {
             name: guild.name,
             owner_discord_id: guild.ownerId,
             bot_role_position: botMember.roles.highest.position,
+            total_roles: guild.roles.cache.size,
           }, { onConflict: 'id' })
           .then(({ error }) => {
             if (error) console.error('[Boot] Failed to update guild record:', error.message);

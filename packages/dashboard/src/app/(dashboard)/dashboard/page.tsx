@@ -18,6 +18,7 @@ interface GuildData {
     bot_role_position: number | null;
   } | null;
   config: Record<string, unknown> | null;
+  totalRoles?: number | null;
 }
 
 /**
@@ -97,7 +98,20 @@ export default function DashboardPage() {
             </div>
             <CardDescription>
               {guild?.bot_joined_at
-                ? `Online · Role position #${guild.bot_role_position ?? '?'}`
+                ? (() => {
+                    const pos = guild.bot_role_position;
+                    const total = data?.totalRoles;
+                    if (pos == null) return 'Online';
+                    // Discord positions go bottom-up: 0 = @everyone.
+                    // "Position from top" = total - pos (1 = highest)
+                    if (total && total > 0) {
+                      const fromTop = total - pos;
+                      return fromTop <= 1
+                        ? 'Online · Highest role ✓'
+                        : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
+                    }
+                    return 'Online';
+                  })()
                 : 'Bot not connected'}
             </CardDescription>
           </CardHeader>
