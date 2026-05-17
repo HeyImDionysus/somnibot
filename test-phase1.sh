@@ -169,20 +169,33 @@ else
     -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
     "${MGMT_BASE}/v1/projects/${PROJECT_REF}" 2>/dev/null)
 
-  if echo "$PROJECT_STATUS" | grep -q '"status":"INACTIVE_PAUSED"'; then
-    info "Project is paused — restoring..."
+  PROJ_STATUS_VAL=$(echo "$PROJECT_STATUS" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  info "Project status: $PROJ_STATUS_VAL"
+
+  if [[ "$PROJ_STATUS_VAL" == *"INACTIVE"* ]] || [[ "$PROJ_STATUS_VAL" == *"PAUSED"* ]]; then
+    info "Project is paused/inactive — restoring..."
     RESTORE_RESP=$(curl -s -w "\n%{http_code}" -X POST \
       -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
       "${MGMT_BASE}/v1/projects/${PROJECT_REF}/restore" 2>/dev/null)
     RESTORE_STATUS=$(echo "$RESTORE_RESP" | tail -1)
-    info "Restore response: $RESTORE_STATUS"
-    info "Waiting 60s for project to come online..."
-    sleep 60
-  elif echo "$PROJECT_STATUS" | grep -q '"status":"ACTIVE_HEALTHY"'; then
+    info "Restore response: HTTP $RESTORE_STATUS"
+
+    # Wait for the project to become active
+    info "Waiting for project to come online (checking every 15s, up to 3min)..."
+    for i in $(seq 1 12); do
+      sleep 15
+      CHECK=$(curl -s \
+        -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+        "${MGMT_BASE}/v1/projects/${PROJECT_REF}" 2>/dev/null)
+      STATUS_NOW=$(echo "$CHECK" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+      info "  Attempt $i/12: status=$STATUS_NOW"
+      if [ "$STATUS_NOW" = "ACTIVE_HEALTHY" ]; then
+        info "Project is now active!"
+        break
+      fi
+    done
+  elif [ "$PROJ_STATUS_VAL" = "ACTIVE_HEALTHY" ]; then
     info "Project is active"
-  else
-    PROJ_STATUS=$(echo "$PROJECT_STATUS" | grep -o '"status":"[^"]*"' || echo "unknown")
-    info "Project status: $PROJ_STATUS"
   fi
 
   # Check if tables already exist via REST API
@@ -297,8 +310,9 @@ header "Discord Bot Connection"
 
 info "Testing Discord bot login..."
 
-# Write test file INSIDE the project so it can resolve discord.js from node_modules
-cat > .test_discord.mjs << 'DISCORD_SCRIPT'
+# Write test file inside packages/bot/ where discord.js is a declared dependency
+# pnpm uses strict module isolation — discord.js only resolves from packages/bot/
+cat > packages/bot/.test_discord.mjs << 'DISCORD_SCRIPT'
 import { Client, GatewayIntentBits } from 'discord.js';
 
 const client = new Client({
@@ -343,7 +357,7 @@ client.login(process.env.DISCORD_TOKEN).catch(err => {
 });
 DISCORD_SCRIPT
 
-node .test_discord.mjs 2>&1 | tee /tmp/discord_result.txt
+node packages/bot/.test_discord.mjs 2>&1 | tee /tmp/discord_result.txt
 
 if grep -q "BOT_TAG:" /tmp/discord_result.txt; then
   BOT_TAG=$(grep "BOT_TAG:" /tmp/discord_result.txt | cut -d: -f2-)
@@ -365,7 +379,7 @@ if grep -q "ROLE_WARNING:" /tmp/discord_result.txt; then
 fi
 
 # Clean up test file
-rm -f .test_discord.mjs
+rm -f packages/bot/.test_discord.mjs
 
 # ────────────────────────────────────────
 # 6. Valkey connection test
