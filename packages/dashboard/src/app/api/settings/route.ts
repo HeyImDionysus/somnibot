@@ -4,10 +4,16 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 
 /**
  * Settings API — read and write operator configuration.
- * 
- * Settings are stored in the `instance_settings` table in Supabase.
- * Each setting has a section (supabase, discord, paypal, etc.) and key/value pairs.
- * Secret values are masked when returned to the client.
+ *
+ * Connection status is derived from ACTUAL env vars and database state,
+ * not just whether a row exists. The settings page shows the real state.
+ *
+ * Values come from two sources:
+ * 1. Environment variables (set at deploy time — Vercel, .env, etc.)
+ * 2. instance_settings table (set via the Settings page at runtime)
+ *
+ * Env vars take priority. The Settings page shows which are already configured
+ * via env and which need to be added.
  */
 
 const SECRET_FIELDS = new Set([
@@ -19,6 +25,38 @@ const SECRET_FIELDS = new Set([
   'lavalink_password',
 ]);
 
+/**
+ * Map of setting keys → env var names.
+ * These are checked on the server to detect what's already configured.
+ */
+const ENV_MAP: Record<string, string[]> = {
+  supabase_url: ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL'],
+  supabase_anon_key: ['NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_ANON_KEY'],
+  supabase_service_role_key: ['SUPABASE_SERVICE_ROLE_KEY'],
+  discord_application_id: ['DISCORD_APPLICATION_ID'],
+  discord_bot_token: ['DISCORD_TOKEN'],
+  discord_guild_id: ['DISCORD_GUILD_ID'],
+  discord_client_secret: ['DISCORD_CLIENT_SECRET'],
+  paypal_client_id: ['PAYPAL_CLIENT_ID'],
+  paypal_client_secret: ['PAYPAL_CLIENT_SECRET'],
+  paypal_webhook_id: ['PAYPAL_WEBHOOK_ID'],
+  paypal_sandbox: ['PAYPAL_SANDBOX'],
+  lavalink_host: ['LAVALINK_HOST'],
+  lavalink_port: ['LAVALINK_PORT'],
+  lavalink_password: ['LAVALINK_PASSWORD'],
+  valkey_url: ['VALKEY_URL', 'REDIS_URL'],
+};
+
+function getEnvValue(key: string): string | null {
+  const envNames = ENV_MAP[key];
+  if (!envNames) return null;
+  for (const name of envNames) {
+    const val = process.env[name];
+    if (val) return val;
+  }
+  return null;
+}
+
 function maskValue(value: string): string {
   if (value.length <= 8) return '••••••••';
   return value.slice(0, 4) + '••••' + value.slice(-4);
@@ -26,6 +64,7 @@ function maskValue(value: string): string {
 
 /**
  * GET /api/settings — Load all settings with masked secrets.
+ * Merges env vars with database overrides.
  */
 export async function GET() {
   try {
@@ -35,45 +74,47 @@ export async function GET() {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const admin = createAdminSupabase();
-
-    // Try to read from instance_settings table
-    const { data: settings, error } = await admin
-      .from('instance_settings')
-      .select('key, value, section')
-      .order('section');
-
-    if (error) {
-      // Table might not exist yet — return empty defaults
-      console.error('[Settings] Read error:', error.message);
-      return NextResponse.json({ values: {}, statuses: {} });
-    }
-
+    // Step 1: Read env vars as base values
     const values: Record<string, string> = {};
-    const sections = new Set<string>();
+    const sources: Record<string, 'env' | 'db' | 'none'> = {};
 
-    for (const row of settings || []) {
-      sections.add(row.section);
-      if (SECRET_FIELDS.has(row.key) && row.value) {
-        values[row.key] = maskValue(row.value);
-      } else {
-        values[row.key] = row.value || '';
+    for (const key of Object.keys(ENV_MAP)) {
+      const envVal = getEnvValue(key);
+      if (envVal) {
+        values[key] = SECRET_FIELDS.has(key) ? maskValue(envVal) : envVal;
+        sources[key] = 'env';
       }
     }
 
-    // Determine connection statuses based on which sections have values
-    const statuses: Record<string, string> = {};
-    for (const section of ['supabase', 'discord', 'paypal', 'lavalink', 'valkey']) {
-      const sectionSettings = (settings || []).filter(
-        (s) => s.section === section && s.value
-      );
-      statuses[section] = sectionSettings.length > 0 ? 'connected' : 'disconnected';
+    // Step 2: Read DB overrides (instance_settings)
+    const admin = createAdminSupabase();
+    const { data: settings } = await admin
+      .from('instance_settings')
+      .select('key, value, section');
+
+    if (settings) {
+      for (const row of settings) {
+        if (row.value && !values[row.key]) {
+          // DB value, only if env var isn't already set
+          values[row.key] = SECRET_FIELDS.has(row.key) ? maskValue(row.value) : row.value;
+          sources[row.key] = 'db';
+        }
+      }
     }
 
-    return NextResponse.json({ values, statuses });
+    // Step 3: Determine connection statuses based on what's actually configured
+    const statuses: Record<string, 'connected' | 'disconnected'> = {
+      supabase: (values.supabase_url && values.supabase_service_role_key) ? 'connected' : 'disconnected',
+      discord: (values.discord_bot_token && values.discord_guild_id) ? 'connected' : 'disconnected',
+      paypal: (values.paypal_client_id && values.paypal_client_secret) ? 'connected' : 'disconnected',
+      lavalink: (values.lavalink_host && values.lavalink_port) ? 'connected' : 'disconnected',
+      valkey: values.valkey_url ? 'connected' : 'disconnected',
+    };
+
+    return NextResponse.json({ values, statuses, sources });
   } catch (err) {
     console.error('[Settings] Error:', err);
-    return NextResponse.json({ values: {}, statuses: {} });
+    return NextResponse.json({ values: {}, statuses: {}, sources: {} });
   }
 }
 
@@ -97,23 +138,20 @@ export async function PUT(request: Request) {
 
     const admin = createAdminSupabase();
 
-    // Upsert each setting
     for (const [key, value] of Object.entries(values)) {
       // Skip masked values (user didn't change them)
       if (value.includes('••••')) continue;
+      if (!value.trim()) continue;
 
       await admin
         .from('instance_settings')
         .upsert(
           { key, value, section, updated_at: new Date().toISOString() },
-          { onConflict: 'key' }
+          { onConflict: 'key' },
         );
     }
 
-    return NextResponse.json({
-      ok: true,
-      status: Object.values(values).some((v) => v && !v.includes('••••')) ? 'connected' : 'disconnected',
-    });
+    return NextResponse.json({ ok: true });
   } catch (err) {
     console.error('[Settings] Save error:', err);
     return NextResponse.json({ error: 'Failed to save settings' }, { status: 500 });
