@@ -74,6 +74,7 @@ export interface DbGuildConfig {
   rank_card_accent_color: number | null;
   rank_card_background: string | null;
   // Music
+  music_enabled: boolean;
   default_volume: number;
   max_queue_length: number;
   allow_duplicates: boolean;
