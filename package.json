@@ -17,5 +17,8 @@
     "db:reset": "supabase db reset",
     "docker:dev": "docker compose up -d",
     "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "turbo": "^2.9.14"
   }
 }
