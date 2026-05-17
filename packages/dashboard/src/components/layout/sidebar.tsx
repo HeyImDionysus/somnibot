@@ -25,7 +25,6 @@ import {
   Sparkles,
   FileCode2,
   Key,
-  Rocket,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -47,7 +46,6 @@ const navigation: NavGroup[] = [
     title: 'Overview',
     items: [
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-      { label: 'Setup', href: '/setup', icon: Rocket },
     ],
   },
   {

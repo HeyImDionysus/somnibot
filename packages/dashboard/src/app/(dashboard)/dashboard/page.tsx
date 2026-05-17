@@ -4,41 +4,42 @@ import { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import {
   Shield, Users, MessageSquare, Zap, Settings,
-  CheckCircle2, XCircle, Loader2,
+  CheckCircle2, XCircle, Loader2, Rocket,
 } from 'lucide-react';
 import Link from 'next/link';
 
-interface GuildStatus {
-  connected: boolean;
-  name?: string;
-  memberCount?: number;
-  setupCompleted?: boolean;
+interface GuildData {
+  guild: {
+    id: string;
+    name: string;
+    bot_joined_at: string;
+    setup_completed: boolean;
+    setup_confirmed_at: string | null;
+    bot_role_position: number | null;
+  } | null;
+  config: Record<string, unknown> | null;
 }
 
 /**
  * Dashboard Home — at-a-glance overview of bot status and server health.
  */
 export default function DashboardPage() {
-  const [guild, setGuild] = useState<GuildStatus | null>(null);
+  const [data, setData] = useState<GuildData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     (async () => {
       try {
         const res = await fetch('/api/guild');
         if (res.ok) {
-          const data = await res.json();
-          setGuild({
-            connected: true,
-            name: data.name,
-            memberCount: data.member_count,
-            setupCompleted: data.setup_completed,
-          });
+          const json = await res.json();
+          setData(json);
         } else {
-          setGuild({ connected: false });
+          setError(true);
         }
       } catch {
-        setGuild({ connected: false });
+        setError(true);
       } finally {
         setLoading(false);
       }
@@ -53,6 +54,8 @@ export default function DashboardPage() {
     );
   }
 
+  const guild = data?.guild;
+
   return (
     <div className="space-y-6">
       <div>
@@ -64,21 +67,38 @@ export default function DashboardPage() {
 
       {/* Status Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {/* Server Status */}
+        {/* Server Connection */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium">Server</CardTitle>
-              {guild?.connected ? (
+              {guild ? (
                 <CheckCircle2 size={18} className="text-green-500" />
               ) : (
                 <XCircle size={18} className="text-red-500" />
               )}
             </div>
             <CardDescription>
-              {guild?.connected
-                ? guild.name || 'Connected'
-                : 'Not connected — configure Discord in Settings'}
+              {guild ? guild.name : 'No guild connected'}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+
+        {/* Bot Status */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Bot</CardTitle>
+              {guild?.bot_joined_at ? (
+                <CheckCircle2 size={18} className="text-green-500" />
+              ) : (
+                <XCircle size={18} className="text-discord-text-muted" />
+              )}
+            </div>
+            <CardDescription>
+              {guild?.bot_joined_at
+                ? `Online · Role position #${guild.bot_role_position ?? '?'}`
+                : 'Bot not connected'}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -88,31 +108,16 @@ export default function DashboardPage() {
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium">Setup</CardTitle>
-              {guild?.setupCompleted ? (
+              {guild?.setup_completed ? (
                 <CheckCircle2 size={18} className="text-green-500" />
               ) : (
-                <Settings size={18} className="text-discord-text-muted" />
+                <Rocket size={18} className="text-discord-text-muted" />
               )}
             </div>
             <CardDescription>
-              {guild?.setupCompleted
+              {guild?.setup_completed
                 ? 'Server setup complete'
-                : 'Run the setup wizard to configure roles & channels'}
-            </CardDescription>
-          </CardHeader>
-        </Card>
-
-        {/* Members */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-medium">Members</CardTitle>
-              <Users size={18} className="text-discord-text-muted" />
-            </div>
-            <CardDescription>
-              {guild?.memberCount != null
-                ? `${guild.memberCount} members`
-                : '—'}
+                : 'Run the setup wizard to deploy roles & channels'}
             </CardDescription>
           </CardHeader>
         </Card>

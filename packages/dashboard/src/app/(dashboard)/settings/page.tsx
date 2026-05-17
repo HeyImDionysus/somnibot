@@ -6,7 +6,7 @@ import { Button } from '@/components/shared/button';
 import { cn } from '@/lib/utils/cn';
 import {
   Database, MessageSquare, CreditCard, Music, Server,
-  CheckCircle2, XCircle, Loader2, Eye, EyeOff, Save,
+  CheckCircle2, XCircle, Loader2, Eye, EyeOff, Save, Lock,
 } from 'lucide-react';
 
 // ============================================================
@@ -28,10 +28,6 @@ interface FieldConfig {
   placeholder: string;
   secret?: boolean;
   helpText?: string;
-}
-
-interface ConnectionStatus {
-  [key: string]: 'connected' | 'disconnected' | 'checking';
 }
 
 // ============================================================
@@ -109,10 +105,12 @@ function SecretField({
   value,
   onChange,
   placeholder,
+  disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
+  disabled?: boolean;
 }) {
   const [visible, setVisible] = useState(false);
 
@@ -123,7 +121,11 @@ function SecretField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 pr-10 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard"
+        disabled={disabled}
+        className={cn(
+          'w-full rounded-input bg-discord-bg-tertiary px-3 py-2 pr-10 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard',
+          disabled && 'opacity-60 cursor-not-allowed',
+        )}
       />
       <button
         type="button"
@@ -162,11 +164,11 @@ function StatusDot({ status }: { status: 'connected' | 'disconnected' | 'checkin
 
 export default function SettingsPage() {
   const [values, setValues] = useState<Record<string, string>>({});
-  const [statuses, setStatuses] = useState<ConnectionStatus>({});
+  const [sources, setSources] = useState<Record<string, 'env' | 'db' | 'none'>>({});
+  const [statuses, setStatuses] = useState<Record<string, 'connected' | 'disconnected' | 'checking'>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Load saved settings on mount
   useEffect(() => {
     (async () => {
       try {
@@ -175,9 +177,10 @@ export default function SettingsPage() {
           const data = await res.json();
           setValues(data.values || {});
           setStatuses(data.statuses || {});
+          setSources(data.sources || {});
         }
       } catch {
-        // Settings API might not exist yet — that's OK
+        // Settings API might not exist yet
       } finally {
         setLoading(false);
       }
@@ -208,9 +211,12 @@ export default function SettingsPage() {
       });
 
       if (res.ok) {
-        const data = await res.json();
-        if (data.status) {
-          setStatuses((prev) => ({ ...prev, [sectionId]: data.status }));
+        // Refresh to get updated statuses
+        const refreshRes = await fetch('/api/settings');
+        if (refreshRes.ok) {
+          const data = await refreshRes.json();
+          setStatuses(data.statuses || {});
+          setSources(data.sources || {});
         }
       }
     } catch {
@@ -234,7 +240,8 @@ export default function SettingsPage() {
       <div>
         <h1 className="text-xl font-bold text-discord-text-primary">Settings</h1>
         <p className="mt-1 text-sm text-discord-text-muted">
-          Configure external connections. Features will become available as you connect each service.
+          Configure external connections. Features become available as you connect each service.
+          Values set via environment variables are shown as locked — override them here or in your hosting provider.
         </p>
       </div>
 
@@ -261,31 +268,49 @@ export default function SettingsPage() {
             </CardHeader>
 
             <div className="space-y-4 px-6 pb-6">
-              {section.fields.map((field) => (
-                <div key={field.key}>
-                  <label className="mb-1.5 block text-sm font-medium text-discord-text-secondary">
-                    {field.label}
-                  </label>
-                  {field.secret ? (
-                    <SecretField
-                      value={values[field.key] || ''}
-                      onChange={(v) => updateField(field.key, v)}
-                      placeholder={field.placeholder}
-                    />
-                  ) : (
-                    <input
-                      type="text"
-                      value={values[field.key] || ''}
-                      onChange={(e) => updateField(field.key, e.target.value)}
-                      placeholder={field.placeholder}
-                      className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard"
-                    />
-                  )}
-                  {field.helpText && (
-                    <p className="mt-1 text-xs text-discord-text-muted">{field.helpText}</p>
-                  )}
-                </div>
-              ))}
+              {section.fields.map((field) => {
+                const source = sources[field.key];
+                const isFromEnv = source === 'env';
+
+                return (
+                  <div key={field.key}>
+                    <div className="mb-1.5 flex items-center gap-2">
+                      <label className="text-sm font-medium text-discord-text-secondary">
+                        {field.label}
+                      </label>
+                      {isFromEnv && (
+                        <span className="flex items-center gap-1 rounded bg-discord-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-discord-text-muted">
+                          <Lock size={10} />
+                          ENV
+                        </span>
+                      )}
+                    </div>
+                    {field.secret ? (
+                      <SecretField
+                        value={values[field.key] || ''}
+                        onChange={(v) => updateField(field.key, v)}
+                        placeholder={field.placeholder}
+                        disabled={isFromEnv}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={values[field.key] || ''}
+                        onChange={(e) => updateField(field.key, e.target.value)}
+                        placeholder={field.placeholder}
+                        disabled={isFromEnv}
+                        className={cn(
+                          'w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard',
+                          isFromEnv && 'opacity-60 cursor-not-allowed',
+                        )}
+                      />
+                    )}
+                    {field.helpText && (
+                      <p className="mt-1 text-xs text-discord-text-muted">{field.helpText}</p>
+                    )}
+                  </div>
+                );
+              })}
 
               <div className="flex justify-end pt-2">
                 <Button
