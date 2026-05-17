@@ -4,6 +4,7 @@ import {
   handleMemberUpdate,
   handleMemberLeave,
 } from '../features/welcome/index.js';
+import { processMessage, expireInfractions } from '../features/moderation/index.js';
 import {
   handleRoleCreate,
   handleRoleUpdate,
@@ -14,6 +15,7 @@ import {
   handleChannelUpdate,
   handleChannelDelete,
 } from '../sync/channel-events.js';
+import type { EscalationStep } from '@somnibot/shared';
 
 /**
  * Register all Discord gateway event listeners.
@@ -91,10 +93,20 @@ export function registerEvents(client: SomniClient): void {
     await handleChannelDelete(client, channel);
   });
 
-  // ── Message Events ─────────────────────────────────────
+  // ── Message Events (Phase 6: Auto-Mod) ─────────────────
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (message.guild?.id !== client.guildId) return;
+
+    // Auto-mod pipeline — runs before any other message processing
+    try {
+      const modConfig = await loadModConfig(client);
+      const handled = await processMessage(client, message, modConfig);
+      if (handled) return; // Message was deleted/actioned by auto-mod
+    } catch (err) {
+      console.error('[Events] Auto-mod error:', err);
+    }
+
     // XP processing added in Phase 9 (Levels)
   });
 
@@ -122,4 +134,52 @@ export function registerEvents(client: SomniClient): void {
   process.on('unhandledRejection', (error) => {
     console.error('[Bot] Unhandled rejection:', error);
   });
+
+  // ── Infraction Expiry Cron (every 15 minutes) ─────────
+  setInterval(async () => {
+    try {
+      await expireInfractions(client.supabase, client.guildId);
+    } catch (err) {
+      console.error('[Events] Infraction expiry error:', err);
+    }
+  }, 15 * 60 * 1000);
+}
+
+// ── Helpers ───────────────────────────────────────────────
+
+/** Cached moderation config to avoid DB hits per message. */
+let _modConfigCache: {
+  escalationChain: EscalationStep[];
+  infractionExpiryDays: number;
+  modLogChannelId: string | null;
+} | null = null;
+let _modConfigCacheTime = 0;
+const MOD_CONFIG_TTL = 60_000; // 1 minute
+
+async function loadModConfig(client: SomniClient): Promise<{
+  escalationChain: EscalationStep[];
+  infractionExpiryDays: number;
+  modLogChannelId: string | null;
+}> {
+  const now = Date.now();
+  if (_modConfigCache && now - _modConfigCacheTime < MOD_CONFIG_TTL) {
+    return _modConfigCache;
+  }
+
+  const { data } = await client.supabase
+    .from('guild_config')
+    .select('escalation_chain, infraction_expiry_days, mod_log_channel_id')
+    .eq('guild_id', client.guildId)
+    .maybeSingle();
+
+  _modConfigCache = {
+    escalationChain: Array.isArray(data?.escalation_chain)
+      ? (data.escalation_chain as EscalationStep[])
+      : [],
+    infractionExpiryDays: (data?.infraction_expiry_days as number) ?? 30,
+    modLogChannelId: (data?.mod_log_channel_id as string) ?? null,
+  };
+  _modConfigCacheTime = now;
+
+  return _modConfigCache;
 }
