@@ -305,18 +305,34 @@ export const DEFAULT_ESCALATION_CHAIN: EscalationStep[] = [
   { threshold: 6, action: 'ban', dmMember: true },
 ];
 
+export interface TicketTypeConfig {
+  id: string;
+  label: string;
+  emoji: string;
+  color: 'blue' | 'grey' | 'green' | 'red';
+  description?: string;
+  categoryOverride?: string;
+  managerRoleOverride?: string[];
+  introMessageOverride?: string;
+}
+
 export interface DbTicketPanel {
   id: string; // UUID
   guild_id: string;
+  name: string;
   channel_id: string;
   message_id: string | null;
-  title: string;
-  description: string;
-  button_label: string;
-  button_emoji: string | null;
-  ticket_category_id: string | null;
-  manager_role_ids: string[];
+  panel_message: Record<string, unknown>; // Embed config (JSONB)
+  input_mode: 'buttons' | 'dropdown';
+  ticket_types: TicketTypeConfig[];
+  manager_roles: string[];
+  open_category_id: string;
+  closed_category_id: string | null;
+  transcript_channel_id: string | null;
+  dm_transcript_to_creator: boolean;
   max_open_per_user: number;
+  introduction_message: string | null;
+  active: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -326,12 +342,31 @@ export interface DbTicket {
   guild_id: string;
   panel_id: string;
   channel_id: string;
-  user_discord_id: string;
-  claimed_by: string | null;
-  status: 'open' | 'claimed' | 'closed';
   ticket_number: number;
+  creator_id: string;
+  type: string;
+  claimed_by: string | null;
+  status: 'open' | 'claimed' | 'closed' | 'deleted';
+  closed_by: string | null;
+  close_reason: string | null;
+  transcript_path: string | null;
+  message_count: number;
   created_at: string;
   closed_at: string | null;
+  deleted_at: string | null;
+}
+
+export interface DbTicketTranscript {
+  id: string; // UUID
+  guild_id: string;
+  ticket_id: string;
+  ticket_number: number;
+  creator_id: string;
+  closed_by_id: string;
+  message_count: number;
+  participant_ids: string[];
+  html_content: string;
+  created_at: string;
 }
 
 export interface DbAutomation {

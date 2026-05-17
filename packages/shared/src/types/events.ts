@@ -171,7 +171,9 @@ export interface PlatformEventMap {
   'purchase.completed': PurchaseCompletedData;
   'subscription.changed': SubscriptionChangedData;
   'ticket.opened': TicketEventData;
+  'ticket.claimed': TicketEventData;
   'ticket.closed': TicketEventData;
+  'ticket.reopened': TicketEventData;
   'infraction.created': InfractionCreatedData;
   'member.muted': MemberMutedData;
   'member.kicked': MemberKickedData;
