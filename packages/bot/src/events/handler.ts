@@ -22,6 +22,7 @@ import type { EscalationStep } from '@somnibot/shared';
  * Register all Discord gateway event listeners.
  * Phase 1: bot-role guard, basic logging.
  * Phase 4: onboarding detection, welcome/goodbye flows.
+ * Phase 8: Automation engine event wiring.
  */
 export function registerEvents(client: SomniClient): void {
   // ── Ready ──────────────────────────────────────────────
@@ -94,7 +95,7 @@ export function registerEvents(client: SomniClient): void {
     await handleChannelDelete(client, channel);
   });
 
-  // ── Message Events (Phase 6: Auto-Mod) ─────────────────
+  // ── Message Events (Phase 6: Auto-Mod + Phase 8: Automations) ──
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (message.guild?.id !== client.guildId) return;
@@ -108,16 +109,117 @@ export function registerEvents(client: SomniClient): void {
       console.error('[Events] Auto-mod error:', err);
     }
 
+    // Phase 8: Emit message.sent event for automations
+    const messageEvent = {
+      type: 'message.sent' as const,
+      guildId: client.guildId,
+      timestamp: Date.now(),
+      data: {
+        discordId: message.author.id,
+        username: message.author.username,
+        channelId: message.channel.id,
+        messageId: message.id,
+        content: message.content,
+      },
+    };
+
+    // Process via automation engine directly (needs Message object for reply/react/delete actions)
+    const engine = (client as unknown as Record<string, unknown>)._automationEngine as
+      | import('../features/automations/automation-engine.js').AutomationEngine
+      | undefined;
+    if (engine) {
+      engine.processMessageEvent(messageEvent, message).catch((err) => {
+        console.error('[Events] Automation message processing error:', err);
+      });
+    }
+
     // XP processing added in Phase 9 (Levels)
   });
 
-  // ── Voice State ────────────────────────────────────────
-  client.on('voiceStateUpdate', async (_oldState, newState) => {
-    if (newState.guild.id !== client.guildId) return;
-    // Music + temp channels added in later phases
+  // ── Reaction Events (Phase 8: Automations) ────────────
+  client.on('messageReactionAdd', async (reaction, user) => {
+    if (user.bot) return;
+    const message = reaction.message;
+    if (message.guild?.id !== client.guildId) return;
+
+    // Emit reaction.added event for automations
+    const reactionEvent = {
+      type: 'reaction.added' as const,
+      guildId: client.guildId,
+      timestamp: Date.now(),
+      data: {
+        discordId: user.id,
+        username: user.username ?? user.id,
+        emoji: reaction.emoji.name ?? reaction.emoji.toString(),
+        channelId: message.channel.id,
+        messageId: message.id,
+      },
+    };
+
+    // Fetch full message if partial
+    const fullMessage = reaction.message.partial
+      ? await reaction.message.fetch().catch(() => null)
+      : reaction.message;
+
+    if (fullMessage) {
+      const engine = (client as unknown as Record<string, unknown>)._automationEngine as
+        | import('../features/automations/automation-engine.js').AutomationEngine
+        | undefined;
+      if (engine) {
+        engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
+          console.error('[Events] Automation reaction processing error:', err);
+        });
+      }
+    }
+
+    // Also emit to event bus for non-message automations
+    client.eventBus.emit('reaction.added', client.guildId, reactionEvent.data);
   });
 
-  // ── Interaction Handler (Phase 7: Tickets) ─────────────
+  // ── Voice State (Phase 8: Automations + future Music/Temp Channels) ──
+  client.on('voiceStateUpdate', async (oldState, newState) => {
+    if (newState.guild.id !== client.guildId) return;
+    const member = newState.member ?? oldState.member;
+    if (!member || member.user.bot) return;
+
+    // Joined a voice channel
+    if (!oldState.channelId && newState.channelId) {
+      client.eventBus.emit('voice.joined', client.guildId, {
+        discordId: member.id,
+        username: member.user.username,
+        channelId: newState.channelId,
+        channelName: newState.channel?.name ?? '',
+      });
+    }
+
+    // Left a voice channel
+    if (oldState.channelId && !newState.channelId) {
+      client.eventBus.emit('voice.left', client.guildId, {
+        discordId: member.id,
+        username: member.user.username,
+        channelId: oldState.channelId,
+        channelName: oldState.channel?.name ?? '',
+      });
+    }
+
+    // Moved between channels (emit both left and joined)
+    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+      client.eventBus.emit('voice.left', client.guildId, {
+        discordId: member.id,
+        username: member.user.username,
+        channelId: oldState.channelId,
+        channelName: oldState.channel?.name ?? '',
+      });
+      client.eventBus.emit('voice.joined', client.guildId, {
+        discordId: member.id,
+        username: member.user.username,
+        channelId: newState.channelId,
+        channelName: newState.channel?.name ?? '',
+      });
+    }
+  });
+
+  // ── Interaction Handler (Phase 7: Tickets + Phase 8: Button automations) ──
   client.on('interactionCreate', async (interaction) => {
     if (!interaction.guild || interaction.guild.id !== client.guildId) return;
 
@@ -126,6 +228,17 @@ export function registerEvents(client: SomniClient): void {
       if (interaction.isButton() || interaction.isStringSelectMenu()) {
         const handled = await handleTicketInteraction(interaction, client);
         if (handled) return;
+
+        // Phase 8: Emit button.clicked event for automations
+        if (interaction.isButton()) {
+          client.eventBus.emit('button.clicked', client.guildId, {
+            discordId: interaction.user.id,
+            username: interaction.user.username,
+            buttonId: interaction.customId,
+            channelId: interaction.channelId ?? '',
+            messageId: interaction.message?.id ?? '',
+          });
+        }
       }
 
       // Handle slash commands

@@ -6,6 +6,7 @@ import { startDeployListener } from './deploy/deploy-listener.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
 import { registerTicketCommands } from './features/tickets/register-commands.js';
+import { AutomationEngine } from './features/automations/index.js';
 
 /**
  * SomniBot entry point.
@@ -111,7 +112,25 @@ async function main(): Promise<void> {
     // Register slash commands (Phase 7: Tickets)
     await registerTicketCommands(client);
 
-    console.log('[Boot] ✅ All Phase 3-7 systems initialized');
+    // Phase 8: Automation Engine
+    if (guild) {
+      try {
+        const automationEngine = new AutomationEngine(
+          guild,
+          client.supabase,
+          client.valkey,
+          client.eventBus,
+        );
+        await automationEngine.start();
+        // Store reference for event handlers to use
+        (client as unknown as Record<string, unknown>)._automationEngine = automationEngine;
+        console.log('[Boot] ✅ Automation engine started');
+      } catch (err) {
+        console.error('[Boot] ⚠️  Automation engine failed to start:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-8 systems initialized');
   });
 
   // Graceful shutdown

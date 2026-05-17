@@ -1,0 +1,358 @@
+/**
+ * Automation Engine — the central nervous system of SomniBot.
+ * §20.1 of the architecture doc.
+ *
+ * Listens to platform events → matches triggers → evaluates scope/conditions → executes actions.
+ */
+import type { Guild, GuildMember, Message } from 'discord.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type Valkey from 'iovalkey';
+import type { PlatformEvent } from '@somnibot/shared';
+import type { PlatformEventBus } from '../../services/event-bus.js';
+import { AutomationLoader, type LoadedAutomation } from './automation-loader.js';
+import { evaluateConditions, type ConditionContext } from './condition-evaluator.js';
+import { executeActions, type ActionContext } from './action-executor.js';
+import { AutomationRateLimiter } from './rate-limiter.js';
+import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
+
+/**
+ * Event context passed alongside platform events for automation processing.
+ */
+export interface AutomationEventContext {
+  member: GuildMember | null;
+  channelId: string | null;
+  messageId: string | null;
+  message: Message | null;
+  /** Template variables resolved from the trigger event data */
+  variables: Record<string, string>;
+}
+
+export class AutomationEngine {
+  private loader: AutomationLoader;
+  private rateLimiter: AutomationRateLimiter;
+  private executionLogger: ExecutionLogger;
+
+  constructor(
+    private guild: Guild,
+    private supabase: SupabaseClient,
+    valkey: Valkey,
+    private eventBus: PlatformEventBus,
+  ) {
+    this.loader = new AutomationLoader(supabase, guild.id);
+    this.rateLimiter = new AutomationRateLimiter(valkey);
+    this.executionLogger = new ExecutionLogger(supabase);
+  }
+
+  /**
+   * Initialize: load automations, subscribe to changes, wire event bus.
+   */
+  async start(): Promise<void> {
+    await this.loader.load();
+    this.loader.subscribe();
+
+    // Listen to ALL platform events and check for matching automations
+    this.eventBus.onAny(async (event: PlatformEvent) => {
+      if (event.guildId !== this.guild.id) return;
+      await this.handleEvent(event);
+    });
+
+    console.log('[AutomationEngine] ✅ Started and listening for events');
+  }
+
+  /**
+   * Process a platform event against all matching automations.
+   */
+  private async handleEvent(event: PlatformEvent): Promise<void> {
+    const triggerType = event.type;
+    const automations = this.loader.getForTrigger(triggerType);
+
+    if (automations.length === 0) return;
+
+    // Build context from the event data
+    const ctx = this.buildEventContext(event);
+
+    for (const automation of automations) {
+      // Run each automation independently — errors in one don't block others
+      this.processAutomation(automation, event, ctx).catch((err) => {
+        console.error(`[AutomationEngine] Uncaught error in automation "${automation.name}":`, err);
+      });
+    }
+  }
+
+  /**
+   * Process a single automation against an event.
+   */
+  private async processAutomation(
+    automation: LoadedAutomation,
+    event: PlatformEvent,
+    ctx: AutomationEventContext,
+  ): Promise<void> {
+    const startTime = Date.now();
+    const userId = ctx.member?.id ?? 'system';
+
+    // 1. Scope check
+    if (!this.checkScope(automation, userId, ctx.channelId)) {
+      return; // Silently skip — scope filters are lightweight pre-checks
+    }
+
+    // 2. Rate limit check
+    if (ctx.member) {
+      const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
+      if (!allowed) {
+        console.log(`[AutomationEngine] Rate limited: ${automation.name} for user ${ctx.member.id}`);
+        return;
+      }
+
+      // Custom per-automation rate limit
+      if (automation.rateLimitPerUser && automation.rateLimitWindowSeconds) {
+        const customAllowed = await this.rateLimiter.allowCustom(
+          this.guild.id,
+          automation.id,
+          ctx.member.id,
+          automation.rateLimitPerUser,
+          automation.rateLimitWindowSeconds,
+        );
+        if (!customAllowed) return;
+      }
+    }
+
+    // 3. Evaluate conditions
+    const conditionCtx: ConditionContext = {
+      guild: this.guild,
+      member: ctx.member,
+      channelId: ctx.channelId,
+      messageContent: ctx.message?.content ?? null,
+      supabase: this.supabase,
+      guildId: this.guild.id,
+    };
+
+    const conditionsPassed = await evaluateConditions(
+      automation.conditions as { type: string; config: Record<string, unknown> }[],
+      conditionCtx,
+    );
+
+    if (!conditionsPassed) {
+      // Log the execution as conditions-failed
+      await this.executionLogger.log({
+        automationId: automation.id,
+        guildId: this.guild.id,
+        triggeredBy: userId,
+        triggerEvent: event.type,
+        conditionsPassed: false,
+        actionsExecuted: 0,
+        actionsFailed: 0,
+        errors: [],
+        durationMs: Date.now() - startTime,
+      });
+      return;
+    }
+
+    // 4. Execute actions
+    const actionCtx: ActionContext = {
+      guild: this.guild,
+      member: ctx.member,
+      channelId: ctx.channelId,
+      messageId: ctx.messageId,
+      message: ctx.message,
+      supabase: this.supabase,
+      guildId: this.guild.id,
+      rateLimiter: this.rateLimiter,
+      automationId: automation.id,
+      variables: ctx.variables,
+    };
+
+    const { executed, failed, errors } = await executeActions(
+      automation.actions as { type: string; config: Record<string, unknown> }[],
+      actionCtx,
+    );
+
+    // 5. Log execution
+    const result: ExecutionResult = {
+      automationId: automation.id,
+      guildId: this.guild.id,
+      triggeredBy: userId,
+      triggerEvent: event.type,
+      conditionsPassed: true,
+      actionsExecuted: executed,
+      actionsFailed: failed,
+      errors,
+      durationMs: Date.now() - startTime,
+    };
+
+    await this.executionLogger.log(result);
+
+    if (errors.length > 0) {
+      console.warn(`[AutomationEngine] "${automation.name}" completed with ${failed} error(s):`, errors);
+    } else {
+      console.log(`[AutomationEngine] "${automation.name}" executed ${executed} action(s) in ${result.durationMs}ms`);
+    }
+  }
+
+  /**
+   * Check scope filters (§20.2.1).
+   */
+  private checkScope(
+    automation: LoadedAutomation,
+    userId: string,
+    channelId: string | null,
+  ): boolean {
+    // Target user filter
+    if (automation.scopeTargetUserIds.length > 0) {
+      if (!automation.scopeTargetUserIds.includes(userId)) return false;
+    }
+    // Exclude user filter
+    if (automation.scopeExcludeUserIds.length > 0) {
+      if (automation.scopeExcludeUserIds.includes(userId)) return false;
+    }
+    // Target channel filter
+    if (automation.scopeTargetChannelIds.length > 0 && channelId) {
+      if (!automation.scopeTargetChannelIds.includes(channelId)) return false;
+    }
+    // Exclude channel filter
+    if (automation.scopeExcludeChannelIds.length > 0 && channelId) {
+      if (automation.scopeExcludeChannelIds.includes(channelId)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Build the event context from platform event data.
+   * Maps event data to member, channel, message, and template variables.
+   */
+  private buildEventContext(event: PlatformEvent): AutomationEventContext {
+    const data = event.data as Record<string, unknown>;
+    const variables: Record<string, string> = {};
+    let member: GuildMember | null = null;
+    let channelId: string | null = null;
+    let messageId: string | null = null;
+
+    // Resolve member from discordId
+    const discordId = data.discordId as string | undefined;
+    if (discordId) {
+      member = this.guild.members.cache.get(discordId) ?? null;
+      variables['user'] = member ? `<@${discordId}>` : discordId;
+      variables['user.name'] = member?.displayName ?? (data.username as string) ?? discordId;
+    }
+
+    // Resolve channel
+    if (data.channelId) {
+      channelId = data.channelId as string;
+      const channel = this.guild.channels.cache.get(channelId);
+      variables['channel'] = channel ? `<#${channelId}>` : channelId;
+    }
+
+    // Resolve message
+    if (data.messageId) {
+      messageId = data.messageId as string;
+    }
+
+    // Trigger-specific variables
+    switch (event.type) {
+      case 'member.joined':
+        variables['memberCount'] = String(this.guild.memberCount);
+        variables['returning'] = String(data.isReturning ?? false);
+        break;
+      case 'member.left':
+        variables['memberCount'] = String(this.guild.memberCount);
+        variables['duration'] = ''; // Could calculate from member data
+        break;
+      case 'member.verified':
+        variables['memberNumber'] = String(data.memberNumber ?? '');
+        break;
+      case 'message.sent':
+        variables['content'] = (data.content as string) ?? '';
+        variables['message'] = (data.content as string) ?? '';
+        break;
+      case 'role.gained':
+      case 'role.lost':
+        variables['role'] = data.roleId ? `<@&${data.roleId}>` : '';
+        variables['role.name'] = (data.roleName as string) ?? '';
+        variables['source'] = (data.source as string) ?? '';
+        break;
+      case 'level.up':
+        variables['oldLevel'] = String(data.previousLevel ?? data.oldLevel ?? '');
+        variables['newLevel'] = String(data.newLevel ?? '');
+        break;
+      case 'purchase.completed':
+        variables['product'] = (data.productName as string) ?? '';
+        variables['order'] = (data.orderNumber as string) ?? '';
+        variables['amount'] = String(data.amount ?? '');
+        break;
+      case 'subscription.activated':
+      case 'subscription.lapsed':
+        variables['plan'] = (data.planId as string) ?? '';
+        break;
+      case 'ticket.opened':
+      case 'ticket.closed':
+        variables['ticket'] = `#${data.ticketNumber ?? ''}`;
+        variables['category'] = '';
+        break;
+      case 'giveaway.ended':
+        variables['giveaway'] = (data.title as string) ?? '';
+        variables['winners'] = Array.isArray(data.winnerIds)
+          ? (data.winnerIds as string[]).map((id) => `<@${id}>`).join(', ')
+          : '';
+        break;
+      case 'button.clicked':
+        variables['buttonId'] = (data.buttonId as string) ?? '';
+        break;
+      case 'reaction.added':
+        variables['emoji'] = (data.emoji as string) ?? '';
+        break;
+      case 'voice.joined':
+      case 'voice.left':
+        variables['channel'] = data.channelName ? (data.channelName as string) : (channelId ? `<#${channelId}>` : '');
+        break;
+      case 'infraction.created':
+        variables['type'] = (data.type as string) ?? '';
+        variables['reason'] = (data.reason as string) ?? '';
+        variables['count'] = String(data.totalInfractions ?? '');
+        break;
+    }
+
+    return {
+      member,
+      channelId,
+      messageId,
+      message: null, // Message object needs to be attached separately for message-based triggers
+      variables,
+    };
+  }
+
+  /**
+   * Process a message-based event with the full Message object.
+   * Called directly from the event handler for message.sent triggers.
+   */
+  async processMessageEvent(event: PlatformEvent, message: Message): Promise<void> {
+    const automations = this.loader.getForTrigger('message.sent');
+    if (automations.length === 0) return;
+
+    const ctx = this.buildEventContext(event);
+    ctx.message = message;
+    ctx.messageId = message.id;
+
+    for (const automation of automations) {
+      this.processAutomation(automation, event, ctx).catch((err) => {
+        console.error(`[AutomationEngine] Uncaught error in message automation "${automation.name}":`, err);
+      });
+    }
+  }
+
+  /**
+   * Process a reaction event with message reference.
+   */
+  async processReactionEvent(event: PlatformEvent, message: Message): Promise<void> {
+    const automations = this.loader.getForTrigger('reaction.added');
+    if (automations.length === 0) return;
+
+    const ctx = this.buildEventContext(event);
+    ctx.message = message;
+    ctx.messageId = message.id;
+
+    for (const automation of automations) {
+      this.processAutomation(automation, event, ctx).catch((err) => {
+        console.error(`[AutomationEngine] Uncaught error in reaction automation "${automation.name}":`, err);
+      });
+    }
+  }
+}

@@ -373,19 +373,20 @@ export interface DbAutomation {
   id: string; // UUID
   guild_id: string;
   name: string;
+  description: string | null;
   enabled: boolean;
   trigger_type: string;
   trigger_config: Record<string, unknown>;
   conditions: Record<string, unknown>[];
   actions: Record<string, unknown>[];
-  scope_target_user_ids: string[];
-  scope_target_channel_ids: string[];
-  scope_exclude_user_ids: string[];
-  scope_exclude_channel_ids: string[];
+  target_user_ids: string[];
+  target_channel_ids: string[];
+  exclude_user_ids: string[];
+  exclude_channel_ids: string[];
   rate_limit_per_user: number | null;
   rate_limit_window_seconds: number | null;
-  last_fired_at: string | null;
-  fire_count: number;
+  execution_count: number;
+  last_executed_at: string | null;
   created_at: string;
   updated_at: string;
 }
