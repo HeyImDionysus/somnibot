@@ -43,7 +43,12 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/login') ||
     request.nextUrl.pathname.startsWith('/api/auth') ||
     request.nextUrl.pathname === '/setup' ||
-    request.nextUrl.pathname.startsWith('/api/setup');
+    request.nextUrl.pathname.startsWith('/api/setup') ||
+    request.nextUrl.pathname.startsWith('/api/paypal/webhook') ||
+    request.nextUrl.pathname.startsWith('/api/license/validate') ||
+    request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||
+    request.nextUrl.pathname.startsWith('/api/license/deactivate') ||
+    request.nextUrl.pathname.startsWith('/api/downloads/');
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

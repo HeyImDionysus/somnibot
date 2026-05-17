@@ -76,7 +76,7 @@ export async function GET() {
 
     // Check if bot has written a recent diagnostics snapshot (indicates it's online)
     const { data: diag } = await supabase
-      .from('diagnostics_snapshots')
+      .from('bot_diagnostics')
       .select('created_at')
       .order('created_at', { ascending: false })
       .limit(1)
