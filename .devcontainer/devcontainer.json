@@ -1,0 +1,22 @@
+{
+  "name": "SomniBot Dev",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "17",
+      "installGradle": "false",
+      "installMaven": "false"
+    }
+  },
+  "forwardPorts": [3000, 2333, 6379],
+  "postCreateCommand": "npm install -g pnpm@9.15.4 && pnpm install",
+  "postStartCommand": "echo '✅ SomniBot Codespace ready. Run: bash test-phase1.sh'",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}
