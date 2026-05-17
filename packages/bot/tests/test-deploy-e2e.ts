@@ -4,10 +4,17 @@
 import { Client, GatewayIntentBits, ChannelType } from 'discord.js';
 import { createClient } from '@supabase/supabase-js';
 
-const DISCORD_TOKEN = 'REDACTED_DISCORD_TOKEN';
-const DISCORD_GUILD_ID = '1464713668766732393';
-const SUPABASE_URL = 'https://REDACTED_PROJECT_REF.supabase.co';
-const SERVICE_ROLE_KEY = 'REDACTED_SUPABASE_SERVICE_ROLE_KEY';
+// Load from environment — never hardcode credentials
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID!;
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+if (!DISCORD_TOKEN || !DISCORD_GUILD_ID || !SUPABASE_URL || !SERVICE_ROLE_KEY) {
+  console.error('❌ Missing required env vars: DISCORD_TOKEN, DISCORD_GUILD_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY');
+  console.error('   Make sure your .env file is loaded (run from repo root with: source .env && bun run packages/bot/tests/test-deploy-e2e.ts)');
+  process.exit(1);
+}
 
 const TEST_DESIRED_STATE = {
   everyonePermissions: '0',
