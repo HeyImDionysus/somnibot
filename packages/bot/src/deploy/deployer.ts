@@ -38,7 +38,7 @@ export interface DeployResult {
 
 export interface DeployAction {
   step: number;
-  action: 'create' | 'update' | 'delete' | 'set';
+  action: 'create' | 'update' | 'delete' | 'set' | 'reuse' | 'move';
   entityType: 'role' | 'channel' | 'category' | 'override' | 'everyone';
   entityName: string;
   discordId?: string;
@@ -339,29 +339,97 @@ export async function deployServerState(
     }
 
     // === Step 6: Create channels with permission overrides ===
+    // Handle Discord Community-required channels (rules, moderator-only).
+    // These can't be deleted, so we reuse them instead of creating duplicates.
+    const communityChannelIds = new Set<string>(
+      [guild.rulesChannelId, guild.publicUpdatesChannelId].filter(Boolean) as string[],
+    );
+    // Also detect the moderator-only channel Discord creates for Community servers
+    const modOnlyChannel = guild.channels.cache.find(
+      (c) => c.name === 'moderator-only' && !c.parentId,
+    );
+
     const sortedChannels = [...desiredState.channels].sort((a, b) => a.position - b.position);
 
     for (const desired of sortedChannels) {
       step++;
-      report(`Creating channel: ${desired.name}`);
-      try {
-        const channelId = await createChannel(
-          guild, desired, roleKeyToDiscordId, categoryKeyToDiscordId,
-        );
-        idMappings.push({ entityType: 'channel', key: desired.key, discordId: channelId });
-        actions.push({
-          step, action: 'create', entityType: 'channel',
-          entityName: desired.name, discordId: channelId, success: true,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errors.push({ step, entityType: 'channel', entityName: desired.name, error: msg });
-        actions.push({
-          step, action: 'create', entityType: 'channel',
-          entityName: desired.name, success: false, error: msg,
-        });
+
+      // Check if this desired channel matches a community-required channel
+      const existingCommunity =
+        desired.key === 'rules' && guild.rulesChannelId
+          ? guild.channels.cache.get(guild.rulesChannelId)
+          : null;
+
+      if (existingCommunity) {
+        report(`Reusing community channel: ${desired.name}`);
+        try {
+          // Move into correct category and set properties
+          const parentId = desired.categoryKey
+            ? categoryKeyToDiscordId.get(desired.categoryKey)
+            : undefined;
+          await existingCommunity.edit({
+            topic: desired.topic ?? undefined,
+            rateLimitPerUser: desired.slowmode,
+            nsfw: desired.nsfw,
+            parent: parentId ?? null,
+            position: desired.position,
+            reason: 'SomniBot deployment — reusing community channel',
+          });
+          idMappings.push({ entityType: 'channel', key: desired.key, discordId: existingCommunity.id });
+          actions.push({
+            step, action: 'reuse', entityType: 'channel',
+            entityName: desired.name, discordId: existingCommunity.id, success: true,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push({ step, entityType: 'channel', entityName: desired.name, error: msg });
+          actions.push({
+            step, action: 'reuse', entityType: 'channel',
+            entityName: desired.name, success: false, error: msg,
+          });
+        }
+      } else {
+        report(`Creating channel: ${desired.name}`);
+        try {
+          const channelId = await createChannel(
+            guild, desired, roleKeyToDiscordId, categoryKeyToDiscordId,
+          );
+          idMappings.push({ entityType: 'channel', key: desired.key, discordId: channelId });
+          actions.push({
+            step, action: 'create', entityType: 'channel',
+            entityName: desired.name, discordId: channelId, success: true,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push({ step, entityType: 'channel', entityName: desired.name, error: msg });
+          actions.push({
+            step, action: 'create', entityType: 'channel',
+            entityName: desired.name, success: false, error: msg,
+          });
+        }
       }
       await sleep(300);
+    }
+
+    // Move moderator-only channel to Staff category if it exists
+    if (modOnlyChannel && 'setParent' in modOnlyChannel) {
+      step++;
+      report('Organizing community moderator-only channel');
+      try {
+        const staffCatId = categoryKeyToDiscordId.get('cat-staff');
+        if (staffCatId) {
+          await (modOnlyChannel as any).setParent(staffCatId, {
+            reason: 'SomniBot deployment — organize community channel',
+          });
+          actions.push({
+            step, action: 'move', entityType: 'channel',
+            entityName: 'moderator-only', discordId: modOnlyChannel.id, success: true,
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push({ step, entityType: 'channel', entityName: 'moderator-only', error: msg });
+      }
     }
 
     // === Step 7: Store ID mappings in Supabase ===
