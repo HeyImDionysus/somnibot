@@ -15,6 +15,7 @@ import { buildTempChannelCommands } from './features/temp-channels/commands.js';
 import { StatsChannelManager } from './features/stats-channels/index.js';
 import { ScheduledMessageRunner } from './features/scheduled-messages/index.js';
 import { GiveawayManager, buildGiveawayCommands } from './features/giveaways/index.js';
+import { MusicPlayerManager, buildMusicCommands } from './features/music/index.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -30,7 +31,7 @@ import { REST, Routes } from 'discord.js';
  */
 async function main(): Promise<void> {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  SomniBot v0.3.0 — Starting...');
+  console.log('  SomniBot v0.4.0 — Starting...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   // 1. Validate environment
@@ -252,7 +253,45 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log('[Boot] ✅ All Phase 3-10 systems initialized');
+    // Phase 11: Music System
+    if (guild) {
+      try {
+        const { data: musicConfig } = await client.supabase
+          .from('guild_config')
+          .select('music_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (musicConfig?.music_enabled !== false) {
+          const musicPlayer = new MusicPlayerManager(
+            guild,
+            client.shoukaku,
+            client.supabase,
+            client.valkey,
+            client.eventBus,
+          );
+          await musicPlayer.init();
+          (client as unknown as Record<string, unknown>)._musicPlayer = musicPlayer;
+
+          // Register music slash commands
+          const rest11 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+          const musicCmds = buildMusicCommands();
+          for (const cmd of musicCmds) {
+            await rest11.post(
+              Routes.applicationGuildCommands(client.user!.id, client.guildId),
+              { body: cmd.toJSON() },
+            );
+          }
+          console.log('[Boot] ✅ Music system started + commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause)');
+        } else {
+          console.log('[Boot] ⏸️  Music system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 11 (Music) initialization error:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-11 systems initialized');
   });
 
   // Graceful shutdown
@@ -273,6 +312,9 @@ async function main(): Promise<void> {
     if (schedRunner?.stop) schedRunner.stop();
     const giveawayMgr = (client as unknown as Record<string, unknown>)._giveawayManager as { stop?: () => void } | undefined;
     if (giveawayMgr?.stop) giveawayMgr.stop();
+    // Phase 11: Stop music player
+    const musicPlayer = (client as unknown as Record<string, unknown>)._musicPlayer as { shutdown?: () => void } | undefined;
+    if (musicPlayer?.shutdown) musicPlayer.shutdown();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});

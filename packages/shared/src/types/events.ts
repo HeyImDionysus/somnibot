@@ -144,6 +144,25 @@ export interface ButtonClickedData {
   messageId: string;
 }
 
+export interface TrackStartedData {
+  title: string;
+  author: string;
+  uri: string;
+  duration: number;
+  requestedBy: string;
+}
+
+export interface TrackEndedData {
+  title: string;
+  author: string;
+  uri: string;
+  reason: 'finished' | 'skipped' | 'stopped' | 'error';
+}
+
+export interface QueueEndedData {
+  totalTracksPlayed: number;
+}
+
 export interface ConfigChangedData {
   section: string;
   changes: Record<string, unknown>;
@@ -224,6 +243,9 @@ export interface PlatformEventMap {
   'reaction.added': ReactionAddedData;
   'voice.joined': VoiceJoinedData;
   'voice.left': VoiceLeftData;
+  'track.started': TrackStartedData;
+  'track.ended': TrackEndedData;
+  'queue.ended': QueueEndedData;
   'config.changed': ConfigChangedData;
   'server.deployed': ServerDeployedData;
   'deploy.requested': DeployRequestedData;
