@@ -4,6 +4,16 @@ import {
   handleMemberUpdate,
   handleMemberLeave,
 } from '../features/welcome/index.js';
+import {
+  handleRoleCreate,
+  handleRoleUpdate,
+  handleRoleDelete,
+} from '../sync/role-events.js';
+import {
+  handleChannelCreate,
+  handleChannelUpdate,
+  handleChannelDelete,
+} from '../sync/channel-events.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -50,6 +60,35 @@ export function registerEvents(client: SomniClient): void {
 
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
     await handleMemberUpdate(client, oldMember, newMember);
+  });
+
+  // ── Role Events (Phase 5: Drift Detection) ─────────────
+  client.on('roleCreate', async (role) => {
+    await handleRoleCreate(client, role);
+  });
+
+  client.on('roleUpdate', async (oldRole, newRole) => {
+    await handleRoleUpdate(client, oldRole, newRole);
+  });
+
+  client.on('roleDelete', async (role) => {
+    await handleRoleDelete(client, role);
+  });
+
+  // ── Channel Events (Phase 5: Drift Detection) ─────────
+  client.on('channelCreate', async (channel) => {
+    if (!('guild' in channel)) return;
+    await handleChannelCreate(client, channel);
+  });
+
+  client.on('channelUpdate', async (oldChannel, newChannel) => {
+    if (!('guild' in newChannel)) return;
+    await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel);
+  });
+
+  client.on('channelDelete', async (channel) => {
+    if (!('guild' in channel)) return;
+    await handleChannelDelete(client, channel);
   });
 
   // ── Message Events ─────────────────────────────────────

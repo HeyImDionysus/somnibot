@@ -4,6 +4,7 @@ import { registerEvents } from './events/handler.js';
 import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
+import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
 
 /**
  * SomniBot entry point.
@@ -79,12 +80,41 @@ async function main(): Promise<void> {
     // Start deploy listener
     startDeployListener(client);
 
-    console.log('[Boot] ✅ All Phase 3 systems initialized');
+    // Start sync engine (Phase 5)
+    if (guild) {
+      const { data: syncConfigData } = await client.supabase
+        .from('guild_config')
+        .select('sync_enabled, sync_interval_minutes, sync_auto_repair, sync_auto_repair_everyone')
+        .eq('guild_id', client.guildId)
+        .maybeSingle();
+
+      const syncConfig: SyncConfig = {
+        enabled: syncConfigData?.sync_enabled ?? true,
+        intervalMinutes: syncConfigData?.sync_interval_minutes ?? 15,
+        autoRepair: syncConfigData?.sync_auto_repair ?? false,
+        autoRepairEveryone: syncConfigData?.sync_auto_repair_everyone ?? true,
+      };
+
+      if (syncConfig.enabled) {
+        const syncHandle = startSyncScheduler(guild, client.supabase, client.eventBus, syncConfig);
+        console.log(`[Boot] ✅ Sync engine started (interval: ${syncConfig.intervalMinutes}m, auto-repair: ${syncConfig.autoRepair})`);
+
+        // Store handle for cleanup
+        (client as unknown as Record<string, unknown>)._syncHandle = syncHandle;
+      } else {
+        console.log('[Boot] ⏸️  Sync engine disabled in config');
+      }
+    }
+
+    console.log('[Boot] ✅ All Phase 3-5 systems initialized');
   });
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
+    // Stop sync scheduler
+    const syncHandle = (client as unknown as Record<string, unknown>)._syncHandle as { stop: () => void } | undefined;
+    if (syncHandle) syncHandle.stop();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});
