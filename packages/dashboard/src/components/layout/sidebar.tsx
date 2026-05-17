@@ -43,18 +43,18 @@ const navigation: NavGroup[] = [
   {
     title: 'Overview',
     items: [
-      { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, locked: true, phase: 2 },
+      { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
       { label: 'Setup', href: '/setup', icon: Settings },
     ],
   },
   {
     title: 'Server',
     items: [
-      { label: 'Roles & Permissions', href: '/roles', icon: Shield, locked: true, phase: 2 },
-      { label: 'Channels', href: '/channels', icon: MessageSquare, locked: true, phase: 2 },
+      { label: 'Roles & Permissions', href: '/roles', icon: Shield },
+      { label: 'Channels', href: '/channels', icon: MessageSquare },
       { label: 'Onboarding', href: '/onboarding', icon: Users, locked: true, phase: 3 },
       { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, locked: true, phase: 3 },
-      { label: 'Sync', href: '/sync', icon: Zap, locked: true, phase: 2 },
+      { label: 'Sync', href: '/sync', icon: Zap },
     ],
   },
   {

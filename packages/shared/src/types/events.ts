@@ -92,6 +92,38 @@ export interface ConfigChangedData {
   changedBy: string;
 }
 
+export interface ServerDeployedData {
+  deployId: string;
+  rolesCreated: number;
+  channelsCreated: number;
+  categoriesCreated: number;
+  overridesApplied: number;
+  duration: number;
+}
+
+export interface DriftDetectedData {
+  driftCount: number;
+  criticalCount: number;
+  autoRepaired: boolean;
+  items: { type: string; entityName: string; severity: string }[];
+}
+
+export interface DeployActionData {
+  action: 'create' | 'update' | 'delete';
+  entityType: 'role' | 'channel' | 'category' | 'override' | 'everyone';
+  entityName: string;
+  discordId?: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface SyncCompletedData {
+  driftItemsFound: number;
+  itemsRepaired: number;
+  itemsAccepted: number;
+  duration: number;
+}
+
 // ============================================================
 // Event Type Map
 // ============================================================
@@ -110,6 +142,10 @@ export interface PlatformEventMap {
   'infraction.created': InfractionCreatedData;
   'giveaway.ended': GiveawayEndedData;
   'config.changed': ConfigChangedData;
+  'server.deployed': ServerDeployedData;
+  'deploy.action': DeployActionData;
+  'drift.detected': DriftDetectedData;
+  'sync.completed': SyncCompletedData;
 }
 
 export type PlatformEventType = keyof PlatformEventMap;
