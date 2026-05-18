@@ -22,6 +22,7 @@ import { AuditService, DiagnosticsService } from './features/audit/index.js';
 import { runMigrations } from './services/migration-runner.js';
 import { startPeriodicSnapshots } from './services/guild-snapshot.js';
 import { startActionQueueListener } from './services/action-queue.js';
+import { scheduleReconciliation } from './services/reconciliation.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -140,6 +141,10 @@ async function main(): Promise<void> {
 
       await startActionQueueListener(guild, client.supabase);
       console.log('[Boot] ✅ Bot action queue listener started');
+
+      const reconciliationTimer = scheduleReconciliation(guild, client.supabase);
+      (client as unknown as Record<string, unknown>)._reconciliationTimer = reconciliationTimer;
+      console.log('[Boot] ✅ Entitlement reconciliation scheduled (every 6 hours)');
     }
 
     // Start sync engine (Phase 5)

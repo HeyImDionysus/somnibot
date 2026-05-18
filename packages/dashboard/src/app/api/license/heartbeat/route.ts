@@ -1,12 +1,12 @@
 /**
  * POST /api/license/heartbeat — Session keepalive.
  *
- * Architecture doc §30.9.
+ * Architecture doc §30.9. Phase B: rate-limited.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
-import { parseBody, schemas } from '@/lib/api/validation';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -15,9 +15,37 @@ function sha256(input: string): string {
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
-  const parsed = await parseBody(req, schemas.licenseSdk.heartbeat);
-  if (!parsed.ok) return parsed.response;
-  const { session_id, license_key } = parsed.data;
+  // ── B.5: Rate limit ──
+  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  const ipLimit = rateLimits.licenseHeartbeat(clientIp);
+  if (ipLimit.limited) {
+    return NextResponse.json(
+      { valid: false, status: 'rate_limited', error: 'Too many requests' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil(ipLimit.retryAfterMs / 1000)) },
+      },
+    );
+  }
+
+  let body: { session_id: string; license_key: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { valid: false, status: 'session_invalidated', error: 'Invalid request body' },
+      { status: 400 },
+    );
+  }
+
+  const { session_id, license_key } = body;
+
+  if (!session_id || !license_key) {
+    return NextResponse.json(
+      { valid: false, status: 'session_invalidated', error: 'session_id and license_key are required' },
+      { status: 400 },
+    );
+  }
 
   // Verify key
   const keyHash = sha256(license_key);
