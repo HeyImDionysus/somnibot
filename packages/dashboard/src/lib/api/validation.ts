@@ -456,6 +456,70 @@ const syncConfig = z.object({
   sync_auto_repair_everyone: z.boolean().optional(),
 }).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
 
+// ── Music schemas ───────────────────────────────────
+
+const musicConfig = z.object({
+  default_volume: z.number().int().min(0).max(100).optional(),
+  max_queue_size: z.number().int().min(1).max(1000).optional(),
+  allow_duplicates: z.boolean().optional(),
+  dj_role_id: snowflake.optional().nullable(),
+  auto_leave_empty: z.boolean().optional(),
+  auto_leave_timeout_seconds: z.number().int().min(0).max(3600).optional(),
+}).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
+
+// ── Product file schemas ────────────────────────────
+
+const productFileCreate = z.object({
+  name: safeName,
+  file_path: z.string().max(512).optional(),
+  external_url: urlString,
+  version: z.string().max(32).optional(),
+  platform: z.string().max(32).optional(),
+  file_size_bytes: z.number().int().min(0).optional(),
+});
+
+// ── Infraction schemas ──────────────────────────────
+
+const infractionCreate = z.object({
+  target_discord_id: snowflake,
+  type: z.enum(['warn', 'mute', 'kick', 'ban', 'note']),
+  reason: z.string().min(1).max(1000),
+  duration_minutes: z.number().int().min(0).max(525600).optional(),
+  evidence: z.string().max(2000).optional(),
+});
+
+const infractionPardon = z.object({
+  infraction_id: uuid,
+  reason: z.string().max(500).optional(),
+});
+
+// ── License key schemas ─────────────────────────────
+
+const licenseKeyUpdate = z.object({
+  status: z.enum(['active', 'suspended', 'revoked', 'expired']),
+  reason: z.string().max(500).optional(),
+});
+
+// ── Public license SDK schemas ──────────────────────
+
+const licenseValidate = z.object({
+  license_key: z.string().min(1).max(512),
+  product_id: uuid,
+  device_fingerprint: z.string().max(256).optional(),
+  device_name: z.string().max(128).optional(),
+  app_version: z.string().max(32).optional(),
+});
+
+const licenseHeartbeat = z.object({
+  license_key: z.string().min(1).max(512),
+  session_id: uuid,
+});
+
+const licenseDeactivate = z.object({
+  license_key: z.string().min(1).max(512),
+  session_id: uuid.optional(),
+});
+
 
 // ── Export all schemas ──────────────────────────────
 
@@ -540,79 +604,22 @@ export const schemas = {
     action: syncAction,
     config: syncConfig,
   },
-};
-
-// ── Additional schemas (late additions) ─────────────
-
-const musicConfig = z.object({
-  default_volume: z.number().int().min(0).max(100).optional(),
-  max_queue_size: z.number().int().min(1).max(1000).optional(),
-  allow_duplicates: z.boolean().optional(),
-  dj_role_id: snowflake.optional().nullable(),
-  auto_leave_empty: z.boolean().optional(),
-  auto_leave_timeout_seconds: z.number().int().min(0).max(3600).optional(),
-}).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
-
-const productFileCreate = z.object({
-  name: safeName,
-  file_path: z.string().max(512).optional(),
-  external_url: urlString,
-  version: z.string().max(32).optional(),
-  platform: z.string().max(32).optional(),
-  file_size_bytes: z.number().int().min(0).optional(),
-});
-
-const infractionCreate = z.object({
-  target_discord_id: snowflake,
-  type: z.enum(['warn', 'mute', 'kick', 'ban', 'note']),
-  reason: z.string().min(1).max(1000),
-  duration_minutes: z.number().int().min(0).max(525600).optional(),
-  evidence: z.string().max(2000).optional(),
-});
-
-const infractionPardon = z.object({
-  infraction_id: uuid,
-  reason: z.string().max(500).optional(),
-});
-
-const licenseKeyUpdate = z.object({
-  status: z.enum(['active', 'suspended', 'revoked', 'expired']),
-  reason: z.string().max(500).optional(),
-});
-
-// Add to schemas export
-Object.assign(schemas, {
-  music: { config: musicConfig },
-  productFile: { create: productFileCreate },
-  infraction: { create: infractionCreate, pardon: infractionPardon },
-  licenseKey: { update: licenseKeyUpdate },
-});
-
-// ── Public license SDK schemas ──────────────────────
-
-const licenseValidate = z.object({
-  key: z.string().min(1).max(64),
-  hardware_id: z.string().max(256).optional(),
-  product_id: uuid.optional(),
-  app_version: z.string().max(32).optional(),
-});
-
-const licenseHeartbeat = z.object({
-  key: z.string().min(1).max(64),
-  session_id: uuid,
-  hardware_id: z.string().max(256).optional(),
-});
-
-const licenseDeactivate = z.object({
-  key: z.string().min(1).max(64),
-  session_id: uuid.optional(),
-  hardware_id: z.string().max(256).optional(),
-});
-
-Object.assign(schemas, {
+  music: {
+    config: musicConfig,
+  },
+  productFile: {
+    create: productFileCreate,
+  },
+  infraction: {
+    create: infractionCreate,
+    pardon: infractionPardon,
+  },
+  licenseKey: {
+    update: licenseKeyUpdate,
+  },
   licenseSdk: {
     validate: licenseValidate,
     heartbeat: licenseHeartbeat,
     deactivate: licenseDeactivate,
   },
-});
+};
