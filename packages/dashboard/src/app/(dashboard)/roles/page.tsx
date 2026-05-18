@@ -1,69 +1,131 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { RoleHierarchyStack, type RoleItem } from '@/components/roles/role-hierarchy-stack';
-import { PermissionMatrix, PERMISSION_CATEGORIES } from '@/components/permissions/permission-matrix';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { Button } from '@/components/shared/button';
-import { Input, Select } from '@/components/shared/input';
+import { Input, Select, Toggle } from '@/components/shared/input';
 import { Badge } from '@/components/shared/badge';
-import { rolesApi, type RoleTemplateRow } from '@/lib/api/client';
-import { Shield, Save, X, AlertTriangle } from 'lucide-react';
+import { rolesApi, type LiveRoleData } from '@/lib/api/client';
+import {
+  Shield, Plus, Pencil, Trash2, Bot, Crown, Sparkles, Lock, Users,
+  RefreshCw, AlertTriangle, X, Save, GripVertical, Star,
+} from 'lucide-react';
+import { cn } from '@/lib/utils/cn';
 
 // ============================================================
 // Types
 // ============================================================
 
-type PermValue = 'allow' | 'deny' | 'inherit';
-
-interface EditingRole {
-  id: string | null; // null = creating new
+interface NewRoleForm {
   name: string;
   tier: string;
-  description: string;
   color: string;
-  permissionValues: Record<string, PermValue>;
+  hoist: boolean;
+  mentionable: boolean;
 }
 
 // ============================================================
 // Constants
 // ============================================================
 
+const TIER_ORDER = ['admin', 'moderator', 'member', 'cosmetic'] as const;
+
+const TIER_META: Record<string, {
+  label: string;
+  description: string;
+  badge: 'danger' | 'warning' | 'success' | 'pink' | 'info' | 'default';
+  icon: typeof Shield;
+}> = {
+  admin: {
+    label: 'Admin',
+    description: 'Full server management — roles, channels, settings',
+    badge: 'danger',
+    icon: Crown,
+  },
+  moderator: {
+    label: 'Moderator',
+    description: 'Moderation tools — timeout, kick, ban, manage messages',
+    badge: 'warning',
+    icon: Shield,
+  },
+  member: {
+    label: 'Member',
+    description: 'Standard community access — chat, voice, reactions',
+    badge: 'success',
+    icon: Users,
+  },
+  cosmetic: {
+    label: 'Cosmetic',
+    description: 'Display only — name color, hoist. No functional permissions',
+    badge: 'pink',
+    icon: Sparkles,
+  },
+};
+
 const TIER_OPTIONS = [
-  { value: 'admin', label: 'Admin — Full server management' },
-  { value: 'moderator', label: 'Moderator — Member management' },
-  { value: 'member', label: 'Member — Standard access' },
-  { value: 'cosmetic', label: 'Cosmetic — Visual only, no permissions' },
-  { value: 'custom', label: 'Custom — Manually configured' },
+  { value: 'admin', label: 'Admin — full management' },
+  { value: 'moderator', label: 'Moderator — moderation tools' },
+  { value: 'member', label: 'Member — standard access' },
+  { value: 'cosmetic', label: 'Cosmetic — display only' },
 ];
 
-const TIER_COLORS: Record<string, string> = {
-  admin: '#ED4245',
-  moderator: '#FEE75C',
-  member: '#57F287',
-  cosmetic: '#FF1493',
-  custom: '#5865F2',
-  everyone: '#99AAB5',
-};
+// ============================================================
+// Helpers
+// ============================================================
+
+function intToHex(color: number): string {
+  if (!color) return '#99AAB5';
+  return '#' + color.toString(16).padStart(6, '0');
+}
+
+function hexToInt(hex: string): number {
+  return parseInt(hex.replace('#', ''), 16) || 0;
+}
+
+function classifyUntieredRole(role: LiveRoleData): string {
+  if (role.managed) return 'managed';
+  return 'unassigned';
+}
+
+function getManagedLabel(role: LiveRoleData): string {
+  if (role.tags.premiumSubscriberRole) return 'Nitro Booster';
+  if (role.tags.botId) return 'Bot Role';
+  if (role.tags.integrationId) return 'Integration';
+  if (role.tags.availableForPurchase) return 'Server Shop';
+  if (role.tags.guildConnections) return 'Linked Role';
+  if (role.managed) return 'Managed';
+  return '';
+}
 
 // ============================================================
 // Page
 // ============================================================
 
 export default function RolesPage() {
-  const [roles, setRoles] = useState<RoleItem[]>([]);
-  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
-  const [editingRole, setEditingRole] = useState<EditingRole | null>(null);
+  const [roles, setRoles] = useState<LiveRoleData[]>([]);
+  const [botRoleId, setBotRoleId] = useState<string | null>(null);
+  const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
+  const [awaitingSnapshot, setAwaitingSnapshot] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
+  const [editingRole, setEditingRole] = useState<LiveRoleData | null>(null);
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [newRoleForm, setNewRoleForm] = useState<NewRoleForm>({
+    name: '', tier: 'member', color: '#99AAB5', hoist: false, mentionable: false,
+  });
+  const [actionPending, setActionPending] = useState(false);
 
-  // Load roles from API
+  // ── Load roles from live state ──
   const loadRoles = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await rolesApi.list();
-      setRoles(data.map(rowToRoleItem));
+      const response = await rolesApi.list();
+      setRoles(response.data);
+      setBotRoleId(response.botRoleId ?? null);
+      setSnapshotAt(response.snapshotAt);
+      setAwaitingSnapshot(response.awaitingSnapshot);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load roles');
     } finally {
@@ -71,126 +133,174 @@ export default function RolesPage() {
     }
   }, []);
 
-  useEffect(() => {
-    loadRoles();
-  }, [loadRoles]);
+  useEffect(() => { loadRoles(); }, [loadRoles]);
 
-  // Convert DB row to UI item
-  function rowToRoleItem(row: RoleTemplateRow): RoleItem {
-    return {
-      id: row.id,
-      name: row.name,
-      tier: row.tier,
-      color: TIER_COLORS[row.tier] ?? '#99AAB5',
-      permissions: row.permissions,
-      isBuiltin: row.is_builtin,
-      description: row.description ?? undefined,
-    };
+  // ── Group roles ──
+  const botRole = roles.find((r) => r.id === botRoleId);
+  const managedRoles = roles.filter(
+    (r) => r.managed && r.id !== botRoleId,
+  );
+  const tieredRoles: Record<string, LiveRoleData[]> = {
+    admin: [], moderator: [], member: [], cosmetic: [],
+  };
+  const unassignedRoles: LiveRoleData[] = [];
+
+  for (const role of roles) {
+    if (role.id === botRoleId) continue;
+    if (role.managed) continue;
+    if (role.tier && tieredRoles[role.tier]) {
+      tieredRoles[role.tier].push(role);
+    } else {
+      unassignedRoles.push(role);
+    }
   }
 
-  // Start editing a role
-  const handleEdit = (id: string) => {
-    const role = roles.find((r) => r.id === id);
-    if (!role) return;
-
-    setEditingRole({
-      id: role.id,
-      name: role.name,
-      tier: role.tier,
-      description: role.description ?? '',
-      color: role.color,
-      permissionValues: {}, // TODO: derive from permission bitfield
-    });
-    setSelectedRoleId(id);
-  };
-
-  // Start creating a new role
-  const handleAdd = () => {
-    setEditingRole({
-      id: null,
-      name: '',
-      tier: 'member',
-      description: '',
-      color: TIER_COLORS['member'],
-      permissionValues: {},
-    });
-    setSelectedRoleId(null);
-  };
-
-  // Save role
-  const handleSave = async () => {
-    if (!editingRole) return;
-
+  // ── Create role ──
+  const handleCreateRole = async () => {
+    if (!newRoleForm.name || !newRoleForm.tier) return;
+    setActionPending(true);
     try {
-      setSaving(true);
-      setError(null);
-
-      if (editingRole.id) {
-        await rolesApi.update({
-          id: editingRole.id,
-          name: editingRole.name,
-          tier: editingRole.tier,
-          description: editingRole.description,
-        });
-      } else {
-        await rolesApi.create({
-          name: editingRole.name,
-          tier: editingRole.tier,
-          description: editingRole.description,
-        });
-      }
-
-      setEditingRole(null);
-      await loadRoles();
+      await rolesApi.create({
+        name: newRoleForm.name,
+        tier: newRoleForm.tier,
+        color: hexToInt(newRoleForm.color),
+        hoist: newRoleForm.hoist,
+        mentionable: newRoleForm.mentionable,
+      });
+      setShowNewForm(false);
+      setNewRoleForm({ name: '', tier: 'member', color: '#99AAB5', hoist: false, mentionable: false });
+      // Poll for updated snapshot
+      setTimeout(loadRoles, 2000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save role');
+      setError(err instanceof Error ? err.message : 'Failed to create role');
     } finally {
-      setSaving(false);
+      setActionPending(false);
     }
   };
 
-  // Delete role
-  const handleDelete = async (id: string) => {
-    const role = roles.find((r) => r.id === id);
-    if (!role) return;
-
-    if (role.isBuiltin) {
-      setError('Cannot delete built-in templates');
-      return;
-    }
-
+  // ── Update role ──
+  const handleUpdateRole = async () => {
+    if (!editingRole) return;
+    setActionPending(true);
     try {
-      await rolesApi.delete(id);
-      setSelectedRoleId(null);
+      await rolesApi.update({
+        roleId: editingRole.id,
+        name: editingRole.name,
+        color: editingRole.color,
+        hoist: editingRole.hoist,
+        mentionable: editingRole.mentionable,
+        templateKey: editingRole.templateKey ?? undefined,
+      });
       setEditingRole(null);
-      await loadRoles();
+      setTimeout(loadRoles, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update role');
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  // ── Delete role ──
+  const handleDeleteRole = async (role: LiveRoleData) => {
+    if (role.managed) return;
+    if (!confirm(`Delete role "${role.name}"? This will remove it from Discord.`)) return;
+    setActionPending(true);
+    try {
+      await rolesApi.delete(role.id, role.templateKey ?? undefined);
+      if (selectedRoleId === role.id) {
+        setSelectedRoleId(null);
+        setEditingRole(null);
+      }
+      setTimeout(loadRoles, 2000);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete role');
+    } finally {
+      setActionPending(false);
     }
   };
 
-  // Reorder
-  const handleReorder = (newRoles: RoleItem[]) => {
-    setRoles(newRoles);
-    // TODO: save order to backend
+  // ── Select role for editing ──
+  const selectRole = (role: LiveRoleData) => {
+    setSelectedRoleId(role.id);
+    if (!role.managed) {
+      setEditingRole({ ...role });
+    } else {
+      setEditingRole(null);
+    }
+    setShowNewForm(false);
   };
 
-  // Permission matrix change
-  const handlePermissionChange = (roleId: string, permKey: string, value: PermValue) => {
-    if (!editingRole || editingRole.id !== roleId) return;
-    setEditingRole({
-      ...editingRole,
-      permissionValues: {
-        ...editingRole.permissionValues,
-        [permKey]: value,
-      },
-    });
-  };
+  // ── Role row component ──
+  const RoleRow = ({ role, readOnly }: { role: LiveRoleData; readOnly?: boolean }) => (
+    <div
+      onClick={() => selectRole(role)}
+      className={cn(
+        'group flex cursor-pointer items-center gap-2 rounded-input px-3 py-2 transition-standard',
+        selectedRoleId === role.id
+          ? 'bg-discord-accent/15 ring-1 ring-discord-accent/40'
+          : 'hover:bg-discord-bg-primary/50',
+      )}
+    >
+      {/* Color dot */}
+      <div
+        className="h-3 w-3 shrink-0 rounded-full"
+        style={{ backgroundColor: intToHex(role.color) }}
+      />
 
+      {/* Name */}
+      <span className="flex-1 truncate text-sm font-medium text-discord-text-primary">
+        {role.name}
+      </span>
+
+      {/* Members count */}
+      <span className="text-xs text-discord-text-muted">{role.memberCount}</span>
+
+      {/* Managed badge */}
+      {role.managed && (
+        <Badge variant="default">
+          {getManagedLabel(role)}
+        </Badge>
+      )}
+
+      {/* Tier badge */}
+      {role.tier && !role.managed && (
+        <Badge variant={TIER_META[role.tier]?.badge ?? 'default'}>
+          {role.tier}
+        </Badge>
+      )}
+
+      {/* Actions for editable roles */}
+      {!readOnly && !role.managed && (
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-standard group-hover:opacity-100">
+          <button
+            onClick={(e) => { e.stopPropagation(); selectRole(role); }}
+            className="rounded p-1 text-discord-text-muted hover:bg-discord-bg-tertiary hover:text-discord-text-primary"
+            title="Edit role"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDeleteRole(role); }}
+            className="rounded p-1 text-discord-text-muted hover:bg-discord-danger/20 hover:text-discord-danger"
+            title="Delete role"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      )}
+
+      {readOnly && (
+        <Lock size={12} className="shrink-0 text-discord-text-muted/40" />
+      )}
+    </div>
+  );
+
+  // ── Loading state ──
   if (loading) {
     return (
-      <div className="flex h-96 items-center justify-center">
-        <div className="text-sm text-discord-text-muted">Loading roles...</div>
+      <div className="flex h-64 items-center justify-center">
+        <RefreshCw size={20} className="animate-spin text-discord-text-muted" />
+        <span className="ml-2 text-sm text-discord-text-muted">Loading Discord roles...</span>
       </div>
     );
   }
@@ -198,140 +308,380 @@ export default function RolesPage() {
   return (
     <div className="space-y-6">
       {/* Page header */}
-      <div>
-        <h1 className="flex items-center gap-2 text-xl font-bold text-discord-text-primary">
-          <Shield size={22} />
-          Role Templates
-        </h1>
-        <p className="mt-1 text-sm text-discord-text-muted">
-          Define roles and their permissions. The bot will create these roles in Discord during deployment.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-bold text-discord-text-primary">
+            <Shield size={22} />
+            Role Management
+          </h1>
+          <p className="mt-1 text-sm text-discord-text-muted">
+            Manage your server&apos;s roles. Roles are grouped by permission tier. Managed roles (bot, Nitro Booster) are shown read-only.
+          </p>
+          {snapshotAt && (
+            <p className="mt-0.5 text-xs text-discord-text-muted">
+              Last synced: {new Date(snapshotAt).toLocaleString()}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={loadRoles} disabled={loading}>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </Button>
+          <Button size="sm" onClick={() => { setShowNewForm(true); setEditingRole(null); setSelectedRoleId(null); }}>
+            <Plus size={14} />
+            Create Role
+          </Button>
+        </div>
       </div>
 
-      {/* Error banner */}
+      {/* Awaiting snapshot warning */}
+      {awaitingSnapshot && (
+        <Card variant="warning">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} className="text-discord-warning" />
+            <p className="text-sm text-discord-warning">
+              Waiting for the bot to send its first snapshot. Make sure the bot is online and connected.
+            </p>
+          </div>
+        </Card>
+      )}
+
+      {/* Error */}
       {error && (
         <Card variant="danger">
           <div className="flex items-center gap-2">
             <AlertTriangle size={14} className="text-discord-danger" />
             <p className="text-sm text-discord-danger">{error}</p>
-            <button onClick={() => setError(null)} className="ml-auto">
-              <X size={14} className="text-discord-danger" />
-            </button>
+            <button onClick={() => setError(null)} className="ml-auto"><X size={14} /></button>
           </div>
         </Card>
       )}
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
         {/* Left: Role hierarchy */}
         <Card>
-          <RoleHierarchyStack
-            roles={roles}
-            selectedRoleId={selectedRoleId}
-            onSelect={(id) => { setSelectedRoleId(id); handleEdit(id); }}
-            onReorder={handleReorder}
-            onAdd={handleAdd}
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-          />
+          <div className="space-y-1">
+            {/* Bot role (always top) */}
+            {botRole && (
+              <>
+                <div className="flex items-center gap-2 rounded-input border border-dashed border-discord-accent/40 bg-discord-accent/5 px-3 py-2">
+                  <Bot size={14} className="text-discord-accent" />
+                  <span className="flex-1 text-xs font-medium text-discord-accent">
+                    {botRole.name}
+                  </span>
+                  <Badge variant="info">Bot</Badge>
+                  <span className="text-[10px] text-discord-text-muted">Must stay #1</span>
+                </div>
+                <div className="border-l-2 border-discord-border-subtle ml-4 h-2" />
+              </>
+            )}
+
+            {/* Tiered roles */}
+            {TIER_ORDER.map((tier) => {
+              const meta = TIER_META[tier];
+              const tierRoles = tieredRoles[tier];
+              const TierIcon = meta.icon;
+
+              return (
+                <div key={tier} className="space-y-0.5">
+                  {/* Tier header */}
+                  <div className="flex items-center gap-2 px-1 pt-3 pb-1">
+                    <TierIcon size={12} className="text-discord-text-muted" />
+                    <span className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
+                      {meta.label}
+                    </span>
+                    <span className="text-[10px] text-discord-text-muted">
+                      — {meta.description}
+                    </span>
+                  </div>
+
+                  {/* Roles in this tier */}
+                  {tierRoles.length > 0 ? (
+                    tierRoles.map((role) => <RoleRow key={role.id} role={role} />)
+                  ) : (
+                    <div className="px-3 py-1.5">
+                      <span className="text-xs italic text-discord-text-muted/50">
+                        No {meta.label.toLowerCase()} roles yet
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Unassigned roles (roles created outside SomniBot) */}
+            {unassignedRoles.length > 0 && (
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2 px-1 pt-3 pb-1">
+                  <Star size={12} className="text-discord-text-muted" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
+                    Unassigned
+                  </span>
+                  <span className="text-[10px] text-discord-text-muted">
+                    — created outside SomniBot, assign a tier to manage
+                  </span>
+                </div>
+                {unassignedRoles.map((role) => <RoleRow key={role.id} role={role} />)}
+              </div>
+            )}
+
+            {/* Managed roles (read-only) */}
+            {managedRoles.length > 0 && (
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2 px-1 pt-3 pb-1">
+                  <Lock size={12} className="text-discord-text-muted" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
+                    Managed
+                  </span>
+                  <span className="text-[10px] text-discord-text-muted">
+                    — Discord-managed, read-only
+                  </span>
+                </div>
+                {managedRoles.map((role) => (
+                  <RoleRow key={role.id} role={role} readOnly />
+                ))}
+              </div>
+            )}
+
+            {/* @everyone (always bottom) */}
+            <div className="flex items-center gap-2 rounded-input border border-dashed border-discord-border-subtle px-3 py-2 mt-2">
+              <div className="h-3 w-3 rounded-full bg-discord-bg-tertiary" />
+              <span className="text-xs font-medium text-discord-text-muted">
+                @everyone — permissions locked to 0
+              </span>
+              <Badge variant="default">everyone</Badge>
+            </div>
+          </div>
         </Card>
 
-        {/* Right: Editor panel */}
+        {/* Right: Editor */}
         <Card>
-          {editingRole ? (
-            <div className="space-y-6">
-              {/* Editor header */}
+          {showNewForm ? (
+            /* ── New role form ── */
+            <div className="space-y-4">
               <CardHeader>
-                <CardTitle>
-                  {editingRole.id ? `Edit: ${editingRole.name}` : 'New Role'}
-                </CardTitle>
+                <CardTitle>Create New Role</CardTitle>
                 <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setEditingRole(null)}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={handleSave} disabled={saving || !editingRole.name}>
-                    <Save size={12} />
-                    {saving ? 'Saving...' : 'Save'}
+                  <Button variant="ghost" size="sm" onClick={() => setShowNewForm(false)}>Cancel</Button>
+                  <Button size="sm" onClick={handleCreateRole} disabled={!newRoleForm.name || actionPending}>
+                    <Plus size={12} />
+                    {actionPending ? 'Creating...' : 'Create'}
                   </Button>
                 </div>
               </CardHeader>
 
-              {/* Basic fields */}
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Input
-                  label="Role Name"
-                  id="role-name"
-                  value={editingRole.name}
-                  onChange={(e) => setEditingRole({ ...editingRole, name: e.target.value })}
-                  placeholder="e.g. Community Manager"
-                />
-                <Select
-                  label="Tier"
-                  id="role-tier"
-                  options={TIER_OPTIONS}
-                  value={editingRole.tier}
-                  onChange={(e) =>
-                    setEditingRole({
-                      ...editingRole,
-                      tier: e.target.value,
-                      color: TIER_COLORS[e.target.value] ?? '#99AAB5',
-                    })
-                  }
-                />
-              </div>
               <Input
-                label="Description"
-                id="role-desc"
-                value={editingRole.description}
-                onChange={(e) => setEditingRole({ ...editingRole, description: e.target.value })}
-                placeholder="What this role is for..."
+                label="Role Name"
+                id="new-role-name"
+                value={newRoleForm.name}
+                onChange={(e) => setNewRoleForm({ ...newRoleForm, name: e.target.value })}
+                placeholder="e.g. Head Moderator, VIP, Team Red"
               />
 
-              {/* Permission matrix */}
-              {editingRole.tier !== 'cosmetic' && (
+              <Select
+                label="Permission Tier"
+                id="new-role-tier"
+                options={TIER_OPTIONS}
+                value={newRoleForm.tier}
+                onChange={(e) => setNewRoleForm({ ...newRoleForm, tier: e.target.value })}
+              />
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
-                  <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
-                    Permissions
-                  </h4>
-                  <PermissionMatrix
-                    categories={PERMISSION_CATEGORIES}
-                    roles={[
-                      {
-                        id: editingRole.id ?? 'new',
-                        name: editingRole.name || 'New Role',
-                        color: editingRole.color,
-                        tier: editingRole.tier,
-                      },
-                    ]}
-                    values={{ [editingRole.id ?? 'new']: editingRole.permissionValues }}
-                    onChange={handlePermissionChange}
+                  <label htmlFor="new-role-color" className="mb-1 block text-xs font-medium text-discord-text-secondary">
+                    Color
+                  </label>
+                  <input
+                    type="color"
+                    id="new-role-color"
+                    value={newRoleForm.color}
+                    onChange={(e) => setNewRoleForm({ ...newRoleForm, color: e.target.value })}
+                    className="h-10 w-full cursor-pointer rounded-input border border-discord-border-subtle bg-discord-bg-primary"
                   />
                 </div>
-              )}
+              </div>
 
-              {editingRole.tier === 'cosmetic' && (
-                <Card variant="warning">
+              <Toggle
+                label="Hoist"
+                description="Show members with this role separately in the member list"
+                checked={newRoleForm.hoist}
+                onChange={(hoist) => setNewRoleForm({ ...newRoleForm, hoist })}
+              />
+              <Toggle
+                label="Mentionable"
+                description="Allow anyone to @mention this role"
+                checked={newRoleForm.mentionable}
+                onChange={(mentionable) => setNewRoleForm({ ...newRoleForm, mentionable })}
+              />
+
+              <p className="text-xs text-discord-text-muted">
+                Permissions are automatically set based on the selected tier. You can fine-tune them after creation.
+              </p>
+            </div>
+          ) : editingRole ? (
+            /* ── Edit existing role ── */
+            <div className="space-y-4">
+              <CardHeader>
+                <CardTitle>
                   <div className="flex items-center gap-2">
-                    <AlertTriangle size={14} className="text-discord-warning" />
-                    <p className="text-sm text-discord-text-secondary">
-                      Cosmetic roles have zero permissions — they&apos;re purely visual (name color, badge).
-                    </p>
+                    <div className="h-4 w-4 rounded-full" style={{ backgroundColor: intToHex(editingRole.color) }} />
+                    Edit: {editingRole.name}
                   </div>
-                </Card>
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => { setEditingRole(null); setSelectedRoleId(null); }}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={handleUpdateRole} disabled={actionPending}>
+                    <Save size={12} />
+                    {actionPending ? 'Saving...' : 'Save'}
+                  </Button>
+                </div>
+              </CardHeader>
+
+              <Input
+                label="Role Name"
+                id="edit-role-name"
+                value={editingRole.name}
+                onChange={(e) => setEditingRole({ ...editingRole, name: e.target.value })}
+              />
+
+              <Select
+                label="Permission Tier"
+                id="edit-role-tier"
+                options={TIER_OPTIONS}
+                value={editingRole.tier ?? 'member'}
+                onChange={(e) => setEditingRole({ ...editingRole, tier: e.target.value })}
+              />
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="edit-role-color" className="mb-1 block text-xs font-medium text-discord-text-secondary">
+                    Color
+                  </label>
+                  <input
+                    type="color"
+                    id="edit-role-color"
+                    value={intToHex(editingRole.color)}
+                    onChange={(e) => setEditingRole({ ...editingRole, color: hexToInt(e.target.value) })}
+                    className="h-10 w-full cursor-pointer rounded-input border border-discord-border-subtle bg-discord-bg-primary"
+                  />
+                </div>
+                <div className="flex flex-col justify-end">
+                  <p className="text-xs text-discord-text-muted">
+                    Members with this role: <span className="font-medium text-discord-text-primary">{editingRole.memberCount}</span>
+                  </p>
+                  <p className="text-xs text-discord-text-muted">
+                    Discord position: <span className="font-medium text-discord-text-primary">{editingRole.position}</span>
+                  </p>
+                </div>
+              </div>
+
+              <Toggle
+                label="Hoist"
+                description="Show members with this role separately in the member list"
+                checked={editingRole.hoist}
+                onChange={(hoist) => setEditingRole({ ...editingRole, hoist })}
+              />
+              <Toggle
+                label="Mentionable"
+                description="Allow anyone to @mention this role"
+                checked={editingRole.mentionable}
+                onChange={(mentionable) => setEditingRole({ ...editingRole, mentionable })}
+              />
+
+              {editingRole.source === 'deployed' && (
+                <div className="rounded-input bg-discord-bg-primary p-3">
+                  <p className="text-xs text-discord-text-muted">
+                    <span className="font-medium text-discord-accent">Deployed by SomniBot</span> — template key: <code className="text-[10px]">{editingRole.templateKey}</code>
+                  </p>
+                </div>
               )}
             </div>
+          ) : selectedRoleId && roles.find((r) => r.id === selectedRoleId)?.managed ? (
+            /* ── Managed role detail view ── */
+            (() => {
+              const role = roles.find((r) => r.id === selectedRoleId)!;
+              return (
+                <div className="space-y-4">
+                  <CardHeader>
+                    <CardTitle>
+                      <div className="flex items-center gap-2">
+                        <div className="h-4 w-4 rounded-full" style={{ backgroundColor: intToHex(role.color) }} />
+                        {role.name}
+                        <Badge variant="default">{getManagedLabel(role)}</Badge>
+                      </div>
+                    </CardTitle>
+                  </CardHeader>
+
+                  <div className="rounded-input bg-discord-bg-primary p-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Lock size={14} className="text-discord-text-muted" />
+                      <p className="text-sm text-discord-text-secondary">
+                        This role is managed by Discord and cannot be edited or deleted through the dashboard.
+                      </p>
+                    </div>
+
+                    {role.tags.premiumSubscriberRole && (
+                      <p className="text-xs text-discord-text-muted">
+                        Automatically assigned to Nitro Boosters. Discord manages membership.
+                        You can enhance the booster experience through channel access and level bonuses.
+                      </p>
+                    )}
+
+                    {role.tags.botId && (
+                      <p className="text-xs text-discord-text-muted">
+                        Created by Discord for a bot integration. Position determines what the bot can manage.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-input bg-discord-bg-primary p-3">
+                      <p className="text-[10px] uppercase tracking-wide text-discord-text-muted">Members</p>
+                      <p className="text-lg font-bold text-discord-text-primary">{role.memberCount}</p>
+                    </div>
+                    <div className="rounded-input bg-discord-bg-primary p-3">
+                      <p className="text-[10px] uppercase tracking-wide text-discord-text-muted">Position</p>
+                      <p className="text-lg font-bold text-discord-text-primary">{role.position}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()
           ) : (
+            /* ── Empty state ── */
             <div className="flex h-64 flex-col items-center justify-center text-center">
               <Shield size={32} className="mb-2 text-discord-text-muted/30" />
               <p className="text-sm text-discord-text-muted">
-                Select a role to edit, or click &quot;Add Role&quot; to create a new one.
+                Select a role to view or edit, or create a new role.
               </p>
               <CardDescription>
-                Roles define what members can do. Drag to reorder the hierarchy.
+                {roles.length} roles in your Discord server
               </CardDescription>
             </div>
           )}
         </Card>
       </div>
+
+      {/* Summary bar */}
+      <Card>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge variant="default">{roles.length} total roles</Badge>
+          {TIER_ORDER.map((tier) => (
+            <Badge key={tier} variant={TIER_META[tier].badge}>
+              {tieredRoles[tier].length} {TIER_META[tier].label}
+            </Badge>
+          ))}
+          {managedRoles.length > 0 && (
+            <Badge variant="default">{managedRoles.length} managed</Badge>
+          )}
+          {unassignedRoles.length > 0 && (
+            <Badge variant="info">{unassignedRoles.length} unassigned</Badge>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }
