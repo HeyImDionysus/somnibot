@@ -8,12 +8,16 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_EXPORT_ROWS = 10_000;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
 
@@ -32,7 +36,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .from('audit_logs')
     .select('*', { count: 'exact' })
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('timestamp', { ascending: false });
 
   if (category) {

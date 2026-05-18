@@ -6,16 +6,21 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
     .from('guild_config')
     .select('escalation_chain, mod_log_channel_id, infraction_expiry_days')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   if (error) {
@@ -33,8 +38,14 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.moderation.escalation);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const updates: Record<string, unknown> = {};
 
@@ -89,7 +100,7 @@ export async function PUT(req: NextRequest) {
   const { error } = await supabase
     .from('guild_config')
     .update(updates)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

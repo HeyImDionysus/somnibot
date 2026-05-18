@@ -10,37 +10,17 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createServerSupabase } from '@/lib/supabase/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-async function getGuildId(): Promise<string | null> {
-  const supabase = await createServerSupabase();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
-
-  const admin = createAdminSupabase();
-  const { data: dbUser } = await admin
-    .from('users')
-    .select('discord_id')
-    .eq('id', user.id)
-    .single();
-  if (!dbUser) return null;
-
-  const { data: guild } = await admin
-    .from('guild')
-    .select('id')
-    .eq('owner_discord_id', dbUser.discord_id)
-    .single();
-
-  return guild?.id ?? null;
-}
 
 // ============================================================
 // GET — Read actual Discord roles from live state
 // ============================================================
 
 export async function GET() {
-  const guildId = await getGuildId();
-  if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
 
   const admin = createAdminSupabase();
 
@@ -75,8 +55,9 @@ export async function GET() {
 // ============================================================
 
 export async function POST(request: NextRequest) {
-  const guildId = await getGuildId();
-  if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
 
   const body = await request.json();
   if (!body.name || !body.tier) {
@@ -119,8 +100,9 @@ export async function POST(request: NextRequest) {
 // ============================================================
 
 export async function PATCH(request: NextRequest) {
-  const guildId = await getGuildId();
-  if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
 
   const body = await request.json();
   if (!body.roleId) {
@@ -163,8 +145,9 @@ export async function PATCH(request: NextRequest) {
 // ============================================================
 
 export async function DELETE(request: NextRequest) {
-  const guildId = await getGuildId();
-  if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
 
   const body = await request.json();
   if (!body.roleId) {

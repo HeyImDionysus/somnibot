@@ -3,19 +3,35 @@
  *
  * Verifies signature, processes order completions and subscription events.
  * Architecture doc §30.5.
+ *
+ * SECURITY (Phase A):
+ * - Webhook signature verification is REQUIRED in production.
+ * - Removed the `return true` fallback when PAYPAL_WEBHOOK_ID is unset.
+ * - Replay is NO LONGER accepted via public X-Replay header.
+ *   Internal replays use a shared secret via X-Replay-Secret header.
+ * - Returns non-2xx on processing errors so PayPal retries.
+ * - Duplicate detection via event_id prevents double-processing.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 
 const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 
+// Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
+const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
+  || (process.env.NEXTAUTH_SECRET
+    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+    : '');
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
 // ── Helpers ─────────────────────────────────────────
 
 async function getPayPalToken(): Promise<string | null> {
+  if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) return null;
   try {
     const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
       method: 'POST',
@@ -36,11 +52,35 @@ async function getPayPalToken(): Promise<string | null> {
 async function verifyWebhookSignature(
   req: NextRequest,
   rawBody: string,
-): Promise<boolean> {
-  if (!PAYPAL_WEBHOOK_ID) return true; // Skip verification if no webhook ID configured
+): Promise<{ valid: boolean; error?: string }> {
+  // REQUIRED: webhook ID must be configured
+  if (!PAYPAL_WEBHOOK_ID) {
+    if (IS_PRODUCTION) {
+      return { valid: false, error: 'PAYPAL_WEBHOOK_ID not configured — cannot verify signature in production' };
+    }
+    // In development, log a warning but allow
+    console.warn('[Webhook] ⚠️ PAYPAL_WEBHOOK_ID not set — skipping verification (dev only)');
+    return { valid: true };
+  }
 
   const token = await getPayPalToken();
-  if (!token) return false;
+  if (!token) {
+    return { valid: false, error: 'Could not obtain PayPal access token for verification' };
+  }
+
+  // Verify all required PayPal headers are present
+  const requiredHeaders = [
+    'paypal-auth-algo',
+    'paypal-cert-url',
+    'paypal-transmission-id',
+    'paypal-transmission-sig',
+    'paypal-transmission-time',
+  ];
+  for (const header of requiredHeaders) {
+    if (!req.headers.get(header)) {
+      return { valid: false, error: `Missing required PayPal header: ${header}` };
+    }
+  }
 
   try {
     const res = await fetch(
@@ -63,11 +103,16 @@ async function verifyWebhookSignature(
       },
     );
 
-    if (!res.ok) return false;
+    if (!res.ok) {
+      return { valid: false, error: `PayPal verification API returned ${res.status}` };
+    }
     const data = await res.json();
-    return data.verification_status === 'SUCCESS';
-  } catch {
-    return false;
+    return {
+      valid: data.verification_status === 'SUCCESS',
+      error: data.verification_status !== 'SUCCESS' ? 'Signature verification failed' : undefined,
+    };
+  } catch (err) {
+    return { valid: false, error: `Verification request failed: ${err}` };
   }
 }
 
@@ -98,11 +143,20 @@ export async function POST(req: NextRequest) {
   const rawBody = await req.text();
   const supabase = createAdminSupabase();
 
-  // Skip signature verification on replays
-  const isReplay = req.headers.get('X-Replay') === 'true';
-  if (!isReplay) {
-    const valid = await verifyWebhookSignature(req, rawBody);
+  // ── Replay: only accept with valid secret ──
+  const replaySecret = req.headers.get('X-Replay-Secret');
+  const isReplay = !!replaySecret;
+
+  if (isReplay) {
+    if (!REPLAY_SECRET || replaySecret !== REPLAY_SECRET) {
+      return NextResponse.json({ error: 'Invalid replay secret' }, { status: 403 });
+    }
+    // Replay is trusted — skip signature verification
+  } else {
+    // Real webhook — verify signature
+    const { valid, error } = await verifyWebhookSignature(req, rawBody);
     if (!valid) {
+      console.error(`[Webhook] Signature verification failed: ${error}`);
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
   }
@@ -116,7 +170,7 @@ export async function POST(req: NextRequest) {
 
   // Check for duplicate
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
-  if (eventId) {
+  if (eventId && !isReplay) {
     const { data: existing } = await supabase
       .from('webhook_events')
       .select('event_id')
@@ -129,10 +183,12 @@ export async function POST(req: NextRequest) {
   }
 
   // Log the event
+  const logEventId = eventId || randomBytes(16).toString('hex');
   await supabase.from('webhook_events').insert({
-    event_id: eventId || randomBytes(16).toString('hex'),
+    event_id: logEventId,
     event_type: event.event_type,
     payload: event as unknown as Record<string, unknown>,
+    ...(isReplay ? { replayed_at: new Date().toISOString() } : {}),
   }).then(() => {}, () => {/* ignore logging failure */});
 
   try {
@@ -160,23 +216,26 @@ export async function POST(req: NextRequest) {
     }
 
     // Mark event as processed
-    if (eventId) {
-      await supabase
-        .from('webhook_events')
-        .update({ result: 'success' })
-        .eq('event_id', eventId);
-    }
+    await supabase
+      .from('webhook_events')
+      .update({ result: 'success' })
+      .eq('event_id', logEventId);
+
+    return NextResponse.json({ status: 'ok' });
   } catch (err) {
     console.error(`[Webhook] Error processing ${event.event_type}:`, err);
-    if (eventId) {
-      await supabase
-        .from('webhook_events')
-        .update({ result: 'error', error_details: String(err) })
-        .eq('event_id', eventId);
-    }
-  }
 
-  return NextResponse.json({ status: 'ok' });
+    await supabase
+      .from('webhook_events')
+      .update({ result: 'error', error_details: String(err) })
+      .eq('event_id', logEventId);
+
+    // Return 500 so PayPal will retry this event
+    return NextResponse.json(
+      { error: 'Processing failed — will retry' },
+      { status: 500 },
+    );
+  }
 }
 
 // ── Event handlers ──────────────────────────────────
@@ -191,8 +250,7 @@ async function handleOrderApproved(
   // Capture the payment
   const token = await getPayPalToken();
   if (!token) {
-    console.error('[Webhook] Could not get PayPal token to capture order');
-    return;
+    throw new Error('Could not get PayPal token to capture order');
   }
 
   const captureRes = await fetch(
@@ -207,8 +265,8 @@ async function handleOrderApproved(
   );
 
   if (!captureRes.ok) {
-    console.error('[Webhook] Failed to capture PayPal order:', await captureRes.text());
-    return;
+    const body = await captureRes.text();
+    throw new Error(`Failed to capture PayPal order ${paypalOrderId}: ${captureRes.status} ${body}`);
   }
 
   // Payment captured — PAYMENT.CAPTURE.COMPLETED will fire next
@@ -230,7 +288,6 @@ async function handlePaymentCaptured(
   }
 
   if (!meta) {
-    // Try to find from supplementary_data or by paypal order ID reference
     console.log('[Webhook] Payment captured but no custom_id metadata');
     return;
   }
