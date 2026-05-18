@@ -29,6 +29,12 @@ import {
   Tag,
   ScrollText,
   Activity,
+  TrendingUp,
+  AlertTriangle,
+  Siren,
+  Workflow,
+  History,
+  UserCog,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -98,6 +104,7 @@ const navigation: NavGroup[] = [
   {
     title: 'Commerce',
     items: [
+      { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
       { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal' },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
@@ -108,6 +115,10 @@ const navigation: NavGroup[] = [
   {
     title: 'Operations',
     items: [
+      { label: 'Incidents', href: '/incidents', icon: Siren },
+      { label: 'Fraud Controls', href: '/fraud', icon: AlertTriangle },
+      { label: 'Workflows', href: '/workflows', icon: Workflow },
+      { label: 'Admin Changes', href: '/admin-changes', icon: History },
       { label: 'Audit Log', href: '/audit', icon: ScrollText },
       { label: 'Diagnostics', href: '/diagnostics', icon: Activity },
     ],
@@ -196,6 +207,21 @@ export function Sidebar() {
           <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
             System
           </h3>
+          <Link
+            href="/settings/team"
+            className={cn(
+              'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
+              pathname === '/settings/team'
+                ? 'bg-discord-accent/20 text-white'
+                : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
+            )}
+          >
+            <UserCog
+              size={18}
+              className={pathname === '/settings/team' ? 'text-discord-accent' : ''}
+            />
+            <span className="flex-1 truncate">Team</span>
+          </Link>
           <Link
             href="/settings"
             className={cn(
