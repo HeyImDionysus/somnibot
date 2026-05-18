@@ -58,14 +58,14 @@ export async function PUT(req: NextRequest) {
       );
     }
 
-    for (const step of body.escalation_chain) {
+    for (const step of body.escalation_chain as Record<string, unknown>[]) {
       if (typeof step.threshold !== 'number' || step.threshold < 1) {
         return NextResponse.json(
           { success: false, error: 'Each step must have a threshold >= 1' },
           { status: 400 },
         );
       }
-      if (!['warn', 'mute', 'kick', 'ban'].includes(step.action)) {
+      if (!['warn', 'mute', 'kick', 'ban'].includes(step.action as string)) {
         return NextResponse.json(
           { success: false, error: 'Invalid action in escalation step' },
           { status: 400 },
@@ -81,7 +81,7 @@ export async function PUT(req: NextRequest) {
   }
 
   if (body.infraction_expiry_days !== undefined) {
-    const days = parseInt(body.infraction_expiry_days);
+    const days = Number(body.infraction_expiry_days);
     if (isNaN(days) || days < 1 || days > 365) {
       return NextResponse.json(
         { success: false, error: 'infraction_expiry_days must be between 1 and 365' },
