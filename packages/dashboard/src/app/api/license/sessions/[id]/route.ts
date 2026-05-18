@@ -3,11 +3,16 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
 export async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { id: sessionId } = await params;
   const supabase = createAdminSupabase();
 

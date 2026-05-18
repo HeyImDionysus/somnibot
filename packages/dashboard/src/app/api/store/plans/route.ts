@@ -8,10 +8,15 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const productId = searchParams.get('product_id');
@@ -19,7 +24,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .from('plans')
     .select('*')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('price_cents', { ascending: true });
 
   if (productId) {
@@ -36,8 +41,14 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.plan.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     product_id,
@@ -62,7 +73,7 @@ export async function POST(req: NextRequest) {
     .from('plans')
     .insert({
       product_id,
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       name,
       paypal_plan_id: paypal_plan_id ?? null,
       interval_unit,
@@ -83,6 +94,10 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
   const { id, ...updates } = body;
@@ -99,7 +114,7 @@ export async function PUT(req: NextRequest) {
     .from('plans')
     .update(updates)
     .eq('id', id)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .select()
     .single();
 
@@ -111,6 +126,10 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
@@ -123,7 +142,7 @@ export async function DELETE(req: NextRequest) {
     .from('plans')
     .delete()
     .eq('id', id)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

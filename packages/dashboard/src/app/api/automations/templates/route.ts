@@ -6,8 +6,9 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 // ── Templates (inlined to avoid cross-package build dependency) ──
 
@@ -132,12 +133,22 @@ const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
 ];
 
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   return NextResponse.json({ success: true, data: AUTOMATION_TEMPLATES });
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.automation.deployTemplate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { template_id, overrides } = body;
 
@@ -162,7 +173,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('automations')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       name: overrides?.name ?? template.name,
       description: template.description,
       trigger_type: template.trigger_type,

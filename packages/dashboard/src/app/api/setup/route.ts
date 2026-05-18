@@ -1,14 +1,22 @@
 /**
  * First-Run Setup API — Manages the initial deployment wizard.
  *
- * GET  /api/setup         — Returns first-run status (is DB initialized? is bot online? guild detected?)
- * POST /api/setup         — Verify credentials, save to instance_settings, configure auth, run migrations, detect guild
+ * GET  /api/setup  — Returns first-run status (is DB initialized? is bot online? guild detected?)
+ * POST /api/setup  — Verify credentials, save to instance_settings, configure auth, run migrations, detect guild
  *
- * This endpoint does NOT require authentication — it's used before Discord OAuth is configured.
+ * SECURITY (Phase A):
+ * - After `finalize`, a `setup_completed_at` timestamp is written.
+ * - Once set, all credential-mutation actions are BLOCKED unless the authenticated
+ *   guild owner first calls `action: 'unlock-maintenance'`.
+ * - Maintenance mode auto-expires after 10 minutes.
+ * - GET remains public so the setup page can detect state.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+
+const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Create a Supabase client from provided credentials (not from env vars).
@@ -20,6 +28,33 @@ function createSetupSupabase(url?: string, key?: string) {
 
   if (!supabaseUrl || !serviceKey) return null;
   return createClient(supabaseUrl, serviceKey);
+}
+
+/**
+ * Check whether setup has been completed (setup_completed_at exists).
+ */
+async function getSetupLock(supabase: ReturnType<typeof createClient>) {
+  const { data: completedRow } = await supabase
+    .from('instance_settings')
+    .select('value')
+    .eq('key', 'setup_completed_at')
+    .maybeSingle();
+
+  const { data: maintenanceRow } = await supabase
+    .from('instance_settings')
+    .select('value')
+    .eq('key', 'setup_maintenance_until')
+    .maybeSingle();
+
+  const isCompleted = !!completedRow?.value;
+  let maintenanceActive = false;
+
+  if (maintenanceRow?.value) {
+    const until = new Date(maintenanceRow.value).getTime();
+    maintenanceActive = Date.now() < until;
+  }
+
+  return { isCompleted, maintenanceActive };
 }
 
 export async function GET() {
@@ -34,6 +69,7 @@ export async function GET() {
     dashboardUrl: process.env.NEXT_PUBLIC_APP_URL || null,
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
     discordAuthConfigured: false,
+    setupCompleted: false,
   };
 
   if (!supabase) {
@@ -62,6 +98,10 @@ export async function GET() {
 
   // Check if bot is online and guild is detected
   if (status.databaseInitialized) {
+    // Check setup lock
+    const { isCompleted } = await getSetupLock(supabase);
+    status.setupCompleted = isCompleted;
+
     const { data: guild } = await supabase
       .from('guild')
       .select('id, name')
@@ -77,13 +117,13 @@ export async function GET() {
     // Check if bot has written a recent diagnostics snapshot (indicates it's online)
     const { data: diag } = await supabase
       .from('bot_diagnostics')
-      .select('created_at')
-      .order('created_at', { ascending: false })
+      .select('snapshot_at')
+      .order('snapshot_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
     if (diag) {
-      const lastSnapshot = new Date(diag.created_at).getTime();
+      const lastSnapshot = new Date(diag.snapshot_at).getTime();
       const now = Date.now();
       // Bot is considered online if last snapshot was within 5 minutes
       status.botOnline = now - lastSnapshot < 5 * 60 * 1000;
@@ -112,9 +152,56 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
+  const action = body.action as string;
+
+  // ── Maintenance unlock (requires authenticated owner) ───────
+  if (action === 'unlock-maintenance') {
+    const auth = await requireGuildOwner();
+    if (!auth.ok) return auth.response;
+
+    const supabase = createSetupSupabase();
+    if (!supabase) {
+      return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
+    }
+
+    const until = new Date(Date.now() + MAINTENANCE_TTL_MS).toISOString();
+    await supabase
+      .from('instance_settings')
+      .upsert(
+        { key: 'setup_maintenance_until', value: until, section: 'system', updated_at: new Date().toISOString() },
+        { onConflict: 'key' },
+      );
+
+    return NextResponse.json({ ok: true, maintenanceUntil: until });
+  }
+
+  // ── For credential-mutation actions, enforce setup lock ─────
+  const credentialActions = new Set([
+    'verify-discord',
+    'verify-supabase',
+    'finalize',
+    'configure-auth',
+  ]);
+
+  if (credentialActions.has(action)) {
+    const supabase = createSetupSupabase();
+    if (supabase) {
+      const { isCompleted, maintenanceActive } = await getSetupLock(supabase);
+
+      if (isCompleted && !maintenanceActive) {
+        return NextResponse.json(
+          {
+            error: 'Setup is locked. Authenticate as the guild owner and call unlock-maintenance first.',
+            setupLocked: true,
+          },
+          { status: 403 },
+        );
+      }
+    }
+  }
 
   // Step 1: Verify Discord credentials
-  if (body.action === 'verify-discord') {
+  if (action === 'verify-discord') {
     const { token, clientId, clientSecret } = body;
     if (!token || !clientId) {
       return NextResponse.json({ error: 'Missing token or clientId' }, { status: 400 });
@@ -182,7 +269,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Step 2: Verify Supabase credentials
-  if (body.action === 'verify-supabase') {
+  if (action === 'verify-supabase') {
     const { url, serviceRoleKey } = body;
     if (!url || !serviceRoleKey) {
       return NextResponse.json({ error: 'Missing url or serviceRoleKey' }, { status: 400 });
@@ -226,7 +313,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Step 3: Generate bot invite URL
-  if (body.action === 'generate-invite') {
+  if (action === 'generate-invite') {
     const clientId = body.clientId || process.env.DISCORD_APPLICATION_ID;
     if (!clientId) {
       return NextResponse.json({ error: 'No client ID available' }, { status: 400 });
@@ -240,13 +327,13 @@ export async function POST(request: NextRequest) {
   }
 
   // Step 4: Configure Discord OAuth in Supabase (can be called independently)
-  if (body.action === 'configure-auth') {
+  if (action === 'configure-auth') {
     const result = await ensureDiscordAuthProvider();
     return NextResponse.json(result);
   }
 
-  // Step 5: Finalize setup — save any remaining credentials and ensure auth is configured
-  if (body.action === 'finalize') {
+  // Step 5: Finalize setup — save any remaining credentials, mark setup complete
+  if (action === 'finalize') {
     const supabase = createSetupSupabase();
     if (!supabase) {
       return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
@@ -282,10 +369,26 @@ export async function POST(request: NextRequest) {
     // Ensure Discord auth provider is configured
     const authResult = await ensureDiscordAuthProvider();
 
+    // ── LOCK: Mark setup as completed ──
+    await supabase
+      .from('instance_settings')
+      .upsert(
+        {
+          key: 'setup_completed_at',
+          value: new Date().toISOString(),
+          section: 'system',
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' },
+      );
+
+    console.log('[Setup] 🔒 Setup finalized and locked');
+
     return NextResponse.json({
       ok: true,
       authConfigured: authResult.success,
       authError: authResult.error || null,
+      setupLocked: true,
     });
   }
 

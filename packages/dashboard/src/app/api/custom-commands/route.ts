@@ -8,16 +8,21 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
     .from('custom_commands')
     .select('*')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('name', { ascending: true });
 
   if (error) {
@@ -28,8 +33,14 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.customCommand.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     name,
@@ -63,7 +74,7 @@ export async function POST(req: NextRequest) {
   const { count } = await supabase
     .from('custom_commands')
     .select('id', { count: 'exact', head: true })
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if ((count ?? 0) >= 25) {
     return NextResponse.json(
@@ -76,7 +87,7 @@ export async function POST(req: NextRequest) {
   const { data: existing } = await supabase
     .from('custom_commands')
     .select('id')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .eq('name', cleanName)
     .maybeSingle();
 
@@ -90,7 +101,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('custom_commands')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       name: cleanName,
       description: description ?? `Custom command: ${cleanName}`,
       actions: actions ?? [],
@@ -113,8 +124,14 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.customCommand.update);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   if (!body.id) {
     return NextResponse.json(
@@ -149,7 +166,7 @@ export async function PUT(req: NextRequest) {
     .from('custom_commands')
     .update(updates)
     .eq('id', body.id)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .select()
     .single();
 
@@ -161,6 +178,10 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
@@ -176,7 +197,7 @@ export async function DELETE(req: NextRequest) {
     .from('custom_commands')
     .delete()
     .eq('id', id)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

@@ -6,11 +6,17 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ productId: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { productId } = await params;
   const supabase = createAdminSupabase();
 
@@ -49,9 +55,15 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ productId: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { productId } = await params;
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.license.config);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     license_mode,

@@ -7,13 +7,18 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { id: customerId } = await params;
   const supabase = createAdminSupabase();
 
@@ -34,9 +39,15 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { id: customerId } = await params;
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.entitlement.grant);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { product_id, type, source, expires_at, granted_role_ids, granted_channel_ids } = body;
 
@@ -50,7 +61,7 @@ export async function POST(
     .insert({
       order_number: `INS-${Date.now().toString().slice(-5)}`,
       customer_id: customerId,
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       product_id,
       amount_cents: 0,
       currency: 'USD',
@@ -68,7 +79,7 @@ export async function POST(
     .from('entitlements')
     .insert({
       customer_id: customerId,
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       product_id,
       order_id: order.id,
       type: type ?? 'one_time',
@@ -90,8 +101,14 @@ export async function POST(
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.entitlement.update);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { entitlement_id, status } = body;
 

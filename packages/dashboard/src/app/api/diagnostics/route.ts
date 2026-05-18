@@ -8,17 +8,21 @@
  */
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   // Get latest bot diagnostics snapshot
   const { data: botHealth, error: botError } = await supabase
     .from('bot_diagnostics')
     .select('*')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   // Check Supabase health (if we got this far, it's working)
@@ -43,7 +47,7 @@ export async function GET() {
   const { data: lastSync } = await supabase
     .from('audit_logs')
     .select('timestamp, details')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .in('action', ['sync.completed', 'setup.deployed'])
     .order('timestamp', { ascending: false })
     .limit(1)
@@ -53,7 +57,7 @@ export async function GET() {
   const { data: lastDrift } = await supabase
     .from('audit_logs')
     .select('timestamp, details')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .eq('action', 'drift.detected')
     .order('timestamp', { ascending: false })
     .limit(1)

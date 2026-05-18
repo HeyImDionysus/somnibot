@@ -6,6 +6,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');

@@ -7,8 +7,9 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 interface DriftActionRequest {
   action: 'repair' | 'accept' | 'ignore' | 'clear_all';
@@ -21,8 +22,14 @@ interface DriftActionRequest {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body: DriftActionRequest = await req.json();
+  const parsed = await parseBody(req, schemas.sync.action);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data as DriftActionRequest;
 
   if (!body.action) {
     return NextResponse.json(
@@ -40,7 +47,7 @@ export async function POST(req: NextRequest) {
         drift_details: [],
         last_sync_at: new Date().toISOString(),
       })
-      .eq('guild_id', GUILD_ID);
+      .eq('guild_id', guildId);
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -61,7 +68,7 @@ export async function POST(req: NextRequest) {
     const { data: current } = await supabase
       .from('guild_desired_state')
       .select('drift_details')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .maybeSingle();
 
     const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
@@ -79,14 +86,14 @@ export async function POST(req: NextRequest) {
         drift_detected: filtered.length > 0,
         drift_details: filtered,
       })
-      .eq('guild_id', GUILD_ID);
+      .eq('guild_id', guildId);
 
     return NextResponse.json({ success: true });
   }
 
   // For 'repair' and 'accept' — write a sync action request for the bot to pick up
   const { error } = await supabase.from('sync_actions').insert({
-    guild_id: GUILD_ID,
+    guild_id: guildId,
     action: body.action,
     drift_item: body.driftItem,
     status: 'pending',
@@ -102,7 +109,7 @@ export async function POST(req: NextRequest) {
         const { data: current } = await supabase
           .from('guild_desired_state')
           .select('drift_details')
-          .eq('guild_id', GUILD_ID)
+          .eq('guild_id', guildId)
           .maybeSingle();
 
         const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
@@ -120,7 +127,7 @@ export async function POST(req: NextRequest) {
             drift_detected: filtered.length > 0,
             drift_details: filtered,
           })
-          .eq('guild_id', GUILD_ID);
+          .eq('guild_id', guildId);
 
         return NextResponse.json({ success: true });
       }

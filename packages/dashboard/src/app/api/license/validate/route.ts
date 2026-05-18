@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 interface ValidateRequest {
   license_key: string;
