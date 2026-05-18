@@ -33,18 +33,19 @@ function createSetupSupabase(url?: string, key?: string) {
 /**
  * Check whether setup has been completed (setup_completed_at exists).
  */
-async function getSetupLock(supabase: ReturnType<typeof createClient>) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getSetupLock(supabase: any) {
   const { data: completedRow } = await supabase
     .from('instance_settings')
     .select('value')
     .eq('key', 'setup_completed_at')
-    .maybeSingle();
+    .maybeSingle() as { data: { value: string } | null };
 
   const { data: maintenanceRow } = await supabase
     .from('instance_settings')
     .select('value')
     .eq('key', 'setup_maintenance_until')
-    .maybeSingle();
+    .maybeSingle() as { data: { value: string } | null };
 
   const isCompleted = !!completedRow?.value;
   let maintenanceActive = false;
