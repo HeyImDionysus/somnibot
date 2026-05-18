@@ -10,6 +10,17 @@ import { useEffect, useState, useCallback } from 'react';
 
 // ── Types ─────────────────────────────────────────────────
 
+interface Alert {
+  id: string;
+  alert_type: string;
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  message: string;
+  acknowledged: boolean;
+  resolved: boolean;
+  created_at: string;
+}
+
 interface DiagnosticsData {
   bot: {
     online: boolean;
@@ -105,6 +116,50 @@ export default function DiagnosticsPage() {
   const [whLoading, setWhLoading] = useState(true);
   const [replayingId, setReplayingId] = useState<string | null>(null);
 
+  // Alert state
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/alerts?status=active');
+      const json = await res.json();
+      if (json.success) {
+        setAlerts(json.data.alerts ?? []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch alerts:', err);
+    } finally {
+      setAlertsLoading(false);
+    }
+  }, []);
+
+  const handleAcknowledgeAlert = async (alertId: string) => {
+    try {
+      await fetch('/api/alerts', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: alertId, action: 'acknowledge' }),
+      });
+      await fetchAlerts();
+    } catch (err) {
+      console.error('Failed to acknowledge alert:', err);
+    }
+  };
+
+  const handleResolveAlert = async (alertId: string) => {
+    try {
+      await fetch('/api/alerts', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: alertId, action: 'resolve' }),
+      });
+      await fetchAlerts();
+    } catch (err) {
+      console.error('Failed to resolve alert:', err);
+    }
+  };
+
   const fetchDiagnostics = useCallback(async () => {
     try {
       const res = await fetch('/api/diagnostics');
@@ -139,10 +194,14 @@ export default function DiagnosticsPage() {
 
   useEffect(() => {
     fetchDiagnostics();
+    fetchAlerts();
     // Refresh every 30s
-    const timer = setInterval(fetchDiagnostics, 30_000);
+    const timer = setInterval(() => {
+      fetchDiagnostics();
+      fetchAlerts();
+    }, 30_000);
     return () => clearInterval(timer);
-  }, [fetchDiagnostics]);
+  }, [fetchDiagnostics, fetchAlerts]);
 
   useEffect(() => {
     fetchWebhooks(1);
@@ -187,6 +246,66 @@ export default function DiagnosticsPage() {
           System health, infrastructure status, and webhook monitoring
         </p>
       </div>
+
+      {/* Active Alerts Banner */}
+      {!alertsLoading && alerts.length > 0 && (
+        <div className="space-y-2">
+          {alerts.map((alert) => {
+            const severityStyles = {
+              critical: 'border-red-500/50 bg-red-500/10',
+              warning: 'border-yellow-500/50 bg-yellow-500/10',
+              info: 'border-blue-500/50 bg-blue-500/10',
+            };
+            const severityTextStyles = {
+              critical: 'text-red-400',
+              warning: 'text-yellow-400',
+              info: 'text-blue-400',
+            };
+            const severityBadge = {
+              critical: 'bg-red-500/20 text-red-400',
+              warning: 'bg-yellow-500/20 text-yellow-400',
+              info: 'bg-blue-500/20 text-blue-400',
+            };
+            return (
+              <div
+                key={alert.id}
+                className={`flex items-start justify-between gap-4 rounded-lg border p-4 ${severityStyles[alert.severity]}`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${severityBadge[alert.severity]}`}>
+                      {alert.severity.toUpperCase()}
+                    </span>
+                    <h4 className={`text-sm font-semibold ${severityTextStyles[alert.severity]}`}>
+                      {alert.title}
+                    </h4>
+                  </div>
+                  <p className="text-sm text-discord-text-muted">{alert.message}</p>
+                  <p className="text-xs text-discord-text-muted mt-1">
+                    Since {formatDate(alert.created_at)}
+                  </p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  {!alert.acknowledged && (
+                    <button
+                      onClick={() => handleAcknowledgeAlert(alert.id)}
+                      className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
+                    >
+                      Acknowledge
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleResolveAlert(alert.id)}
+                    className="rounded-md bg-discord-bg-secondary px-2 py-1 text-xs text-discord-text-secondary hover:bg-discord-bg-tertiary transition-colors"
+                  >
+                    Resolve
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Health cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
