@@ -14,13 +14,18 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 
 const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
 const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
-const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET || '';
+
+// Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
+const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
+  || (process.env.NEXTAUTH_SECRET
+    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+    : '');
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // ── Helpers ─────────────────────────────────────────

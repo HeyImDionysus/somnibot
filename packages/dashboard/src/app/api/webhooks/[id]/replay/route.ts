@@ -9,8 +9,13 @@
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { createHmac } from 'crypto';
 
-const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET || '';
+// Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
+const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
+  || (process.env.NEXTAUTH_SECRET
+    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+    : '');
 
 export async function POST(
   _req: Request,
