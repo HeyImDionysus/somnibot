@@ -2,13 +2,12 @@
  * GET /api/dashboard/stats — Live dashboard metrics.
  *
  * Returns counts and aggregates for the dashboard home page:
- * - Members (from last guild snapshot)
- * - Messages today (from daily_stats or audit count)
+ * - Members (from bot_diagnostics snapshot)
  * - Active tickets, open infractions
- * - Revenue this month
- * - Music plays today
+ * - Revenue this month (from orders)
  * - Active giveaways
- * - Recent activity feed
+ * - Uptime (from bot_diagnostics)
+ * - Recent activity feed (from audit_logs)
  */
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -21,26 +20,33 @@ export async function GET() {
     const guildId = ctx.guildId;
 
     const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
     // Run all queries in parallel
     const [
-      snapshotResult,
+      diagnosticsResult,
+      memberCountResult,
       ticketResult,
       infractionResult,
       revenueResult,
       giveawayResult,
       recentEventsResult,
+      todayMessagesResult,
     ] = await Promise.all([
-      // Latest guild snapshot for member counts
+      // Latest bot_diagnostics snapshot for uptime + member count
       admin
-        .from('guild_snapshots')
-        .select('member_count, online_count, message_count_today')
+        .from('bot_diagnostics')
+        .select('guild_member_count, uptime_seconds, discord_ws_ping, active_voice_connections, valkey_connected, memory_rss_mb, snapshot_at')
         .eq('guild_id', guildId)
-        .order('created_at', { ascending: false })
+        .order('snapshot_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
+
+      // Total tracked members
+      admin
+        .from('members')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', guildId),
 
       // Active tickets
       admin
@@ -55,12 +61,12 @@ export async function GET() {
         .select('*', { count: 'exact', head: true })
         .eq('guild_id', guildId)
         .eq('active', true)
-        .eq('pardoned', false),
+        .is('pardoned', false),
 
       // Revenue this month
       admin
         .from('orders')
-        .select('total_cents')
+        .select('amount_cents')
         .eq('guild_id', guildId)
         .eq('status', 'completed')
         .gte('created_at', monthStart),
@@ -75,49 +81,68 @@ export async function GET() {
       // Recent audit log events for activity feed
       admin
         .from('audit_logs')
-        .select('action, details, created_at')
+        .select('action, details, timestamp, actor_id, target_id, target_type, success')
         .eq('guild_id', guildId)
-        .order('created_at', { ascending: false })
+        .order('timestamp', { ascending: false })
         .limit(15),
+
+      // Messages today — count audit log entries that represent messages
+      // (bot_diagnostics doesn't track message counts, so we approximate from members)
+      admin
+        .from('audit_logs')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', guildId)
+        .gte('timestamp', new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()),
     ]);
 
     // Calculate revenue
     const revenueThisMonth = revenueResult.data
-      ? revenueResult.data.reduce((sum: number, o: { total_cents?: number }) => sum + (o.total_cents ?? 0), 0)
+      ? revenueResult.data.reduce(
+          (sum: number, o: { amount_cents?: number }) => sum + (o.amount_cents ?? 0),
+          0,
+        )
       : 0;
 
     // Format recent events
-    const recentEvents = (recentEventsResult.data ?? []).map((log: Record<string, unknown>) => ({
-      type: formatEventType(log.action as string),
-      description: formatEventDescription(log.action as string, log.details as Record<string, unknown>),
-      timestamp: log.created_at as string,
-    })).filter((e: { description: string }) => e.description !== '');
+    const recentEvents = (recentEventsResult.data ?? [])
+      .map((log: Record<string, unknown>) => ({
+        type: formatEventType(log.action as string),
+        description: formatEventDescription(
+          log.action as string,
+          log.details as Record<string, unknown>,
+        ),
+        timestamp: log.timestamp as string,
+        success: log.success as boolean,
+      }))
+      .filter((e: { description: string }) => e.description !== '');
 
-    // Music plays (from Valkey stats, stored in daily_stats table if available)
-    let musicPlaysToday = 0;
-    try {
-      const { data: musicStats } = await admin
-        .from('daily_stats')
-        .select('value')
-        .eq('guild_id', guildId)
-        .eq('stat_key', 'music_plays')
-        .eq('date', todayStart.slice(0, 10))
-        .maybeSingle();
-      musicPlaysToday = musicStats?.value ?? 0;
-    } catch {
-      // daily_stats table may not exist yet — non-fatal
-    }
+    // Uptime formatting
+    const uptimeSeconds = diagnosticsResult.data?.uptime_seconds ?? 0;
+    const uptimeHours = Math.floor(uptimeSeconds / 3600);
+    const uptimeDays = Math.floor(uptimeHours / 24);
+    const uptimeDisplay =
+      uptimeDays > 0
+        ? `${uptimeDays}d ${uptimeHours % 24}h`
+        : uptimeHours > 0
+          ? `${uptimeHours}h ${Math.floor((uptimeSeconds % 3600) / 60)}m`
+          : `${Math.floor(uptimeSeconds / 60)}m`;
 
     return NextResponse.json({
-      memberCount: snapshotResult.data?.member_count ?? 0,
-      onlineCount: snapshotResult.data?.online_count ?? 0,
-      messagesToday: snapshotResult.data?.message_count_today ?? 0,
+      memberCount: diagnosticsResult.data?.guild_member_count ?? memberCountResult.count ?? 0,
+      trackedMembers: memberCountResult.count ?? 0,
       activeTickets: ticketResult.count ?? 0,
       openInfractions: infractionResult.count ?? 0,
       revenueThisMonth,
-      musicPlaysToday,
       activeGiveaways: giveawayResult.count ?? 0,
       recentEvents,
+      eventsToday: todayMessagesResult.count ?? 0,
+      uptime: uptimeDisplay,
+      uptimeSeconds,
+      wsPing: diagnosticsResult.data?.discord_ws_ping ?? null,
+      activeVoice: diagnosticsResult.data?.active_voice_connections ?? 0,
+      valkeyConnected: diagnosticsResult.data?.valkey_connected ?? false,
+      memoryMb: diagnosticsResult.data?.memory_rss_mb ?? null,
+      lastSnapshot: diagnosticsResult.data?.snapshot_at ?? null,
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes('Unauthorized')) {
@@ -130,19 +155,32 @@ export async function GET() {
 
 function formatEventType(action: string): string {
   if (action.startsWith('ticket.')) return `ticket.${action.split('.')[1]}`;
-  if (action.startsWith('moderation.') || action.includes('warn') || action.includes('ban') || action.includes('kick'))
+  if (
+    action.startsWith('moderation.') ||
+    action.includes('warn') ||
+    action.includes('ban') ||
+    action.includes('kick')
+  )
     return `moderation.${action.split('.').pop()}`;
-  if (action.includes('purchase') || action.includes('fulfillment'))
-    return 'purchase.completed';
-  if (action.includes('member') && action.includes('join'))
-    return 'member.joined';
-  if (action.includes('giveaway'))
-    return 'giveaway.ended';
+  if (action.includes('purchase') || action.includes('fulfillment')) return 'purchase.completed';
+  if (action.includes('member') && action.includes('join')) return 'member.joined';
+  if (action.includes('giveaway')) return 'giveaway.ended';
   return action;
 }
 
-function formatEventDescription(action: string, details: Record<string, unknown> | null): string {
-  if (!details) return '';
+function formatEventDescription(
+  action: string,
+  details: Record<string, unknown> | null,
+): string {
+  if (!details) {
+    // Some actions make sense without details
+    switch (action) {
+      case 'bot.started':
+        return 'Bot started';
+      default:
+        return '';
+    }
+  }
 
   switch (action) {
     case 'ticket.opened':
@@ -158,15 +196,24 @@ function formatEventDescription(action: string, details: Record<string, unknown>
     case 'moderation.kick':
     case 'bot.kick':
       return `Member kicked${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
+    case 'moderation.mute':
+    case 'bot.mute':
+      return `Member muted${details.reason ? `: ${String(details.reason).slice(0, 60)}` : ''}`;
     case 'fulfillment.one_time_purchase':
     case 'purchase_fulfilled':
       return `Purchase fulfilled: ${details.product_name ?? details.productName ?? 'product'}`;
+    case 'fulfillment.subscription_activated':
+      return `Subscription activated: ${details.product_name ?? 'plan'}`;
     case 'bot.started':
       return 'Bot started';
     case 'bot.create_role':
       return `Role created: ${details.result && typeof details.result === 'object' ? (details.result as Record<string, unknown>).name : 'role'}`;
     case 'bot.create_channel':
       return `Channel created: ${details.result && typeof details.result === 'object' ? (details.result as Record<string, unknown>).name : 'channel'}`;
+    case 'giveaway.ended':
+      return `Giveaway ended: ${details.prize ?? 'giveaway'}`;
+    case 'giveaway.started':
+      return `Giveaway started: ${details.prize ?? 'giveaway'}`;
     default:
       return '';
   }
