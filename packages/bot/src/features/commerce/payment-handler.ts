@@ -201,9 +201,12 @@ export async function handleBuyButton(
       return;
     }
 
-    // Create pending order in DB
+    // Create pending order in DB with sequential order number
+    const { data: seqResult } = await supabase.rpc('generate_order_number') as { data: string | null; error: unknown };
+    const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
+
     await supabase.from('orders').insert({
-      order_number: `INS-${Date.now().toString().slice(-5)}`, // Temporary — proper sequence in webhook
+      order_number: orderNumber,
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,

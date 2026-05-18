@@ -20,6 +20,7 @@ import { ChannelType, PermissionsBitField, type Guild, type GuildChannel, type T
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
+import { runReconciliation } from './reconciliation.js';
 
 // ============================================================
 // Types
@@ -416,6 +417,79 @@ async function removeRoleFromDesiredState(
 // Action Router
 // ============================================================
 
+// ── B.3: Entitlement Role Actions ──────────────────
+
+async function handleGrantRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const discordId = payload.discord_id as string;
+  const roleIds = payload.role_ids as string[];
+
+  if (!discordId || !roleIds?.length) {
+    return { success: false, error: 'Missing discord_id or role_ids' };
+  }
+
+  try {
+    const member = await guild.members.fetch(discordId);
+    const granted: string[] = [];
+    const skipped: string[] = [];
+
+    for (const roleId of roleIds) {
+      const role = guild.roles.cache.get(roleId);
+      if (!role) { skipped.push(roleId); continue; }
+      if (member.roles.cache.has(roleId)) { skipped.push(roleId); continue; }
+      await member.roles.add(roleId, `Commerce: ${payload.reason ?? 'entitlement granted'}`);
+      granted.push(roleId);
+    }
+
+    console.log(`[ActionQueue] Granted ${granted.length} role(s) to ${member.user.tag} (skipped ${skipped.length})`);
+    return { success: true, data: { granted, skipped } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // If member not in guild, that's not a retryable error
+    if (msg.includes('Unknown Member') || msg.includes('not found')) {
+      return { success: true, data: { note: 'Member not in guild — roles will be granted when they rejoin' } };
+    }
+    throw err; // Other errors should be retried
+  }
+}
+
+async function handleRevokeRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const discordId = payload.discord_id as string;
+  const roleIds = payload.role_ids as string[];
+
+  if (!discordId || !roleIds?.length) {
+    return { success: false, error: 'Missing discord_id or role_ids' };
+  }
+
+  try {
+    const member = await guild.members.fetch(discordId);
+    const revoked: string[] = [];
+    const skipped: string[] = [];
+
+    for (const roleId of roleIds) {
+      if (!member.roles.cache.has(roleId)) { skipped.push(roleId); continue; }
+      await member.roles.remove(roleId, `Commerce: ${payload.reason ?? 'entitlement revoked'}`);
+      revoked.push(roleId);
+    }
+
+    console.log(`[ActionQueue] Revoked ${revoked.length} role(s) from ${member.user.tag} (skipped ${skipped.length})`);
+    return { success: true, data: { revoked, skipped } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('Unknown Member') || msg.includes('not found')) {
+      return { success: true, data: { note: 'Member not in guild — no roles to revoke' } };
+    }
+    throw err;
+  }
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -428,6 +502,8 @@ const ACTION_HANDLERS: Record<
   delete_channel: handleDeleteChannel,
   create_category: handleCreateCategory,
   delete_category: handleDeleteCategory,
+  grant_roles: handleGrantRoles,
+  revoke_roles: handleRevokeRoles,
 };
 
 async function processAction(
@@ -450,6 +526,13 @@ async function processAction(
     if (action.action === 'refresh_snapshot') {
       await writeGuildSnapshot(guild, supabase);
       result = { success: true };
+    } else if (action.action === 'run_reconciliation') {
+      const findings = await runReconciliation(
+        guild,
+        supabase,
+        (action.payload.trigger as 'manual' | 'scheduled' | 'startup') || 'manual',
+      );
+      result = { success: true, data: findings as unknown as Record<string, unknown> };
     } else {
       result = { success: false, error: `Unknown action: ${action.action}` };
     }

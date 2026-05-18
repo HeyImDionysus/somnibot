@@ -1,7 +1,7 @@
 /**
  * POST /api/orders/[id]/refund — Issue a refund via PayPal + revoke entitlement.
  *
- * Admin action.
+ * Admin action. Phase B: also enqueues Discord role revocation via bot_action_queue.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -44,7 +44,7 @@ export async function POST(
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  // Fetch order
+  // Fetch order with entitlements and payments
   const { data: order } = await supabase
     .from('orders')
     .select('*, payments(*)')
@@ -90,6 +90,13 @@ export async function POST(
     }
   }
 
+  // ── B.3: Get entitlements BEFORE updating, for role revocation ──
+  const { data: activeEntitlements } = await supabase
+    .from('entitlements')
+    .select('id, customer_id, granted_role_ids')
+    .eq('order_id', orderId)
+    .in('status', ['active', 'pending', 'grace_period']);
+
   // Update order status
   await supabase
     .from('orders')
@@ -118,6 +125,36 @@ export async function POST(
     })
     .eq('order_id', orderId)
     .neq('status', 'revoked');
+
+  // ── B.3: Enqueue Discord role revocation ──
+  if (activeEntitlements?.length) {
+    const allRoleIds = [...new Set(activeEntitlements.flatMap(e => e.granted_role_ids ?? []))];
+    if (allRoleIds.length > 0) {
+      // Get the customer's Discord ID
+      const customerId = activeEntitlements[0]!.customer_id;
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('discord_id')
+        .eq('id', customerId)
+        .single();
+
+      if (customer?.discord_id) {
+        await supabase.from('bot_action_queue').insert({
+          guild_id: guildId,
+          action: 'revoke_roles',
+          payload: {
+            discord_id: customer.discord_id,
+            role_ids: allRoleIds,
+            reason: 'refund',
+            order_id: orderId,
+          },
+          status: 'pending',
+        }).then(() => {}, (err) => {
+          console.error('[Commerce] Failed to enqueue role revocation:', err);
+        });
+      }
+    }
+  }
 
   // Audit log
   await supabase.from('audit_logs').insert({

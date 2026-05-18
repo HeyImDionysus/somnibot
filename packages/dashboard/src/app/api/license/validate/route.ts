@@ -1,24 +1,57 @@
 /**
  * POST /api/license/validate — Universal License Validation API.
  *
- * Public endpoint (rate-limited). Called by external apps to verify a license.
+ * Public endpoint. Called by external apps to verify a license.
  * Architecture doc §30.8.
+ *
+ * Phase B enhancements:
+ * - IP + key rate limiting to prevent brute-force.
+ * - Invalid key attempts logged even when key not found.
+ * - Failed attempt counter on the key record for abuse detection.
+ * - Configurable device policy: 'evict_oldest' or 'reject'.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
-import { parseBody, schemas } from '@/lib/api/validation';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
+function getClientIp(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    ?? req.headers.get('x-real-ip')
+    ?? 'unknown';
+}
+
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
+  const clientIp = getClientIp(req);
 
-  const parsed = await parseBody(req, schemas.licenseSdk.validate);
-  if (!parsed.ok) return parsed.response;
-  const { license_key, product_id, device_fingerprint, device_name, app_version } = parsed.data;
+  // ── B.5: Rate limit by IP ──
+  const ipLimit = rateLimits.licenseValidate(clientIp);
+  if (ipLimit.limited) {
+    return NextResponse.json(
+      { valid: false, status: 'rate_limited', error: 'Too many requests' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil(ipLimit.retryAfterMs / 1000)) },
+      },
+    );
+  }
+
+  let body: { license_key?: string; product_id?: string; device_fingerprint?: string; device_name?: string; app_version?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { valid: false, status: 'revoked', error: 'Invalid request body' },
+      { status: 400 },
+    );
+  }
+
+  const { license_key, product_id, device_fingerprint, device_name, app_version } = body;
 
   if (!license_key || !product_id) {
     return NextResponse.json(
@@ -29,6 +62,19 @@ export async function POST(req: NextRequest) {
 
   // 1. Hash the key and look up
   const keyHash = sha256(license_key);
+
+  // ── B.5: Per-key rate limit ──
+  const keyLimit = rateLimits.licensePerKey(keyHash);
+  if (keyLimit.limited) {
+    return NextResponse.json(
+      { valid: false, status: 'rate_limited', error: 'Too many requests for this license' },
+      {
+        status: 429,
+        headers: { 'Retry-After': String(Math.ceil(keyLimit.retryAfterMs / 1000)) },
+      },
+    );
+  }
+
   const { data: licenseKey } = await supabase
     .from('license_keys')
     .select('*')
@@ -36,13 +82,33 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (!licenseKey) {
-    await logValidation(supabase, null, product_id, device_fingerprint, 'invalid_key', req);
+    // ── B.5: Log invalid key attempt with IP (even though key not found) ──
+    const failedLimit = rateLimits.licenseFailedAttempt(clientIp);
+
+    // Log the attempt to license_validations with a synthetic reference
+    await supabase.from('license_validations').insert({
+      license_key_id: null as unknown as string, // No FK — logged for audit
+      product_id: product_id,
+      device_fingerprint: device_fingerprint ?? null,
+      result: 'invalid_key',
+      ip_address: clientIp,
+      app_version: app_version ?? null,
+    }).then(() => {}, () => {});
+
+    // If too many failed attempts from this IP, return rate limited
+    if (failedLimit.limited) {
+      return NextResponse.json(
+        { valid: false, status: 'rate_limited', error: 'Too many failed attempts' },
+        { status: 429 },
+      );
+    }
+
     return NextResponse.json({ valid: false, status: 'revoked', error: 'Invalid license key' });
   }
 
   // 2. Check key status
   if (licenseKey.status !== 'active') {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, licenseKey.status as string, req);
+    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, licenseKey.status as string, clientIp, app_version);
     return NextResponse.json({
       valid: false,
       status: licenseKey.status,
@@ -52,7 +118,11 @@ export async function POST(req: NextRequest) {
 
   // 3. Check product match
   if (licenseKey.product_id !== product_id) {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'product_mismatch', req);
+    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'product_mismatch', clientIp, app_version);
+
+    // ── B.5: Increment failed attempt counter ──
+    await incrementFailedAttempts(supabase, licenseKey.id);
+
     return NextResponse.json({
       valid: false,
       status: 'revoked',
@@ -68,7 +138,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (!entitlement || !['active', 'grace_period'].includes(entitlement.status)) {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, entitlement?.status ?? 'revoked', req);
+    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, entitlement?.status ?? 'revoked', clientIp, app_version);
     return NextResponse.json({
       valid: false,
       status: entitlement?.status ?? 'revoked',
@@ -83,7 +153,7 @@ export async function POST(req: NextRequest) {
       .update({ status: 'expired', updated_at: new Date().toISOString() })
       .eq('id', entitlement.id);
 
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'expired', req);
+    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'expired', clientIp, app_version);
     return NextResponse.json({ valid: false, status: 'expired', error: 'License has expired' });
   }
 
@@ -117,7 +187,21 @@ export async function POST(req: NextRequest) {
     );
 
     if (!existingSession && sessions.length >= (licenseConfig.max_devices || 3)) {
-      // Over device limit — invalidate oldest session
+      // ── B.5: Configurable device policy ──
+      const devicePolicy = licenseConfig.device_policy || 'evict_oldest';
+
+      if (devicePolicy === 'reject') {
+        await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
+        return NextResponse.json({
+          valid: false,
+          status: 'over_device_limit',
+          error: `Maximum ${licenseConfig.max_devices || 3} devices reached. Deactivate an existing device first.`,
+          active_devices: sessions.length,
+          max_devices: licenseConfig.max_devices || 3,
+        });
+      }
+
+      // evict_oldest: invalidate oldest session
       const oldest = [...sessions].sort(
         (a, b) => new Date(a.last_seen_at).getTime() - new Date(b.last_seen_at).getTime(),
       )[0];
@@ -135,7 +219,6 @@ export async function POST(req: NextRequest) {
     }
 
     const now = new Date().toISOString();
-    const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
 
     if (existingSession) {
       const { data: updated } = await supabase
@@ -170,7 +253,15 @@ export async function POST(req: NextRequest) {
   }
 
   // Log validation
-  await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'valid', req);
+  await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'valid', clientIp, app_version);
+
+  // Reset failed attempt counter on successful validation
+  if (licenseKey.failed_attempts > 0) {
+    await supabase
+      .from('license_keys')
+      .update({ failed_attempts: 0 })
+      .eq('id', licenseKey.id);
+  }
 
   return NextResponse.json({
     valid: true,
@@ -192,18 +283,59 @@ async function logValidation(
   productId: string,
   deviceFingerprint: string | undefined,
   result: string,
-  req: NextRequest,
+  clientIp: string,
+  appVersion?: string,
 ): Promise<void> {
-  if (!licenseKeyId) return;
   try {
     await supabase.from('license_validations').insert({
       license_key_id: licenseKeyId,
       product_id: productId,
       device_fingerprint: deviceFingerprint ?? null,
       result,
-      ip_address: req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+      ip_address: clientIp,
+      app_version: appVersion ?? null,
     });
   } catch {
-    // Non-critical — don't fail the validation
+    // Non-critical
+  }
+}
+
+/**
+ * Increment failed attempt counter on a license key.
+ * If threshold exceeded (e.g., 50 failures), auto-suspend the key.
+ */
+async function incrementFailedAttempts(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  licenseKeyId: string,
+): Promise<void> {
+  const SUSPEND_THRESHOLD = 50;
+
+  try {
+    const { data: key } = await supabase
+      .from('license_keys')
+      .select('failed_attempts')
+      .eq('id', licenseKeyId)
+      .single();
+
+    const newCount = (key?.failed_attempts ?? 0) + 1;
+
+    const update: Record<string, unknown> = {
+      failed_attempts: newCount,
+      last_failed_at: new Date().toISOString(),
+    };
+
+    // Auto-suspend if too many failures
+    if (newCount >= SUSPEND_THRESHOLD) {
+      update.status = 'suspended';
+      update.revocation_reason = 'auto_suspended_abuse';
+      console.warn(`[License] Key ${licenseKeyId} auto-suspended after ${newCount} failed attempts`);
+    }
+
+    await supabase
+      .from('license_keys')
+      .update(update)
+      .eq('id', licenseKeyId);
+  } catch {
+    // Non-critical
   }
 }
