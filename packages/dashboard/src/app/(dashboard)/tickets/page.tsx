@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import Link from 'next/link';
 
 interface TicketType {
@@ -110,6 +111,9 @@ export default function TicketsPage() {
   useEffect(() => {
     if (!loading) loadTickets();
   }, [ticketFilter, loading, loadTickets]);
+
+  // GAP 2: Live updates — auto-refresh when ticket data changes in DB
+  useAutoRefresh('tickets', undefined, loadTickets);
 
   const clearMessages = () => {
     setError(null);

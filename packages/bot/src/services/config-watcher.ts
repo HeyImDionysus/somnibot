@@ -9,10 +9,19 @@
  * - 'moderation' → reload automod rules, infraction config
  * - 'levels' → reload XP rates, level-up rewards
  * - 'welcome' → reload welcome/goodbye messages
+ * - 'onboarding' → reload onboarding / member role config
  * - 'commerce' → reload store config
  * - 'music' → reload music config
  * - 'tickets' → reload ticket panels
  * - 'automations' → reload automation rules
+ * - 'reaction-roles' → reload reaction role mappings
+ * - 'giveaways' → reload giveaway config
+ * - 'temp-channels' → reload temp channel hubs
+ * - 'scheduled-messages' → reload scheduled message rules
+ * - 'custom-commands' → reload custom command definitions
+ * - 'stats-channels' → reload stats channel config
+ * - 'embeds' → reload saved embed templates
+ * - 'settings' → reload instance-wide settings (full reload)
  * - 'all' → full config reload
  */
 import type { Guild } from 'discord.js';
@@ -77,6 +86,33 @@ export class ConfigWatcher {
             break;
           case 'automations':
             await this.reloadAutomations();
+            break;
+          case 'onboarding':
+            await this.reloadOnboarding();
+            break;
+          case 'reaction-roles':
+            await this.reloadReactionRoles();
+            break;
+          case 'giveaways':
+            await this.reloadGiveaways();
+            break;
+          case 'temp-channels':
+            await this.reloadTempChannels();
+            break;
+          case 'scheduled-messages':
+            await this.reloadScheduledMessages();
+            break;
+          case 'custom-commands':
+            await this.reloadCustomCommands();
+            break;
+          case 'stats-channels':
+            await this.reloadStatsChannels();
+            break;
+          case 'embeds':
+            await this.reloadEmbeds();
+            break;
+          case 'settings':
+            await this.reloadAll();
             break;
           case 'all':
             await this.reloadAll();
@@ -165,15 +201,69 @@ export class ConfigWatcher {
     console.log('[ConfigWatcher] ✅ Automations config reloaded');
   }
 
+  private async reloadOnboarding(): Promise<void> {
+    await this.reloadGuildConfig();
+    await this.valkey.del(`onboarding:config:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Onboarding config reloaded');
+  }
+
+  private async reloadReactionRoles(): Promise<void> {
+    await this.valkey.del(`reaction-roles:${this.guild.id}`).catch(() => {});
+    // Delete all individual reaction role cache keys for this guild
+    const keys = await this.valkey.keys(`rr:${this.guild.id}:*`).catch(() => [] as string[]);
+    if (keys.length > 0) {
+      await this.valkey.del(...keys).catch(() => {});
+    }
+    console.log('[ConfigWatcher] ✅ Reaction roles reloaded');
+  }
+
+  private async reloadGiveaways(): Promise<void> {
+    await this.valkey.del(`giveaways:active:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Giveaways config reloaded');
+  }
+
+  private async reloadTempChannels(): Promise<void> {
+    await this.valkey.del(`temp-channels:hubs:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Temp channels config reloaded');
+  }
+
+  private async reloadScheduledMessages(): Promise<void> {
+    await this.valkey.del(`scheduled-messages:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Scheduled messages config reloaded');
+  }
+
+  private async reloadCustomCommands(): Promise<void> {
+    await this.valkey.del(`custom-commands:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Custom commands config reloaded');
+  }
+
+  private async reloadStatsChannels(): Promise<void> {
+    await this.valkey.del(`stats-channels:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Stats channels config reloaded');
+  }
+
+  private async reloadEmbeds(): Promise<void> {
+    await this.valkey.del(`embeds:${this.guild.id}`).catch(() => {});
+    console.log('[ConfigWatcher] ✅ Embeds config reloaded');
+  }
+
   private async reloadAll(): Promise<void> {
     await this.reloadGuildConfig();
     await this.reloadModeration();
     await this.reloadLevels();
     await this.reloadWelcome();
+    await this.reloadOnboarding();
     await this.reloadCommerce();
     await this.reloadMusic();
     await this.reloadTickets();
     await this.reloadAutomations();
+    await this.reloadReactionRoles();
+    await this.reloadGiveaways();
+    await this.reloadTempChannels();
+    await this.reloadScheduledMessages();
+    await this.reloadCustomCommands();
+    await this.reloadStatsChannels();
+    await this.reloadEmbeds();
     console.log('[ConfigWatcher] ✅ Full config reload complete');
   }
 

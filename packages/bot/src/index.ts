@@ -29,6 +29,10 @@ import { ConfigWatcher } from './services/config-watcher.js';
 import { OwnerNotificationService } from './services/owner-notifications.js';
 import { GiveawayFulfillmentService } from './services/giveaway-fulfillment.js';
 import { MusicStatusReporter } from './services/music-status-reporter.js';
+import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
+import { AutoModSync } from './features/discord-native/automod-sync.js';
+import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
+import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -507,7 +511,31 @@ async function main(): Promise<void> {
         (client as unknown as Record<string, unknown>)._presenceManager = presenceManager;
         console.log('[Boot] ✅ BotPresenceManager started');
 
-        // 14f: Start OwnerNotificationService (DMs owner on critical events)
+        // 14f: Start CrossFeatureBridge (GAP 3)
+        const crossFeatureBridge = new CrossFeatureBridge(
+          guild,
+          client.supabase,
+          client.eventBus,
+          client.valkey,
+        );
+        crossFeatureBridge.start();
+        (client as unknown as Record<string, unknown>)._crossFeatureBridge = crossFeatureBridge;
+        console.log('[Boot] ✅ CrossFeatureBridge started — cross-feature events wired');
+
+        // 14g: Start Discord Native services (GAP 5)
+        const autoModSync = new AutoModSync(guild, client.supabase, client.eventBus);
+        autoModSync.start();
+        (client as unknown as Record<string, unknown>)._autoModSync = autoModSync;
+
+        const guildOnboardingSync = new GuildOnboardingSync(guild, client.supabase, client.eventBus);
+        guildOnboardingSync.start();
+        (client as unknown as Record<string, unknown>)._guildOnboardingSync = guildOnboardingSync;
+
+        const forumTicketService = new ForumTicketService(guild, client.supabase);
+        (client as unknown as Record<string, unknown>)._forumTicketService = forumTicketService;
+        console.log('[Boot] ✅ Discord Native services started (AutoMod sync, Onboarding sync, Forum tickets)');
+
+        // 14h: Start OwnerNotificationService (DMs owner on critical events)
         const notificationService = new OwnerNotificationService(
           client,
           client.guildId,
@@ -556,6 +584,11 @@ async function main(): Promise<void> {
     if (auditSvc?.stop) auditSvc.stop();
     const diagSvc = (client as unknown as Record<string, unknown>)._diagnosticsService as { stop?: () => void } | undefined;
     if (diagSvc?.stop) diagSvc.stop();
+    // Cross-feature bridge + Discord native services
+    const crossBridge = (client as unknown as Record<string, unknown>)._crossFeatureBridge as { stop?: () => void } | undefined;
+    if (crossBridge?.stop) crossBridge.stop();
+    const autoModSync = (client as unknown as Record<string, unknown>)._autoModSync as { stop?: () => void } | undefined;
+    if (autoModSync?.stop) autoModSync.stop();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
     await client.valkey.quit().catch(() => {});

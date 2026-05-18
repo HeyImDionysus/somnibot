@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -105,6 +106,9 @@ export default function OrdersPage() {
   }, [search, filterStatus]);
 
   useEffect(() => { load(); }, [load]);
+
+  // GAP 2: Live updates — auto-refresh when order data changes in DB
+  useAutoRefresh('orders', undefined, load);
 
   const refundOrder = async (orderId: string) => {
     if (!confirm('Issue a refund for this order? Entitlements and license keys will be revoked.')) return;
