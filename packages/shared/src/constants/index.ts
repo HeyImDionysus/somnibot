@@ -4,3 +4,4 @@ export * from './brand.js';
 export * from './levels.js';
 export * from './automations.js';
 export * from './discord.js';
+export * from './rbac.js';
