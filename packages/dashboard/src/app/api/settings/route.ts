@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
-import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { notifyBot } from '@/lib/notify-bot';
 
 /**
  * Settings API — read and write operator configuration.
@@ -69,8 +69,11 @@ function maskValue(value: string): string {
  */
 export async function GET() {
   try {
-    const auth = await requireGuildOwner();
-    if (!auth.ok) return auth.response;
+    const supabase = await createServerSupabase();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
     // Step 1: Read env vars as base values
     const values: Record<string, string> = {};
@@ -166,8 +169,11 @@ export async function GET() {
  */
 export async function PUT(request: Request) {
   try {
-    const auth = await requireGuildOwner();
-    if (!auth.ok) return auth.response;
+    const supabase = await createServerSupabase();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
     const body = await request.json();
     const { section, values } = body as { section: string; values: Record<string, string> };
@@ -190,6 +196,8 @@ export async function PUT(request: Request) {
           { onConflict: 'key' },
         );
     }
+
+    await notifyBot('settings', { section });
 
     return NextResponse.json({ ok: true });
   } catch (err) {

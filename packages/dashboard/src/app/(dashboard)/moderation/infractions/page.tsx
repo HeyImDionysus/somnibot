@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 interface Infraction {
   id: string;
@@ -78,6 +79,9 @@ export default function InfractionsPage() {
   useEffect(() => {
     loadInfractions();
   }, [loadInfractions]);
+
+  // GAP 2: Live updates — auto-refresh when infraction data changes in DB
+  useAutoRefresh('infractions', undefined, loadInfractions);
 
   const handlePardon = async (id: string) => {
     try {

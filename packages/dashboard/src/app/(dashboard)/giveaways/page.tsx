@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -99,6 +100,9 @@ export default function GiveawaysPage() {
   useEffect(() => {
     fetchGiveaways();
   }, [fetchGiveaways]);
+
+  // GAP 2: Live updates — auto-refresh when giveaway data changes in DB
+  useAutoRefresh('giveaways', undefined, fetchGiveaways);
 
   const createGiveaway = async () => {
     setError(null);

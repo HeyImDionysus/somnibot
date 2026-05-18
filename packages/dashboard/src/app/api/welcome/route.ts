@@ -3,15 +3,11 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requireGuildOwner } from '@/lib/api/require-owner';
-import { parseBody, schemas } from '@/lib/api/validation';
+import { notifyBot } from '@/lib/notify-bot';
 
+const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
@@ -21,7 +17,7 @@ export async function GET() {
       'welcome_card_background, welcome_dm_enabled, welcome_dm_message, welcome_auto_roles, ' +
       'goodbye_enabled, goodbye_channel_id, goodbye_message',
     )
-    .eq('guild_id', guildId)
+    .eq('guild_id', GUILD_ID)
     .maybeSingle();
 
   if (error) {
@@ -32,14 +28,8 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.welcome.config);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data as Record<string, unknown>;
+  const body = await req.json();
 
   const allowed: Record<string, unknown> = {};
   const fields = [
@@ -56,11 +46,13 @@ export async function PUT(req: NextRequest) {
   const { error } = await supabase
     .from('guild_config')
     .update(allowed)
-    .eq('guild_id', guildId);
+    .eq('guild_id', GUILD_ID);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
+
+  await notifyBot('welcome', allowed);
 
   return NextResponse.json({ success: true });
 }

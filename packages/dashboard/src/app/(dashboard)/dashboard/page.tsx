@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import {
   Shield, Users, Zap, Settings, Music, ShoppingCart, Ticket,
@@ -78,6 +79,17 @@ export default function DashboardPage() {
       }
     })();
   }, []);
+
+  // GAP 2: Live updates — refresh dashboard stats when key tables change
+  const refreshStats = useCallback(async () => {
+    try {
+      const res = await fetch('/api/dashboard/stats');
+      if (res.ok) setStats(await res.json());
+    } catch { /* non-critical */ }
+  }, []);
+  useAutoRefresh('orders', undefined, refreshStats);
+  useAutoRefresh('tickets', undefined, refreshStats);
+  useAutoRefresh('audit_log', undefined, refreshStats);
 
   if (loading) {
     return (

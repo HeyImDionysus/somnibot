@@ -1,0 +1,80 @@
+/**
+ * ErrorBoundary — Catches render errors in any child component tree
+ * so a crash in one page/component doesn't take down the entire dashboard.
+ *
+ * GAP 4: Operator UX Polish
+ */
+'use client';
+
+import React, { Component, type ErrorInfo, type ReactNode } from 'react';
+import { AlertTriangle, RefreshCw } from 'lucide-react';
+
+interface Props {
+  children: ReactNode;
+  /** Optional fallback component */
+  fallback?: ReactNode;
+  /** Name of the section for logging */
+  section?: string;
+}
+
+interface State {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class ErrorBoundary extends Component<Props, State> {
+  constructor(props: Props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(
+      `[ErrorBoundary${this.props.section ? `: ${this.props.section}` : ''}] Caught error:`,
+      error,
+      errorInfo,
+    );
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false, error: null });
+  };
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <div className="flex min-h-[300px] flex-col items-center justify-center rounded-lg border border-discord-danger/30 bg-discord-danger/5 p-8">
+          <AlertTriangle className="mb-4 h-10 w-10 text-discord-danger" />
+          <h2 className="mb-2 text-lg font-semibold text-discord-text-primary">
+            Something went wrong
+          </h2>
+          <p className="mb-1 text-sm text-discord-text-muted">
+            {this.props.section
+              ? `The ${this.props.section} section encountered an error.`
+              : 'This section encountered an error.'}
+          </p>
+          <p className="mb-4 max-w-md text-center text-xs text-discord-text-muted/70">
+            {this.state.error?.message || 'An unexpected error occurred.'}
+          </p>
+          <button
+            onClick={this.handleRetry}
+            className="flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-colors"
+          >
+            <RefreshCw size={14} />
+            Retry
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}

@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { Sidebar } from '@/components/layout/sidebar';
+import { DashboardProviders } from '@/components/layout/dashboard-providers';
 
 /**
  * Dashboard layout — sidebar + content area.
@@ -23,7 +24,9 @@ export default async function DashboardLayout({
       <Sidebar />
       <main className="flex-1 overflow-y-auto bg-discord-bg-primary">
         <div className="mx-auto max-w-5xl p-6">
-          {children}
+          <DashboardProviders>
+            {children}
+          </DashboardProviders>
         </div>
       </main>
     </div>

@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -135,6 +136,9 @@ export default function CustomersPage() {
   useEffect(() => {
     fetchCustomers();
   }, [fetchCustomers]);
+
+  // GAP 2: Live updates — auto-refresh when customer data changes in DB
+  useAutoRefresh('customers', undefined, fetchCustomers);
 
   const filteredTimeline = timeline?.timeline.filter((e) => {
     if (categoryFilter) return e.category === categoryFilter;
