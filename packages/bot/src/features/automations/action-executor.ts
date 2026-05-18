@@ -179,15 +179,63 @@ async function executeAction(
     case 'grant_entitlement': {
       if (!ctx.member) return { success: false, error: 'No user context for entitlement' };
       const productId = config.product_id as string;
-      // Create an entitlement record
-      const { error } = await ctx.supabase.from('entitlements').insert({
+
+      // Fetch product to get role/channel grants
+      const { data: product } = await ctx.supabase
+        .from('products')
+        .select('name, granted_role_ids, granted_channel_ids')
+        .eq('id', productId)
+        .single();
+
+      if (!product) return { success: false, error: `Product ${productId} not found` };
+
+      // Find or create customer record
+      let { data: customer } = await ctx.supabase
+        .from('customers')
+        .select('id')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', ctx.member.id)
+        .maybeSingle();
+
+      if (!customer) {
+        const { data: newCustomer } = await ctx.supabase
+          .from('customers')
+          .insert({
+            guild_id: ctx.guildId,
+            discord_id: ctx.member.id,
+            username: ctx.member.user.username,
+          })
+          .select('id')
+          .single();
+        customer = newCustomer;
+      }
+
+      if (!customer) return { success: false, error: 'Failed to create customer record' };
+
+      // Queue fulfillment via bot_action_queue so EntitlementService handles it
+      // (roles, events, audit log — all in one atomic operation)
+      const { error: queueError } = await ctx.supabase.from('bot_action_queue').insert({
         guild_id: ctx.guildId,
-        discord_id: ctx.member.id,
-        product_id: productId,
-        status: 'active',
-        source: 'automation',
+        action: 'fulfill_purchase',
+        payload: {
+          fulfillment_type: 'one_time_purchase',
+          guild_id: ctx.guildId,
+          customer_id: customer.id,
+          discord_id: ctx.member.id,
+          product_id: productId,
+          product_name: product.name,
+          order_id: `auto-${ctx.automationId}-${Date.now()}`,
+          order_number: `AUTO-${Date.now().toString().slice(-5)}`,
+          amount_cents: 0,
+          currency: 'USD',
+          granted_role_ids: product.granted_role_ids ?? [],
+          granted_channel_ids: product.granted_channel_ids ?? [],
+          entitlement_type: 'one_time',
+        },
+        status: 'pending',
       });
-      if (error) return { success: false, error: `Entitlement grant failed: ${error.message}` };
+
+      if (queueError) return { success: false, error: `Entitlement queue failed: ${queueError.message}` };
       return { success: true };
     }
 
@@ -206,7 +254,79 @@ async function executeAction(
     }
 
     case 'create_ticket': {
-      // Ticket creation via automation — simplified, just logs intent
+      if (!ctx.member) return { success: false, error: 'No user context for ticket creation' };
+
+      const subject = config.subject
+        ? resolveVars(config.subject as string, ctx.variables)
+        : 'Auto-created ticket';
+      const panelId = config.panel_id as string | undefined;
+
+      // Get ticket panel
+      const panelQuery = ctx.supabase
+        .from('ticket_panels')
+        .select('id, category_id, staff_role_ids')
+        .eq('guild_id', ctx.guildId);
+
+      if (panelId) panelQuery.eq('id', panelId);
+      panelQuery.order('created_at', { ascending: true }).limit(1);
+
+      const { data: panel } = await panelQuery.single();
+      if (!panel) return { success: false, error: 'No ticket panel configured' };
+
+      // Generate ticket number
+      const { count } = await ctx.supabase
+        .from('tickets')
+        .select('id', { count: 'exact', head: true })
+        .eq('guild_id', ctx.guildId);
+
+      const ticketNumber = (count ?? 0) + 1;
+
+      // Create the channel
+      const { ChannelType: CT } = await import('discord.js');
+      const ticketChannel = await ctx.guild.channels.create({
+        name: `ticket-${ticketNumber.toString().padStart(4, '0')}`,
+        type: CT.GuildText,
+        parent: panel.category_id || undefined,
+        topic: `Ticket #${ticketNumber} — ${subject}`,
+        reason: 'Automation: auto-created ticket',
+      });
+
+      // Permissions
+      await ticketChannel.permissionOverwrites.create(ctx.guild.id, { ViewChannel: false });
+      await ticketChannel.permissionOverwrites.create(ctx.member.id, {
+        ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true,
+      });
+      for (const roleId of (panel.staff_role_ids ?? [])) {
+        await ticketChannel.permissionOverwrites.create(roleId, {
+          ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+        }).catch(() => {});
+      }
+
+      // Create ticket record
+      const { data: ticket, error: ticketError } = await ctx.supabase
+        .from('tickets')
+        .insert({
+          guild_id: ctx.guildId,
+          ticket_number: ticketNumber,
+          channel_id: ticketChannel.id,
+          user_discord_id: ctx.member.id,
+          panel_id: panel.id,
+          subject,
+          status: 'open',
+        })
+        .select('id')
+        .single();
+
+      if (ticketError) {
+        await ticketChannel.delete().catch(() => {});
+        return { success: false, error: `Ticket DB error: ${ticketError.message}` };
+      }
+
+      // Post opening message
+      await ticketChannel.send({
+        content: `🎫 **Ticket #${ticketNumber}** — ${subject}\nCreated for ${ctx.member} by automation.\n\nA staff member will be with you shortly.`,
+      });
+
       return { success: true };
     }
 
