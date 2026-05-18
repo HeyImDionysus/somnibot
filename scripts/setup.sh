@@ -9,9 +9,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║         SomniBot — First-Time Setup      ║"
-echo "╚══════════════════════════════════════════╝"
+echo "+==========================================+"
+echo "|         SomniBot — First-Time Setup      |"
+echo "+==========================================+"
 echo ""
 
 # ─── Check prerequisites ────────────────────────────────────
@@ -26,11 +26,13 @@ elif [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 22 ]]; then
 fi
 
 if ! command -v pnpm &>/dev/null; then
-  missing+=("pnpm (run: corepack enable && corepack prepare pnpm@9 --activate)")
+  missing+=("pnpm (run: corepack enable, then re-run this script)")
 fi
 
 if ! command -v docker &>/dev/null; then
   missing+=("Docker Desktop (https://docker.com/get-started)")
+elif ! docker info &>/dev/null; then
+  missing+=("Docker daemon is not running — start Docker Desktop first")
 fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
@@ -40,7 +42,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     echo "   • $item"
   done
   echo ""
-  echo "Install the above and run this script again."
+  echo "Install/fix the above and run this script again."
   exit 1
 fi
 
@@ -61,7 +63,7 @@ if [[ ! -f .env ]]; then
   echo "       DISCORD_APPLICATION_ID — from Discord Developer Portal → OAuth2 → Client ID"
   echo "       DISCORD_CLIENT_SECRET  — from Discord Developer Portal → OAuth2 → Client Secret"
   echo "       SUPABASE_URL           — from Supabase → Settings → API → Project URL"
-  echo "       SUPABASE_SERVICE_ROLE_KEY — from Supabase → Settings → API → service_role key"
+  echo "       SUPABASE_SECRET_KEY    — from Supabase → Settings → API → secret key"
   echo ""
   echo "     The .env file is at: $REPO_ROOT/.env"
   echo ""
@@ -71,20 +73,34 @@ fi
 
 # ─── Install dependencies ───────────────────────────────────
 echo "→ Installing dependencies (this may take a minute)..."
-pnpm install
+
+# Suppress Node.js deprecation warnings from pnpm internals
+NODE_NO_WARNINGS=1 pnpm install
+
 echo "  ✅ Dependencies installed"
 echo ""
 
 # ─── Build all packages ─────────────────────────────────────
 echo "→ Building all packages (shared → bot → dashboard)..."
+
+# Disable Turborepo telemetry prompt
+export TURBO_TELEMETRY_DISABLED=1
+export DO_NOT_TRACK=1
+
 pnpm build
 echo "  ✅ Build complete"
 echo ""
 
+# ─── Pull Docker images ─────────────────────────────────────
+echo "→ Pulling Docker images (Lavalink + Valkey)..."
+docker compose pull 2>/dev/null || echo "  ⚠️  Image pull failed (will pull on first start)"
+echo "  ✅ Docker images ready"
+echo ""
+
 # ─── Done ────────────────────────────────────────────────────
-echo "╔══════════════════════════════════════════╗"
-echo "║            ✅ Setup Complete!             ║"
-echo "╚══════════════════════════════════════════╝"
+echo "+==========================================+"
+echo "|            ✅ Setup Complete!             |"
+echo "+==========================================+"
 echo ""
 echo "Next steps:"
 echo "  1. Fill in your .env file (if you haven't already)"
