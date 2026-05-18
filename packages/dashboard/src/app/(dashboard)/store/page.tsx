@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import ProductFiles from '@/components/store/product-files';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -112,6 +113,8 @@ export default function StorePage() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [filesProductId, setFilesProductId] = useState<string | null>(null);
+  const [filesProductName, setFilesProductName] = useState<string>('');
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
 
@@ -427,6 +430,12 @@ export default function StorePage() {
                     {p.active ? 'Active' : 'Inactive'}
                   </button>
                   <button
+                    onClick={() => { setFilesProductId(p.id); setFilesProductName(p.name); }}
+                    className="rounded-input bg-discord-bg-tertiary px-3 py-1 text-xs text-discord-text-secondary hover:text-discord-text-primary transition-standard"
+                  >
+                    📁 Files
+                  </button>
+                  <button
                     onClick={() => openEdit(p)}
                     className="rounded-input bg-discord-bg-tertiary px-3 py-1 text-xs text-discord-text-secondary hover:text-discord-text-primary transition-standard"
                   >
@@ -442,6 +451,22 @@ export default function StorePage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* File Manager Drawer */}
+      {filesProductId && (
+        <div className="mt-6">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-base font-semibold text-white">Product Files</h2>
+            <button
+              onClick={() => setFilesProductId(null)}
+              className="text-xs text-discord-text-muted hover:text-white"
+            >
+              ✕ Close
+            </button>
+          </div>
+          <ProductFiles productId={filesProductId} productName={filesProductName} />
         </div>
       )}
     </div>

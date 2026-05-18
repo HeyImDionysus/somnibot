@@ -1,6 +1,6 @@
 /**
- * Commerce Analytics — Revenue, customers, products, churn, LTV.
- * Phase D: SOTA commerce intelligence dashboard.
+ * Analytics — Commerce, Engagement, Moderation, Levels.
+ * Phase D: SOTA intelligence dashboard. Phase F.3: Expanded beyond commerce.
  */
 'use client';
 
@@ -79,15 +79,28 @@ const PERIODS = [
 
 export default function AnalyticsPage() {
   const [data, setData] = useState<AnalyticsData | null>(null);
+  const [engagement, setEngagement] = useState<{
+    moderation: { totalInfractions: number; activeInfractions: number; pardonedInfractions: number; byType: Record<string, number>; byDay: Record<string, number> };
+    tickets: { total: number; open: number; closed: number; avgResolutionHours: number };
+    levels: { totalTrackedMembers: number; avgLevel: number; maxLevel: number; totalMessages: number; totalVoiceMinutes: number; distribution: Record<number, number> };
+    members: { joins: number; returningJoins: number; leaves: number; netGrowth: number };
+    giveaways: { total: number; totalEntries: number; totalWinners: number };
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState('30d');
+  const [activeTab, setActiveTab] = useState<'commerce' | 'engagement'>('commerce');
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/analytics?period=${period}`);
-      const json = await res.json();
-      if (json.success) setData(json.data);
+      const [commerceRes, engagementRes] = await Promise.all([
+        fetch(`/api/analytics?period=${period}`),
+        fetch(`/api/analytics/engagement?period=${period}`),
+      ]);
+      const commerceJson = await commerceRes.json();
+      const engagementJson = await engagementRes.json();
+      if (commerceJson.success) setData(commerceJson.data);
+      if (engagementJson.success) setEngagement(engagementJson.data);
     } finally {
       setLoading(false);
     }
@@ -120,8 +133,23 @@ export default function AnalyticsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Analytics</h1>
-          <p className="mt-1 text-sm text-discord-text-muted">Commerce performance and customer insights</p>
+          <p className="mt-1 text-sm text-discord-text-muted">Commerce, engagement, and moderation insights</p>
         </div>
+        <div className="flex items-center gap-3">
+          <div className="flex rounded-md bg-discord-bg-tertiary p-0.5">
+            <button
+              onClick={() => setActiveTab('commerce')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                activeTab === 'commerce' ? 'bg-discord-accent text-white' : 'text-discord-text-muted hover:text-white'
+              }`}
+            >💰 Commerce</button>
+            <button
+              onClick={() => setActiveTab('engagement')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                activeTab === 'engagement' ? 'bg-discord-accent text-white' : 'text-discord-text-muted hover:text-white'
+              }`}
+            >📊 Engagement</button>
+          </div>
         <select
           value={period}
           onChange={(e) => setPeriod(e.target.value)}
@@ -131,7 +159,98 @@ export default function AnalyticsPage() {
             <option key={p.value} value={p.value}>{p.label}</option>
           ))}
         </select>
+        </div>
       </div>
+
+      {activeTab === 'engagement' && engagement ? (
+        /* ── Engagement Tab ───────────────────────────── */
+        <div className="space-y-6">
+          {/* Engagement KPIs */}
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+            {[
+              { label: 'Member Joins', value: String(engagement.members.joins), sub: `${engagement.members.returningJoins} returning`, color: 'text-green-400' },
+              { label: 'Net Growth', value: (engagement.members.netGrowth >= 0 ? '+' : '') + engagement.members.netGrowth, sub: `${engagement.members.leaves} left`, color: engagement.members.netGrowth >= 0 ? 'text-green-400' : 'text-red-400' },
+              { label: 'Infractions', value: String(engagement.moderation.totalInfractions), sub: `${engagement.moderation.activeInfractions} active`, color: engagement.moderation.totalInfractions > 0 ? 'text-yellow-400' : 'text-discord-text-muted' },
+              { label: 'Tickets', value: String(engagement.tickets.total), sub: `${engagement.tickets.open} open · avg ${engagement.tickets.avgResolutionHours}h resolve`, color: 'text-blue-400' },
+              { label: 'Avg Level', value: String(engagement.levels.avgLevel), sub: `${engagement.levels.totalTrackedMembers} tracked · max ${engagement.levels.maxLevel}`, color: 'text-purple-400' },
+            ].map((card) => (
+              <div key={card.label} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
+                <p className="text-xs text-discord-text-muted uppercase tracking-wide">{card.label}</p>
+                <p className={`mt-1 text-2xl font-bold ${card.color}`}>{card.value}</p>
+                <p className="mt-1 text-xs text-discord-text-muted">{card.sub}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Moderation Breakdown */}
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
+            <h3 className="text-sm font-semibold text-discord-text-primary mb-3">🛡️ Moderation by Type</h3>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {Object.entries(engagement.moderation.byType).map(([type, count]) => (
+                <div key={type} className="flex items-center justify-between bg-discord-bg-tertiary rounded p-2.5">
+                  <span className="text-xs text-discord-text-secondary capitalize">{type}</span>
+                  <span className="text-sm font-bold text-discord-text-primary">{count}</span>
+                </div>
+              ))}
+              {Object.keys(engagement.moderation.byType).length === 0 && (
+                <p className="text-xs text-discord-text-muted col-span-4">No infractions this period</p>
+              )}
+            </div>
+          </div>
+
+          {/* Level Distribution */}
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
+            <h3 className="text-sm font-semibold text-discord-text-primary mb-3">📈 Level Distribution</h3>
+            <div className="flex items-end gap-1 h-32">
+              {Object.entries(engagement.levels.distribution)
+                .sort(([a], [b]) => Number(a) - Number(b))
+                .map(([bucket, count]) => {
+                  const maxCount = Math.max(...Object.values(engagement.levels.distribution), 1);
+                  const height = (count / maxCount) * 100;
+                  return (
+                    <div key={bucket} className="flex-1 flex flex-col items-center gap-1">
+                      <span className="text-xs text-discord-text-muted">{count}</span>
+                      <div
+                        className="w-full bg-discord-accent rounded-t"
+                        style={{ height: `${Math.max(height, 4)}%` }}
+                      />
+                      <span className="text-xs text-discord-text-muted">{bucket}-{Number(bucket) + 4}</span>
+                    </div>
+                  );
+                })}
+              {Object.keys(engagement.levels.distribution).length === 0 && (
+                <p className="text-xs text-discord-text-muted w-full text-center">No level data</p>
+              )}
+            </div>
+            <div className="flex items-center gap-4 mt-3 text-xs text-discord-text-muted">
+              <span>💬 {engagement.levels.totalMessages.toLocaleString()} messages</span>
+              <span>🎙️ {Math.round(engagement.levels.totalVoiceMinutes / 60).toLocaleString()} voice hours</span>
+            </div>
+          </div>
+
+          {/* Giveaway Stats */}
+          {engagement.giveaways.total > 0 && (
+            <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
+              <h3 className="text-sm font-semibold text-discord-text-primary mb-3">🎉 Giveaways</h3>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center">
+                  <p className="text-lg font-bold text-discord-text-primary">{engagement.giveaways.total}</p>
+                  <p className="text-xs text-discord-text-muted">Total</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-lg font-bold text-discord-text-primary">{engagement.giveaways.totalEntries}</p>
+                  <p className="text-xs text-discord-text-muted">Entries</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-lg font-bold text-discord-text-primary">{engagement.giveaways.totalWinners}</p>
+                  <p className="text-xs text-discord-text-muted">Winners</p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+      <>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -278,6 +397,8 @@ export default function AnalyticsPage() {
             ))}
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

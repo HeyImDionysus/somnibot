@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import NowPlayingWidget from '@/components/music/now-playing-widget';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -123,6 +124,9 @@ export default function MusicSettingsPage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-6">
+      {/* Now Playing Widget */}
+      <NowPlayingWidget />
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
