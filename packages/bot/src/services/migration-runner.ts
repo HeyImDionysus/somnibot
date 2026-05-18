@@ -160,10 +160,10 @@ function extractProjectRef(url: string): string | null {
  */
 export async function runMigrations(): Promise<MigrationResult> {
   const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceRoleKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !serviceRoleKey) {
-    console.log('[Migration] ⏭️  Skipping — SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set');
+    console.log('[Migration] ⏭️  Skipping — SUPABASE_URL or SUPABASE_SECRET_KEY not set');
     return { ran: false, migrations: [], errors: [] };
   }
 

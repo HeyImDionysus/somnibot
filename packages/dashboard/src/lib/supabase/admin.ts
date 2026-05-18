@@ -6,8 +6,8 @@ import { createClient } from '@supabase/supabase-js';
 
 export function createAdminSupabase() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? '';
-  // Use the legacy service_role JWT key — the sb_secret format doesn't grant table access
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_SECRET_KEY ?? '';
+  // Prefer the new sb_secret key, fall back to legacy service_role
+  const serviceKey = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
 
   return createClient(supabaseUrl, serviceKey);
 }

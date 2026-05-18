@@ -5,9 +5,12 @@ import { z } from 'zod';
  *
  * User-provided (5 required):
  *   DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET,
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+ *   SUPABASE_URL, SUPABASE_SECRET_KEY
  *
  * Everything else is auto-derived or has sensible defaults.
+ *
+ * Supabase key format: Uses the new sb_secret / sb_publishable keys.
+ * Legacy service_role / anon keys are accepted as fallbacks.
  */
 export const BotEnvSchema = z.object({
   // ─── Discord (user-provided) ───
@@ -19,10 +22,11 @@ export const BotEnvSchema = z.object({
 
   // ─── Supabase (user-provided) ───
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
-  // Legacy aliases (auto-derived from SERVICE_ROLE_KEY if not set)
-  SUPABASE_PUBLISHABLE_KEY: z.string().optional().default(''),
+  // New key format (primary)
   SUPABASE_SECRET_KEY: z.string().optional().default(''),
+  SUPABASE_PUBLISHABLE_KEY: z.string().optional().default(''),
+  // Legacy key format (accepted as fallback)
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(''),
   SUPABASE_ANON_KEY: z.string().optional().default(''),
 
   // ─── Supabase Management API (optional, for auto-migration) ───
@@ -52,12 +56,23 @@ export const BotEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 })
   .transform((env) => {
-    // Auto-derive missing keys from SERVICE_ROLE_KEY
-    if (!env.SUPABASE_PUBLISHABLE_KEY) env.SUPABASE_PUBLISHABLE_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!env.SUPABASE_SECRET_KEY) env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!env.SUPABASE_ANON_KEY) env.SUPABASE_ANON_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+    // Resolve secret key: prefer SUPABASE_SECRET_KEY, fall back to legacy SUPABASE_SERVICE_ROLE_KEY
+    if (!env.SUPABASE_SECRET_KEY && env.SUPABASE_SERVICE_ROLE_KEY) {
+      env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+    }
+    // Resolve publishable key: prefer SUPABASE_PUBLISHABLE_KEY, fall back to legacy SUPABASE_ANON_KEY
+    if (!env.SUPABASE_PUBLISHABLE_KEY && env.SUPABASE_ANON_KEY) {
+      env.SUPABASE_PUBLISHABLE_KEY = env.SUPABASE_ANON_KEY;
+    }
+    // Keep legacy aliases populated for any code that references them
+    if (!env.SUPABASE_SERVICE_ROLE_KEY) env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY;
+    if (!env.SUPABASE_ANON_KEY) env.SUPABASE_ANON_KEY = env.SUPABASE_PUBLISHABLE_KEY;
     return env;
-  });
+  })
+  .refine(
+    (env) => !!env.SUPABASE_SECRET_KEY,
+    { message: 'SUPABASE_SECRET_KEY is required (or set the legacy SUPABASE_SERVICE_ROLE_KEY)', path: ['SUPABASE_SECRET_KEY'] },
+  );
 
 export type BotEnv = z.infer<typeof BotEnvSchema>;
 
@@ -70,9 +85,9 @@ export const DashboardEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.string().url('NEXT_PUBLIC_SUPABASE_URL must be a valid URL'),
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is required'),
 
-  // Server-only
+  // Server-only — new format is primary, legacy accepted as fallback
   SUPABASE_SECRET_KEY: z.string().optional().default(''),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY is required'),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(''),
   DISCORD_CLIENT_SECRET: z.string().min(1, 'DISCORD_CLIENT_SECRET is required'),
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
   DISCORD_GUILD_ID: z.string().optional().default(''),
@@ -89,8 +104,11 @@ export const DashboardEnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 })
   .transform((env) => {
-    // Auto-derive missing keys
-    if (!env.SUPABASE_SECRET_KEY) env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+    // Resolve: prefer new key, fall back to legacy
+    if (!env.SUPABASE_SECRET_KEY && env.SUPABASE_SERVICE_ROLE_KEY) {
+      env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
+    }
+    if (!env.SUPABASE_SERVICE_ROLE_KEY) env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY;
     return env;
   });
 
