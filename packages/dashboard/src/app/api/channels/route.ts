@@ -1,10 +1,10 @@
 /**
- * Channel Templates CRUD API
+ * Channels API — Live Discord Channel Management
  *
- * GET    /api/channels — List all channel templates for the guild
- * POST   /api/channels — Create a new channel template
- * PATCH  /api/channels — Update a channel template
- * DELETE /api/channels — Delete a channel template
+ * GET    /api/channels — Returns actual Discord channels from guild_live_state.
+ * POST   /api/channels — Queue a create_channel action for the bot
+ * PATCH  /api/channels — Queue an update_channel action for the bot
+ * DELETE /api/channels — Queue a delete_channel action for the bot
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -32,119 +32,159 @@ async function getGuildId(): Promise<string | null> {
   return guild?.id ?? null;
 }
 
+// ============================================================
+// GET — Read actual Discord channels from live state
+// ============================================================
+
 export async function GET() {
   const guildId = await getGuildId();
   if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const admin = createAdminSupabase();
-  const { data, error } = await admin
-    .from('channel_templates')
-    .select('*')
-    .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+  const { data: liveState } = await admin
+    .from('guild_live_state')
+    .select('channels, categories, snapshot_at')
+    .eq('guild_id', guildId)
+    .single();
+
+  if (!liveState) {
+    return NextResponse.json({
+      success: true,
+      channels: [],
+      categories: [],
+      snapshotAt: null,
+      awaitingSnapshot: true,
+    });
+  }
+
+  return NextResponse.json({
+    success: true,
+    channels: liveState.channels ?? [],
+    categories: liveState.categories ?? [],
+    snapshotAt: liveState.snapshot_at,
+    awaitingSnapshot: false,
+  });
 }
+
+// ============================================================
+// POST — Create channel via bot action queue
+// ============================================================
 
 export async function POST(request: NextRequest) {
   const guildId = await getGuildId();
   if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await request.json();
+
   const admin = createAdminSupabase();
 
+  // Determine if creating a channel or category
+  const action = body.isCategory ? 'create_category' : 'create_channel';
+  const payload = body.isCategory
+    ? { name: body.name, templateKey: body.templateKey }
+    : {
+        name: body.name,
+        type: body.type ?? 0,
+        parentId: body.parentId ?? null,
+        topic: body.topic ?? null,
+        nsfw: body.nsfw ?? false,
+        slowmode: body.slowmode ?? 0,
+        templateKey: body.templateKey,
+      };
+
   const { data, error } = await admin
-    .from('channel_templates')
-    .insert({
-      guild_id: guildId,
-      name: body.name,
-      description: body.description ?? null,
-      target_channel_type: body.targetChannelType,
-      overrides: body.overrides ?? [],
-      is_builtin: body.isBuiltin ?? false,
-      base_template_id: body.baseTemplateId ?? null,
-    })
-    .select()
+    .from('bot_action_queue')
+    .insert({ guild_id: guildId, action, payload })
+    .select('id')
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  await admin.from('audit_logs').insert({
-    guild_id: guildId,
-    actor_type: 'user',
-    action: 'channel_template.created',
-    entity_type: 'channel_template',
-    entity_id: data.id,
-    details: { name: body.name, targetChannelType: body.targetChannelType },
-  });
-
-  return NextResponse.json(data, { status: 201 });
+  return NextResponse.json({
+    success: true,
+    actionId: data.id,
+    message: `${body.isCategory ? 'Category' : 'Channel'} creation queued`,
+  }, { status: 202 });
 }
+
+// ============================================================
+// PATCH — Update channel via bot action queue
+// ============================================================
 
 export async function PATCH(request: NextRequest) {
   const guildId = await getGuildId();
   if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await request.json();
-  if (!body.id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
+  if (!body.channelId) {
+    return NextResponse.json({ error: 'Missing channelId' }, { status: 400 });
+  }
 
   const admin = createAdminSupabase();
 
-  const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
-  if (body.name !== undefined) updateData.name = body.name;
-  if (body.description !== undefined) updateData.description = body.description;
-  if (body.targetChannelType !== undefined) updateData.target_channel_type = body.targetChannelType;
-  if (body.overrides !== undefined) updateData.overrides = body.overrides;
-
   const { data, error } = await admin
-    .from('channel_templates')
-    .update(updateData)
-    .eq('id', body.id)
-    .eq('guild_id', guildId)
-    .select()
+    .from('bot_action_queue')
+    .insert({
+      guild_id: guildId,
+      action: 'update_channel',
+      payload: {
+        channelId: body.channelId,
+        name: body.name,
+        topic: body.topic,
+        nsfw: body.nsfw,
+        slowmode: body.slowmode,
+        parentId: body.parentId,
+      },
+    })
+    .select('id')
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data);
+
+  return NextResponse.json({
+    success: true,
+    actionId: data.id,
+    message: 'Channel update queued',
+  });
 }
+
+// ============================================================
+// DELETE — Delete channel via bot action queue
+// ============================================================
 
 export async function DELETE(request: NextRequest) {
   const guildId = await getGuildId();
   if (!guildId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await request.json();
-  if (!body.id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
+  const isCategory = body.isCategory ?? false;
+  const id = isCategory ? body.categoryId : body.channelId;
+
+  if (!id) {
+    return NextResponse.json(
+      { error: `Missing ${isCategory ? 'categoryId' : 'channelId'}` },
+      { status: 400 },
+    );
+  }
 
   const admin = createAdminSupabase();
 
-  const { data: existing } = await admin
-    .from('channel_templates')
-    .select('is_builtin, name')
-    .eq('id', body.id)
-    .eq('guild_id', guildId)
+  const { data, error } = await admin
+    .from('bot_action_queue')
+    .insert({
+      guild_id: guildId,
+      action: isCategory ? 'delete_category' : 'delete_channel',
+      payload: isCategory ? { categoryId: id } : { channelId: id },
+    })
+    .select('id')
     .single();
-
-  if (existing?.is_builtin) {
-    return NextResponse.json({ error: 'Cannot delete built-in templates' }, { status: 400 });
-  }
-
-  const { error } = await admin
-    .from('channel_templates')
-    .delete()
-    .eq('id', body.id)
-    .eq('guild_id', guildId);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  await admin.from('audit_logs').insert({
-    guild_id: guildId,
-    actor_type: 'user',
-    action: 'channel_template.deleted',
-    entity_type: 'channel_template',
-    entity_id: body.id,
-    details: { name: existing?.name },
+  return NextResponse.json({
+    success: true,
+    actionId: data.id,
+    message: `${isCategory ? 'Category' : 'Channel'} deletion queued`,
   });
-
-  return NextResponse.json({ success: true });
 }

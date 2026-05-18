@@ -39,83 +39,153 @@ export const guildApi = {
 };
 
 // ============================================================
-// Roles
+// Roles — Live Discord State
 // ============================================================
 
-export interface RoleTemplateRow {
+/** A live Discord role as stored in guild_live_state */
+export interface LiveRoleData {
   id: string;
-  guild_id: string;
   name: string;
-  tier: string;
-  description: string | null;
-  permissions: number;
-  permission_details: Record<string, unknown>;
-  is_builtin: boolean;
-  base_template_id: string | null;
-  created_at: string;
-  updated_at: string;
+  color: number;
+  position: number;
+  permissions: string;
+  hoist: boolean;
+  mentionable: boolean;
+  managed: boolean;
+  tags: {
+    botId: string | null;
+    integrationId: string | null;
+    premiumSubscriberRole: boolean;
+    availableForPurchase: boolean;
+    guildConnections: boolean;
+  };
+  templateKey: string | null;
+  tier: string | null;
+  source: string; // 'managed' | 'deployed' | 'manual'
+  memberCount: number;
 }
 
+export interface RolesResponse {
+  success: boolean;
+  data: LiveRoleData[];
+  botRoleId?: string;
+  snapshotAt: string | null;
+  awaitingSnapshot: boolean;
+}
+
+export interface ActionResponse {
+  success: boolean;
+  actionId?: string;
+  message?: string;
+  error?: string;
+}
+
+/** Legacy alias — kept so unchanged imports don't break at build time */
+export type RoleTemplateRow = LiveRoleData;
+
 export const rolesApi = {
-  list: () => request<RoleTemplateRow[]>('/api/roles'),
+  list: () => request<RolesResponse>('/api/roles'),
 
   create: (data: {
     name: string;
     tier: string;
-    description?: string;
-    permissions?: number;
-    permissionDetails?: Record<string, unknown>;
-    isBuiltin?: boolean;
-  }) => request<RoleTemplateRow>('/api/roles', { method: 'POST', body: JSON.stringify(data) }),
+    color?: number;
+    hoist?: boolean;
+    mentionable?: boolean;
+    permissions?: string;
+    position?: number;
+    templateKey?: string;
+  }) => request<ActionResponse>('/api/roles', { method: 'POST', body: JSON.stringify(data) }),
 
-  update: (data: { id: string } & Partial<{
-    name: string;
-    tier: string;
-    description: string;
-    permissions: number;
-    permissionDetails: Record<string, unknown>;
-  }>) => request<RoleTemplateRow>('/api/roles', { method: 'PATCH', body: JSON.stringify(data) }),
+  update: (data: {
+    roleId: string;
+    name?: string;
+    tier?: string;
+    color?: number;
+    hoist?: boolean;
+    mentionable?: boolean;
+    permissions?: string;
+    position?: number;
+    templateKey?: string;
+  }) => request<ActionResponse>('/api/roles', { method: 'PATCH', body: JSON.stringify(data) }),
 
-  delete: (id: string) =>
-    request('/api/roles', { method: 'DELETE', body: JSON.stringify({ id }) }),
+  delete: (roleId: string, templateKey?: string) =>
+    request<ActionResponse>('/api/roles', {
+      method: 'DELETE',
+      body: JSON.stringify({ roleId, templateKey }),
+    }),
 };
 
 // ============================================================
-// Channels
+// Channels — Live Discord State
 // ============================================================
 
-export interface ChannelTemplateRow {
+/** A live Discord channel as stored in guild_live_state */
+export interface LiveChannelData {
   id: string;
-  guild_id: string;
   name: string;
-  description: string | null;
-  target_channel_type: string;
-  overrides: Record<string, unknown>[];
-  is_builtin: boolean;
-  base_template_id: string | null;
-  created_at: string;
-  updated_at: string;
+  type: number;
+  parentId: string | null;
+  position: number;
+  topic: string | null;
+  slowmode: number;
+  nsfw: boolean;
+  templateKey: string | null;
 }
 
+/** A live Discord category as stored in guild_live_state */
+export interface LiveCategoryData {
+  id: string;
+  name: string;
+  position: number;
+  templateKey: string | null;
+}
+
+export interface ChannelsResponse {
+  success: boolean;
+  channels: LiveChannelData[];
+  categories: LiveCategoryData[];
+  snapshotAt: string | null;
+  awaitingSnapshot: boolean;
+}
+
+/** Legacy alias */
+export type ChannelTemplateRow = LiveChannelData;
+
 export const channelsApi = {
-  list: () => request<ChannelTemplateRow[]>('/api/channels'),
+  list: () => request<ChannelsResponse>('/api/channels'),
 
   create: (data: {
     name: string;
-    targetChannelType: string;
-    description?: string;
-    overrides?: Record<string, unknown>[];
-  }) => request<ChannelTemplateRow>('/api/channels', { method: 'POST', body: JSON.stringify(data) }),
+    type?: number;
+    parentId?: string | null;
+    topic?: string | null;
+    nsfw?: boolean;
+    slowmode?: number;
+    isCategory?: boolean;
+    templateKey?: string;
+  }) => request<ActionResponse>('/api/channels', { method: 'POST', body: JSON.stringify(data) }),
 
-  update: (data: { id: string } & Partial<{
-    name: string;
-    description: string;
-    targetChannelType: string;
-    overrides: Record<string, unknown>[];
-  }>) => request<ChannelTemplateRow>('/api/channels', { method: 'PATCH', body: JSON.stringify(data) }),
+  update: (data: {
+    channelId: string;
+    name?: string;
+    topic?: string;
+    nsfw?: boolean;
+    slowmode?: number;
+    parentId?: string | null;
+  }) => request<ActionResponse>('/api/channels', { method: 'PATCH', body: JSON.stringify(data) }),
 
-  delete: (id: string) =>
-    request('/api/channels', { method: 'DELETE', body: JSON.stringify({ id }) }),
+  deleteChannel: (channelId: string) =>
+    request<ActionResponse>('/api/channels', {
+      method: 'DELETE',
+      body: JSON.stringify({ channelId }),
+    }),
+
+  deleteCategory: (categoryId: string) =>
+    request<ActionResponse>('/api/channels', {
+      method: 'DELETE',
+      body: JSON.stringify({ categoryId, isCategory: true }),
+    }),
 };
 
 // ============================================================

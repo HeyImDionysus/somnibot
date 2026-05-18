@@ -15,6 +15,7 @@
 import type { SomniClient } from '../client.js';
 import { deployServerState, type DeployOptions, type DeployResult } from './deployer.js';
 import { writeAuditLog, writeAuditBatch } from '../services/audit.js';
+import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 import type { DesiredState, DesiredRole, DesiredChannel, DesiredCategory } from '@somnibot/shared';
 
 // ============================================================
@@ -288,6 +289,14 @@ async function executeDeployDirect(
           ? result.errors.map((e) => `${e.entityName}: ${e.error}`).join('; ')
           : undefined,
     });
+
+    // Write live state snapshot after deployment so dashboard sees the result immediately
+    try {
+      await writeGuildSnapshot(guild, client.supabase);
+      console.log('[Deploy] Guild live state snapshot updated');
+    } catch (snapshotErr) {
+      console.error('[Deploy] Failed to write post-deploy snapshot:', snapshotErr);
+    }
 
     // Emit event
     if (result.success) {

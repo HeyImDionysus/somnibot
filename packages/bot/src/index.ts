@@ -20,6 +20,8 @@ import { MusicPlayerManager, buildMusicCommands } from './features/music/index.j
 import { EntitlementService, buildStoreCommand, buildLicenseCommand } from './features/commerce/index.js';
 import { AuditService, DiagnosticsService } from './features/audit/index.js';
 import { runMigrations } from './services/migration-runner.js';
+import { startPeriodicSnapshots } from './services/guild-snapshot.js';
+import { startActionQueueListener } from './services/action-queue.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -129,6 +131,16 @@ async function main(): Promise<void> {
 
     // Start deploy listener
     startDeployListener(client);
+
+    // Start guild live state snapshots + action queue listener
+    if (guild) {
+      const snapshotTimer = startPeriodicSnapshots(guild, client.supabase, 60_000);
+      (client as unknown as Record<string, unknown>)._snapshotTimer = snapshotTimer;
+      console.log('[Boot] ✅ Guild live state snapshots started (60s interval)');
+
+      await startActionQueueListener(guild, client.supabase);
+      console.log('[Boot] ✅ Bot action queue listener started');
+    }
 
     // Start sync engine (Phase 5)
     if (guild) {
@@ -408,6 +420,9 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     console.log(`\n[Bot] Received ${signal}, shutting down gracefully...`);
+    // Stop snapshot timer
+    const snapshotTimer = (client as unknown as Record<string, unknown>)._snapshotTimer as NodeJS.Timeout | undefined;
+    if (snapshotTimer) clearInterval(snapshotTimer);
     // Stop sync scheduler
     const syncHandle = (client as unknown as Record<string, unknown>)._syncHandle as { stop: () => void } | undefined;
     if (syncHandle) syncHandle.stop();

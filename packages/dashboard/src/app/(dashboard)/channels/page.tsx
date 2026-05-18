@@ -1,44 +1,37 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { ChannelTreeEditor, type ChannelItem, type CategoryItem } from '@/components/channels/channel-tree-editor';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { Button } from '@/components/shared/button';
 import { Input, Select, Toggle } from '@/components/shared/input';
 import { Badge } from '@/components/shared/badge';
-import { channelsApi, type ChannelTemplateRow } from '@/lib/api/client';
-import { Hash, Save, X, AlertTriangle, Plus } from 'lucide-react';
-
-// ============================================================
-// Types
-// ============================================================
-
-interface EditingChannel {
-  id: string | null;
-  name: string;
-  type: 'text' | 'voice' | 'announcement' | 'forum' | 'stage';
-  categoryId: string | null;
-  topic: string;
-  slowmode: number;
-  nsfw: boolean;
-  templateId: string;
-}
-
-interface EditingCategory {
-  id: string | null;
-  name: string;
-}
+import { channelsApi, type LiveChannelData, type LiveCategoryData } from '@/lib/api/client';
+import {
+  Hash, Volume2, Megaphone, MessageSquare, Radio,
+  FolderOpen, Plus, Pencil, Trash2, RefreshCw, AlertTriangle,
+  X, Save, ChevronDown, ChevronRight,
+} from 'lucide-react';
+import { cn } from '@/lib/utils/cn';
 
 // ============================================================
 // Constants
 // ============================================================
 
+/** Discord ChannelType enum values */
+const CHANNEL_TYPE_LABELS: Record<number, { label: string; icon: typeof Hash }> = {
+  0:  { label: 'Text',         icon: Hash },
+  2:  { label: 'Voice',        icon: Volume2 },
+  5:  { label: 'Announcement', icon: Megaphone },
+  13: { label: 'Stage',        icon: Radio },
+  15: { label: 'Forum',        icon: MessageSquare },
+};
+
 const CHANNEL_TYPE_OPTIONS = [
-  { value: 'text', label: 'Text Channel' },
-  { value: 'voice', label: 'Voice Channel' },
-  { value: 'announcement', label: 'Announcement Channel' },
-  { value: 'forum', label: 'Forum Channel' },
-  { value: 'stage', label: 'Stage Channel' },
+  { value: '0',  label: 'Text Channel' },
+  { value: '2',  label: 'Voice Channel' },
+  { value: '5',  label: 'Announcement' },
+  { value: '13', label: 'Stage Channel' },
+  { value: '15', label: 'Forum Channel' },
 ];
 
 const SLOWMODE_OPTIONS = [
@@ -53,169 +46,271 @@ const SLOWMODE_OPTIONS = [
   { value: '21600', label: '6 hours' },
 ];
 
-// Default categories for a new server
-const DEFAULT_CATEGORIES: CategoryItem[] = [
-  { id: 'cat-info', name: 'INFORMATION' },
-  { id: 'cat-general', name: 'GENERAL' },
-  { id: 'cat-community', name: 'COMMUNITY' },
-  { id: 'cat-music', name: 'MUSIC' },
-  { id: 'cat-voice', name: 'VOICE' },
-  { id: 'cat-staff', name: 'STAFF' },
-];
+function getChannelIcon(type: number) {
+  return CHANNEL_TYPE_LABELS[type]?.icon ?? Hash;
+}
 
-const DEFAULT_CHANNELS: ChannelItem[] = [
-  { id: 'ch-rules', name: 'rules', type: 'text', categoryId: 'cat-info', templateName: 'member_view_only', topic: 'Server rules and guidelines', slowmode: 0, nsfw: false },
-  { id: 'ch-announcements', name: 'announcements', type: 'announcement', categoryId: 'cat-info', templateName: 'member_view_only', topic: 'Important server announcements', slowmode: 0, nsfw: false },
-  { id: 'ch-welcome', name: 'welcome', type: 'text', categoryId: 'cat-info', templateName: 'member_view_only', topic: 'Welcome messages for new members', slowmode: 0, nsfw: false },
-  { id: 'ch-general', name: 'general', type: 'text', categoryId: 'cat-general', templateName: 'member_view_and_use', topic: 'General conversation', slowmode: 0, nsfw: false },
-  { id: 'ch-media', name: 'media', type: 'text', categoryId: 'cat-general', templateName: 'member_view_and_use', topic: 'Share images, videos, and links', slowmode: 5, nsfw: false },
-  { id: 'ch-bot-commands', name: 'bot-commands', type: 'text', categoryId: 'cat-general', templateName: 'member_view_and_use', topic: 'Use bot commands here', slowmode: 3, nsfw: false },
-  { id: 'ch-lounge', name: 'lounge', type: 'text', categoryId: 'cat-community', templateName: 'member_view_and_use', topic: 'Chill and hang out', slowmode: 0, nsfw: false },
-  { id: 'ch-music-chat', name: 'music-chat', type: 'text', categoryId: 'cat-music', templateName: 'member_view_and_use', topic: 'Discuss music and song requests', slowmode: 0, nsfw: false },
-  { id: 'ch-now-playing', name: 'now-playing', type: 'text', categoryId: 'cat-music', templateName: 'member_view_only', topic: 'Currently playing tracks', slowmode: 0, nsfw: false },
-  { id: 'ch-listening', name: 'Listening Room', type: 'voice', categoryId: 'cat-music', templateName: 'member_view_and_use', topic: '', slowmode: 0, nsfw: false },
-  { id: 'ch-general-vc', name: 'General', type: 'voice', categoryId: 'cat-voice', templateName: 'member_view_and_use', topic: '', slowmode: 0, nsfw: false },
-  { id: 'ch-gaming', name: 'Gaming', type: 'voice', categoryId: 'cat-voice', templateName: 'member_view_and_use', topic: '', slowmode: 0, nsfw: false },
-  { id: 'ch-staff-chat', name: 'staff-chat', type: 'text', categoryId: 'cat-staff', templateName: 'staff_only', topic: 'Staff discussion', slowmode: 0, nsfw: false },
-  { id: 'ch-mod-log', name: 'mod-log', type: 'text', categoryId: 'cat-staff', templateName: 'staff_only', topic: 'Moderation actions log', slowmode: 0, nsfw: false },
-  { id: 'ch-bot-log', name: 'bot-log', type: 'text', categoryId: 'cat-staff', templateName: 'staff_only', topic: 'Bot activity log', slowmode: 0, nsfw: false },
-];
+// ============================================================
+// Types
+// ============================================================
+
+interface NewChannelForm {
+  name: string;
+  type: number;
+  parentId: string | null;
+  topic: string;
+  slowmode: number;
+  nsfw: boolean;
+  isCategory: boolean;
+}
 
 // ============================================================
 // Page
 // ============================================================
 
 export default function ChannelsPage() {
-  const [categories, setCategories] = useState<CategoryItem[]>(DEFAULT_CATEGORIES);
-  const [channels, setChannels] = useState<ChannelItem[]>(DEFAULT_CHANNELS);
-  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
-  const [editingChannel, setEditingChannel] = useState<EditingChannel | null>(null);
-  const [editingCategory, setEditingCategory] = useState<EditingCategory | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [channels, setChannels] = useState<LiveChannelData[]>([]);
+  const [categories, setCategories] = useState<LiveCategoryData[]>([]);
+  const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
+  const [awaitingSnapshot, setAwaitingSnapshot] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingChannel, setEditingChannel] = useState<LiveChannelData | null>(null);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [newForm, setNewForm] = useState<NewChannelForm>({
+    name: '', type: 0, parentId: null, topic: '', slowmode: 0, nsfw: false, isCategory: false,
+  });
+  const [actionPending, setActionPending] = useState(false);
 
-  const selectedChannel = channels.find((c) => c.id === selectedChannelId);
+  // ── Load channels from live state ──
+  const loadChannels = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await channelsApi.list();
+      setChannels(response.channels);
+      setCategories(response.categories);
+      setSnapshotAt(response.snapshotAt);
+      setAwaitingSnapshot(response.awaitingSnapshot);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load channels');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  // Add channel
-  const handleAddChannel = (categoryId: string | null) => {
-    setEditingChannel({
-      id: null,
-      name: '',
-      type: 'text',
-      categoryId,
-      topic: '',
-      slowmode: 0,
-      nsfw: false,
-      templateId: 'member_view_and_use',
+  useEffect(() => { loadChannels(); }, [loadChannels]);
+
+  // ── Group channels by category ──
+  const uncategorized = channels.filter((c) => !c.parentId);
+  const channelsByCategory = new Map<string, LiveChannelData[]>();
+  for (const cat of categories) {
+    channelsByCategory.set(cat.id, channels.filter((c) => c.parentId === cat.id));
+  }
+
+  // ── Toggle category collapse ──
+  const toggleCategory = (id: string) => {
+    setCollapsedCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
-    setEditingCategory(null);
   };
 
-  // Add category
-  const handleAddCategory = () => {
-    setEditingCategory({ id: null, name: '' });
-    setEditingChannel(null);
+  // ── Create channel/category ──
+  const handleCreate = async () => {
+    if (!newForm.name) return;
+    setActionPending(true);
+    try {
+      await channelsApi.create({
+        name: newForm.isCategory ? newForm.name.toUpperCase() : newForm.name.toLowerCase().replace(/\s+/g, '-'),
+        type: newForm.type,
+        parentId: newForm.parentId,
+        topic: newForm.topic || null,
+        nsfw: newForm.nsfw,
+        slowmode: newForm.slowmode,
+        isCategory: newForm.isCategory,
+      });
+      setShowNewForm(false);
+      setNewForm({ name: '', type: 0, parentId: null, topic: '', slowmode: 0, nsfw: false, isCategory: false });
+      setTimeout(loadChannels, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create');
+    } finally {
+      setActionPending(false);
+    }
   };
 
-  // Edit channel
-  const handleEditChannel = (id: string) => {
-    const channel = channels.find((c) => c.id === id);
-    if (!channel) return;
-    setEditingChannel({
-      id: channel.id,
-      name: channel.name,
-      type: channel.type,
-      categoryId: channel.categoryId,
-      topic: channel.topic ?? '',
-      slowmode: channel.slowmode,
-      nsfw: channel.nsfw,
-      templateId: channel.templateName,
-    });
-    setEditingCategory(null);
-  };
-
-  // Save channel
-  const handleSaveChannel = () => {
-    if (!editingChannel || !editingChannel.name) return;
-
-    if (editingChannel.id) {
-      setChannels((prev) =>
-        prev.map((c) =>
-          c.id === editingChannel.id
-            ? {
-                ...c,
-                name: editingChannel.name,
-                type: editingChannel.type,
-                categoryId: editingChannel.categoryId,
-                topic: editingChannel.topic,
-                slowmode: editingChannel.slowmode,
-                nsfw: editingChannel.nsfw,
-                templateName: editingChannel.templateId,
-              }
-            : c,
-        ),
-      );
-    } else {
-      const newChannel: ChannelItem = {
-        id: `ch-${Date.now()}`,
+  // ── Update channel ──
+  const handleUpdate = async () => {
+    if (!editingChannel) return;
+    setActionPending(true);
+    try {
+      await channelsApi.update({
+        channelId: editingChannel.id,
         name: editingChannel.name,
-        type: editingChannel.type,
-        categoryId: editingChannel.categoryId,
-        templateName: editingChannel.templateId,
-        topic: editingChannel.topic,
-        slowmode: editingChannel.slowmode,
+        topic: editingChannel.topic ?? undefined,
         nsfw: editingChannel.nsfw,
-      };
-      setChannels((prev) => [...prev, newChannel]);
+        slowmode: editingChannel.slowmode,
+        parentId: editingChannel.parentId,
+      });
+      setEditingChannel(null);
+      setTimeout(loadChannels, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update');
+    } finally {
+      setActionPending(false);
     }
-
-    setEditingChannel(null);
   };
 
-  // Save category
-  const handleSaveCategory = () => {
-    if (!editingCategory || !editingCategory.name) return;
-
-    if (editingCategory.id) {
-      setCategories((prev) =>
-        prev.map((c) => (c.id === editingCategory.id ? { ...c, name: editingCategory.name } : c)),
-      );
-    } else {
-      setCategories((prev) => [...prev, { id: `cat-${Date.now()}`, name: editingCategory.name }]);
+  // ── Delete channel ──
+  const handleDeleteChannel = async (id: string, name: string) => {
+    if (!confirm(`Delete channel #${name}? This cannot be undone.`)) return;
+    setActionPending(true);
+    try {
+      await channelsApi.deleteChannel(id);
+      if (selectedId === id) { setSelectedId(null); setEditingChannel(null); }
+      setTimeout(loadChannels, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete');
+    } finally {
+      setActionPending(false);
     }
-
-    setEditingCategory(null);
   };
 
-  // Delete channel
-  const handleDeleteChannel = (id: string) => {
-    setChannels((prev) => prev.filter((c) => c.id !== id));
-    if (selectedChannelId === id) setSelectedChannelId(null);
+  // ── Delete category ──
+  const handleDeleteCategory = async (id: string, name: string) => {
+    if (!confirm(`Delete category "${name}"? Channels inside it will become uncategorized.`)) return;
+    setActionPending(true);
+    try {
+      await channelsApi.deleteCategory(id);
+      setTimeout(loadChannels, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete category');
+    } finally {
+      setActionPending(false);
+    }
   };
 
-  // Delete category
-  const handleDeleteCategory = (id: string) => {
-    // Move channels out of category first
-    setChannels((prev) =>
-      prev.map((c) => (c.categoryId === id ? { ...c, categoryId: null } : c)),
+  // ── Select channel for editing ──
+  const selectChannel = (channel: LiveChannelData) => {
+    setSelectedId(channel.id);
+    setEditingChannel({ ...channel });
+    setShowNewForm(false);
+  };
+
+  // ── Channel row ──
+  const ChannelRow = ({ channel }: { channel: LiveChannelData }) => {
+    const Icon = getChannelIcon(channel.type);
+    return (
+      <div
+        onClick={() => selectChannel(channel)}
+        className={cn(
+          'group flex cursor-pointer items-center gap-2 rounded-input px-3 py-1.5 transition-standard',
+          selectedId === channel.id
+            ? 'bg-discord-accent/15 ring-1 ring-discord-accent/40'
+            : 'hover:bg-discord-bg-primary/50',
+        )}
+      >
+        <Icon size={14} className="shrink-0 text-discord-text-muted" />
+        <span className="flex-1 truncate text-sm text-discord-text-primary">
+          {channel.name}
+        </span>
+        {channel.nsfw && <Badge variant="danger">NSFW</Badge>}
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-standard group-hover:opacity-100">
+          <button
+            onClick={(e) => { e.stopPropagation(); selectChannel(channel); }}
+            className="rounded p-1 text-discord-text-muted hover:bg-discord-bg-tertiary hover:text-discord-text-primary"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDeleteChannel(channel.id, channel.name); }}
+            className="rounded p-1 text-discord-text-muted hover:bg-discord-danger/20 hover:text-discord-danger"
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      </div>
     );
-    setCategories((prev) => prev.filter((c) => c.id !== id));
   };
+
+  // ── Loading state ──
+  if (loading) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <RefreshCw size={20} className="animate-spin text-discord-text-muted" />
+        <span className="ml-2 text-sm text-discord-text-muted">Loading Discord channels...</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       {/* Page header */}
-      <div>
-        <h1 className="flex items-center gap-2 text-xl font-bold text-discord-text-primary">
-          <Hash size={22} />
-          Channel Structure
-        </h1>
-        <p className="mt-1 text-sm text-discord-text-muted">
-          Design your server&apos;s channel layout. Each channel uses a permission template that controls access.
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-bold text-discord-text-primary">
+            <Hash size={22} />
+            Channel Structure
+          </h1>
+          <p className="mt-1 text-sm text-discord-text-muted">
+            Manage your server&apos;s channels and categories. All changes are applied directly to Discord.
+          </p>
+          {snapshotAt && (
+            <p className="mt-0.5 text-xs text-discord-text-muted">
+              Last synced: {new Date(snapshotAt).toLocaleString()}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={loadChannels} disabled={loading}>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setShowNewForm(true);
+              setEditingChannel(null);
+              setSelectedId(null);
+              setNewForm({ ...newForm, isCategory: true, name: '' });
+            }}
+          >
+            <FolderOpen size={14} />
+            Add Category
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => {
+              setShowNewForm(true);
+              setEditingChannel(null);
+              setSelectedId(null);
+              setNewForm({ ...newForm, isCategory: false, name: '' });
+            }}
+          >
+            <Plus size={14} />
+            Add Channel
+          </Button>
+        </div>
       </div>
 
-      {/* Error */}
+      {/* Warnings */}
+      {awaitingSnapshot && (
+        <Card variant="warning">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} className="text-discord-warning" />
+            <p className="text-sm text-discord-warning">
+              Waiting for the bot to send its first snapshot. Make sure the bot is online.
+            </p>
+          </div>
+        </Card>
+      )}
+
       {error && (
         <Card variant="danger">
           <div className="flex items-center gap-2">
@@ -229,100 +324,243 @@ export default function ChannelsPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[360px_1fr]">
         {/* Left: Channel tree */}
         <Card>
-          <ChannelTreeEditor
-            categories={categories}
-            channels={channels}
-            selectedChannelId={selectedChannelId}
-            onSelectChannel={(id) => { setSelectedChannelId(id); handleEditChannel(id); }}
-            onAddChannel={handleAddChannel}
-            onAddCategory={handleAddCategory}
-            onEditChannel={handleEditChannel}
-            onDeleteChannel={handleDeleteChannel}
-            onEditCategory={(id) => {
-              const cat = categories.find((c) => c.id === id);
-              if (cat) { setEditingCategory({ id: cat.id, name: cat.name }); setEditingChannel(null); }
-            }}
-            onDeleteCategory={handleDeleteCategory}
-            onReorderChannels={setChannels}
-          />
+          <div className="space-y-0.5">
+            {/* Uncategorized channels */}
+            {uncategorized.length > 0 && (
+              <div className="space-y-0.5 pb-2">
+                {uncategorized.map((ch) => <ChannelRow key={ch.id} channel={ch} />)}
+              </div>
+            )}
+
+            {/* Categories with children */}
+            {categories.map((cat) => {
+              const isCollapsed = collapsedCategories.has(cat.id);
+              const children = channelsByCategory.get(cat.id) ?? [];
+              return (
+                <div key={cat.id}>
+                  {/* Category header */}
+                  <div
+                    onClick={() => toggleCategory(cat.id)}
+                    className="group flex cursor-pointer items-center gap-1 px-1 py-1 hover:text-discord-text-primary"
+                  >
+                    {isCollapsed ? (
+                      <ChevronRight size={12} className="text-discord-text-muted" />
+                    ) : (
+                      <ChevronDown size={12} className="text-discord-text-muted" />
+                    )}
+                    <span className="flex-1 text-xs font-semibold uppercase tracking-wide text-discord-text-muted group-hover:text-discord-text-primary">
+                      {cat.name}
+                    </span>
+                    <span className="text-[10px] text-discord-text-muted">{children.length}</span>
+                    <div className="flex items-center gap-0.5 opacity-0 transition-standard group-hover:opacity-100">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowNewForm(true);
+                          setEditingChannel(null);
+                          setSelectedId(null);
+                          setNewForm({ ...newForm, isCategory: false, parentId: cat.id, name: '' });
+                        }}
+                        className="rounded p-0.5 text-discord-text-muted hover:text-discord-text-primary"
+                        title="Add channel to this category"
+                      >
+                        <Plus size={12} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteCategory(cat.id, cat.name);
+                        }}
+                        className="rounded p-0.5 text-discord-text-muted hover:text-discord-danger"
+                        title="Delete category"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Category children */}
+                  {!isCollapsed && (
+                    <div className="ml-3 space-y-0.5 border-l border-discord-border-subtle pl-2">
+                      {children.length > 0 ? (
+                        children.map((ch) => <ChannelRow key={ch.id} channel={ch} />)
+                      ) : (
+                        <p className="py-1 text-xs italic text-discord-text-muted/50 pl-2">
+                          Empty category
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {channels.length === 0 && categories.length === 0 && !awaitingSnapshot && (
+              <div className="flex h-32 items-center justify-center">
+                <p className="text-xs text-discord-text-muted">No channels found</p>
+              </div>
+            )}
+          </div>
         </Card>
 
         {/* Right: Editor */}
         <Card>
-          {editingChannel ? (
+          {showNewForm ? (
+            /* ── New channel/category form ── */
             <div className="space-y-4">
               <CardHeader>
                 <CardTitle>
-                  {editingChannel.id ? `Edit: #${editingChannel.name}` : 'New Channel'}
+                  {newForm.isCategory ? 'New Category' : 'New Channel'}
                 </CardTitle>
                 <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setEditingChannel(null)}>Cancel</Button>
-                  <Button size="sm" onClick={handleSaveChannel} disabled={!editingChannel.name}>
-                    <Save size={12} />
-                    Save
+                  <Button variant="ghost" size="sm" onClick={() => setShowNewForm(false)}>Cancel</Button>
+                  <Button size="sm" onClick={handleCreate} disabled={!newForm.name || actionPending}>
+                    <Plus size={12} />
+                    {actionPending ? 'Creating...' : 'Create'}
                   </Button>
                 </div>
               </CardHeader>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Input
-                  label="Channel Name"
-                  id="ch-name"
-                  value={editingChannel.name}
-                  onChange={(e) => setEditingChannel({ ...editingChannel, name: e.target.value.toLowerCase().replace(/\s+/g, '-') })}
-                  placeholder="e.g. general"
-                />
-                <Select
-                  label="Type"
-                  id="ch-type"
-                  options={CHANNEL_TYPE_OPTIONS}
-                  value={editingChannel.type}
-                  onChange={(e) => setEditingChannel({ ...editingChannel, type: e.target.value as EditingChannel['type'] })}
-                />
+              <Input
+                label={newForm.isCategory ? 'Category Name' : 'Channel Name'}
+                id="new-name"
+                value={newForm.name}
+                onChange={(e) => setNewForm({
+                  ...newForm,
+                  name: newForm.isCategory
+                    ? e.target.value.toUpperCase()
+                    : e.target.value.toLowerCase().replace(/\s+/g, '-'),
+                })}
+                placeholder={newForm.isCategory ? 'e.g. COMMUNITY' : 'e.g. general'}
+              />
+
+              {!newForm.isCategory && (
+                <>
+                  <Select
+                    label="Channel Type"
+                    id="new-type"
+                    options={CHANNEL_TYPE_OPTIONS}
+                    value={String(newForm.type)}
+                    onChange={(e) => setNewForm({ ...newForm, type: parseInt(e.target.value) })}
+                  />
+
+                  <Select
+                    label="Category"
+                    id="new-category"
+                    options={[
+                      { value: '', label: '— No category —' },
+                      ...categories.map((c) => ({ value: c.id, label: c.name })),
+                    ]}
+                    value={newForm.parentId ?? ''}
+                    onChange={(e) => setNewForm({ ...newForm, parentId: e.target.value || null })}
+                  />
+
+                  {newForm.type === 0 && (
+                    <Input
+                      label="Topic"
+                      id="new-topic"
+                      value={newForm.topic}
+                      onChange={(e) => setNewForm({ ...newForm, topic: e.target.value })}
+                      placeholder="Channel topic description..."
+                    />
+                  )}
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Select
+                      label="Slowmode"
+                      id="new-slowmode"
+                      options={SLOWMODE_OPTIONS}
+                      value={String(newForm.slowmode)}
+                      onChange={(e) => setNewForm({ ...newForm, slowmode: parseInt(e.target.value) })}
+                    />
+                  </div>
+
+                  <Toggle
+                    label="NSFW Channel"
+                    description="Members must confirm they are 18+ to view"
+                    checked={newForm.nsfw}
+                    onChange={(nsfw) => setNewForm({ ...newForm, nsfw })}
+                  />
+                </>
+              )}
+            </div>
+          ) : editingChannel ? (
+            /* ── Edit channel ── */
+            <div className="space-y-4">
+              <CardHeader>
+                <CardTitle>
+                  <div className="flex items-center gap-2">
+                    {(() => { const Icon = getChannelIcon(editingChannel.type); return <Icon size={16} />; })()}
+                    Edit: {editingChannel.name}
+                  </div>
+                </CardTitle>
+                <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={() => { setEditingChannel(null); setSelectedId(null); }}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={handleUpdate} disabled={actionPending}>
+                    <Save size={12} />
+                    {actionPending ? 'Saving...' : 'Save'}
+                  </Button>
+                </div>
+              </CardHeader>
+
+              <Input
+                label="Channel Name"
+                id="edit-name"
+                value={editingChannel.name}
+                onChange={(e) => setEditingChannel({
+                  ...editingChannel,
+                  name: e.target.value.toLowerCase().replace(/\s+/g, '-'),
+                })}
+              />
+
+              <div className="rounded-input bg-discord-bg-primary p-3">
+                <p className="text-xs text-discord-text-muted">
+                  Type: <span className="font-medium text-discord-text-primary">
+                    {CHANNEL_TYPE_LABELS[editingChannel.type]?.label ?? 'Unknown'}
+                  </span>
+                  {' '}(cannot be changed after creation)
+                </p>
               </div>
 
               <Select
                 label="Category"
-                id="ch-category"
+                id="edit-category"
                 options={[
                   { value: '', label: '— No category —' },
                   ...categories.map((c) => ({ value: c.id, label: c.name })),
                 ]}
-                value={editingChannel.categoryId ?? ''}
-                onChange={(e) => setEditingChannel({ ...editingChannel, categoryId: e.target.value || null })}
+                value={editingChannel.parentId ?? ''}
+                onChange={(e) => setEditingChannel({
+                  ...editingChannel,
+                  parentId: e.target.value || null,
+                })}
               />
 
-              {editingChannel.type === 'text' && (
+              {(editingChannel.type === 0 || editingChannel.type === 5) && (
                 <Input
                   label="Topic"
-                  id="ch-topic"
-                  value={editingChannel.topic}
-                  onChange={(e) => setEditingChannel({ ...editingChannel, topic: e.target.value })}
+                  id="edit-topic"
+                  value={editingChannel.topic ?? ''}
+                  onChange={(e) => setEditingChannel({
+                    ...editingChannel,
+                    topic: e.target.value,
+                  })}
                   placeholder="Channel topic description..."
                 />
               )}
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Select
-                  label="Slowmode"
-                  id="ch-slowmode"
-                  options={SLOWMODE_OPTIONS}
-                  value={String(editingChannel.slowmode)}
-                  onChange={(e) => setEditingChannel({ ...editingChannel, slowmode: parseInt(e.target.value) })}
-                />
-                <Select
-                  label="Permission Template"
-                  id="ch-template"
-                  options={[
-                    { value: 'member_view_only', label: 'View Only (members can read)' },
-                    { value: 'member_view_and_use', label: 'View & Use (members can chat)' },
-                    { value: 'staff_only', label: 'Staff Only (mod+ access)' },
-                    { value: 'premium_only', label: 'Premium Only (subscriber access)' },
-                  ]}
-                  value={editingChannel.templateId}
-                  onChange={(e) => setEditingChannel({ ...editingChannel, templateId: e.target.value })}
-                />
-              </div>
+              <Select
+                label="Slowmode"
+                id="edit-slowmode"
+                options={SLOWMODE_OPTIONS}
+                value={String(editingChannel.slowmode)}
+                onChange={(e) => setEditingChannel({
+                  ...editingChannel,
+                  slowmode: parseInt(e.target.value),
+                })}
+              />
 
               <Toggle
                 label="NSFW Channel"
@@ -331,36 +569,12 @@ export default function ChannelsPage() {
                 onChange={(nsfw) => setEditingChannel({ ...editingChannel, nsfw })}
               />
             </div>
-          ) : editingCategory ? (
-            <div className="space-y-4">
-              <CardHeader>
-                <CardTitle>
-                  {editingCategory.id ? `Edit Category` : 'New Category'}
-                </CardTitle>
-                <div className="flex items-center gap-2">
-                  <Button variant="ghost" size="sm" onClick={() => setEditingCategory(null)}>Cancel</Button>
-                  <Button size="sm" onClick={handleSaveCategory} disabled={!editingCategory.name}>
-                    <Save size={12} />
-                    Save
-                  </Button>
-                </div>
-              </CardHeader>
-              <Input
-                label="Category Name"
-                id="cat-name"
-                value={editingCategory.name}
-                onChange={(e) => setEditingCategory({ ...editingCategory, name: e.target.value.toUpperCase() })}
-                placeholder="e.g. COMMUNITY"
-              />
-              <p className="text-xs text-discord-text-muted">
-                Categories group channels together. They appear as collapsible sections in Discord.
-              </p>
-            </div>
           ) : (
+            /* ── Empty state ── */
             <div className="flex h-64 flex-col items-center justify-center text-center">
               <Hash size={32} className="mb-2 text-discord-text-muted/30" />
               <p className="text-sm text-discord-text-muted">
-                Select a channel to edit, or use the + buttons to create channels and categories.
+                Select a channel to edit, or create a new channel or category.
               </p>
               <CardDescription>
                 {channels.length} channels across {categories.length} categories
@@ -374,14 +588,13 @@ export default function ChannelsPage() {
       <Card>
         <div className="flex flex-wrap items-center gap-3">
           <Badge variant="info">{categories.length} categories</Badge>
-          <Badge variant="success">{channels.filter((c) => c.type === 'text' || c.type === 'announcement' || c.type === 'forum').length} text</Badge>
-          <Badge variant="cyan">{channels.filter((c) => c.type === 'voice' || c.type === 'stage').length} voice</Badge>
+          <Badge variant="success">
+            {channels.filter((c) => c.type === 0 || c.type === 5 || c.type === 15).length} text
+          </Badge>
+          <Badge variant="cyan">
+            {channels.filter((c) => c.type === 2 || c.type === 13).length} voice
+          </Badge>
           <Badge variant="default">{channels.length} total channels</Badge>
-          <div className="flex-1" />
-          <Button variant="primary" size="sm">
-            <Save size={12} />
-            Save Structure
-          </Button>
         </div>
       </Card>
     </div>
