@@ -1,22 +1,43 @@
 /**
- * Auto-Migration Runner — executes SQL migrations on first boot.
+ * Tracked Migration Runner — Phase C rewrite.
  *
- * Checks if the database has been initialized by looking for the `guild` table.
- * If not found, runs all migrations from packages/supabase/migrations/ in order.
- * Uses the Supabase service role key to execute raw SQL via the REST API.
+ * Replaces the first-boot-only runner with per-file tracking:
+ *  • schema_migrations table tracks every applied file + SHA-256 checksum
+ *  • Self-bootstraps: creates the tracking table if missing
+ *  • Only runs migrations not yet recorded
+ *  • Detects checksum drift (file changed after it was applied)
+ *  • Records duration and success/failure per migration
+ *  • Stops on first error (ordered migrations)
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
+// ── Types ───────────────────────────────────────────────────
+
 interface MigrationResult {
   ran: boolean;
-  migrations: string[];
+  applied: string[];
+  skipped: string[];
   errors: string[];
+  checksumDrift: string[];
+}
+
+interface AppliedMigration {
+  filename: string;
+  checksum: string;
+  success: boolean;
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+
+function sha256(content: string): string {
+  return createHash('sha256').update(content, 'utf-8').digest('hex');
 }
 
 /**
- * Find the migrations directory relative to the current working directory or known paths.
+ * Find the migrations directory relative to CWD or known paths.
  */
 function findMigrationsDir(): string {
   const candidates = [
@@ -40,65 +61,22 @@ function findMigrationsDir(): string {
 }
 
 /**
- * Check if the database already has tables (specifically the `guild` table).
+ * Extract Supabase project ref from URL.
  */
-async function isDatabaseInitialized(supabaseUrl: string, serviceRoleKey: string): Promise<boolean> {
-  const res = await fetch(`${supabaseUrl}/rest/v1/guild?select=id&limit=0`, {
-    headers: {
-      apikey: serviceRoleKey,
-      Authorization: `Bearer ${serviceRoleKey}`,
-    },
-  });
-
-  // 200 = table exists (may be empty). 404/4xx = table doesn't exist.
-  return res.ok;
+function extractProjectRef(url: string): string | null {
+  const match = url.match(/https:\/\/([a-z0-9]+)\.supabase\.co/);
+  return match?.[1] ?? null;
 }
 
-/**
- * Execute a SQL statement via Supabase's RPC (pg function) or REST SQL endpoint.
- * Uses the /rest/v1/rpc endpoint with a raw SQL wrapper, or the management API.
- * Falls back to splitting by statement if needed.
- */
+// ── SQL Execution ───────────────────────────────────────────
+
 async function executeSql(
   supabaseUrl: string,
   serviceRoleKey: string,
   sql: string,
-  migrationName: string,
+  _migrationName: string,
 ): Promise<{ success: boolean; error?: string }> {
-  // Use Supabase's PostgREST RPC if a helper function exists, otherwise try the SQL endpoint
-  // The most reliable approach: use the pg_net extension or direct SQL execution
-  // For Supabase hosted, we can use the management API with the access token,
-  // but for simplicity, we'll create an RPC function first, then use it.
-
-  // Strategy: Try executing via Supabase's built-in SQL execution endpoint
-  // POST /rest/v1/rpc with a custom function, or use the raw SQL endpoint
-
-  // Supabase exposes a SQL endpoint at /pg/query for the service role
-  // Actually, the simplest approach: use fetch to call the Supabase Management API
-  // But that requires SUPABASE_ACCESS_TOKEN which we may not have.
-
-  // Best approach for hosted Supabase: create a temporary RPC function
-  // Actually, Supabase service role key has full access via PostgREST.
-  // The trick is we need to execute DDL, which PostgREST doesn't support directly.
-
-  // Solution: Use the Supabase client library's `rpc` with a PLpgSQL wrapper,
-  // or better, use the Supabase Management API's SQL endpoint.
-
-  // For maximum compatibility, let's try the /pg endpoint (Supabase v2+)
-  const sqlEndpoint = `${supabaseUrl}/rest/v1/rpc/exec_sql`;
-
-  // First, try to create the exec_sql function if it doesn't exist
-  // This is a bootstrap problem. Let's use a different approach.
-
-  // Use Supabase's REST API to check, and the Management API for DDL.
-  // Actually, the cleanest solution for self-hosted Supabase or Railway:
-  // Just use the DATABASE_URL directly with pg. But we want zero extra deps.
-
-  // Final approach: Use the Supabase client's `from('').rpc()` pattern won't work for DDL.
-  // Let's use the fetch-based approach with Supabase's /sql endpoint (if available)
-  // or fall back to management API.
-
-  // Try the Supabase Management API SQL endpoint first
+  // Strategy 1: Supabase Management API
   const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
   const projectRef = extractProjectRef(supabaseUrl);
 
@@ -112,24 +90,20 @@ async function executeSql(
       body: JSON.stringify({ query: sql }),
     });
 
-    if (res.ok) {
-      return { success: true };
-    }
-
+    if (res.ok) return { success: true };
     const errText = await res.text();
     return { success: false, error: `Management API error (${res.status}): ${errText}` };
   }
 
-  // Fallback: try the database URL directly if available
+  // Strategy 2: Direct DATABASE_URL via postgres package
   const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
   if (dbUrl) {
     try {
-      // Dynamic import to avoid hard dependency
       const { default: postgres } = await import('postgres' as string).catch(() => ({ default: null }));
       if (postgres) {
-        const sql_client = postgres(dbUrl);
-        await sql_client.unsafe(sql);
-        await sql_client.end();
+        const sqlClient = postgres(dbUrl);
+        await sqlClient.unsafe(sql);
+        await sqlClient.end();
         return { success: true };
       }
     } catch (err) {
@@ -137,26 +111,92 @@ async function executeSql(
     }
   }
 
-  // If we have neither, warn and skip
   return {
     success: false,
-    error: `No database access method available for DDL execution. Set SUPABASE_ACCESS_TOKEN (+ Supabase project URL) or SUPABASE_DB_URL / DATABASE_URL to enable auto-migration. Migration: ${migrationName}`,
+    error: `No database access method available. Set SUPABASE_ACCESS_TOKEN or SUPABASE_DB_URL / DATABASE_URL.`,
   };
 }
 
-/**
- * Extract the Supabase project ref from the URL.
- * e.g., https://YOUR_PROJECT.supabase.co → YOUR_PROJECT_REF
- */
-function extractProjectRef(url: string): string | null {
-  const match = url.match(/https:\/\/([a-z0-9]+)\.supabase\.co/);
-  return match?.[1] ?? null;
+// ── Tracking Table Bootstrap ────────────────────────────────
+
+const BOOTSTRAP_SQL = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename    TEXT PRIMARY KEY,
+  checksum    TEXT NOT NULL,
+  applied_at  TIMESTAMPTZ DEFAULT now(),
+  duration_ms INTEGER DEFAULT 0,
+  success     BOOLEAN DEFAULT true
+);
+`;
+
+async function ensureTrackingTable(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+): Promise<boolean> {
+  const result = await executeSql(supabaseUrl, serviceRoleKey, BOOTSTRAP_SQL, '_bootstrap');
+  if (!result.success) {
+    console.warn('[Migration] Could not create tracking table:', result.error);
+    return false;
+  }
+  return true;
 }
 
+// ── Fetch Applied Migrations ────────────────────────────────
+
+async function getAppliedMigrations(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+): Promise<AppliedMigration[]> {
+  const res = await fetch(
+    `${supabaseUrl}/rest/v1/schema_migrations?select=filename,checksum,success&order=filename.asc`,
+    {
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+      },
+    },
+  );
+
+  if (!res.ok) {
+    // Table might not exist yet (pre-bootstrap)
+    return [];
+  }
+
+  return (await res.json()) as AppliedMigration[];
+}
+
+// ── Record Migration ────────────────────────────────────────
+
+async function recordMigration(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  filename: string,
+  checksum: string,
+  durationMs: number,
+  success: boolean,
+): Promise<void> {
+  await fetch(`${supabaseUrl}/rest/v1/schema_migrations`, {
+    method: 'POST',
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify({ filename, checksum, duration_ms: durationMs, success }),
+  });
+}
+
+// ── Main Entry Point ────────────────────────────────────────
+
 /**
- * Run all pending migrations.
+ * Run all pending migrations with per-file tracking.
  *
- * @returns Migration result with list of applied migrations and any errors.
+ * - Bootstraps schema_migrations table if missing
+ * - Checks each .sql file against the tracking table
+ * - Skips already-applied files (warns on checksum drift)
+ * - Runs pending files in filename order
+ * - Records result of each migration
  */
 export async function runMigrations(): Promise<MigrationResult> {
   const supabaseUrl = process.env.SUPABASE_URL;
@@ -164,57 +204,141 @@ export async function runMigrations(): Promise<MigrationResult> {
 
   if (!supabaseUrl || !serviceRoleKey) {
     console.log('[Migration] ⏭️  Skipping — SUPABASE_URL or SUPABASE_SECRET_KEY not set');
-    return { ran: false, migrations: [], errors: [] };
+    return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
   }
 
-  // Check if database is already initialized
-  const initialized = await isDatabaseInitialized(supabaseUrl, serviceRoleKey);
-  if (initialized) {
-    console.log('[Migration] ✅ Database already initialized — skipping migrations');
-    return { ran: false, migrations: [], errors: [] };
+  // Bootstrap tracking table
+  const bootstrapped = await ensureTrackingTable(supabaseUrl, serviceRoleKey);
+  if (!bootstrapped) {
+    console.warn('[Migration] ⚠️  Could not bootstrap tracking table — falling back to legacy check');
+    return await runLegacyMigrations(supabaseUrl, serviceRoleKey);
   }
 
-  console.log('[Migration] 🔄 Database not initialized — running migrations...');
+  // Load already-applied migrations
+  const applied = await getAppliedMigrations(supabaseUrl, serviceRoleKey);
+  const appliedMap = new Map(applied.map((m) => [m.filename, m]));
 
+  // Find migration files
   let migrationsDir: string;
   try {
     migrationsDir = findMigrationsDir();
   } catch (err) {
     console.error('[Migration] ❌', err);
-    return { ran: false, migrations: [], errors: [(err as Error).message] };
+    return { ran: false, applied: [], skipped: [], errors: [(err as Error).message], checksumDrift: [] };
   }
 
-  // Get sorted migration files
   const files = readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql'))
     .sort();
 
-  console.log(`[Migration] Found ${files.length} migration files`);
+  console.log(`[Migration] Found ${files.length} migration files, ${appliedMap.size} already applied`);
 
-  const applied: string[] = [];
-  const errors: string[] = [];
+  const result: MigrationResult = {
+    ran: false,
+    applied: [],
+    skipped: [],
+    errors: [],
+    checksumDrift: [],
+  };
 
   for (const file of files) {
-    console.log(`[Migration] Running ${file}...`);
     const sql = readFileSync(join(migrationsDir, file), 'utf-8');
+    const checksum = sha256(sql);
 
-    const result = await executeSql(supabaseUrl, serviceRoleKey, sql, file);
-    if (result.success) {
-      applied.push(file);
+    const existing = appliedMap.get(file);
+
+    if (existing) {
+      // Already applied — check for checksum drift
+      if (existing.checksum !== checksum) {
+        console.warn(`[Migration] ⚠️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
+        result.checksumDrift.push(file);
+      }
+      result.skipped.push(file);
+      continue;
+    }
+
+    // Run this migration
+    console.log(`[Migration] Running ${file}...`);
+    result.ran = true;
+    const startMs = Date.now();
+
+    const execResult = await executeSql(supabaseUrl, serviceRoleKey, sql, file);
+    const durationMs = Date.now() - startMs;
+
+    if (execResult.success) {
+      result.applied.push(file);
+      await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, true);
+      console.log(`[Migration] ✅ ${file} (${durationMs}ms)`);
+    } else {
+      result.errors.push(`${file}: ${execResult.error}`);
+      await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, false);
+      console.error(`[Migration] ❌ ${file}: ${execResult.error}`);
+      break; // Stop on first error — migrations are ordered
+    }
+  }
+
+  if (result.applied.length > 0) {
+    console.log(`[Migration] ✅ Applied ${result.applied.length} new migration(s)`);
+  } else if (result.errors.length === 0) {
+    console.log('[Migration] ✅ Database is up to date');
+  }
+
+  if (result.checksumDrift.length > 0) {
+    console.warn(`[Migration] ⚠️  ${result.checksumDrift.length} file(s) changed after being applied — review manually`);
+  }
+
+  return result;
+}
+
+// ── Legacy Fallback ─────────────────────────────────────────
+
+/**
+ * Fallback migration runner for when the tracking table can't be created.
+ * Checks for guild table existence (original behavior) but runs ALL migrations
+ * if the DB appears uninitialized.
+ */
+async function runLegacyMigrations(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+): Promise<MigrationResult> {
+  const res = await fetch(`${supabaseUrl}/rest/v1/guild?select=id&limit=0`, {
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+  });
+
+  if (res.ok) {
+    console.log('[Migration] ✅ Database already initialized (legacy check) — skipping');
+    return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
+  }
+
+  let migrationsDir: string;
+  try {
+    migrationsDir = findMigrationsDir();
+  } catch (err) {
+    return { ran: false, applied: [], skipped: [], errors: [(err as Error).message], checksumDrift: [] };
+  }
+
+  const files = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+
+  const result: MigrationResult = { ran: true, applied: [], skipped: [], errors: [], checksumDrift: [] };
+
+  for (const file of files) {
+    const sql = readFileSync(join(migrationsDir, file), 'utf-8');
+    const execResult = await executeSql(supabaseUrl, serviceRoleKey, sql, file);
+
+    if (execResult.success) {
+      result.applied.push(file);
       console.log(`[Migration] ✅ ${file}`);
     } else {
-      errors.push(`${file}: ${result.error}`);
-      console.error(`[Migration] ❌ ${file}: ${result.error}`);
-      // Don't continue on error — migrations are ordered
+      result.errors.push(`${file}: ${execResult.error}`);
+      console.error(`[Migration] ❌ ${file}: ${execResult.error}`);
       break;
     }
   }
 
-  if (errors.length === 0) {
-    console.log(`[Migration] ✅ All ${applied.length} migrations applied successfully`);
-  } else {
-    console.error(`[Migration] ⚠️ ${applied.length}/${files.length} migrations applied, ${errors.length} errors`);
-  }
-
-  return { ran: true, migrations: applied, errors };
+  return result;
 }
