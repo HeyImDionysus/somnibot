@@ -27,6 +27,8 @@ import { buildHelpCommand } from './features/help/index.js';
 import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
 import { ConfigWatcher } from './services/config-watcher.js';
 import { OwnerNotificationService } from './services/owner-notifications.js';
+import { GiveawayFulfillmentService } from './services/giveaway-fulfillment.js';
+import { MusicStatusReporter } from './services/music-status-reporter.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -301,6 +303,16 @@ async function main(): Promise<void> {
             { body: giveawayCmd.toJSON() },
           );
           console.log('[Boot] ✅ Giveaway manager started + /giveaway command registered');
+
+          // Start giveaway prize fulfillment service
+          const giveawayFulfillment = new GiveawayFulfillmentService(
+            guild,
+            client.supabase,
+            client.eventBus,
+          );
+          giveawayFulfillment.start();
+          (client as unknown as Record<string, unknown>)._giveawayFulfillment = giveawayFulfillment;
+          console.log('[Boot] ✅ Giveaway fulfillment service started');
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 10 initialization error:', err);
@@ -343,6 +355,16 @@ async function main(): Promise<void> {
             }
           }
           console.log(`[Boot] ✅ Music system started + ${registered}/${musicCmds.length} commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter)`);
+
+          // Start music status reporter for dashboard now-playing widget
+          const musicStatusReporter = new MusicStatusReporter(
+            musicPlayer,
+            client.supabase,
+            client.guildId,
+          );
+          musicStatusReporter.start();
+          (client as unknown as Record<string, unknown>)._musicStatusReporter = musicStatusReporter;
+          console.log('[Boot] ✅ Music status reporter started (15s interval)');
         } else {
           console.log('[Boot] ⏸️  Music system disabled in config');
         }
@@ -524,9 +546,11 @@ async function main(): Promise<void> {
     if (schedRunner?.stop) schedRunner.stop();
     const giveawayMgr = (client as unknown as Record<string, unknown>)._giveawayManager as { stop?: () => void } | undefined;
     if (giveawayMgr?.stop) giveawayMgr.stop();
-    // Phase 11: Stop music player
+    // Phase 11: Stop music player + status reporter
     const musicPlayer = (client as unknown as Record<string, unknown>)._musicPlayer as { shutdown?: () => void } | undefined;
     if (musicPlayer?.shutdown) musicPlayer.shutdown();
+    const musicReporter = (client as unknown as Record<string, unknown>)._musicStatusReporter as { stop?: () => void } | undefined;
+    if (musicReporter?.stop) musicReporter.stop();
     // Phase 13: Stop audit & diagnostics
     const auditSvc = (client as unknown as Record<string, unknown>)._auditService as { stop?: () => void } | undefined;
     if (auditSvc?.stop) auditSvc.stop();

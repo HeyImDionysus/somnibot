@@ -1,7 +1,8 @@
 /**
- * Customers — Customer management dashboard page.
+ * Customers — Customer 360 view with unified timeline.
  *
- * Architecture doc §31.4 — Customer management.
+ * Left panel: searchable customer list with key metrics.
+ * Right panel: full customer detail with tabs for timeline, orders, entitlements, infractions.
  */
 'use client';
 
@@ -11,37 +12,37 @@ import { useEffect, useState, useCallback } from 'react';
 
 interface Customer {
   id: string;
-  guild_id: string;
   discord_id: string;
   discord_username: string;
-  paypal_customer_id: string | null;
   email: string | null;
-  first_purchase_at: string | null;
   total_spent_cents: number;
-  notes: string | null;
+  order_count: number;
   created_at: string;
-  updated_at: string;
 }
 
-interface CustomerDetail extends Customer {
-  orders: Array<{
-    id: string;
-    order_number: string;
-    status: string;
-    amount_cents: number;
-    currency: string;
-    created_at: string;
-    products: { name: string } | null;
-  }>;
-  entitlements: Array<{
-    id: string;
-    product_id: string;
-    status: string;
-    type: string;
-    created_at: string;
-    expires_at: string | null;
-    products: { name: string } | null;
-  }>;
+interface TimelineEvent {
+  id: string;
+  type: string;
+  category: 'commerce' | 'support' | 'moderation' | 'engagement' | 'system';
+  title: string;
+  description: string;
+  timestamp: string;
+  metadata: Record<string, unknown>;
+}
+
+interface TimelineSummary {
+  totalOrders: number;
+  totalSpent: number;
+  activeEntitlements: number;
+  openTickets: number;
+  infractions: number;
+  activeLicenseSessions: number;
+}
+
+interface CustomerTimeline {
+  customer: Customer;
+  timeline: TimelineEvent[];
+  summary: TimelineSummary;
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -58,20 +59,34 @@ function formatDate(iso: string): string {
   });
 }
 
-function statusColor(status: string): string {
-  switch (status) {
-    case 'active':
-      return 'bg-discord-success/20 text-discord-success';
-    case 'expired':
-    case 'cancelled':
-      return 'bg-discord-danger/20 text-discord-danger';
-    case 'pending':
-      return 'bg-yellow-500/20 text-yellow-400';
-    case 'grace_period':
-    case 'suspended':
-      return 'bg-orange-500/20 text-orange-400';
-    default:
-      return 'bg-discord-bg-tertiary text-discord-text-muted';
+function formatDateTime(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function categoryIcon(cat: string): string {
+  switch (cat) {
+    case 'commerce': return '💰';
+    case 'support': return '🎫';
+    case 'moderation': return '🛡️';
+    case 'engagement': return '📈';
+    case 'system': return '⚙️';
+    default: return '📋';
+  }
+}
+
+function categoryColor(cat: string): string {
+  switch (cat) {
+    case 'commerce': return 'border-l-green-500';
+    case 'support': return 'border-l-blue-500';
+    case 'moderation': return 'border-l-red-500';
+    case 'engagement': return 'border-l-purple-500';
+    case 'system': return 'border-l-gray-500';
+    default: return 'border-l-gray-500';
   }
 }
 
@@ -79,209 +94,215 @@ function statusColor(status: string): string {
 
 export default function CustomersPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [total, setTotal] = useState(0);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<CustomerTimeline | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<CustomerDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'timeline' | 'commerce' | 'support' | 'moderation'>('timeline');
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const fetchCustomers = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (search) params.set('search', search);
       const res = await fetch(`/api/customers?${params}`);
       const json = await res.json();
-      if (json.success) {
-        setCustomers(json.data);
-        setTotal(json.total);
-      }
+      if (json.success) setCustomers(json.data ?? []);
+    } catch (err) {
+      console.error('Failed to load customers:', err);
     } finally {
       setLoading(false);
     }
   }, [search]);
 
-  useEffect(() => { load(); }, [load]);
-
-  const loadDetail = async (id: string) => {
+  const fetchTimeline = useCallback(async (id: string) => {
     setSelectedId(id);
-    setDetailLoading(true);
+    setTimelineLoading(true);
+    setActiveTab('timeline');
+    setCategoryFilter(null);
     try {
-      const res = await fetch(`/api/customers/${id}`);
+      const res = await fetch(`/api/customers/${id}/timeline`);
       const json = await res.json();
-      if (json.success) setDetail(json.data);
+      if (json.success) setTimeline(json.data);
+    } catch (err) {
+      console.error('Failed to load timeline:', err);
     } finally {
-      setDetailLoading(false);
+      setTimelineLoading(false);
     }
-  };
+  }, []);
 
-  // Stats
-  const totalSpent = customers.reduce((sum, c) => sum + c.total_spent_cents, 0);
-  const withEmail = customers.filter((c) => c.email).length;
+  useEffect(() => {
+    fetchCustomers();
+  }, [fetchCustomers]);
+
+  const filteredTimeline = timeline?.timeline.filter((e) => {
+    if (categoryFilter) return e.category === categoryFilter;
+    if (activeTab === 'commerce') return e.category === 'commerce';
+    if (activeTab === 'support') return e.category === 'support';
+    if (activeTab === 'moderation') return e.category === 'moderation';
+    return true;
+  }) ?? [];
 
   return (
-    <div className="space-y-6 p-6">
-      <div>
-        <h1 className="text-2xl font-bold text-discord-text-primary">Customers</h1>
-        <p className="text-sm text-discord-text-muted">View and manage your customer base</p>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        {[
-          { label: 'Total Customers', value: total },
-          { label: 'Total Revenue', value: formatPrice(totalSpent) },
-          { label: 'With Email', value: withEmail },
-          { label: 'Avg Spend', value: customers.length ? formatPrice(Math.round(totalSpent / customers.length)) : '$0.00' },
-        ].map((s) => (
-          <div
-            key={s.label}
-            className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4 text-center"
-          >
-            <p className="text-2xl font-bold text-discord-text-primary">{s.value}</p>
-            <p className="text-xs text-discord-text-muted">{s.label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Search */}
-      <input
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search by username, Discord ID, or email…"
-        className="rounded-input bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary outline-none border border-discord-border-subtle w-full max-w-md"
-      />
-
-      <div className="flex gap-6">
-        {/* Customer List */}
-        <div className="flex-1 space-y-2">
+    <div className="flex h-[calc(100vh-4rem)] gap-0">
+      {/* ── Left: Customer List ─────────────────────────── */}
+      <div className="w-80 border-r border-discord-border bg-discord-secondary flex flex-col flex-shrink-0">
+        <div className="p-4 border-b border-discord-border">
+          <h1 className="text-lg font-bold text-white mb-3">Customers</h1>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name, ID, email..."
+            className="w-full px-3 py-2 bg-discord-tertiary text-sm text-white rounded border border-discord-border focus:border-discord-blurple focus:outline-none"
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <div className="text-center py-12 text-discord-text-muted">Loading customers…</div>
+            <p className="text-discord-text-muted text-sm p-4">Loading...</p>
           ) : customers.length === 0 ? (
-            <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
-              <div className="text-4xl mb-3">👤</div>
-              <p className="text-discord-text-muted">No customers found.</p>
-            </div>
+            <p className="text-discord-text-muted text-sm p-4">No customers found</p>
           ) : (
             customers.map((c) => (
               <button
                 key={c.id}
-                onClick={() => loadDetail(c.id)}
-                className={`w-full text-left flex items-center justify-between rounded-card border p-4 transition-standard ${
-                  selectedId === c.id
-                    ? 'border-[#FF1493] bg-discord-bg-secondary'
-                    : 'border-discord-border-subtle bg-discord-bg-secondary hover:border-discord-border-subtle/80'
+                onClick={() => fetchTimeline(c.id)}
+                className={`w-full text-left px-4 py-3 border-b border-discord-border hover:bg-discord-tertiary transition-colors ${
+                  selectedId === c.id ? 'bg-discord-tertiary border-l-2 border-l-discord-blurple' : ''
                 }`}
               >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-discord-text-primary">
-                      {c.discord_username}
-                    </span>
-                    <span className="text-xs text-discord-text-muted">
-                      {c.discord_id}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-xs text-discord-text-muted">
-                    {c.email ?? 'No email'} • Joined {formatDate(c.created_at)}
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="font-semibold text-discord-text-primary">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium text-white truncate">
+                    {c.discord_username}
+                  </span>
+                  <span className="text-xs text-green-400 font-mono">
                     {formatPrice(c.total_spent_cents)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-xs text-discord-text-muted">
+                    {c.order_count} order{c.order_count !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-xs text-discord-text-muted">
+                    Since {formatDate(c.created_at)}
                   </span>
                 </div>
               </button>
             ))
           )}
         </div>
+      </div>
 
-        {/* Detail Panel */}
-        {selectedId && (
-          <div className="w-96 shrink-0 rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
-            {detailLoading ? (
-              <div className="text-center py-8 text-discord-text-muted">Loading…</div>
-            ) : detail ? (
-              <div className="space-y-4">
-                <div>
-                  <h2 className="text-lg font-bold text-discord-text-primary">
-                    {detail.discord_username}
-                  </h2>
-                  <p className="text-xs text-discord-text-muted">ID: {detail.discord_id}</p>
-                  {detail.email && (
-                    <p className="text-xs text-discord-text-muted">Email: {detail.email}</p>
-                  )}
+      {/* ── Right: Customer 360 ────────────────────────── */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {!selectedId ? (
+          <div className="flex-1 flex items-center justify-center text-discord-text-muted">
+            <div className="text-center">
+              <p className="text-4xl mb-2">👤</p>
+              <p className="text-sm">Select a customer to view their full profile</p>
+            </div>
+          </div>
+        ) : timelineLoading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <p className="text-discord-text-muted animate-pulse">Loading customer data...</p>
+          </div>
+        ) : timeline ? (
+          <>
+            {/* Header with summary cards */}
+            <div className="p-4 border-b border-discord-border bg-discord-secondary">
+              <div className="flex items-center gap-4 mb-4">
+                <div className="w-12 h-12 rounded-full bg-discord-blurple flex items-center justify-center text-white text-xl font-bold">
+                  {timeline.customer.discord_username.charAt(0).toUpperCase()}
                 </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-input bg-discord-bg-tertiary p-2 text-center">
-                    <p className="text-sm font-bold text-discord-text-primary">
-                      {formatPrice(detail.total_spent_cents)}
-                    </p>
-                    <p className="text-xs text-discord-text-muted">Total Spent</p>
-                  </div>
-                  <div className="rounded-input bg-discord-bg-tertiary p-2 text-center">
-                    <p className="text-sm font-bold text-discord-text-primary">
-                      {detail.orders?.length ?? 0}
-                    </p>
-                    <p className="text-xs text-discord-text-muted">Orders</p>
-                  </div>
-                </div>
-
-                {/* Entitlements */}
                 <div>
-                  <h3 className="text-sm font-semibold text-discord-text-secondary mb-2">
-                    Entitlements ({detail.entitlements?.length ?? 0})
-                  </h3>
-                  {detail.entitlements?.map((e) => (
-                    <div
-                      key={e.id}
-                      className="mb-2 rounded-input bg-discord-bg-tertiary p-2 flex items-center justify-between"
-                    >
-                      <div>
-                        <span className="text-sm text-discord-text-primary">
-                          {e.products?.name ?? 'Unknown'}
-                        </span>
-                        <p className="text-xs text-discord-text-muted">
-                          {e.type} • {e.expires_at ? `Expires ${formatDate(e.expires_at)}` : 'No expiry'}
-                        </p>
-                      </div>
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${statusColor(e.status)}`}>
-                        {e.status}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Recent Orders */}
-                <div>
-                  <h3 className="text-sm font-semibold text-discord-text-secondary mb-2">
-                    Recent Orders
-                  </h3>
-                  {detail.orders?.slice(0, 5).map((o) => (
-                    <div
-                      key={o.id}
-                      className="mb-2 rounded-input bg-discord-bg-tertiary p-2 flex items-center justify-between"
-                    >
-                      <div>
-                        <span className="text-sm font-mono text-discord-text-primary">
-                          {o.order_number}
-                        </span>
-                        <p className="text-xs text-discord-text-muted">
-                          {o.products?.name ?? 'Unknown'} • {formatDate(o.created_at)}
-                        </p>
-                      </div>
-                      <span className="text-sm text-discord-text-primary">
-                        {formatPrice(o.amount_cents)}
-                      </span>
-                    </div>
-                  ))}
+                  <h2 className="text-lg font-bold text-white">{timeline.customer.discord_username}</h2>
+                  <p className="text-xs text-discord-text-muted">
+                    {timeline.customer.discord_id}
+                    {timeline.customer.email && ` • ${timeline.customer.email}`}
+                  </p>
                 </div>
               </div>
-            ) : null}
-          </div>
-        )}
+
+              {/* Summary cards */}
+              <div className="grid grid-cols-6 gap-2">
+                {[
+                  { label: 'Total Spent', value: formatPrice(timeline.summary.totalSpent), color: 'text-green-400' },
+                  { label: 'Orders', value: String(timeline.summary.totalOrders), color: 'text-blue-400' },
+                  { label: 'Active Entitlements', value: String(timeline.summary.activeEntitlements), color: 'text-purple-400' },
+                  { label: 'Open Tickets', value: String(timeline.summary.openTickets), color: 'text-yellow-400' },
+                  { label: 'Infractions', value: String(timeline.summary.infractions), color: timeline.summary.infractions > 0 ? 'text-red-400' : 'text-discord-text-muted' },
+                  { label: 'License Sessions', value: String(timeline.summary.activeLicenseSessions), color: 'text-cyan-400' },
+                ].map((card) => (
+                  <div key={card.label} className="bg-discord-tertiary rounded-lg p-2.5 text-center">
+                    <p className={`text-lg font-bold ${card.color}`}>{card.value}</p>
+                    <p className="text-xs text-discord-text-muted">{card.label}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex items-center gap-1 px-4 pt-3 border-b border-discord-border bg-discord-primary">
+              {([
+                { key: 'timeline', label: 'Timeline', icon: '📋' },
+                { key: 'commerce', label: 'Commerce', icon: '💰' },
+                { key: 'support', label: 'Support', icon: '🎫' },
+                { key: 'moderation', label: 'Moderation', icon: '🛡️' },
+              ] as const).map((tab) => (
+                <button
+                  key={tab.key}
+                  onClick={() => { setActiveTab(tab.key); setCategoryFilter(null); }}
+                  className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                    activeTab === tab.key
+                      ? 'bg-discord-secondary text-white border-b-2 border-discord-blurple'
+                      : 'text-discord-text-muted hover:text-white'
+                  }`}
+                >
+                  {tab.icon} {tab.label}
+                  {tab.key !== 'timeline' && (
+                    <span className="ml-1 text-xs opacity-60">
+                      ({timeline.timeline.filter((e) =>
+                        tab.key === 'commerce' ? e.category === 'commerce' :
+                        tab.key === 'support' ? e.category === 'support' :
+                        e.category === 'moderation'
+                      ).length})
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {/* Timeline feed */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {filteredTimeline.length === 0 ? (
+                <p className="text-discord-text-muted text-sm text-center mt-8">
+                  No events in this category
+                </p>
+              ) : (
+                filteredTimeline.map((event) => (
+                  <div
+                    key={event.id}
+                    className={`bg-discord-secondary rounded-lg p-3 border-l-4 ${categoryColor(event.category)} hover:bg-discord-tertiary transition-colors`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-start gap-2">
+                        <span className="text-base mt-0.5">{categoryIcon(event.category)}</span>
+                        <div>
+                          <p className="text-sm font-medium text-white">{event.title}</p>
+                          <p className="text-xs text-discord-text-muted mt-0.5">{event.description}</p>
+                        </div>
+                      </div>
+                      <span className="text-xs text-discord-text-muted whitespace-nowrap ml-4">
+                        {formatDateTime(event.timestamp)}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </>
+        ) : null}
       </div>
     </div>
   );

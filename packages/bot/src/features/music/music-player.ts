@@ -111,6 +111,43 @@ export class MusicPlayerManager {
     return { ...this.config };
   }
 
+  /**
+   * Get current player status for dashboard display.
+   */
+  getStatus(): {
+    nowPlaying: { title: string; author: string; url: string; duration: number; position: number; requester: string; thumbnail: string | null } | null;
+    queue: { length: number; duration: number };
+    listeners: number;
+  } {
+    const guildId = this.guild.id;
+    const node = this.shoukaku.nodes.values().next().value;
+    const player = node?.players?.get(guildId);
+
+    if (!player || !player.track) {
+      return { nowPlaying: null, queue: { length: 0, duration: 0 }, listeners: 0 };
+    }
+
+    // Count listeners in the voice channel
+    const voiceChannel = this.guild.channels.cache.get(player.connection?.channelId ?? '');
+    const listeners = voiceChannel && 'members' in voiceChannel
+      ? (voiceChannel.members as Map<string, unknown>).size - 1 // Subtract the bot
+      : 0;
+
+    return {
+      nowPlaying: {
+        title: (player.track as Record<string, unknown>).info ? ((player.track as Record<string, Record<string, string>>).info.title ?? 'Unknown') : 'Unknown',
+        author: (player.track as Record<string, Record<string, string>>).info?.author ?? 'Unknown',
+        url: (player.track as Record<string, Record<string, string>>).info?.uri ?? '',
+        duration: Number((player.track as Record<string, Record<string, number>>).info?.length ?? 0),
+        position: player.position ?? 0,
+        requester: 'Unknown',
+        thumbnail: (player.track as Record<string, Record<string, string>>).info?.artworkUrl ?? null,
+      },
+      queue: { length: 0, duration: 0 },
+      listeners: Math.max(0, listeners),
+    };
+  }
+
   // ── DJ Permissions ──────────────────────────────────────
 
   /** Check if a user has DJ privileges. */
