@@ -8,7 +8,7 @@ import { Badge } from '@/components/shared/badge';
 import { rolesApi, type LiveRoleData } from '@/lib/api/client';
 import {
   Shield, Plus, Pencil, Trash2, Bot, Crown, Sparkles, Lock, Users,
-  RefreshCw, AlertTriangle, X, Save, GripVertical, Star,
+  RefreshCw, AlertTriangle, X, Save, GripVertical, Star, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
 
@@ -95,6 +95,203 @@ function getManagedLabel(role: LiveRoleData): string {
   if (role.tags.guildConnections) return 'Linked Role';
   if (role.managed) return 'Managed';
   return '';
+}
+
+// ============================================================
+// Permission Definitions (from architecture doc §10.1)
+// ============================================================
+
+interface PermDef {
+  name: string;
+  bit: string; // stored as string, converted to BigInt at runtime
+  label: string;
+  category: string;
+  dangerTier?: 'admin';
+}
+
+function permBit(shift: number): string {
+  return (BigInt(1) << BigInt(shift)).toString();
+}
+
+const PERMISSION_DEFS: PermDef[] = [
+  // General
+  { name: 'VIEW_CHANNEL',             bit: permBit(10), label: 'View Channels',             category: 'General' },
+  { name: 'CHANGE_NICKNAME',          bit: permBit(26), label: 'Change Nickname',            category: 'General' },
+  { name: 'CREATE_INSTANT_INVITE',    bit: permBit(0),  label: 'Create Invite',              category: 'General' },
+  { name: 'USE_EXTERNAL_APPS',        bit: permBit(50), label: 'Use External Apps',          category: 'General' },
+  // Text
+  { name: 'SEND_MESSAGES',            bit: permBit(11), label: 'Send Messages',              category: 'Text' },
+  { name: 'SEND_MESSAGES_IN_THREADS', bit: permBit(38), label: 'Send Messages in Threads',   category: 'Text' },
+  { name: 'CREATE_PUBLIC_THREADS',    bit: permBit(35), label: 'Create Public Threads',      category: 'Text' },
+  { name: 'CREATE_PRIVATE_THREADS',   bit: permBit(36), label: 'Create Private Threads',     category: 'Text' },
+  { name: 'EMBED_LINKS',              bit: permBit(14), label: 'Embed Links',                category: 'Text' },
+  { name: 'ATTACH_FILES',             bit: permBit(15), label: 'Attach Files',               category: 'Text' },
+  { name: 'ADD_REACTIONS',            bit: permBit(6),  label: 'Add Reactions',              category: 'Text' },
+  { name: 'USE_EXTERNAL_EMOJIS',      bit: permBit(18), label: 'Use External Emojis',        category: 'Text' },
+  { name: 'USE_EXTERNAL_STICKERS',    bit: permBit(37), label: 'Use External Stickers',      category: 'Text' },
+  { name: 'READ_MESSAGE_HISTORY',     bit: permBit(16), label: 'Read Message History',       category: 'Text' },
+  { name: 'USE_APPLICATION_COMMANDS', bit: permBit(31), label: 'Use Slash Commands',         category: 'Text' },
+  { name: 'SEND_VOICE_MESSAGES',      bit: permBit(46), label: 'Send Voice Messages',        category: 'Text' },
+  { name: 'SEND_POLLS',               bit: permBit(49), label: 'Send Polls',                 category: 'Text' },
+  { name: 'MENTION_EVERYONE',         bit: permBit(17), label: 'Mention @everyone',          category: 'Text' },
+  { name: 'SEND_TTS_MESSAGES',        bit: permBit(12), label: 'Send TTS Messages',          category: 'Text' },
+  // Voice
+  { name: 'CONNECT',                  bit: permBit(20), label: 'Connect',                    category: 'Voice' },
+  { name: 'SPEAK',                    bit: permBit(21), label: 'Speak',                      category: 'Voice' },
+  { name: 'USE_VAD',                  bit: permBit(25), label: 'Use Voice Activity',         category: 'Voice' },
+  { name: 'STREAM',                   bit: permBit(9),  label: 'Video / Screen Share',       category: 'Voice' },
+  { name: 'USE_SOUNDBOARD',           bit: permBit(42), label: 'Use Soundboard',             category: 'Voice' },
+  { name: 'USE_EXTERNAL_SOUNDS',      bit: permBit(45), label: 'Use External Sounds',        category: 'Voice' },
+  { name: 'PRIORITY_SPEAKER',         bit: permBit(8),  label: 'Priority Speaker',           category: 'Voice' },
+  { name: 'MUTE_MEMBERS',             bit: permBit(22), label: 'Mute Members',               category: 'Voice' },
+  { name: 'DEAFEN_MEMBERS',           bit: permBit(23), label: 'Deafen Members',             category: 'Voice' },
+  { name: 'MOVE_MEMBERS',             bit: permBit(24), label: 'Move Members',               category: 'Voice' },
+  { name: 'REQUEST_TO_SPEAK',         bit: permBit(32), label: 'Request to Speak',           category: 'Voice' },
+  // Moderation
+  { name: 'MANAGE_MESSAGES',          bit: permBit(13), label: 'Manage Messages',            category: 'Moderation' },
+  { name: 'MANAGE_THREADS',           bit: permBit(34), label: 'Manage Threads',             category: 'Moderation' },
+  { name: 'MODERATE_MEMBERS',         bit: permBit(40), label: 'Timeout Members',            category: 'Moderation' },
+  { name: 'KICK_MEMBERS',             bit: permBit(1),  label: 'Kick Members',               category: 'Moderation' },
+  { name: 'BAN_MEMBERS',              bit: permBit(2),  label: 'Ban Members',                category: 'Moderation' },
+  { name: 'MANAGE_NICKNAMES',         bit: permBit(27), label: 'Manage Nicknames',           category: 'Moderation' },
+  { name: 'VIEW_AUDIT_LOG',           bit: permBit(7),  label: 'View Audit Log',             category: 'Moderation' },
+  { name: 'MANAGE_EVENTS',            bit: permBit(33), label: 'Manage Events',              category: 'Moderation' },
+  { name: 'CREATE_EVENTS',            bit: permBit(44), label: 'Create Events',              category: 'Moderation' },
+  // Server Management (admin)
+  { name: 'MANAGE_ROLES',             bit: permBit(28), label: 'Manage Roles',               category: 'Server Management', dangerTier: 'admin' },
+  { name: 'MANAGE_CHANNELS',          bit: permBit(4),  label: 'Manage Channels',            category: 'Server Management', dangerTier: 'admin' },
+  { name: 'MANAGE_GUILD',             bit: permBit(5),  label: 'Manage Server',              category: 'Server Management', dangerTier: 'admin' },
+  { name: 'MANAGE_WEBHOOKS',          bit: permBit(29), label: 'Manage Webhooks',            category: 'Server Management', dangerTier: 'admin' },
+  { name: 'MANAGE_GUILD_EXPRESSIONS', bit: permBit(30), label: 'Manage Expressions',         category: 'Server Management', dangerTier: 'admin' },
+  { name: 'CREATE_GUILD_EXPRESSIONS', bit: permBit(43), label: 'Create Expressions',         category: 'Server Management' },
+  { name: 'VIEW_GUILD_INSIGHTS',      bit: permBit(19), label: 'View Server Insights',       category: 'Server Management' },
+];
+
+const PERM_CATEGORIES = ['General', 'Text', 'Voice', 'Moderation', 'Server Management'] as const;
+
+function permHas(permissions: string | undefined, bitStr: string): boolean {
+  if (!permissions) return false;
+  try {
+    const bit = BigInt(bitStr);
+    return (BigInt(permissions) & bit) === bit;
+  } catch {
+    return false;
+  }
+}
+
+function permToggle(permissions: string | undefined, bitStr: string, on: boolean): string {
+  const bit = BigInt(bitStr);
+  const current = permissions ? BigInt(permissions) : BigInt(0);
+  const updated = on ? current | bit : current & ~bit;
+  return updated.toString();
+}
+
+// ============================================================
+// Permission Editor Component
+// ============================================================
+
+function PermissionEditor({
+  permissions,
+  tier,
+  onChange,
+}: {
+  permissions: string | undefined;
+  tier: string;
+  onChange: (perms: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
+
+  const toggleCategory = (cat: string) => {
+    setOpenCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat); else next.add(cat);
+      return next;
+    });
+  };
+
+  const enabledCount = PERMISSION_DEFS.filter((p) => permHas(permissions, p.bit)).length;
+
+  return (
+    <div className="rounded-lg border border-discord-border bg-discord-bg-tertiary/30">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <Shield size={14} className="text-discord-text-muted" />
+          <span className="text-sm font-medium text-discord-text-primary">
+            Permissions
+          </span>
+          <Badge variant="default">
+            {enabledCount}/{PERMISSION_DEFS.length}
+          </Badge>
+        </div>
+        {expanded ? <ChevronDown size={14} className="text-discord-text-muted" /> : <ChevronRight size={14} className="text-discord-text-muted" />}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-discord-border px-4 pb-4 pt-2 space-y-2">
+          <p className="text-[10px] text-discord-text-muted">
+            Toggle individual permissions. Changes are based on the tier default — toggling resets to your custom set.
+          </p>
+          {PERM_CATEGORIES.map((cat) => {
+            const perms = PERMISSION_DEFS.filter((p) => p.category === cat);
+            const catOpen = openCategories.has(cat);
+            const catEnabled = perms.filter((p) => permHas(permissions, p.bit)).length;
+
+            return (
+              <div key={cat}>
+                <button
+                  onClick={() => toggleCategory(cat)}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-discord-text-muted hover:bg-discord-bg-secondary/50"
+                >
+                  {catOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                  {cat}
+                  <span className="text-[10px] font-normal">({catEnabled}/{perms.length})</span>
+                </button>
+
+                {catOpen && (
+                  <div className="ml-4 space-y-0.5 pt-1">
+                    {perms.map((perm) => {
+                      const isOn = permHas(permissions, perm.bit);
+                      const isDangerous = perm.dangerTier === 'admin' && tier !== 'admin';
+
+                      return (
+                        <label
+                          key={perm.name}
+                          className={cn(
+                            'flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs hover:bg-discord-bg-secondary/30',
+                            isDangerous && isOn && 'bg-red-500/10',
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isOn}
+                            onChange={(e) => onChange(permToggle(permissions, perm.bit, e.target.checked))}
+                            className="rounded"
+                          />
+                          <span className={cn(
+                            'text-discord-text-secondary',
+                            isOn && 'text-discord-text-primary',
+                          )}>
+                            {perm.label}
+                          </span>
+                          {isDangerous && isOn && (
+                            <AlertTriangle size={10} className="text-red-400" />
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ============================================================
@@ -189,6 +386,7 @@ export default function RolesPage() {
         color: editingRole.color,
         hoist: editingRole.hoist,
         mentionable: editingRole.mentionable,
+        permissions: editingRole.permissions,
         templateKey: editingRole.templateKey ?? undefined,
       });
       setEditingRole(null);
@@ -589,6 +787,13 @@ export default function RolesPage() {
                 description="Allow anyone to @mention this role"
                 checked={editingRole.mentionable}
                 onChange={(mentionable) => setEditingRole({ ...editingRole, mentionable })}
+              />
+
+              {/* Per-role permission editor */}
+              <PermissionEditor
+                permissions={editingRole.permissions}
+                tier={editingRole.tier ?? 'member'}
+                onChange={(permissions) => setEditingRole({ ...editingRole, permissions })}
               />
 
               {editingRole.source === 'deployed' && (

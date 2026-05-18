@@ -8,7 +8,8 @@ import { cn } from '@/lib/utils/cn';
 import {
   CheckCircle2, Circle, ChevronRight, Shield, Hash,
   Rocket, Eye, Settings, Zap, AlertTriangle,
-  Copy, Loader2, RefreshCw,
+  Loader2, Plus, Trash2, Crown, Sparkles, Users,
+  X,
 } from 'lucide-react';
 import { deployApi } from '@/lib/api/client';
 
@@ -51,173 +52,178 @@ interface DeployData {
 }
 
 // ============================================================
-// Default Templates
+// Tier Configuration
 // ============================================================
 
-// Role permission bitfields computed from architecture doc §10.1.
-// Every single Discord permission is deliberately assigned to exactly one tier.
-// ADMINISTRATOR (1 << 3) is NEVER granted — it bypasses all overrides.
+type TierKey = 'admin' | 'moderator' | 'member' | 'cosmetic';
+
+const TIER_ORDER: TierKey[] = ['admin', 'moderator', 'member', 'cosmetic'];
+
+const TIER_META: Record<TierKey, {
+  label: string;
+  description: string;
+  badge: 'danger' | 'warning' | 'success' | 'pink';
+  icon: typeof Shield;
+  defaultColor: number;
+}> = {
+  admin: {
+    label: 'Admin',
+    description: 'Full server management — roles, channels, settings. Never grants ADMINISTRATOR.',
+    badge: 'danger',
+    icon: Crown,
+    defaultColor: 0xED4245,
+  },
+  moderator: {
+    label: 'Moderator',
+    description: 'Moderation tools — timeout, kick, ban, manage messages/threads.',
+    badge: 'warning',
+    icon: Shield,
+    defaultColor: 0xFEE75C,
+  },
+  member: {
+    label: 'Member',
+    description: 'Standard community access — chat, voice, reactions, slash commands.',
+    badge: 'success',
+    icon: Users,
+    defaultColor: 0x57F287,
+  },
+  cosmetic: {
+    label: 'Cosmetic',
+    description: 'Display only — name color, hoist. Zero functional permissions.',
+    badge: 'pink',
+    icon: Sparkles,
+    defaultColor: 0xFF69B4,
+  },
+};
+
+// Permission bitfields from architecture doc §10.1
 const PERM = {
-  MEMBER:    '1764069874191937', // 22 perms: VIEW_CHANNEL, SEND_MESSAGES, SEND_MESSAGES_IN_THREADS, CREATE_PUBLIC_THREADS, EMBED_LINKS, ATTACH_FILES, ADD_REACTIONS, USE_EXTERNAL_EMOJIS, USE_EXTERNAL_STICKERS, READ_MESSAGE_HISTORY, USE_APPLICATION_COMMANDS, CONNECT, SPEAK, USE_VAD, STREAM, USE_SOUNDBOARD, SEND_VOICE_MESSAGES, SEND_POLLS, USE_EXTERNAL_APPS, CHANGE_NICKNAME, CREATE_INSTANT_INVITE, REQUEST_TO_SPEAK
-  MODERATOR: '1818040596955079', // 39 perms: Member + MANAGE_MESSAGES, MANAGE_THREADS, CREATE_PRIVATE_THREADS, MODERATE_MEMBERS, KICK, BAN, MUTE, DEAFEN, MOVE_MEMBERS, PRIORITY_SPEAKER, MANAGE_NICKNAMES, VIEW_AUDIT_LOG, MENTION_EVERYONE, MANAGE_EVENTS, CREATE_EVENTS, USE_EXTERNAL_SOUNDS, SEND_TTS_MESSAGES
-  ADMIN:     '1829037592805367', // 47 perms: Moderator + MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_GUILD, MANAGE_WEBHOOKS, MANAGE_GUILD_EXPRESSIONS, CREATE_GUILD_EXPRESSIONS, VIEW_GUILD_INSIGHTS, VIEW_CREATOR_MONETIZATION_ANALYTICS
+  COSMETIC:  '0',
+  MEMBER:    '1764069874191937',
+  MODERATOR: '1818040596955079',
+  ADMIN:     '1829037592805367',
 } as const;
 
-const DEFAULT_ROLES = [
-  {
-    key: 'owner',
-    name: 'Owner',
-    tier: 'admin',
-    permissions: PERM.ADMIN, // Same as Admin — NEVER ADMINISTRATOR. Server owner has implicit full access.
-    color: 0xFF1493, // SOMNI_PALETTE HOT_PINK
-    hoist: true,
-    mentionable: false,
-    position: 5,
-  },
-  {
-    key: 'admin',
-    name: 'Admin',
-    tier: 'admin',
-    permissions: PERM.ADMIN,
-    color: 0xED4245,
-    hoist: true,
-    mentionable: false,
-    position: 4,
-  },
-  {
-    key: 'moderator',
-    name: 'Moderator',
-    tier: 'moderator',
-    permissions: PERM.MODERATOR,
-    color: 0xFEE75C,
-    hoist: true,
-    mentionable: false,
-    position: 3,
-  },
-  {
-    key: 'dj',
-    name: 'DJ',
-    tier: 'moderator',
-    permissions: PERM.MEMBER, // Same as Member — DJ-specific perms are channel overrides on music channels
-    color: 0x00D4FF, // SOMNI_PALETTE CYAN
-    hoist: false,
-    mentionable: false,
-    position: 2,
-  },
-  {
-    key: 'member',
-    name: 'Member',
-    tier: 'member',
-    permissions: PERM.MEMBER,
-    color: 0x57F287,
-    hoist: false,
-    mentionable: false,
-    position: 1,
-  },
-];
+const TIER_PERMISSIONS: Record<TierKey, string> = {
+  admin: PERM.ADMIN,
+  moderator: PERM.MODERATOR,
+  member: PERM.MEMBER,
+  cosmetic: PERM.COSMETIC,
+};
 
-// Channel override bitfields from architecture doc §11.1.
-// These match the per-channel permission templates exactly.
+// ============================================================
+// Role & Channel Types for the Wizard
+// ============================================================
+
+interface WizardRole {
+  key: string;
+  name: string;
+  tier: TierKey;
+  permissions: string;
+  color: number;
+  hoist: boolean;
+  mentionable: boolean;
+  position: number;
+}
+
+interface WizardChannel {
+  key: string;
+  name: string;
+  type: number; // 0=text, 2=voice, 5=announcement
+  categoryKey: string;
+  position: number;
+  topic: string | null;
+  slowmode: number;
+  nsfw: boolean;
+  templateId: string;
+  overrides: Array<{ roleKey: string; allow: string; deny: string }>;
+}
+
+interface WizardCategory {
+  key: string;
+  name: string;
+  position: number;
+}
+
+// ============================================================
+// Channel Permission Override Helpers
+// ============================================================
+
 const CH = {
-  // View Only: can see & react, cannot send messages or use commands
-  VIEW_ONLY_ALLOW: '66624',       // VIEW_CHANNEL + READ_MESSAGE_HISTORY + ADD_REACTIONS
-  VIEW_ONLY_DENY:  '380104607744', // SEND_MESSAGES + SEND_MESSAGES_IN_THREADS + CREATE_PUBLIC_THREADS + CREATE_PRIVATE_THREADS + USE_APPLICATION_COMMANDS
-
-  // View & Use: full Member-level text access
-  VIEW_USE_ALLOW: '1759667428904000', // VIEW_CHANNEL + READ_MESSAGE_HISTORY + SEND_MESSAGES + SEND_MESSAGES_IN_THREADS + CREATE_PUBLIC_THREADS + ADD_REACTIONS + EMBED_LINKS + ATTACH_FILES + USE_APPLICATION_COMMANDS + SEND_VOICE_MESSAGES + SEND_POLLS + USE_EXTERNAL_EMOJIS + USE_EXTERNAL_STICKERS + USE_EXTERNAL_APPS
-
-  // Staff Only: @everyone denied, mod+ allowed
-  STAFF_DENY: '1024',              // VIEW_CHANNEL
-  STAFF_ALLOW: '19327478848',      // VIEW_CHANNEL + SEND_MESSAGES + READ_MESSAGE_HISTORY + MANAGE_MESSAGES + MANAGE_THREADS + EMBED_LINKS + ATTACH_FILES + ADD_REACTIONS + USE_APPLICATION_COMMANDS
-
-  // Voice: standard voice access
-  VOICE_ALLOW: '4398083212800',    // VIEW_CHANNEL + CONNECT + SPEAK + USE_VAD + STREAM + USE_SOUNDBOARD
+  VIEW_ONLY_ALLOW: '66624',
+  VIEW_ONLY_DENY:  '380104607744',
+  VIEW_USE_ALLOW: '1759667428904000',
+  STAFF_DENY: '1024',
+  STAFF_ALLOW: '19327478848',
+  VOICE_ALLOW: '4398083212800',
 } as const;
 
-// Helper: build Staff Only overrides (hidden from @everyone, visible to mod+)
 const staffOverrides = () => [
   { roleKey: 'everyone', allow: '0', deny: CH.STAFF_DENY },
   { roleKey: 'moderator', allow: CH.STAFF_ALLOW, deny: '0' },
   { roleKey: 'admin', allow: CH.STAFF_ALLOW, deny: '0' },
-  { roleKey: 'owner', allow: CH.STAFF_ALLOW, deny: '0' },
 ];
 
-// Helper: build View Only overrides (Member can see + react, cannot send)
 const viewOnlyOverrides = () => [
   { roleKey: 'member', allow: CH.VIEW_ONLY_ALLOW, deny: CH.VIEW_ONLY_DENY },
 ];
 
-// Helper: build View & Use overrides (Member has full text access)
 const viewUseOverrides = () => [
   { roleKey: 'member', allow: CH.VIEW_USE_ALLOW, deny: '0' },
 ];
 
-// Helper: build voice overrides
 const voiceOverrides = () => [
   { roleKey: 'member', allow: CH.VOICE_ALLOW, deny: '0' },
 ];
 
-// Helper: build staff-only voice overrides
 const staffVoiceOverrides = () => [
   { roleKey: 'everyone', allow: '0', deny: CH.STAFF_DENY },
   { roleKey: 'moderator', allow: CH.VOICE_ALLOW, deny: '0' },
   { roleKey: 'admin', allow: CH.VOICE_ALLOW, deny: '0' },
-  { roleKey: 'owner', allow: CH.VOICE_ALLOW, deny: '0' },
-];
-
-// Optimal default server structure — based on web research + architecture doc §11.4.
-// Follows Discord best practices:
-//   - "Rule of Seven": new servers start lean, add channels as features activate
-//   - 4-5 channels per category (Discord's recommendation)
-//   - Important channels at top, main chat middle, less important at bottom
-//   - Only includes channels for features that exist or are imminent
-//   - Staff/logging channels ready from day one
-// Total: ~20 channels in 7 categories = clean, functional, not overwhelming.
-const DEFAULT_CHANNELS = [
-  // ── INFORMATION (3 channels) ──────────────────────────────
-  // Top of server. View-only. Rules, announcements, welcome info.
-  { key: 'rules', name: 'rules', type: 0, categoryKey: 'cat-information', position: 0, topic: 'Server rules and guidelines', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
-  { key: 'announcements', name: 'announcements', type: 5, categoryKey: 'cat-information', position: 1, topic: 'Important server announcements', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
-  { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'cat-information', position: 2, topic: 'Welcome new members! Introduce yourself here.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
-
-  // ── GENERAL (3 channels) ──────────────────────────────────
-  // Main community chat. Open to all Members.
-  { key: 'general', name: 'general', type: 0, categoryKey: 'cat-general', position: 0, topic: 'General discussion', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
-  { key: 'off-topic', name: 'off-topic', type: 0, categoryKey: 'cat-general', position: 1, topic: 'Anything goes', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
-  { key: 'media', name: 'media', type: 0, categoryKey: 'cat-general', position: 2, topic: 'Share images, videos, and links', slowmode: 5, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
-
-  // ── SUPPORT (1 channel) ───────────────────────────────────
-  // Ticket panel lives here. View-only so members can't clutter it.
-  // Ticket channels are created dynamically by the bot (not a template).
-  { key: 'support', name: 'support', type: 0, categoryKey: 'cat-support', position: 0, topic: 'Need help? Open a ticket below.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
-
-  // ── MUSIC (3 channels) ────────────────────────────────────
-  // Music system channels. Lavalink-powered.
-  { key: 'music-chat', name: 'music-chat', type: 0, categoryKey: 'cat-music', position: 0, topic: 'Discuss music and request songs', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
-  { key: 'now-playing', name: 'now-playing', type: 0, categoryKey: 'cat-music', position: 1, topic: 'Currently playing — updated by SomniBot', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
-  { key: 'listening-room', name: 'Listening Room', type: 2, categoryKey: 'cat-music', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
-
-  // ── VOICE (3 channels) ────────────────────────────────────
-  // Standard voice channels + staff voice.
-  { key: 'vc-general', name: 'General', type: 2, categoryKey: 'cat-voice', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
-  { key: 'vc-gaming', name: 'Gaming', type: 2, categoryKey: 'cat-voice', position: 1, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
-  { key: 'vc-staff', name: 'Staff Voice', type: 2, categoryKey: 'cat-voice', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'staff-voice', overrides: staffVoiceOverrides() },
-
-  // ── STAFF (3 channels) ────────────────────────────────────
-  // Hidden from members. Mod+ only.
-  { key: 'staff-chat', name: 'staff-chat', type: 0, categoryKey: 'cat-staff', position: 0, topic: 'Staff-only discussion', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
-  { key: 'mod-log', name: 'mod-log', type: 0, categoryKey: 'cat-staff', position: 1, topic: 'Moderation action log — automated by SomniBot', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
-  { key: 'bot-log', name: 'bot-log', type: 0, categoryKey: 'cat-staff', position: 2, topic: 'Bot system events & deploy logs', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
 ];
 
 // ============================================================
-// Constants
+// Smart Defaults — no hardcoded role names
+// ============================================================
+
+function buildDefaultChannels(): WizardChannel[] {
+  return [
+    { key: 'rules', name: 'rules', type: 0, categoryKey: 'cat-information', position: 0, topic: 'Server rules and guidelines', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+    { key: 'announcements', name: 'announcements', type: 5, categoryKey: 'cat-information', position: 1, topic: 'Important server announcements', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+    { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'cat-information', position: 2, topic: 'Welcome new members! Introduce yourself here.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+    { key: 'general', name: 'general', type: 0, categoryKey: 'cat-general', position: 0, topic: 'General discussion', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+    { key: 'off-topic', name: 'off-topic', type: 0, categoryKey: 'cat-general', position: 1, topic: 'Anything goes', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+    { key: 'media', name: 'media', type: 0, categoryKey: 'cat-general', position: 2, topic: 'Share images, videos, and links', slowmode: 5, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+    { key: 'support', name: 'support', type: 0, categoryKey: 'cat-support', position: 0, topic: 'Need help? Open a ticket below.', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+    { key: 'music-chat', name: 'music-chat', type: 0, categoryKey: 'cat-music', position: 0, topic: 'Discuss music and request songs', slowmode: 0, nsfw: false, templateId: 'open', overrides: viewUseOverrides() },
+    { key: 'now-playing', name: 'now-playing', type: 0, categoryKey: 'cat-music', position: 1, topic: 'Currently playing — updated by SomniBot', slowmode: 0, nsfw: false, templateId: 'readonly', overrides: viewOnlyOverrides() },
+    { key: 'listening-room', name: 'Listening Room', type: 2, categoryKey: 'cat-music', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+    { key: 'vc-general', name: 'General', type: 2, categoryKey: 'cat-voice', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+    { key: 'vc-gaming', name: 'Gaming', type: 2, categoryKey: 'cat-voice', position: 1, topic: null, slowmode: 0, nsfw: false, templateId: 'voice', overrides: voiceOverrides() },
+    { key: 'vc-staff', name: 'Staff Voice', type: 2, categoryKey: 'cat-voice', position: 2, topic: null, slowmode: 0, nsfw: false, templateId: 'staff-voice', overrides: staffVoiceOverrides() },
+    { key: 'staff-chat', name: 'staff-chat', type: 0, categoryKey: 'cat-staff', position: 0, topic: 'Staff-only discussion', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
+    { key: 'mod-log', name: 'mod-log', type: 0, categoryKey: 'cat-staff', position: 1, topic: 'Moderation action log — automated by SomniBot', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
+    { key: 'bot-log', name: 'bot-log', type: 0, categoryKey: 'cat-staff', position: 2, topic: 'Bot system events & deploy logs', slowmode: 0, nsfw: false, templateId: 'staff', overrides: staffOverrides() },
+  ];
+}
+
+const DEFAULT_CATEGORIES: WizardCategory[] = [
+  { key: 'cat-information', name: 'Information', position: 0 },
+  { key: 'cat-general', name: 'General', position: 1 },
+  { key: 'cat-support', name: 'Support', position: 2 },
+  { key: 'cat-music', name: 'Music', position: 3 },
+  { key: 'cat-voice', name: 'Voice', position: 4 },
+  { key: 'cat-staff', name: 'Staff', position: 5 },
+];
+
+// ============================================================
+// Step Configurations
 // ============================================================
 
 const STEPS: StepConfig[] = [
   { number: 1, title: 'Bot Status', description: 'Verify bot connection & permissions', icon: Settings },
-  { number: 2, title: 'Role Templates', description: 'Configure role hierarchy & permissions', icon: Shield },
-  { number: 3, title: 'Channel Structure', description: 'Design channel layout & access controls', icon: Hash },
+  { number: 2, title: 'Roles', description: 'Design your role hierarchy by tier', icon: Shield },
+  { number: 3, title: 'Channels', description: 'Configure channel structure', icon: Hash },
   { number: 4, title: 'Review', description: 'Preview all changes before deploying', icon: Eye },
   { number: 5, title: 'Deploy', description: 'Execute server configuration', icon: Rocket },
   { number: 6, title: 'Verification', description: 'Confirm deployment success', icon: CheckCircle2 },
@@ -235,7 +241,11 @@ export default function SetupPage() {
   const [setupData, setSetupData] = useState<SetupData | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Fetch setup status on mount
+  // Wizard state — roles & channels the user configures
+  const [wizardRoles, setWizardRoles] = useState<WizardRole[]>([]);
+  const [wizardChannels, setWizardChannels] = useState<WizardChannel[]>(buildDefaultChannels);
+  const [wizardCategories, setWizardCategories] = useState<WizardCategory[]>(DEFAULT_CATEGORIES);
+
   useEffect(() => {
     (async () => {
       try {
@@ -244,12 +254,10 @@ export default function SetupPage() {
           const data: SetupData = await res.json();
           setSetupData(data);
 
-          // If setup is already completed, mark all steps done
           if (data.guild?.setupCompleted) {
             setCompletedSteps(new Set([1, 2, 3, 4, 5, 6, 7] as WizardStep[]));
             setCurrentStep(7);
           } else if (data.isDeployed) {
-            // Deployed but not confirmed
             setCompletedSteps(new Set([1, 2, 3, 4, 5] as WizardStep[]));
             setCurrentStep(6);
           }
@@ -285,8 +293,7 @@ export default function SetupPage() {
           Server Setup Wizard
         </h1>
         <p className="mt-1 text-sm text-discord-text-muted">
-          Configure your Discord server step by step. The bot will create roles, channels,
-          and permissions exactly as defined here.
+          Design your Discord server from the dashboard. The bot creates everything in Discord exactly as you configure it here.
         </p>
       </div>
 
@@ -341,13 +348,31 @@ export default function SetupPage() {
             <Step1BotStatus onComplete={() => markComplete(1)} isComplete={completedSteps.has(1)} />
           )}
           {currentStep === 2 && (
-            <Step2Roles onComplete={() => markComplete(2)} isComplete={completedSteps.has(2)} />
+            <Step2Roles
+              onComplete={() => markComplete(2)}
+              isComplete={completedSteps.has(2)}
+              roles={wizardRoles}
+              onRolesChange={setWizardRoles}
+            />
           )}
           {currentStep === 3 && (
-            <Step3Channels onComplete={() => markComplete(3)} isComplete={completedSteps.has(3)} />
+            <Step3Channels
+              onComplete={() => markComplete(3)}
+              isComplete={completedSteps.has(3)}
+              channels={wizardChannels}
+              categories={wizardCategories}
+              onChannelsChange={setWizardChannels}
+              onCategoriesChange={setWizardCategories}
+            />
           )}
           {currentStep === 4 && (
-            <Step4Review onComplete={() => markComplete(4)} isComplete={completedSteps.has(4)} />
+            <Step4Review
+              onComplete={() => markComplete(4)}
+              isComplete={completedSteps.has(4)}
+              roles={wizardRoles}
+              channels={wizardChannels}
+              categories={wizardCategories}
+            />
           )}
           {currentStep === 5 && (
             <Step5Deploy
@@ -355,10 +380,18 @@ export default function SetupPage() {
               isComplete={completedSteps.has(5)}
               deploying={deploying}
               onDeploy={() => setDeploying(true)}
+              roles={wizardRoles}
+              channels={wizardChannels}
+              categories={wizardCategories}
             />
           )}
           {currentStep === 6 && (
-            <Step6Verification onComplete={() => markComplete(6)} isComplete={completedSteps.has(6)} />
+            <Step6Verification
+              onComplete={() => markComplete(6)}
+              isComplete={completedSteps.has(6)}
+              roles={wizardRoles}
+              channels={wizardChannels}
+            />
           )}
           {currentStep === 7 && (
             <Step7GoLive
@@ -394,7 +427,7 @@ export default function SetupPage() {
 }
 
 // ============================================================
-// Step 1: Bot Status — calls /api/guild for real bot info
+// Step 1: Bot Status
 // ============================================================
 
 function Step1BotStatus({
@@ -429,7 +462,7 @@ function Step1BotStatus({
       } else {
         setStatus({ connected: false, rolePosition: -1, guildName: '', memberCount: 0, error: 'Failed to verify bot connection' });
       }
-    } catch (err) {
+    } catch {
       setStatus({ connected: false, rolePosition: -1, guildName: '', memberCount: 0, error: 'Network error' });
     } finally {
       setChecking(false);
@@ -488,66 +521,251 @@ function Step1BotStatus({
 }
 
 // ============================================================
-// Step 2: Role Templates — uses default templates
+// Step 2: Roles — tier-based role designer (no hardcoded names)
 // ============================================================
 
-function Step2Roles({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
+function Step2Roles({
+  onComplete,
+  isComplete,
+  roles,
+  onRolesChange,
+}: {
+  onComplete: () => void;
+  isComplete: boolean;
+  roles: WizardRole[];
+  onRolesChange: (roles: WizardRole[]) => void;
+}) {
+  const [addingTier, setAddingTier] = useState<TierKey | null>(null);
+  const [newName, setNewName] = useState('');
+  const [newColor, setNewColor] = useState('#99AAB5');
+  const [newHoist, setNewHoist] = useState(false);
+
+  const addRole = () => {
+    if (!addingTier || !newName.trim()) return;
+
+    const tierRoles = roles.filter((r) => r.tier === addingTier);
+    const tierIndex = TIER_ORDER.indexOf(addingTier);
+    // Position: higher tiers get higher positions
+    const basePosition = (TIER_ORDER.length - tierIndex) * 10;
+    const position = basePosition + tierRoles.length;
+
+    const key = `${addingTier}-${newName.trim().toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+    const role: WizardRole = {
+      key,
+      name: newName.trim(),
+      tier: addingTier,
+      permissions: TIER_PERMISSIONS[addingTier],
+      color: parseInt(newColor.replace('#', ''), 16),
+      hoist: newHoist,
+      mentionable: false,
+      position,
+    };
+
+    onRolesChange([...roles, role]);
+    setNewName('');
+    setNewColor('#99AAB5');
+    setNewHoist(false);
+    setAddingTier(null);
+  };
+
+  const removeRole = (key: string) => {
+    onRolesChange(roles.filter((r) => r.key !== key));
+  };
+
+  const hasRoles = roles.length > 0;
+
+  // Must have at least one role in the member tier to proceed
+  const hasMemberRole = roles.some((r) => r.tier === 'member');
+
   return (
     <div className="space-y-4">
       <CardHeader>
         <CardTitle>
           <div className="flex items-center gap-2">
             <Shield size={18} />
-            Step 2: Role Templates
+            Step 2: Design Your Roles
           </div>
         </CardTitle>
         {isComplete && <Badge variant="success">Complete</Badge>}
       </CardHeader>
 
       <CardDescription>
-        Configure the roles for your server. SomniBot comes with default templates:
-        Admin, Moderator, Member, and cosmetic roles.
+        Create roles within each permission tier. Tiers define what permissions a role has —
+        you choose the names, colors, and which tier each role belongs to.
+        You need at least one <strong>Member</strong> role (granted when users complete onboarding).
       </CardDescription>
 
-      <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3">
-        <p className="text-xs font-semibold uppercase tracking-wide text-discord-text-muted">
-          Default Roles (will be created)
-        </p>
-        {DEFAULT_ROLES.map((role) => (
-          <div key={role.key} className="flex items-center gap-2">
-            <div className="h-3 w-3 rounded-full" style={{ backgroundColor: `#${role.color.toString(16).padStart(6, '0')}` }} />
-            <span className="text-sm text-discord-text-primary">{role.name}</span>
-            <Badge variant={role.tier === 'admin' ? 'danger' : role.tier === 'moderator' ? 'warning' : role.tier === 'member' ? 'success' : 'pink'}>
-              {role.tier}
-            </Badge>
+      {/* Tier sections */}
+      {TIER_ORDER.map((tierKey) => {
+        const meta = TIER_META[tierKey];
+        const tierRoles = roles.filter((r) => r.tier === tierKey);
+
+        return (
+          <div
+            key={tierKey}
+            className="rounded-lg border border-discord-border bg-discord-bg-tertiary/30 p-4"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <meta.icon size={16} className={cn(
+                  tierKey === 'admin' && 'text-red-400',
+                  tierKey === 'moderator' && 'text-yellow-400',
+                  tierKey === 'member' && 'text-green-400',
+                  tierKey === 'cosmetic' && 'text-pink-400',
+                )} />
+                <h3 className="text-sm font-semibold text-discord-text-primary">
+                  {meta.label} Tier
+                </h3>
+                <Badge variant={meta.badge}>{tierRoles.length} role{tierRoles.length !== 1 ? 's' : ''}</Badge>
+              </div>
+              <button
+                onClick={() => {
+                  setAddingTier(addingTier === tierKey ? null : tierKey);
+                  setNewName('');
+                  setNewColor(`#${meta.defaultColor.toString(16).padStart(6, '0')}`);
+                  setNewHoist(tierKey !== 'cosmetic' && tierKey !== 'member');
+                }}
+                className="flex items-center gap-1 rounded px-2 py-1 text-xs text-discord-accent hover:bg-discord-accent/10"
+              >
+                <Plus size={12} />
+                Add Role
+              </button>
+            </div>
+
+            <p className="mt-1 text-xs text-discord-text-muted">{meta.description}</p>
+
+            {/* Existing roles in this tier */}
+            {tierRoles.length > 0 && (
+              <div className="mt-3 space-y-1">
+                {tierRoles.map((role) => (
+                  <div
+                    key={role.key}
+                    className="flex items-center justify-between rounded bg-discord-bg-secondary/50 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="h-3 w-3 rounded-full"
+                        style={{ backgroundColor: `#${role.color.toString(16).padStart(6, '0')}` }}
+                      />
+                      <span className="text-sm text-discord-text-primary">{role.name}</span>
+                      {role.hoist && (
+                        <span className="text-[10px] text-discord-text-muted">(hoisted)</span>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => removeRole(role.key)}
+                      className="rounded p-1 text-discord-text-muted hover:bg-red-500/10 hover:text-red-400"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add role form */}
+            {addingTier === tierKey && (
+              <div className="mt-3 rounded border border-discord-accent/30 bg-discord-bg-secondary p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <div className="flex-1">
+                    <label className="mb-1 block text-xs text-discord-text-muted">Role Name</label>
+                    <input
+                      type="text"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      placeholder={tierKey === 'admin' ? 'e.g. Server Admin' : tierKey === 'moderator' ? 'e.g. Moderator' : tierKey === 'member' ? 'e.g. Verified Member' : 'e.g. Team Red'}
+                      className="w-full rounded border border-discord-border bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted/50 focus:border-somni-pink focus:outline-none"
+                      onKeyDown={(e) => e.key === 'Enter' && addRole()}
+                      autoFocus
+                    />
+                  </div>
+                  <div className="w-20">
+                    <label className="mb-1 block text-xs text-discord-text-muted">Color</label>
+                    <input
+                      type="color"
+                      value={newColor}
+                      onChange={(e) => setNewColor(e.target.value)}
+                      className="h-8 w-full cursor-pointer rounded border border-discord-border bg-discord-bg-tertiary"
+                    />
+                  </div>
+                  <label className="flex items-center gap-1.5 text-xs text-discord-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={newHoist}
+                      onChange={(e) => setNewHoist(e.target.checked)}
+                      className="rounded"
+                    />
+                    Hoisted
+                  </label>
+                  <div className="flex gap-1">
+                    <Button size="sm" onClick={addRole} disabled={!newName.trim()}>
+                      <Plus size={12} />
+                      Add
+                    </Button>
+                    <button
+                      onClick={() => setAddingTier(null)}
+                      className="rounded p-1.5 text-discord-text-muted hover:bg-discord-bg-tertiary"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
-        ))}
-      </div>
+        );
+      })}
 
-      <p className="text-xs text-discord-text-muted">
-        You can customize these on the <strong>Roles</strong> page after setup, or accept the defaults.
-      </p>
+      {/* Validation & proceed */}
+      {!hasMemberRole && hasRoles && (
+        <div className="flex items-center gap-2 rounded bg-yellow-500/10 px-3 py-2 text-sm text-yellow-400">
+          <AlertTriangle size={14} />
+          You need at least one role in the <strong>Member</strong> tier. This role gets granted when users complete onboarding.
+        </div>
+      )}
 
-      <Button size="sm" onClick={onComplete}>
-        Accept Defaults
+      {!hasMemberRole && !hasRoles && (
+        <div className="rounded bg-discord-bg-tertiary/50 px-3 py-2 text-xs text-discord-text-muted">
+          Click <strong>Add Role</strong> on any tier to start building your hierarchy.
+          At minimum, create one Member tier role — it&apos;s what users receive after onboarding.
+        </div>
+      )}
+
+      <Button
+        size="sm"
+        onClick={onComplete}
+        disabled={!hasMemberRole}
+      >
+        <CheckCircle2 size={14} />
+        Confirm Roles ({roles.length} role{roles.length !== 1 ? 's' : ''})
       </Button>
     </div>
   );
 }
 
 // ============================================================
-// Step 3: Channel Structure — uses default templates
+// Step 3: Channel Structure
 // ============================================================
 
-function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
-  const categories = [
-    { cat: 'INFORMATION', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-information') },
-    { cat: 'GENERAL', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-general') },
-    { cat: 'SUPPORT', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-support') },
-    { cat: 'MUSIC', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-music') },
-    { cat: 'VOICE', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-voice') },
-    { cat: 'STAFF', channels: DEFAULT_CHANNELS.filter(c => c.categoryKey === 'cat-staff') },
-  ];
+function Step3Channels({
+  onComplete,
+  isComplete,
+  channels,
+  categories,
+  onChannelsChange,
+  onCategoriesChange,
+}: {
+  onComplete: () => void;
+  isComplete: boolean;
+  channels: WizardChannel[];
+  categories: WizardCategory[];
+  onChannelsChange: (ch: WizardChannel[]) => void;
+  onCategoriesChange: (cat: WizardCategory[]) => void;
+}) {
+  const grouped = categories.map((cat) => ({
+    ...cat,
+    channels: channels.filter((ch) => ch.categoryKey === cat.key),
+  }));
 
   return (
     <div className="space-y-4">
@@ -562,19 +780,20 @@ function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isC
       </CardHeader>
 
       <CardDescription>
-        Your server will be set up with {DEFAULT_CHANNELS.length} channels in {categories.length} categories.
+        Your server will be set up with {channels.length} channels in {categories.length} categories.
+        You can add, remove, or rename channels after setup from the Channels page.
       </CardDescription>
 
       <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
-        {categories.map((g) => (
-          <div key={g.cat}>
+        {grouped.map((g) => (
+          <div key={g.key}>
             <p className="text-[10px] font-bold uppercase tracking-wider text-discord-text-muted">
-              {g.cat}
+              {g.name}
             </p>
             <div className="ml-2 space-y-0.5">
               {g.channels.map((ch) => (
                 <p key={ch.key} className="text-discord-text-secondary">
-                  {ch.type === 2 ? '🔊' : '#'} {ch.name}
+                  {ch.type === 2 ? '🔊' : ch.type === 5 ? '📢' : '#'} {ch.name}
                   {ch.topic && <span className="ml-1 text-discord-text-muted">— {ch.topic}</span>}
                 </p>
               ))}
@@ -584,17 +803,36 @@ function Step3Channels({ onComplete, isComplete }: { onComplete: () => void; isC
       </div>
 
       <Button size="sm" onClick={onComplete}>
-        Accept Defaults
+        <CheckCircle2 size={14} />
+        Confirm Channels
       </Button>
     </div>
   );
 }
 
 // ============================================================
-// Step 4: Review — shows what will happen
+// Step 4: Review — dynamic based on user's choices
 // ============================================================
 
-function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isComplete: boolean }) {
+function Step4Review({
+  onComplete,
+  isComplete,
+  roles,
+  channels,
+  categories,
+}: {
+  onComplete: () => void;
+  isComplete: boolean;
+  roles: WizardRole[];
+  channels: WizardChannel[];
+  categories: WizardCategory[];
+}) {
+  const rolesByTier = TIER_ORDER.map((tier) => ({
+    tier,
+    label: TIER_META[tier].label,
+    roles: roles.filter((r) => r.tier === tier),
+  })).filter((g) => g.roles.length > 0);
+
   return (
     <div className="space-y-4">
       <CardHeader>
@@ -608,7 +846,7 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
       </CardHeader>
 
       <CardDescription>
-        Review what the bot will do when you deploy.
+        Review what the bot will create in your Discord server.
       </CardDescription>
 
       <Card variant="warning">
@@ -620,23 +858,52 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
             </p>
             <p className="text-xs text-discord-text-muted">
               The bot will <strong>delete all existing channels and non-managed roles</strong> in your Discord server,
-              then recreate everything from the templates. This cannot be undone.
+              then recreate everything from your configuration. This cannot be undone.
             </p>
           </div>
         </div>
       </Card>
 
-      <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
+      <div className="space-y-3 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Deploy plan:</p>
         <ul className="space-y-1 text-discord-text-secondary">
           <li>1. Set @everyone permissions to zero (lockout model)</li>
-          <li>2. Delete {DEFAULT_CHANNELS.length} existing channels</li>
-          <li>3. Delete existing non-managed roles</li>
-          <li>4. Create {DEFAULT_ROLES.length} roles ({DEFAULT_ROLES.map(r => r.name).join(', ')})</li>
-          <li>5. Set role hierarchy positions</li>
-          <li>6. Create 7 categories</li>
-          <li>7. Create {DEFAULT_CHANNELS.length} channels with permission overrides</li>
-          <li>8. Store ID mappings for drift detection</li>
+          <li>2. Delete existing non-managed roles and channels</li>
+          <li>3. Create {roles.length} roles:</li>
+        </ul>
+
+        {/* Role hierarchy preview */}
+        <div className="ml-4 space-y-2 rounded border border-discord-border/50 bg-discord-bg-secondary/30 p-2">
+          <div className="flex items-center gap-2 text-xs text-discord-text-muted">
+            <span className="font-medium">🤖 SomniBot</span>
+            <span className="text-[10px]">(locked — top of hierarchy)</span>
+          </div>
+          {rolesByTier.map((group) => (
+            <div key={group.tier} className="space-y-0.5">
+              {group.roles.map((role) => (
+                <div key={role.key} className="flex items-center gap-2 text-xs">
+                  <div
+                    className="h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: `#${role.color.toString(16).padStart(6, '0')}` }}
+                  />
+                  <span className="text-discord-text-primary">{role.name}</span>
+                  <Badge variant={TIER_META[group.tier].badge}>
+                    {group.label}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          ))}
+          <div className="flex items-center gap-2 text-xs text-discord-text-muted">
+            <span className="font-medium">@everyone</span>
+            <span className="text-[10px]">(zero permissions)</span>
+          </div>
+        </div>
+
+        <ul className="space-y-1 text-discord-text-secondary">
+          <li>4. Create {categories.length} categories</li>
+          <li>5. Create {channels.length} channels with permission overrides</li>
+          <li>6. Store ID mappings for drift detection</li>
         </ul>
       </div>
 
@@ -648,7 +915,7 @@ function Step4Review({ onComplete, isComplete }: { onComplete: () => void; isCom
 }
 
 // ============================================================
-// Step 5: Deploy — calls /api/deploy POST
+// Step 5: Deploy — sends user's configured roles/channels
 // ============================================================
 
 function Step5Deploy({
@@ -656,11 +923,17 @@ function Step5Deploy({
   isComplete,
   deploying,
   onDeploy,
+  roles,
+  channels,
+  categories,
 }: {
   onComplete: () => void;
   isComplete: boolean;
   deploying: boolean;
   onDeploy: () => void;
+  roles: WizardRole[];
+  channels: WizardChannel[];
+  categories: WizardCategory[];
 }) {
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState('');
@@ -673,21 +946,13 @@ function Step5Deploy({
     setProgress(5);
 
     try {
-      // POST the desired state to trigger the bot
       const res = await fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          roles: DEFAULT_ROLES,
-          channels: DEFAULT_CHANNELS,
-          categories: [
-            { key: 'cat-information', name: 'Information', position: 0 },
-            { key: 'cat-general', name: 'General', position: 1 },
-            { key: 'cat-community', name: 'Community', position: 2 },
-            { key: 'cat-music', name: 'Music', position: 3 },
-            { key: 'cat-voice', name: 'Voice', position: 4 },
-            { key: 'cat-staff', name: 'Staff', position: 5 },
-          ],
+          roles,
+          channels,
+          categories,
           cleanExisting: true,
         }),
       });
@@ -702,7 +967,7 @@ function Step5Deploy({
 
       // Poll for deploy completion
       let attempts = 0;
-      const maxAttempts = 60; // 2 minutes
+      const maxAttempts = 60;
       while (attempts < maxAttempts) {
         await new Promise((r) => setTimeout(r, 2000));
         attempts++;
@@ -713,7 +978,6 @@ function Step5Deploy({
             const statusData: DeployData = await statusRes.json();
 
             if (!statusData.isDeploying && statusData.desiredState) {
-              // Check if deployment completed (applied_at is set)
               const appliedAt = (statusData.desiredState as Record<string, unknown>).applied_at;
               if (appliedAt) {
                 setProgress(100);
@@ -723,7 +987,6 @@ function Step5Deploy({
               }
             }
 
-            // Check recent actions for progress
             if (statusData.recentActions?.length > 0) {
               const latest = statusData.recentActions[0];
               if (latest.action === 'deploy.completed') {
@@ -740,16 +1003,13 @@ function Step5Deploy({
           // Polling errors are non-fatal, keep trying
         }
 
-        // Simulate visual progress
         setProgress(Math.min(90, 20 + (attempts / maxAttempts) * 70));
         setStatusText(`Bot is deploying... (${attempts * 2}s elapsed)`);
       }
 
-      // Timeout — bot might still be working
       setStatusText('Deploy request sent. The bot may still be processing — check Discord to verify.');
       setProgress(100);
       onComplete();
-
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error';
       setError(msg);
@@ -773,7 +1033,7 @@ function Step5Deploy({
         <>
           <CardDescription>
             Click the button below to deploy your server configuration.
-            The bot will execute all changes in the correct order.
+            The bot will create {roles.length} roles and {channels.length} channels.
           </CardDescription>
           <Button onClick={handleDeploy} size="lg">
             <Rocket size={16} />
@@ -821,16 +1081,29 @@ function Step5Deploy({
 }
 
 // ============================================================
-// Step 6: Verification — user checks Discord manually
+// Step 6: Verification — dynamic based on actual config
 // ============================================================
 
 function Step6Verification({
   onComplete,
   isComplete,
+  roles,
+  channels,
 }: {
   onComplete: () => void;
   isComplete: boolean;
+  roles: WizardRole[];
+  channels: WizardChannel[];
 }) {
+  const categoryCount = new Set(channels.map((ch) => ch.categoryKey)).size;
+  const tierSummary = TIER_ORDER
+    .map((t) => {
+      const count = roles.filter((r) => r.tier === t).length;
+      return count > 0 ? `${count} ${TIER_META[t].label}` : null;
+    })
+    .filter(Boolean)
+    .join(', ');
+
   return (
     <div className="space-y-4">
       <CardHeader>
@@ -850,8 +1123,8 @@ function Step6Verification({
       <div className="space-y-2 rounded-input bg-discord-bg-tertiary/50 p-3 text-sm">
         <p className="font-medium text-discord-text-primary">Check these items:</p>
         <ul className="space-y-1 text-discord-text-secondary">
-          <li>✅ All 6 categories and 15 channels are visible</li>
-          <li>✅ Roles appear in the correct hierarchy order (Admin → Moderator → Member → VIP → Subscriber)</li>
+          <li>✅ {categoryCount} categories and {channels.length} channels are visible</li>
+          <li>✅ Roles appear in the correct hierarchy ({tierSummary})</li>
           <li>✅ @everyone has zero permissions (can&apos;t see channels without a role)</li>
           <li>✅ Staff channels are hidden from non-staff members</li>
           <li>✅ Bot is at the top of the role hierarchy</li>
@@ -899,7 +1172,7 @@ function Step7GoLive({
         const data = await res.json();
         setError(data.error ?? 'Confirmation failed');
       }
-    } catch (err) {
+    } catch {
       setError('Network error — try again');
     } finally {
       setConfirming(false);
@@ -951,9 +1224,11 @@ function Step7GoLive({
       <Card>
         <h4 className="text-sm font-medium text-discord-text-primary">What&apos;s Next</h4>
         <div className="mt-2 space-y-1 text-xs text-discord-text-secondary">
+          <p>• <strong>Roles:</strong> Fine-tune permissions per role from the Roles page</p>
+          <p>• <strong>Channels:</strong> Add or reorganize channels from the Channels page</p>
           <p>• <strong>Onboarding:</strong> Configure Discord native onboarding &amp; welcome messages</p>
           <p>• <strong>Moderation:</strong> Set up auto-mod rules &amp; escalation chains</p>
-          <p>• <strong>Music:</strong> Configure DJ roles &amp; the music player</p>
+          <p>• <strong>Music:</strong> Configure the music player &amp; DJ permissions</p>
           <p>• <strong>Store:</strong> Set up products, plans, and the commerce system</p>
           <p>• <strong>Automations:</strong> Build custom automation workflows</p>
         </div>
