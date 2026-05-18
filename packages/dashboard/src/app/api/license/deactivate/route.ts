@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -14,6 +15,16 @@ function sha256(input: string): string {
 
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
+
+  // ── B.5: Rate limit ──
+  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  const ipLimit = rateLimits.licenseDeactivate(clientIp);
+  if (ipLimit.limited) {
+    return NextResponse.json(
+      { success: false, error: 'Too many requests' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil(ipLimit.retryAfterMs / 1000)) } },
+    );
+  }
 
   const parsed = await parseBody(req, schemas.licenseSdk.deactivate);
   if (!parsed.ok) return parsed.response;
