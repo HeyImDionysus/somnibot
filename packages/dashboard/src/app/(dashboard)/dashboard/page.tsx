@@ -3,9 +3,9 @@
 import { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import {
-  Shield, Users, MessageSquare, Zap, Settings, Music, ShoppingCart, Ticket,
-  CheckCircle2, XCircle, Loader2, Rocket, TrendingUp, AlertTriangle,
-  BarChart3, DollarSign, Headphones, Activity,
+  Shield, Users, Zap, Settings, Music, ShoppingCart, Ticket,
+  CheckCircle2, XCircle, Loader2, Rocket,
+  BarChart3, DollarSign, Headphones, Activity, Clock, Wifi,
 } from 'lucide-react';
 import Link from 'next/link';
 
@@ -24,17 +24,24 @@ interface GuildData {
 
 interface DashboardStats {
   memberCount: number;
-  onlineCount: number;
-  messagesToday: number;
+  trackedMembers: number;
   activeTickets: number;
   openInfractions: number;
   revenueThisMonth: number;
-  musicPlaysToday: number;
   activeGiveaways: number;
+  eventsToday: number;
+  uptime: string;
+  uptimeSeconds: number;
+  wsPing: number | null;
+  activeVoice: number;
+  valkeyConnected: boolean;
+  memoryMb: number | null;
+  lastSnapshot: string | null;
   recentEvents: Array<{
     type: string;
     description: string;
     timestamp: string;
+    success: boolean;
   }>;
 }
 
@@ -126,14 +133,16 @@ export default function DashboardPage() {
                 ? (() => {
                     const pos = guild.bot_role_position;
                     const total = data?.totalRoles;
-                    if (pos == null) return 'Online';
-                    if (total && total > 0) {
+                    const ping = stats?.wsPing;
+                    let statusText = 'Online';
+                    if (pos != null && total && total > 0) {
                       const fromTop = total - pos;
-                      return fromTop <= 1
+                      statusText = fromTop <= 1
                         ? 'Online · Highest role ✓'
                         : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
                     }
-                    return 'Online';
+                    if (ping != null) statusText += ` · ${ping}ms`;
+                    return statusText;
                   })()
                 : 'Bot not connected'}
             </CardDescription>
@@ -170,14 +179,8 @@ export default function DashboardPage() {
             icon={Users}
             label="Members"
             value={stats?.memberCount ?? '—'}
-            subValue={stats?.onlineCount ? `${stats.onlineCount} online` : undefined}
+            subValue={stats?.trackedMembers ? `${stats.trackedMembers} tracked` : undefined}
             color="text-green-400"
-          />
-          <MetricCard
-            icon={MessageSquare}
-            label="Messages Today"
-            value={stats?.messagesToday ?? '—'}
-            color="text-blue-400"
           />
           <MetricCard
             icon={Ticket}
@@ -199,8 +202,8 @@ export default function DashboardPage() {
           />
           <MetricCard
             icon={Headphones}
-            label="Music Plays Today"
-            value={stats?.musicPlaysToday ?? '—'}
+            label="Voice Connections"
+            value={stats?.activeVoice ?? '—'}
             color="text-purple-400"
           />
           <MetricCard
@@ -210,10 +213,17 @@ export default function DashboardPage() {
             color="text-pink-400"
           />
           <MetricCard
-            icon={TrendingUp}
+            icon={Clock}
             label="Uptime"
-            value={guild?.bot_joined_at ? 'Healthy' : 'Offline'}
-            color={guild?.bot_joined_at ? 'text-green-400' : 'text-red-400'}
+            value={stats?.uptime ?? '—'}
+            color="text-cyan-400"
+          />
+          <MetricCard
+            icon={Wifi}
+            label="Events Today"
+            value={stats?.eventsToday ?? '—'}
+            subValue={stats?.valkeyConnected ? 'Cache ✓' : 'No cache'}
+            color="text-blue-400"
           />
         </div>
       </div>
@@ -320,10 +330,13 @@ function ActivityDot({ type }: { type: string }) {
     'ticket.closed': 'bg-green-400',
     'moderation.warn': 'bg-amber-400',
     'moderation.ban': 'bg-red-500',
+    'moderation.kick': 'bg-orange-400',
+    'moderation.mute': 'bg-amber-300',
     'purchase.completed': 'bg-emerald-400',
     'member.joined': 'bg-blue-400',
     'member.left': 'bg-gray-400',
     'giveaway.ended': 'bg-pink-400',
+    'giveaway.started': 'bg-pink-300',
   };
   return (
     <span
