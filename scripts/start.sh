@@ -9,10 +9,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Disable telemetry noise
+export TURBO_TELEMETRY_DISABLED=1
+export DO_NOT_TRACK=1
+
 echo ""
-echo "╔══════════════════════════════════════════╗"
-echo "║       SomniBot — Starting All Services   ║"
-echo "╚══════════════════════════════════════════╝"
+echo "+==========================================+"
+echo "|       SomniBot — Starting All Services   |"
+echo "+==========================================+"
 echo ""
 
 # ─── Preflight checks ───────────────────────────────────────
@@ -98,9 +102,9 @@ echo "  ✅ Dashboard starting on http://localhost:3000 (PID: $DASH_PID)"
 echo ""
 
 # ─── Running ─────────────────────────────────────────────────
-echo "╔══════════════════════════════════════════╗"
-echo "║          ✅ Everything is running!        ║"
-echo "╚══════════════════════════════════════════╝"
+echo "+==========================================+"
+echo "|          ✅ Everything is running!        |"
+echo "+==========================================+"
 echo ""
 echo "  🤖 Bot:        Running (check this terminal for logs)"
 echo "  🌐 Dashboard:  http://localhost:3000"
