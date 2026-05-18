@@ -3,22 +3,26 @@
  */
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const [configResult, driftResult] = await Promise.all([
     supabase
       .from('guild_config')
       .select('sync_enabled, sync_interval_minutes, sync_auto_repair, sync_auto_repair_everyone')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .maybeSingle(),
     supabase
       .from('guild_desired_state')
       .select('last_sync_at, drift_detected, drift_details')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .maybeSingle(),
   ]);
 

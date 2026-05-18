@@ -5,10 +5,14 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticket_id');
@@ -21,7 +25,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await supabase
       .from('ticket_transcripts')
       .select('*')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .eq('ticket_id', ticketId)
       .single();
 
@@ -36,7 +40,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await supabase
       .from('ticket_transcripts')
       .select('*')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .eq('ticket_number', parseInt(ticketNumber, 10))
       .single();
 
@@ -51,7 +55,7 @@ export async function GET(req: NextRequest) {
   const { data, error, count } = await supabase
     .from('ticket_transcripts')
     .select('id, guild_id, ticket_id, ticket_number, creator_id, closed_by_id, message_count, participant_ids, created_at', { count: 'exact' })
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 

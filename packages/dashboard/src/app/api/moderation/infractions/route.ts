@@ -7,10 +7,15 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
 
@@ -22,7 +27,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .from('infractions')
     .select('*', { count: 'exact' })
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -50,8 +55,14 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.infraction.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { member_id, type, reason, moderator_id, duration_minutes } = body;
 
@@ -74,7 +85,7 @@ export async function POST(req: NextRequest) {
   const { data: config } = await supabase
     .from('guild_config')
     .select('infraction_expiry_days')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   const expiryDays = (config?.infraction_expiry_days as number) ?? 30;
@@ -84,7 +95,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('infractions')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       member_id,
       moderator_id: moderator_id ?? 'dashboard',
       type,
@@ -105,8 +116,14 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.infraction.pardon);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   if (!body.id) {
     return NextResponse.json({ success: false, error: 'Missing infraction id' }, { status: 400 });
@@ -122,7 +139,7 @@ export async function PATCH(req: NextRequest) {
         pardoned_at: new Date().toISOString(),
       })
       .eq('id', body.id)
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .select()
       .single();
 
