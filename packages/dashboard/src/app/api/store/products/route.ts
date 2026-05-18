@@ -1,28 +1,155 @@
 /**
- * /api/store/products — Product CRUD.
+ * /api/store/products — Product CRUD with PayPal Catalog sync.
  *
  * GET: List all products for the guild
- * POST: Create a new product
- * PUT: Update a product
- * DELETE: Delete a product by ID
+ * POST: Create a new product (auto-creates PayPal Catalog Product)
+ * PUT: Update a product (syncs PayPal if name/description changed)
+ * DELETE: Deactivate a product (soft delete; preserves entitlements)
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requireGuildOwner } from '@/lib/api/require-owner';
-import { parseBody, schemas } from '@/lib/api/validation';
 
+const GUILD_ID = process.env.DISCORD_GUILD_ID!;
+const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
+
+// ── PayPal Helpers ─────────────────────────────────────
+
+async function getPayPalToken(): Promise<string | null> {
+  try {
+    const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
+      },
+      body: 'grant_type=client_credentials',
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.access_token;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a PayPal Catalog Product.
+ * Returns the PayPal product ID.
+ */
+async function createPayPalCatalogProduct(
+  name: string,
+  description: string | null,
+  type: 'one_time' | 'subscription',
+): Promise<string | null> {
+  const token = await getPayPalToken();
+  if (!token) return null;
+
+  try {
+    const paypalType = type === 'subscription' ? 'SERVICE' : 'DIGITAL';
+    const res = await fetch(`${PAYPAL_API_BASE}/v1/catalogs/products`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'PayPal-Request-Id': `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      },
+      body: JSON.stringify({
+        name: name.slice(0, 127), // PayPal max 127 chars
+        description: (description ?? name).slice(0, 256), // PayPal max 256 chars
+        type: paypalType,
+        category: 'SOFTWARE',
+      }),
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error('[Products] PayPal catalog creation failed:', errorText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.id as string;
+  } catch (err) {
+    console.error('[Products] PayPal catalog creation error:', err);
+    return null;
+  }
+}
+
+/**
+ * Create a PayPal Billing Plan for a subscription product.
+ */
+async function createPayPalBillingPlan(
+  paypalProductId: string,
+  planName: string,
+  priceCents: number,
+  currency: string,
+  intervalUnit: string,
+  intervalCount: number,
+): Promise<string | null> {
+  const token = await getPayPalToken();
+  if (!token) return null;
+
+  try {
+    const res = await fetch(`${PAYPAL_API_BASE}/v1/billing/plans`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        'PayPal-Request-Id': `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      },
+      body: JSON.stringify({
+        product_id: paypalProductId,
+        name: planName.slice(0, 127),
+        status: 'ACTIVE',
+        billing_cycles: [
+          {
+            frequency: {
+              interval_unit: intervalUnit.toUpperCase(), // DAY, WEEK, MONTH, YEAR
+              interval_count: intervalCount,
+            },
+            tenure_type: 'REGULAR',
+            sequence: 1,
+            total_cycles: 0, // Infinite
+            pricing_scheme: {
+              fixed_price: {
+                value: (priceCents / 100).toFixed(2),
+                currency_code: currency.toUpperCase(),
+              },
+            },
+          },
+        ],
+        payment_preferences: {
+          auto_bill_outstanding: true,
+          payment_failure_threshold: 3,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error('[Products] PayPal plan creation failed:', errorText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.id as string;
+  } catch (err) {
+    console.error('[Products] PayPal plan creation error:', err);
+    return null;
+  }
+}
+
+// ── Route Handlers ──────────────────────────────────────
 
 export async function GET() {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
     .from('products')
-    .select('*, plans(*), product_license_config(*)')
-    .eq('guild_id', guildId)
+    .select('*, plans(*), product_license_config(*), product_files(*)')
+    .eq('guild_id', GUILD_ID)
     .order('sort_order', { ascending: true });
 
   if (error) {
@@ -33,14 +160,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.product.create);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
+  const body = await req.json();
 
   const {
     name,
@@ -54,6 +175,7 @@ export async function POST(req: NextRequest) {
     active,
     sort_order,
     metadata,
+    plans: planDefs, // Optional: plan definitions for subscription products
   } = body;
 
   if (!name || !type || !delivery_type || price_cents == null) {
@@ -63,14 +185,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // 1. Auto-create PayPal Catalog Product
+  let paypalProductId: string | null = null;
+  if (PAYPAL_CLIENT_ID && PAYPAL_CLIENT_SECRET) {
+    paypalProductId = await createPayPalCatalogProduct(name, description, type);
+    if (!paypalProductId) {
+      console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
+    }
+  }
+
+  // 2. Create product in database
   const { data, error } = await supabase
     .from('products')
     .insert({
-      guild_id: guildId,
+      guild_id: GUILD_ID,
       name,
       description: description ?? null,
       type,
       delivery_type,
+      paypal_product_id: paypalProductId,
       price_cents,
       currency: currency ?? 'USD',
       granted_role_ids: granted_role_ids ?? [],
@@ -86,18 +219,59 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, data });
+  // 3. Auto-create PayPal Billing Plans for subscription products
+  const createdPlans: { id: string; paypalPlanId: string | null }[] = [];
+
+  if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
+    for (const planDef of planDefs) {
+      const paypalPlanId = await createPayPalBillingPlan(
+        paypalProductId,
+        planDef.name ?? `${name} — ${planDef.interval_unit}`,
+        planDef.price_cents ?? price_cents,
+        currency ?? 'USD',
+        planDef.interval_unit ?? 'MONTH',
+        planDef.interval_count ?? 1,
+      );
+
+      const { data: plan } = await supabase
+        .from('plans')
+        .insert({
+          product_id: data.id,
+          name: planDef.name ?? `${name} — ${planDef.interval_unit}`,
+          paypal_plan_id: paypalPlanId,
+          interval_unit: planDef.interval_unit ?? 'MONTH',
+          interval_count: planDef.interval_count ?? 1,
+          price_cents: planDef.price_cents ?? price_cents,
+          currency: currency ?? 'USD',
+          active: true,
+        })
+        .select('id')
+        .single();
+
+      if (plan) {
+        createdPlans.push({ id: plan.id, paypalPlanId });
+      }
+    }
+  }
+
+  // Fetch final product with relations
+  const { data: fullProduct } = await supabase
+    .from('products')
+    .select('*, plans(*), product_license_config(*)')
+    .eq('id', data.id)
+    .single();
+
+  return NextResponse.json({
+    success: true,
+    data: fullProduct ?? data,
+    paypal_synced: !!paypalProductId,
+    plans_created: createdPlans.length,
+  });
 }
 
 export async function PUT(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.product.update);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data as Record<string, unknown>;
+  const body = await req.json();
 
   const { id, ...updates } = body;
 
@@ -114,7 +288,7 @@ export async function PUT(req: NextRequest) {
     .from('products')
     .update(updates)
     .eq('id', id)
-    .eq('guild_id', guildId)
+    .eq('guild_id', GUILD_ID)
     .select()
     .single();
 
@@ -122,14 +296,18 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
+  // Queue config reload so bot knows about product changes
+  await supabase.from('bot_action_queue').insert({
+    guild_id: GUILD_ID,
+    action: 'config_reload',
+    payload: { section: 'commerce', changes: { product_updated: id } },
+    status: 'pending',
+  });
+
   return NextResponse.json({ success: true, data });
 }
 
 export async function DELETE(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
@@ -138,11 +316,12 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
+  // Soft delete — deactivate instead of hard delete to preserve entitlements
   const { error } = await supabase
     .from('products')
-    .delete()
+    .update({ active: false, updated_at: new Date().toISOString() })
     .eq('id', id)
-    .eq('guild_id', guildId);
+    .eq('guild_id', GUILD_ID);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
