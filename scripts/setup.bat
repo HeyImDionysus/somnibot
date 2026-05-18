@@ -4,72 +4,130 @@ REM SomniBot — First-Time Setup (Windows)
 REM Run this once after cloning the repo.
 REM ============================================================
 
+REM Enable UTF-8 output so Unicode characters render correctly
+chcp 65001 >nul 2>&1
+
 cd /d "%~dp0\.."
 
 echo.
-echo ╔══════════════════════════════════════════╗
-echo ║         SomniBot — First-Time Setup      ║
-echo ╚══════════════════════════════════════════╝
+echo +==========================================+
+echo ^|         SomniBot - First-Time Setup      ^|
+echo +==========================================+
 echo.
 
 REM ─── Check prerequisites ──────────────────────────────────
-echo → Checking prerequisites...
+echo [1/5] Checking prerequisites...
 
+REM ── Node.js ──
 where node >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Node.js not found. Download from https://nodejs.org ^(v22+^)
+    echo   [X] Node.js not found. Download from https://nodejs.org ^(v22+^)
     pause
     exit /b 1
 )
-echo   ✅ Node.js found
 
+REM Verify Node.js version >= 22
+for /f "tokens=1 delims=v" %%A in ('node -v') do set "NODE_RAW=%%A"
+for /f "tokens=1 delims=." %%M in ("%NODE_RAW%") do set "NODE_MAJOR=%%M"
+if %NODE_MAJOR% LSS 22 (
+    echo   [X] Node.js v%NODE_RAW% found, but v22+ is required.
+    echo       Download the latest LTS from https://nodejs.org
+    pause
+    exit /b 1
+)
+echo   [OK] Node.js v%NODE_RAW%
+
+REM ── pnpm ──
 where pnpm >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ pnpm not found. Run: corepack enable ^&^& corepack prepare pnpm@9 --activate
+    echo   [X] pnpm not found. Run: corepack enable
+    echo       Then re-run this script ^(corepack will auto-install the correct pnpm version^).
     pause
     exit /b 1
 )
-echo   ✅ pnpm found
+echo   [OK] pnpm found
 
+REM ── Docker ──
 where docker >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ❌ Docker not found. Download Docker Desktop from https://docker.com/get-started
+    echo   [X] Docker not found. Download Docker Desktop from https://docker.com/get-started
     pause
     exit /b 1
 )
-echo   ✅ Docker found
+
+REM Verify Docker daemon is running
+docker info >nul 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] Docker is installed but not running.
+    echo       Start Docker Desktop and wait for it to finish loading, then re-run this script.
+    pause
+    exit /b 1
+)
+echo   [OK] Docker found and running
 echo.
 
 REM ─── Create .env ──────────────────────────────────────────
+echo [2/5] Checking environment file...
 if not exist .env (
-    echo → Creating .env from .env.example...
     copy .env.example .env >nul
-    echo   ✅ Created .env
+    echo   [OK] Created .env from .env.example
     echo.
-    echo   ⚠️  IMPORTANT: Open .env in a text editor and fill in your values.
+    echo   !! IMPORTANT: Open .env in a text editor and fill in your values.
     echo      At minimum you need:
     echo        DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET
-    echo        SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+    echo        SUPABASE_URL, SUPABASE_SECRET_KEY
     echo.
 ) else (
-    echo → .env already exists, skipping.
+    echo   [OK] .env already exists, skipping.
+    echo.
 )
 
 REM ─── Install dependencies ─────────────────────────────────
-echo → Installing dependencies (this may take a minute)...
+echo [3/5] Installing dependencies (this may take a minute)...
+
+REM Suppress Node.js deprecation warnings from pnpm internals
+set "NODE_NO_WARNINGS=1"
 call pnpm install
-echo   ✅ Dependencies installed
+set "NODE_NO_WARNINGS="
+
+if %errorlevel% neq 0 (
+    echo   [X] Dependency installation failed. Check the output above for errors.
+    pause
+    exit /b 1
+)
+echo   [OK] Dependencies installed
 echo.
 
 REM ─── Build ─────────────────────────────────────────────────
-echo → Building all packages...
+echo [4/5] Building all packages...
+
+REM Disable Turborepo telemetry prompt
+set "TURBO_TELEMETRY_DISABLED=1"
+set "DO_NOT_TRACK=1"
+
 call pnpm build
-echo   ✅ Build complete
+
+if %errorlevel% neq 0 (
+    echo   [X] Build failed. Check the output above for errors.
+    pause
+    exit /b 1
+)
+echo   [OK] Build complete
 echo.
 
-echo ╔══════════════════════════════════════════╗
-echo ║            ✅ Setup Complete!             ║
-echo ╚══════════════════════════════════════════╝
+REM ─── Pull Docker images ────────────────────────────────────
+echo [5/5] Pulling Docker images (Lavalink + Valkey)...
+docker compose pull >nul 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] Docker image pull failed. You can still start manually with: docker compose up -d
+) else (
+    echo   [OK] Docker images ready
+)
+echo.
+
+echo +==========================================+
+echo ^|           Setup Complete!                ^|
+echo +==========================================+
 echo.
 echo Next steps:
 echo   1. Fill in your .env file (if you haven't already)

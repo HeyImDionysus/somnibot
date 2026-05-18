@@ -3,20 +3,27 @@ REM ============================================================
 REM SomniBot — Stop Everything (Windows)
 REM ============================================================
 
+REM Enable UTF-8 output so Unicode characters render correctly
+chcp 65001 >nul 2>&1
+
 cd /d "%~dp0\.."
 
 echo.
-echo → Stopping SomniBot...
+echo [*] Stopping SomniBot...
 
-echo   → Stopping Docker services...
-docker compose down 2>nul
-echo   ✅ Docker services stopped
+REM ── Stop Docker services ──
+echo   [*] Stopping Docker services...
+docker compose down >nul 2>&1
+echo   [OK] Docker services stopped
 
-echo   → Stopping bot and dashboard processes...
+REM ── Stop SomniBot windows ──
+echo   [*] Stopping SomniBot windows...
+
+REM Only kill windows with SomniBot titles (not all node processes)
+taskkill /f /fi "WINDOWTITLE eq SomniBot Dashboard*" >nul 2>&1
 taskkill /f /fi "WINDOWTITLE eq SomniBot*" >nul 2>&1
-taskkill /f /im "node.exe" /fi "MEMUSAGE gt 50000" >nul 2>&1
 
 echo.
-echo ✅ Done. (If the bot window is still open, close it manually.)
+echo [OK] Done. If the bot window is still open, close it manually (Ctrl+C or close the window).
 echo.
 pause
