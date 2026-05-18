@@ -9,14 +9,6 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { parseBody, schemas } from '@/lib/api/validation';
 
-interface ValidateRequest {
-  license_key: string;
-  product_id: string;
-  device_fingerprint?: string;
-  device_name?: string;
-  app_version?: string;
-}
-
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
@@ -24,17 +16,9 @@ function sha256(input: string): string {
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
-  let body: ValidateRequest;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { valid: false, status: 'revoked', error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { license_key, product_id, device_fingerprint, device_name, app_version } = body;
+  const parsed = await parseBody(req, schemas.licenseSdk.validate);
+  if (!parsed.ok) return parsed.response;
+  const { license_key, product_id, device_fingerprint, device_name, app_version } = parsed.data;
 
   if (!license_key || !product_id) {
     return NextResponse.json(

@@ -15,14 +15,9 @@ function sha256(input: string): string {
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
-  let body: { session_id: string; license_key: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid request body' }, { status: 400 });
-  }
-
-  const { session_id, license_key } = body;
+  const parsed = await parseBody(req, schemas.licenseSdk.deactivate);
+  if (!parsed.ok) return parsed.response;
+  const { session_id, license_key } = parsed.data;
 
   if (!session_id || !license_key) {
     return NextResponse.json(
