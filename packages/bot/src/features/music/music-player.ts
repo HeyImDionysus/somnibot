@@ -660,15 +660,53 @@ export class MusicPlayerManager {
         console.error('[Music] Failed to send now-playing:', err);
       });
       this.clearInactivityTimer(this.guild.id);
+
+      // Emit track.started event
+      this.queueManager.getQueue(this.guild.id).then((queue) => {
+        if (queue?.nowPlaying) {
+          const np = queue.nowPlaying;
+          this.eventBus.emit('track.started', this.guild.id, {
+            title: np.info?.title ?? 'Unknown',
+            author: np.info?.author ?? 'Unknown',
+            uri: np.info?.uri ?? '',
+            duration: np.info?.length ?? 0,
+            requestedBy: np.requestedBy,
+          });
+          // Track music stats in Valkey
+          this.trackMusicStats('track_played', {
+            title: np.info?.title ?? 'Unknown',
+            author: np.info?.author ?? 'Unknown',
+            requestedBy: np.requestedBy,
+          });
+        }
+      }).catch(() => {});
     });
 
     player.on('end', async (data: TrackEndEvent) => {
       if (data.reason === 'replaced') return; // Track was replaced (skip)
 
+      // Emit track.ended event for the track that just finished
+      const currentQueue = await this.queueManager.getQueue(this.guild.id);
+      if (currentQueue?.nowPlaying) {
+        const np = currentQueue.nowPlaying;
+        this.eventBus.emit('track.ended', this.guild.id, {
+          title: np.info?.title ?? 'Unknown',
+          author: np.info?.author ?? 'Unknown',
+          uri: np.info?.uri ?? '',
+          reason: data.reason === 'finished' ? 'finished' : 'skipped',
+        });
+      }
+
       const { track, queueEnded } = await this.queueManager.nextTrack(this.guild.id);
 
       if (queueEnded || !track) {
-        // Queue ended
+        // Queue ended — emit event
+        const totalPlayed = await this.getMusicStat('tracks_played_session');
+        this.eventBus.emit('queue.ended', this.guild.id, {
+          totalTracksPlayed: totalPlayed,
+        });
+        await this.resetSessionStats();
+
         await this.queueManager.clearNowPlayingMessage(this.guild.id);
         this.resetInactivityTimer(this.guild.id);
 
@@ -772,5 +810,133 @@ export class MusicPlayerManager {
   private clearTimers(guildId: string): void {
     this.clearAutoLeaveTimer(guildId);
     this.clearInactivityTimer(guildId);
+  }
+
+  // ── Music Stats Tracking ────────────────────────────────
+
+  /**
+   * Track a music stat in Valkey for analytics.
+   * Stats are stored with daily keys and expire after 90 days.
+   */
+  private async trackMusicStats(
+    statType: string,
+    data: Record<string, string>,
+  ): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const guildId = this.guild.id;
+
+    try {
+      // Increment daily track count
+      const dailyKey = `music:stats:${guildId}:${today}:tracks_played`;
+      await this.valkey.incr(dailyKey);
+      await this.valkey.expire(dailyKey, 90 * 86400); // 90 days
+
+      // Increment session track count
+      const sessionKey = `music:session:${guildId}:tracks_played`;
+      await this.valkey.incr(sessionKey);
+      await this.valkey.expire(sessionKey, 86400);
+
+      // Track most-requested songs (sorted set)
+      if (data.title) {
+        const topKey = `music:stats:${guildId}:${today}:top_tracks`;
+        await this.valkey.zincrby(topKey, 1, `${data.author} — ${data.title}`);
+        await this.valkey.expire(topKey, 90 * 86400);
+      }
+
+      // Track most-active requesters
+      if (data.requestedBy) {
+        const reqKey = `music:stats:${guildId}:${today}:top_requesters`;
+        await this.valkey.zincrby(reqKey, 1, data.requestedBy);
+        await this.valkey.expire(reqKey, 90 * 86400);
+      }
+
+      // Track total listening time (increment by track duration if available)
+      if (statType === 'track_played') {
+        const listenKey = `music:stats:${guildId}:${today}:listen_minutes`;
+        await this.valkey.incr(listenKey);
+        await this.valkey.expire(listenKey, 90 * 86400);
+      }
+    } catch {
+      // Stats are best-effort — don't let failures affect music playback
+    }
+  }
+
+  private async getMusicStat(key: string): Promise<number> {
+    try {
+      const val = await this.valkey.get(`music:session:${this.guild.id}:${key}`);
+      return parseInt(val ?? '0', 10);
+    } catch {
+      return 0;
+    }
+  }
+
+  private async resetSessionStats(): Promise<void> {
+    try {
+      await this.valkey.del(`music:session:${this.guild.id}:tracks_played`);
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * Get music stats for the dashboard analytics page.
+   */
+  async getStats(days: number = 7): Promise<{
+    totalTracksPlayed: number;
+    topTracks: { name: string; count: number }[];
+    topRequesters: { userId: string; count: number }[];
+    dailyPlays: { date: string; count: number }[];
+  }> {
+    const guildId = this.guild.id;
+    const stats = {
+      totalTracksPlayed: 0,
+      topTracks: [] as { name: string; count: number }[],
+      topRequesters: [] as { userId: string; count: number }[],
+      dailyPlays: [] as { date: string; count: number }[],
+    };
+
+    try {
+      for (let i = 0; i < days; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const dateStr = d.toISOString().slice(0, 10);
+
+        const countStr = await this.valkey.get(`music:stats:${guildId}:${dateStr}:tracks_played`);
+        const count = parseInt(countStr ?? '0', 10);
+        stats.totalTracksPlayed += count;
+        stats.dailyPlays.push({ date: dateStr, count });
+
+        // Aggregate top tracks
+        if (i === 0) {
+          const topTracks = await this.valkey.zrevrange(
+            `music:stats:${guildId}:${dateStr}:top_tracks`,
+            0, 9,
+            'WITHSCORES',
+          );
+          for (let j = 0; j < topTracks.length; j += 2) {
+            stats.topTracks.push({
+              name: topTracks[j]!,
+              count: parseInt(topTracks[j + 1] ?? '0', 10),
+            });
+          }
+
+          const topReq = await this.valkey.zrevrange(
+            `music:stats:${guildId}:${dateStr}:top_requesters`,
+            0, 9,
+            'WITHSCORES',
+          );
+          for (let j = 0; j < topReq.length; j += 2) {
+            stats.topRequesters.push({
+              userId: topReq[j]!,
+              count: parseInt(topReq[j + 1] ?? '0', 10),
+            });
+          }
+        }
+      }
+    } catch {
+      // Stats are best-effort
+    }
+
+    return stats;
   }
 }
