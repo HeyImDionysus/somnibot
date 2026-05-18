@@ -15,24 +15,9 @@ function sha256(input: string): string {
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
 
-  let body: { session_id: string; license_key: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { valid: false, status: 'session_invalidated', error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { session_id, license_key } = body;
-
-  if (!session_id || !license_key) {
-    return NextResponse.json(
-      { valid: false, status: 'session_invalidated', error: 'session_id and license_key are required' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, schemas.licenseSdk.heartbeat);
+  if (!parsed.ok) return parsed.response;
+  const { session_id, license_key } = parsed.data;
 
   // Verify key
   const keyHash = sha256(license_key);
