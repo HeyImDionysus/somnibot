@@ -109,7 +109,7 @@ export async function PUT(req: NextRequest) {
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.automation.update);
   if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
+  const body = parsed.data as Record<string, unknown>;
 
   if (!body.id) {
     return NextResponse.json({ success: false, error: 'Missing automation id' }, { status: 400 });
