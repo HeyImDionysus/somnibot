@@ -5,10 +5,14 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const search = searchParams.get('search');
@@ -19,7 +23,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .from('orders')
     .select('*, customers(discord_id, discord_username), products(name)', { count: 'exact' })
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 

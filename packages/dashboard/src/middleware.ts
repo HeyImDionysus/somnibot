@@ -48,6 +48,7 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/license/validate') ||
     request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||
     request.nextUrl.pathname.startsWith('/api/license/deactivate') ||
+    // Downloads handle their own auth (session OR license key)
     request.nextUrl.pathname.startsWith('/api/downloads/');
 
   if (!user && !isPublicRoute) {

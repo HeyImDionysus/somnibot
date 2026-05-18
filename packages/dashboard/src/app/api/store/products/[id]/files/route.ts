@@ -7,11 +7,17 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { id: productId } = await params;
   const supabase = createAdminSupabase();
 
@@ -32,9 +38,15 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const { id: productId } = await params;
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.productFile.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { name, description, file_path, external_url, file_size_bytes, mime_type, sort_order } = body;
 
@@ -71,6 +83,10 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   await params; // consume to satisfy Next.js
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);

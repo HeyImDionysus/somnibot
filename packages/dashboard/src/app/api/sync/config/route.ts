@@ -3,12 +3,19 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.sync.config);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const allowed: Record<string, unknown> = {};
   const fields = [
@@ -30,7 +37,7 @@ export async function PUT(req: NextRequest) {
   const { error } = await supabase
     .from('guild_config')
     .update(allowed)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
