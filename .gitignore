@@ -28,6 +28,9 @@ Thumbs.db
 npm-debug.log*
 pnpm-debug.log*
 
+# TypeScript build info
+*.tsbuildinfo
+
 # Testing
 coverage/
 
