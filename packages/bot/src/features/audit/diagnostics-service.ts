@@ -2,24 +2,33 @@
  * DiagnosticsService — Writes periodic health snapshots for the dashboard.
  *
  * Architecture doc §33.4.
+ * Phase C: Now integrates AlertManager for threshold-based alerting.
  *
  * Snapshots include: uptime, memory usage, Lavalink status, Valkey stats,
  * guild count, active voice connections, and automation stats.
  *
  * Writes to the `bot_diagnostics` table every 60 seconds.
+ * After each snapshot, evaluates alert thresholds via AlertManager.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SomniClient } from '../../client.js';
+import { AlertManager, type AlertThresholds } from './alert-manager.js';
 
 export class DiagnosticsService {
   private client: SomniClient;
   private supabase: SupabaseClient;
+  private alertManager: AlertManager;
   private timer: ReturnType<typeof setInterval> | null = null;
   private startedAt: number;
 
-  constructor(client: SomniClient, supabase: SupabaseClient) {
+  constructor(
+    client: SomniClient,
+    supabase: SupabaseClient,
+    alertThresholds?: Partial<AlertThresholds>,
+  ) {
     this.client = client;
     this.supabase = supabase;
+    this.alertManager = new AlertManager(supabase, alertThresholds);
     this.startedAt = Date.now();
   }
 
@@ -35,7 +44,7 @@ export class DiagnosticsService {
       void this.writeSnapshot();
     }, 60_000);
 
-    console.log('[DiagnosticsService] ✅ Started — writing health snapshots every 60s');
+    console.log('[DiagnosticsService] ✅ Started — writing health snapshots every 60s (with alerts)');
   }
 
   /**
@@ -50,7 +59,7 @@ export class DiagnosticsService {
   }
 
   /**
-   * Collect and write a health snapshot.
+   * Collect and write a health snapshot, then evaluate alert thresholds.
    */
   private async writeSnapshot(): Promise<void> {
     try {
@@ -92,15 +101,15 @@ export class DiagnosticsService {
         (vs) => vs.channelId !== null
       ).size ?? 0;
 
-      // Scheduled message stats (from Valkey or just a count)
+      // Scheduled message stats
       let scheduledMessageCount = 0;
       try {
-        const { data } = await this.supabase
+        const { count } = await this.supabase
           .from('scheduled_messages')
           .select('id', { count: 'exact', head: true })
           .eq('guild_id', this.client.guildId)
           .eq('enabled', true);
-        scheduledMessageCount = (data as unknown as number) ?? 0;
+        scheduledMessageCount = count ?? 0;
       } catch {
         // ignore
       }
@@ -118,11 +127,14 @@ export class DiagnosticsService {
         // ignore
       }
 
+      const memoryRssMb = Math.round(memUsage.rss / 1024 / 1024 * 100) / 100;
+      const memoryHeapMb = Math.round(memUsage.heapUsed / 1024 / 1024 * 100) / 100;
+
       const snapshot = {
         guild_id: this.client.guildId,
         uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
-        memory_rss_mb: Math.round(memUsage.rss / 1024 / 1024 * 100) / 100,
-        memory_heap_mb: Math.round(memUsage.heapUsed / 1024 / 1024 * 100) / 100,
+        memory_rss_mb: memoryRssMb,
+        memory_heap_mb: memoryHeapMb,
         lavalink_nodes: lavalinkNodes,
         valkey_connected: valkeyConnected,
         valkey_memory_mb: valkeyMemoryMb,
@@ -142,6 +154,15 @@ export class DiagnosticsService {
       if (error) {
         console.error('[DiagnosticsService] Failed to write snapshot:', error.message);
       }
+
+      // Evaluate alert thresholds
+      await this.alertManager.evaluate({
+        guild_id: this.client.guildId,
+        memory_rss_mb: memoryRssMb,
+        discord_ws_ping: this.client.ws.ping,
+        valkey_connected: valkeyConnected,
+        lavalink_nodes: lavalinkNodes,
+      });
     } catch (err) {
       console.error('[DiagnosticsService] Snapshot error:', err);
     }
