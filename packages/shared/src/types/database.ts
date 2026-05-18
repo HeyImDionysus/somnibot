@@ -805,3 +805,232 @@ export interface DbWebhookEvent {
   result: 'success' | 'error' | 'duplicate' | null;
   error_details: string | null;
 }
+
+// ============================================================
+// Phase D — SOTA: Dashboard RBAC
+// ============================================================
+
+export type DashboardPermission =
+  | 'dashboard.full_access'
+  | 'dashboard.view_analytics'
+  | 'dashboard.manage_store'
+  | 'dashboard.manage_products'
+  | 'dashboard.manage_orders'
+  | 'dashboard.manage_customers'
+  | 'dashboard.manage_licenses'
+  | 'dashboard.manage_moderation'
+  | 'dashboard.manage_tickets'
+  | 'dashboard.manage_automations'
+  | 'dashboard.manage_server'
+  | 'dashboard.manage_roles'
+  | 'dashboard.manage_channels'
+  | 'dashboard.manage_team'
+  | 'dashboard.view_audit'
+  | 'dashboard.view_diagnostics'
+  | 'dashboard.manage_incidents'
+  | 'dashboard.view_fraud'
+  | 'dashboard.manage_fraud'
+  | 'dashboard.view_workflows'
+  | 'dashboard.manage_workflows'
+  | 'dashboard.undo_changes';
+
+export interface DbDashboardRole {
+  id: string; // UUID
+  guild_id: string;
+  name: string;
+  description: string | null;
+  permissions: DashboardPermission[];
+  is_system: boolean;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbDashboardUserRole {
+  id: string; // UUID
+  guild_id: string;
+  discord_id: string;
+  role_id: string;
+  assigned_by: string | null;
+  assigned_at: string;
+}
+
+// ============================================================
+// Phase D — SOTA: Customer Portal
+// ============================================================
+
+export interface DbPortalSession {
+  id: string; // UUID
+  guild_id: string;
+  customer_id: string;
+  token_hash: string;
+  discord_id: string;
+  expires_at: string;
+  created_at: string;
+  last_used_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  revoked: boolean;
+}
+
+// ============================================================
+// Phase D — SOTA: Fraud Controls
+// ============================================================
+
+export type FraudSignalType =
+  | 'velocity'
+  | 'device_abuse'
+  | 'chargeback'
+  | 'ip_mismatch'
+  | 'key_sharing'
+  | 'payment_pattern';
+
+export type FraudSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export type FraudSignalStatus = 'open' | 'investigating' | 'confirmed' | 'dismissed' | 'auto_resolved';
+
+export interface DbFraudSignal {
+  id: string; // UUID
+  guild_id: string;
+  signal_type: FraudSignalType;
+  severity: FraudSeverity;
+  entity_type: string;
+  entity_id: string;
+  discord_id: string | null;
+  description: string;
+  evidence: Record<string, unknown>;
+  status: FraudSignalStatus;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  auto_action: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type FraudRuleType =
+  | 'velocity_limit'
+  | 'device_limit'
+  | 'ip_block'
+  | 'amount_threshold'
+  | 'pattern_match';
+
+export interface DbFraudRule {
+  id: string; // UUID
+  guild_id: string;
+  name: string;
+  description: string | null;
+  rule_type: FraudRuleType;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  auto_action: string;
+  trigger_count: number;
+  last_triggered: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Phase D — SOTA: Incidents
+// ============================================================
+
+export type IncidentSeverity = 'info' | 'warning' | 'critical' | 'outage';
+export type IncidentStatus = 'open' | 'investigating' | 'identified' | 'monitoring' | 'resolved';
+
+export interface DbIncident {
+  id: string; // UUID
+  guild_id: string;
+  incident_number: number;
+  title: string;
+  description: string | null;
+  severity: IncidentSeverity;
+  status: IncidentStatus;
+  source: string;
+  source_ref_id: string | null;
+  assigned_to: string | null;
+  started_at: string;
+  identified_at: string | null;
+  resolved_at: string | null;
+  duration_seconds: number | null;
+  impact_summary: string | null;
+  root_cause: string | null;
+  resolution: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbIncidentEvent {
+  id: string; // UUID
+  incident_id: string;
+  event_type: string;
+  actor_id: string | null;
+  message: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+// ============================================================
+// Phase D — SOTA: Dead-Letter Queue & Workflow Events
+// ============================================================
+
+export type DLQStatus = 'pending' | 'retrying' | 'exhausted' | 'resolved' | 'discarded';
+
+export interface DbDeadLetterItem {
+  id: string; // UUID
+  guild_id: string;
+  event_type: string;
+  source: string;
+  payload: Record<string, unknown>;
+  error_message: string | null;
+  error_stack: string | null;
+  retry_count: number;
+  max_retries: number;
+  status: DLQStatus;
+  first_failed_at: string;
+  last_retry_at: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution_note: string | null;
+  created_at: string;
+}
+
+export interface DbWorkflowEvent {
+  id: string; // UUID
+  guild_id: string;
+  event_type: string;
+  source: string;
+  correlation_id: string | null;
+  payload: Record<string, unknown>;
+  result: 'success' | 'error' | 'skipped' | 'pending' | null;
+  error_message: string | null;
+  duration_ms: number | null;
+  parent_event_id: string | null;
+  created_at: string;
+}
+
+// ============================================================
+// Phase D — SOTA: Admin Change Tracking
+// ============================================================
+
+export type BlastRadius = 'low' | 'medium' | 'high' | 'critical';
+
+export interface DbAdminChange {
+  id: string; // UUID
+  guild_id: string;
+  actor_id: string;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  description: string;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
+  undo_payload: Record<string, unknown> | null;
+  is_undoable: boolean;
+  is_undone: boolean;
+  undone_at: string | null;
+  undone_by: string | null;
+  undo_change_id: string | null;
+  blast_radius: BlastRadius;
+  requires_confirmation: boolean;
+  created_at: string;
+}
