@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -110,6 +111,10 @@ export default function AuditLogPage() {
   useEffect(() => {
     fetchLogs(1);
   }, [fetchLogs]);
+
+  // GAP 2: Live updates — auto-refresh when new audit entries arrive
+  const refetchCurrentPage = useCallback(() => fetchLogs(pagination.page), [fetchLogs, pagination.page]);
+  useAutoRefresh('audit_log', undefined, refetchCurrentPage);
 
   const handleExport = async (format: 'csv' | 'json') => {
     const params = new URLSearchParams({ export: 'true', format });

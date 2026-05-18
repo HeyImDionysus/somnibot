@@ -8,21 +8,17 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requireGuildOwner } from '@/lib/api/require-owner';
-import { parseBody, schemas } from '@/lib/api/validation';
+import { notifyBot } from '@/lib/notify-bot';
 
+const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 
 export async function GET() {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
     .from('embed_configs')
     .select('*')
-    .eq('guild_id', guildId)
+    .eq('guild_id', GUILD_ID)
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -33,14 +29,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.embed.create);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
+  const body = await req.json();
 
   const { name } = body;
   if (!name) {
@@ -54,7 +44,7 @@ export async function POST(req: NextRequest) {
   const { count } = await supabase
     .from('embed_configs')
     .select('id', { count: 'exact', head: true })
-    .eq('guild_id', guildId);
+    .eq('guild_id', GUILD_ID);
 
   if ((count ?? 0) >= 50) {
     return NextResponse.json(
@@ -66,7 +56,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('embed_configs')
     .insert({
-      guild_id: guildId,
+      guild_id: GUILD_ID,
       name,
       title: body.title ?? null,
       description: body.description ?? null,
@@ -90,18 +80,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
+  await notifyBot('embeds');
+
   return NextResponse.json({ success: true, data });
 }
 
 export async function PUT(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
-  const parsed = await parseBody(req, schemas.embed.update);
-  if (!parsed.ok) return parsed.response;
-  const body = parsed.data as Record<string, unknown>;
+  const body = await req.json();
 
   if (!body.id) {
     return NextResponse.json(
@@ -141,7 +127,7 @@ export async function PUT(req: NextRequest) {
     .from('embed_configs')
     .update(updates)
     .eq('id', body.id)
-    .eq('guild_id', guildId)
+    .eq('guild_id', GUILD_ID)
     .select()
     .single();
 
@@ -149,14 +135,12 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
+  await notifyBot('embeds');
+
   return NextResponse.json({ success: true, data });
 }
 
 export async function DELETE(req: NextRequest) {
-  const auth = await requireGuildOwner();
-  if (!auth.ok) return auth.response;
-  const { guildId } = auth.ctx;
-
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
@@ -172,11 +156,13 @@ export async function DELETE(req: NextRequest) {
     .from('embed_configs')
     .delete()
     .eq('id', id)
-    .eq('guild_id', guildId);
+    .eq('guild_id', GUILD_ID);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
+
+  await notifyBot('embeds');
 
   return NextResponse.json({ success: true });
 }
