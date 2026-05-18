@@ -477,22 +477,32 @@ export async function handleBanCommand(
     expiresAt: calculateExpiryDate(config?.infraction_expiry_days ?? 30),
   });
 
-  // Suspend entitlements
-  const { data: entitlements } = await client.supabase
-    .from('entitlements')
+  // Suspend entitlements — entitlements link via customer_id, not discord_id
+  // First find the customer record for this Discord user
+  const { data: customer } = await client.supabase
+    .from('customers')
     .select('id')
     .eq('guild_id', client.guildId)
     .eq('discord_id', member.id)
-    .eq('status', 'active');
+    .maybeSingle();
 
-  if (entitlements && entitlements.length > 0) {
-    for (const ent of entitlements) {
-      await client.supabase
-        .from('entitlements')
-        .update({ status: 'suspended', updated_at: new Date().toISOString() })
-        .eq('id', ent.id);
+  if (customer) {
+    const { data: entitlements } = await client.supabase
+      .from('entitlements')
+      .select('id')
+      .eq('guild_id', client.guildId)
+      .eq('customer_id', customer.id)
+      .eq('status', 'active');
+
+    if (entitlements && entitlements.length > 0) {
+      for (const ent of entitlements) {
+        await client.supabase
+          .from('entitlements')
+          .update({ status: 'suspended', updated_at: new Date().toISOString() })
+          .eq('id', ent.id);
+      }
+      console.log(`[Moderation] Suspended ${entitlements.length} entitlement(s) for banned user ${member.id}`);
     }
-    console.log(`[Moderation] Suspended ${entitlements.length} entitlement(s) for banned user ${member.id}`);
   }
 
   // Emit event

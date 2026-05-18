@@ -41,13 +41,13 @@ export class OwnerNotificationService {
 
     const { data: guildConfig } = await this.supabase
       .from('guild_config')
-      .select('admin_notification_channel_id')
+      .select('mod_log_channel_id')
       .eq('guild_id', this.guildId)
       .maybeSingle();
 
     this.config = {
       ownerDiscordId: guild?.owner_discord_id ?? '',
-      adminChannelId: guildConfig?.admin_notification_channel_id ?? null,
+      adminChannelId: guildConfig?.mod_log_channel_id ?? null,
     };
 
     // Subscribe to critical events
