@@ -5,6 +5,24 @@ import {
   handleMemberLeave,
 } from '../features/welcome/index.js';
 import { processMessage, expireInfractions } from '../features/moderation/index.js';
+import {
+  handleWarnCommand,
+  handleMuteCommand,
+  handleKickCommand,
+  handleBanCommand,
+  handlePardonCommand,
+  handleInfractionsCommand,
+} from '../features/moderation/commands.js';
+import { handleHelpCommand, handleHelpCategorySelect } from '../features/help/index.js';
+import {
+  handleViewProfile,
+  handleWarnUser,
+  handleViewPurchases,
+  handleCreateTicketFromMessage,
+  handleReportMessage,
+} from '../features/discord-ux/index.js';
+import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
+import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
 import { handleTicketInteraction, handleTicketCommand } from '../features/tickets/index.js';
 import {
   handleRoleCreate,
@@ -403,8 +421,82 @@ export function registerEvents(client: SomniClient): void {
         }
       }
 
+      // Handle context menu commands (right-click User/Message)
+      if (interaction.isUserContextMenuCommand()) {
+        switch (interaction.commandName) {
+          case 'View Profile':
+            await handleViewProfile(interaction, client.supabase, client.guildId);
+            return;
+          case 'Warn User':
+            await handleWarnUser(interaction);
+            return;
+          case 'View Purchases':
+            await handleViewPurchases(interaction, client.supabase, client.guildId);
+            return;
+        }
+      }
+
+      if (interaction.isMessageContextMenuCommand()) {
+        switch (interaction.commandName) {
+          case 'Create Ticket':
+            await handleCreateTicketFromMessage(interaction);
+            return;
+          case 'Report Message':
+            await handleReportMessage(interaction);
+            return;
+        }
+      }
+
+      // Handle modal submissions (from context menus and warn user)
+      if (interaction.isModalSubmit()) {
+        const guild = interaction.guild;
+        if (guild) {
+          await handleModalSubmit(interaction, guild, client.supabase, client.eventBus);
+        }
+        return;
+      }
+
+      // Handle autocomplete interactions
+      if (interaction.isAutocomplete()) {
+        await handleAutocomplete(interaction, client.supabase, client.shoukaku, client.guildId);
+        return;
+      }
+
+      // Handle string select menu interactions (help category selector)
+      if (interaction.isStringSelectMenu()) {
+        if (interaction.customId === 'help:category') {
+          await handleHelpCategorySelect(interaction, client);
+          return;
+        }
+      }
+
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
+        // Phase 14: Moderation commands
+        switch (interaction.commandName) {
+          case 'warn':
+            await handleWarnCommand(interaction, client);
+            return;
+          case 'mute':
+            await handleMuteCommand(interaction, client);
+            return;
+          case 'kick':
+            await handleKickCommand(interaction, client);
+            return;
+          case 'ban':
+            await handleBanCommand(interaction, client);
+            return;
+          case 'pardon':
+            await handlePardonCommand(interaction, client);
+            return;
+          case 'infractions':
+            await handleInfractionsCommand(interaction, client);
+            return;
+          case 'help':
+            await handleHelpCommand(interaction, client);
+            return;
+        }
+
         // Phase 7: Ticket commands
         if (interaction.commandName === 'ticket') {
           await handleTicketCommand(interaction, client);
