@@ -72,7 +72,7 @@ const jsonObj = z.record(z.unknown()).default({});
 
 // ── Automation schemas ──────────────────────────────
 
-const automationBase = {
+const automationCreate = z.object({
   name: safeName,
   description: safeDescription,
   trigger_type: z.string().min(1).max(64),
@@ -83,16 +83,21 @@ const automationBase = {
   target_channel_ids: snowflakeArray,
   exclude_user_ids: snowflakeArray,
   exclude_channel_ids: snowflakeArray,
-};
-
-const automationCreate = z.object(automationBase);
+});
 
 const automationUpdate = z.object({
   id: uuid,
-  ...Object.fromEntries(
-    Object.entries(automationBase).map(([k, v]) => [k, v.optional()])
-  ),
+  name: safeName.optional(),
+  description: z.string().max(2000).trim().optional(),
+  trigger_type: z.string().min(1).max(64).optional(),
+  trigger_config: jsonObj.optional(),
+  conditions: z.array(z.record(z.unknown())).max(50).optional(),
+  actions: z.array(z.record(z.unknown())).max(50).optional(),
   enabled: z.boolean().optional(),
+  target_user_ids: z.array(snowflake).max(100).optional(),
+  target_channel_ids: z.array(snowflake).max(100).optional(),
+  exclude_user_ids: z.array(snowflake).max(100).optional(),
+  exclude_channel_ids: z.array(snowflake).max(100).optional(),
 });
 
 const automationTemplateDeploySchema = z.object({
@@ -119,10 +124,10 @@ const customCommandUpdate = z.object({
   name: z.string().min(1).max(32).regex(/^[\w-]+$/).optional(),
   description: z.string().max(100).optional(),
   actions: z.array(z.record(z.unknown())).max(25).optional(),
-  allowed_roles: snowflakeArray.optional(),
-  allowed_channels: snowflakeArray.optional(),
-  denied_roles: snowflakeArray.optional(),
-  denied_channels: snowflakeArray.optional(),
+  allowed_roles: z.array(snowflake).max(100).optional(),
+  allowed_channels: z.array(snowflake).max(100).optional(),
+  denied_roles: z.array(snowflake).max(100).optional(),
+  denied_channels: z.array(snowflake).max(100).optional(),
   cooldown_seconds: z.number().int().min(0).max(86400).optional(),
   ephemeral: z.boolean().optional(),
   enabled: z.boolean().optional(),
@@ -154,30 +159,46 @@ const embedCreate = z.object({
 
 const embedUpdate = z.object({
   id: uuid,
-}).merge(embedCreate.partial());
+  name: safeName.optional(),
+  title: z.string().max(256).optional().nullable(),
+  description: z.string().max(4096).optional().nullable(),
+  color: colorHex,
+  fields: z.array(z.object({
+    name: z.string().max(256),
+    value: z.string().max(1024),
+    inline: z.boolean().optional(),
+  })).max(25).optional(),
+  image_url: urlString,
+  thumbnail_url: urlString,
+  footer_text: z.string().max(2048).optional().nullable(),
+  footer_icon_url: urlString,
+  author_name: z.string().max(256).optional().nullable(),
+  author_url: urlString,
+  author_icon_url: urlString,
+  include_timestamp: z.boolean().optional(),
+  use_components_v2: z.boolean().optional(),
+  components_v2_data: z.record(z.unknown()).optional().nullable(),
+});
 
 // ── Product schemas ─────────────────────────────────
 
 const productCreate = z.object({
   name: safeName,
-  slug: z.string().min(1).max(64).regex(/^[a-z0-9-]+$/).optional(),
   description: safeDescription,
-  short_description: z.string().max(200).optional(),
   type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
+  delivery_type: z.string().max(32).optional(),
   price_cents: z.number().int().min(0).max(999999).default(0),
   currency: z.string().length(3).default('USD'),
-  image_url: urlString,
   granted_role_ids: snowflakeArray,
   granted_channel_ids: snowflakeArray,
-  is_active: z.boolean().default(true),
+  active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
-  requires_license: z.boolean().default(false),
-  max_quantity: z.number().int().min(0).max(9999).default(0),
+  metadata: z.record(z.unknown()).optional(),
 });
 
 const productUpdate = z.object({
   id: uuid,
-}).merge(productCreate.partial());
+}).merge(productCreate.partial()).passthrough();
 
 // ── Plan schemas ────────────────────────────────────
 
@@ -185,24 +206,29 @@ const planCreate = z.object({
   product_id: uuid,
   name: safeName,
   paypal_plan_id: z.string().max(64).optional(),
-  interval: z.enum(['monthly', 'quarterly', 'yearly']),
+  interval_unit: z.string().max(32),
+  interval_count: z.number().int().min(1).max(12).default(1),
   price_cents: z.number().int().min(0).max(999999),
   currency: z.string().length(3).default('USD'),
-  is_active: z.boolean().default(true),
-  sort_order: z.number().int().min(0).max(999).default(0),
+  trial_days: z.number().int().min(0).max(365).optional(),
+  active: z.boolean().default(true),
 });
 
 // ── Promotion schemas ───────────────────────────────
 
 const promotionCreate = z.object({
-  code: z.string().min(1).max(32).regex(/^[A-Z0-9_-]+$/i),
-  product_id: uuid.optional().nullable(),
-  discount_type: z.enum(['percent', 'fixed']),
-  discount_value: z.number().min(0).max(100),
-  max_uses: z.number().int().min(0).max(99999).default(0),
-  starts_at: z.string().datetime().optional().nullable(),
-  expires_at: z.string().datetime().optional().nullable(),
-  is_active: z.boolean().default(true),
+  name: safeName,
+  type: z.enum(['percent', 'fixed']),
+  value: z.number().min(0).max(100),
+  coupon_code: z.string().min(1).max(32).optional(),
+  applies_to_product_ids: z.array(uuid).optional(),
+  applies_to_plan_ids: z.array(uuid).optional(),
+  start_date: z.string().datetime().optional().nullable(),
+  end_date: z.string().datetime().optional().nullable(),
+  max_uses: z.number().int().min(0).max(99999).optional(),
+  min_purchase_cents: z.number().int().min(0).optional(),
+  first_purchase_only: z.boolean().optional(),
+  active: z.boolean().default(true),
 });
 
 // ── Entitlement schemas ─────────────────────────────
@@ -236,67 +262,82 @@ const moderationRule = z.object({
   config: jsonObj,
   enabled: z.boolean().default(true),
   action: z.enum(['warn', 'mute', 'kick', 'ban', 'log', 'delete']),
-  action_duration: z.number().int().min(0).optional(),
+  mute_duration_minutes: z.number().int().min(0).max(525600).optional(),
   exempt_roles: snowflakeArray,
   exempt_channels: snowflakeArray,
+  log_to_mod_channel: z.boolean().optional(),
 });
 
 const moderationRuleUpdate = z.object({
   id: uuid,
-}).merge(moderationRule.partial());
+  name: safeName.optional(),
+  type: z.string().min(1).max(64).optional(),
+  config: jsonObj.optional(),
+  enabled: z.boolean().optional(),
+  action: z.enum(['warn', 'mute', 'kick', 'ban', 'log', 'delete']).optional(),
+  mute_duration_minutes: z.number().int().min(0).max(525600).optional(),
+  exempt_roles: z.array(snowflake).max(100).optional(),
+  exempt_channels: z.array(snowflake).max(100).optional(),
+  log_to_mod_channel: z.boolean().optional(),
+});
 
 const escalationConfig = z.object({
-  infraction_type: z.string().min(1).max(64),
-  thresholds: z.array(z.object({
-    count: z.number().int().min(1).max(100),
-    action: z.enum(['warn', 'mute', 'kick', 'ban']),
-    duration_minutes: z.number().int().min(0).max(525600).optional(),
-  })).max(10),
-  window_hours: z.number().int().min(1).max(8760).default(24),
-  enabled: z.boolean().default(true),
+  escalation_chain: z.array(z.record(z.unknown())).optional(),
+  mod_log_channel_id: snowflake.optional().nullable(),
+  infraction_expiry_days: z.number().int().min(0).max(3650).optional(),
 });
 
 // ── Giveaway schemas ────────────────────────────────
 
 const giveawayCreate = z.object({
-  title: safeName,
-  description: safeDescription,
-  prize: z.string().min(1).max(256),
-  winner_count: z.number().int().min(1).max(100).default(1),
   channel_id: snowflake,
-  duration_minutes: z.number().int().min(1).max(43200).optional(),
+  prize: z.string().min(1).max(256),
+  winner_count: z.number().int().min(1).max(100).optional(),
   ends_at: z.string().datetime().optional(),
-  required_role_ids: snowflakeArray,
-  bonus_role_entries: z.record(z.number().int().min(1).max(10)).default({}),
+  required_role_id: snowflake.optional().nullable(),
+  required_level: z.number().int().min(0).optional().nullable(),
+  prize_product_id: uuid.optional().nullable(),
+  prize_license_count: z.number().int().min(1).max(100).optional(),
+  created_by: z.string().max(128).optional(),
 });
 
 const giveawayAction = z.object({
-  action: z.enum(['end', 'reroll', 'delete']),
   id: uuid,
+  prize: z.string().min(1).max(256).optional(),
   winner_count: z.number().int().min(1).max(100).optional(),
+  ends_at: z.string().datetime().optional().nullable(),
+  required_role_id: snowflake.optional().nullable(),
+  required_level: z.number().int().min(0).optional().nullable(),
+  prize_product_id: uuid.optional().nullable(),
+  prize_license_count: z.number().int().min(1).max(100).optional(),
+  status: z.string().max(32).optional(),
+  winners: z.array(z.unknown()).optional(),
 });
 
 // ── Welcome/onboarding schemas ──────────────────────
 
 const welcomeConfig = z.object({
-  enabled: z.boolean().optional(),
-  channel_id: snowflake.optional().nullable(),
-  message: z.string().max(2000).optional(),
-  embed: z.record(z.unknown()).optional().nullable(),
-  dm_enabled: z.boolean().optional(),
-  dm_message: z.string().max(2000).optional(),
+  welcome_enabled: z.boolean().optional(),
+  welcome_channel_id: snowflake.optional().nullable(),
+  welcome_message: z.string().max(2000).optional(),
+  welcome_card_enabled: z.boolean().optional(),
+  welcome_card_background: z.string().max(512).optional().nullable(),
+  welcome_dm_enabled: z.boolean().optional(),
+  welcome_dm_message: z.string().max(2000).optional(),
+  welcome_auto_roles: z.array(snowflake).max(25).optional(),
   goodbye_enabled: z.boolean().optional(),
   goodbye_channel_id: snowflake.optional().nullable(),
   goodbye_message: z.string().max(2000).optional(),
-  auto_roles: snowflakeArray.optional(),
-}).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
+});
 
 const onboardingConfig = z.object({
-  enabled: z.boolean().optional(),
-  prompts: z.array(z.record(z.unknown())).max(25).optional(),
-  default_channels: snowflakeArray.optional(),
-  mode: z.enum(['default', 'advanced']).optional(),
-}).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
+  member_role_id: snowflake.optional().nullable(),
+  onboarding_enabled: z.boolean().optional(),
+  interest_role_mapping: z.record(z.unknown()).optional(),
+  returning_member_skip_welcome_dm: z.boolean().optional(),
+  returning_member_restore_entitlements: z.boolean().optional(),
+  returning_member_restore_levels: z.boolean().optional(),
+});
 
 // ── Reaction role schemas ───────────────────────────
 
@@ -305,59 +346,76 @@ const reactionRoleCreate = z.object({
   message_id: snowflake,
   emoji: z.string().min(1).max(64),
   role_id: snowflake,
-  type: z.enum(['toggle', 'add_only', 'remove_only']).default('toggle'),
+  exclusive_group: z.string().max(64).optional().nullable(),
+  require_role: snowflake.optional().nullable(),
+  require_level: z.number().int().min(0).optional().nullable(),
+  max_per_group: z.number().int().min(0).max(100).optional().nullable(),
+  remove_on_unreact: z.boolean().optional(),
+  log_actions: z.boolean().optional(),
 });
 
 // ── Scheduled message schemas ───────────────────────
 
 const scheduledMessageCreate = z.object({
+  name: safeName,
   channel_id: snowflake,
-  content: z.string().min(1).max(2000),
-  embed: z.record(z.unknown()).optional().nullable(),
+  message: z.string().max(2000).optional(),
+  embed_config_id: uuid.optional().nullable(),
   cron_expression: z.string().max(128).optional(),
-  send_at: z.string().datetime().optional(),
-  repeat: z.boolean().default(false),
   timezone: z.string().max(64).default('UTC'),
-  name: z.string().max(100).optional(),
+  start_date: z.string().datetime().optional().nullable(),
+  end_date: z.string().datetime().optional().nullable(),
+  max_sends: z.number().int().min(0).optional().nullable(),
 });
 
 const scheduledMessageUpdate = z.object({
   id: uuid,
-}).merge(scheduledMessageCreate.partial()).merge(
-  z.object({ enabled: z.boolean().optional() })
-);
+  name: safeName.optional(),
+  channel_id: snowflake.optional(),
+  message: z.string().max(2000).optional(),
+  embed_config_id: uuid.optional().nullable(),
+  cron_expression: z.string().max(128).optional(),
+  timezone: z.string().max(64).optional(),
+  start_date: z.string().datetime().optional().nullable(),
+  end_date: z.string().datetime().optional().nullable(),
+  max_sends: z.number().int().min(0).optional().nullable(),
+  active: z.boolean().optional(),
+});
 
 // ── Ticket panel schemas ────────────────────────────
 
 const ticketPanelCreate = z.object({
   name: safeName,
   channel_id: snowflake,
-  category_id: snowflake.optional(),
-  message: z.string().max(2000).optional(),
-  embed: z.record(z.unknown()).optional().nullable(),
-  button_label: z.string().max(80).optional(),
-  button_emoji: z.string().max(64).optional(),
+  panel_message: z.string().max(2000).optional(),
+  input_mode: z.string().max(32).optional(),
+  ticket_types: z.array(z.record(z.unknown())).max(25).optional(),
+  manager_roles: snowflakeArray,
+  open_category_id: snowflake.optional().nullable(),
+  closed_category_id: snowflake.optional().nullable(),
+  transcript_channel_id: snowflake.optional().nullable(),
+  dm_transcript_to_creator: z.boolean().optional(),
   max_open_per_user: z.number().int().min(1).max(10).default(1),
-  support_role_ids: snowflakeArray,
-  auto_close_hours: z.number().int().min(0).max(720).default(0),
+  introduction_message: z.string().max(2000).optional(),
 });
 
 // ── Level reward schemas ────────────────────────────
 
 const levelRewardCreate = z.object({
-  level: z.number().int().min(1).max(200),
-  role_id: snowflake,
-  remove_previous: z.boolean().default(false),
+  type: z.enum(['reward', 'multiplier']),
+  level: z.number().int().min(1).max(200).optional(),
+  role_id: snowflake.optional(),
+  remove_at_level: z.number().int().min(0).max(200).optional().nullable(),
+  announce: z.boolean().optional(),
+  multiplier: z.number().min(0.1).max(10).optional(),
 });
 
 // ── Stats channel schemas ───────────────────────────
 
 const statsChannelCreate = z.object({
-  channel_id: snowflake,
-  type: z.enum(['member_count', 'online_count', 'role_count', 'channel_count', 'boost_count', 'custom']),
-  template: z.string().max(128).default('{value}'),
-  custom_value: z.string().max(128).optional(),
-  update_interval_minutes: z.number().int().min(5).max(1440).default(10),
+  stat_type: z.string().min(1).max(64),
+  name_format: z.string().max(128),
+  stat_config: z.record(z.unknown()).optional(),
 });
 
 // ── Temp channel schemas ────────────────────────────
@@ -365,10 +423,12 @@ const statsChannelCreate = z.object({
 const tempChannelCreate = z.object({
   hub_channel_id: snowflake,
   category_id: snowflake.optional(),
-  name_template: z.string().max(100).default("{user}'s Channel"),
-  user_limit: z.number().int().min(0).max(99).default(0),
-  bitrate: z.number().int().min(8000).max(384000).optional(),
-  auto_delete_empty: z.boolean().default(true),
+  naming_format: z.string().max(100).optional(),
+  default_user_limit: z.number().int().min(0).max(99).optional(),
+  default_bitrate: z.number().int().min(8000).max(384000).optional(),
+  keep_alive_minutes: z.number().int().min(0).max(1440).optional(),
+  allow_text_channel: z.boolean().optional(),
+  moderator_roles: snowflakeArray,
 });
 
 // ── Guild config (PATCH /api/guild) ─────────────────
@@ -391,12 +451,14 @@ const guildConfigUpdate = z.object({
 // ── License config schemas ──────────────────────────
 
 const licenseConfig = z.object({
-  enabled: z.boolean().optional(),
-  max_activations: z.number().int().min(1).max(100).optional(),
-  expiration_days: z.number().int().min(0).max(3650).optional(),
-  hardware_lock: z.boolean().optional(),
-  heartbeat_interval_minutes: z.number().int().min(1).max(1440).optional(),
-  heartbeat_grace_minutes: z.number().int().min(1).max(10080).optional(),
+  license_mode: z.string().max(32).optional(),
+  max_devices: z.number().int().min(1).max(100).optional(),
+  heartbeat_interval_seconds: z.number().int().min(0).max(86400).optional(),
+  offline_grace_period_seconds: z.number().int().min(0).max(604800).optional(),
+  feature_flags: z.record(z.unknown()).optional(),
+  tier: z.string().max(64).optional(),
+  watermark_config: z.record(z.unknown()).optional().nullable(),
+  require_discord_guild_membership: z.boolean().optional(),
 });
 
 // ── Setup schemas ───────────────────────────────────
@@ -459,45 +521,46 @@ const syncConfig = z.object({
 // ── Music schemas ───────────────────────────────────
 
 const musicConfig = z.object({
+  music_enabled: z.boolean().optional(),
   default_volume: z.number().int().min(0).max(100).optional(),
-  max_queue_size: z.number().int().min(1).max(1000).optional(),
+  max_queue_length: z.number().int().min(1).max(1000).optional(),
   allow_duplicates: z.boolean().optional(),
   dj_role_id: snowflake.optional().nullable(),
-  auto_leave_empty: z.boolean().optional(),
-  auto_leave_timeout_seconds: z.number().int().min(0).max(3600).optional(),
-}).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
+});
 
 // ── Product file schemas ────────────────────────────
 
 const productFileCreate = z.object({
   name: safeName,
+  description: z.string().max(500).optional(),
   file_path: z.string().max(512).optional(),
   external_url: urlString,
-  version: z.string().max(32).optional(),
-  platform: z.string().max(32).optional(),
   file_size_bytes: z.number().int().min(0).optional(),
+  mime_type: z.string().max(128).optional(),
+  sort_order: z.number().int().min(0).max(999).optional(),
 });
 
 // ── Infraction schemas ──────────────────────────────
 
 const infractionCreate = z.object({
-  target_discord_id: snowflake,
+  member_id: snowflake,
   type: z.enum(['warn', 'mute', 'kick', 'ban', 'note']),
   reason: z.string().min(1).max(1000),
+  moderator_id: snowflake.optional(),
   duration_minutes: z.number().int().min(0).max(525600).optional(),
-  evidence: z.string().max(2000).optional(),
 });
 
 const infractionPardon = z.object({
-  infraction_id: uuid,
-  reason: z.string().max(500).optional(),
+  action: z.enum(['pardon', 'delete']),
+  id: uuid,
+  pardoned_by: snowflake.optional(),
 });
 
 // ── License key schemas ─────────────────────────────
 
 const licenseKeyUpdate = z.object({
   status: z.enum(['active', 'suspended', 'revoked', 'expired']),
-  reason: z.string().max(500).optional(),
+  revocation_reason: z.string().max(500).optional(),
 });
 
 // ── Public license SDK schemas ──────────────────────

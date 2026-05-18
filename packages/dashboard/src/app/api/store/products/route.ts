@@ -97,7 +97,7 @@ export async function PUT(req: NextRequest) {
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.product.update);
   if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
+  const body = parsed.data as Record<string, unknown>;
 
   const { id, ...updates } = body;
 
