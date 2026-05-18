@@ -8,10 +8,10 @@ import { createClient } from '@supabase/supabase-js';
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID!;
 const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const SERVICE_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-if (!DISCORD_TOKEN || !DISCORD_GUILD_ID || !SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  console.error('❌ Missing required env vars: DISCORD_TOKEN, DISCORD_GUILD_ID, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY');
+if (!DISCORD_TOKEN || !DISCORD_GUILD_ID || !SUPABASE_URL || !SERVICE_KEY) {
+  console.error('❌ Missing required env vars: DISCORD_TOKEN, DISCORD_GUILD_ID, SUPABASE_URL, SUPABASE_SECRET_KEY');
   console.error('   Make sure your .env file is loaded (run from repo root with: source .env && bun run packages/bot/tests/test-deploy-e2e.ts)');
   process.exit(1);
 }
@@ -44,7 +44,7 @@ async function main() {
   console.log('║  Phase 3: Deploy E2E Test                  ║');
   console.log('╚════════════════════════════════════════════╝\n');
 
-  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+  const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 

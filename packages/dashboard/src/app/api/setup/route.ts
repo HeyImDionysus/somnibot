@@ -16,7 +16,7 @@ import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
  */
 function createSetupSupabase(url?: string, key?: string) {
   const supabaseUrl = url || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const serviceKey = key || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
+  const serviceKey = key || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
   if (!supabaseUrl || !serviceKey) return null;
   return createClient(supabaseUrl, serviceKey);
@@ -198,7 +198,7 @@ export async function POST(request: NextRequest) {
         if (!error) {
           const creds: Record<string, { value: string; section: string }> = {
             supabase_url: { value: url, section: 'supabase' },
-            supabase_service_role_key: { value: serviceRoleKey, section: 'supabase' },
+            supabase_secret_key: { value: serviceRoleKey, section: 'supabase' },
           };
 
           for (const [key, { value, section }] of Object.entries(creds)) {

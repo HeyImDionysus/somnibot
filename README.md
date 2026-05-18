@@ -61,8 +61,8 @@ Before starting, make sure you have these installed on your computer:
 3. Wait for the project to finish setting up (about 1 minute).
 4. Go to **Settings** (gear icon in the left sidebar) → **API**.
 5. Copy the **Project URL** — save this.
-6. Under "Project API keys," copy the **service_role** key (click the eye icon to reveal it) — save this.
-7. Also copy the **anon/public** key — save this too (needed for the dashboard).
+6. Under "Project API keys," copy the **secret** key (starts with `sb_secret_`, click the eye icon to reveal it) — save this.
+7. Also copy the **publishable** key (starts with `sb_publishable_`) — save this too (needed for the dashboard).
 
 ### Step 3: Clone and Set Up
 
@@ -101,14 +101,14 @@ DISCORD_TOKEN=paste-your-bot-token-here
 DISCORD_APPLICATION_ID=paste-your-client-id-here
 DISCORD_CLIENT_SECRET=paste-your-client-secret-here
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=eyJhbG...your-service-role-key
+SUPABASE_SECRET_KEY=sb_secret_...your-secret-key
 
 # Also fill these for the dashboard:
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=eyJhbG...your-anon-key
 ```
 
-> **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **anon/public** key from Supabase (not the service role key).
+> **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
 
 Save the file.
 
@@ -208,7 +208,7 @@ If you want to run SomniBot 24/7 without keeping your computer on:
 | `DISCORD_APPLICATION_ID` | Discord Developer Portal → OAuth2 → Client ID |
 | `DISCORD_CLIENT_SECRET` | Discord Developer Portal → OAuth2 → Client Secret |
 | `SUPABASE_URL` | Supabase → Settings → API → Project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API → service_role key |
+| `SUPABASE_SECRET_KEY` | Supabase → Settings → API → secret key (sb_secret_...) |
 
 Railway will deploy three services:
 - **Bot** — the Discord bot
@@ -226,7 +226,7 @@ Railway will deploy three services:
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Same Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon** key (Settings → API → anon/public) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Same service role key |
+| `SUPABASE_SECRET_KEY` | Same secret key |
 | `DISCORD_APPLICATION_ID` | Same Client ID |
 | `DISCORD_CLIENT_SECRET` | Same Client Secret |
 
@@ -270,7 +270,7 @@ somnibot/
 | `DISCORD_APPLICATION_ID` | Application/Client ID |
 | `DISCORD_CLIENT_SECRET` | OAuth2 client secret |
 | `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key |
+| `SUPABASE_SECRET_KEY` | Supabase secret key (sb_secret_...) |
 
 ### Dashboard (also required for the web UI)
 | Variable | Description |

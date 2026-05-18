@@ -18,7 +18,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 
 const SECRET_FIELDS = new Set([
   'supabase_anon_key',
-  'supabase_service_role_key',
+  'supabase_secret_key',
   'discord_bot_token',
   'discord_client_secret',
   'paypal_client_secret',
@@ -32,7 +32,7 @@ const SECRET_FIELDS = new Set([
 const ENV_MAP: Record<string, string[]> = {
   supabase_url: ['NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL'],
   supabase_anon_key: ['NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_ANON_KEY'],
-  supabase_service_role_key: ['SUPABASE_SERVICE_ROLE_KEY'],
+  supabase_secret_key: ['SUPABASE_SECRET_KEY', 'SUPABASE_SERVICE_ROLE_KEY'],
   discord_application_id: ['DISCORD_APPLICATION_ID'],
   discord_bot_token: ['DISCORD_TOKEN'],
   discord_guild_id: ['DISCORD_GUILD_ID'],
@@ -113,7 +113,7 @@ export async function GET() {
     };
 
     // Supabase: if we got this far, Supabase IS connected (we just queried it)
-    if (values.supabase_url && values.supabase_service_role_key) {
+    if (values.supabase_url && values.supabase_secret_key) {
       statuses.supabase = 'connected';
     }
 

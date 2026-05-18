@@ -505,7 +505,7 @@ export default function SetupWizardPage() {
                   <li className="flex gap-2">
                     <span className="font-mono text-discord-accent">4.</span>
                     <span>
-                      Under &quot;Project API keys&quot;, copy the <strong>service_role</strong> key (not the anon key)
+                      Under &quot;Project API keys&quot;, copy the <strong>secret</strong> key (starts with <code>sb_secret_</code>)
                     </span>
                   </li>
                 </ol>
@@ -528,13 +528,13 @@ export default function SetupWizardPage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
-                    Service Role Key
+                    Secret Key
                   </label>
                   <input
                     type="password"
                     value={supabaseKey}
                     onChange={(e) => setSupabaseKey(e.target.value)}
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    placeholder="sb_secret_..."
                     className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
                     disabled={supabaseVerified}
                   />

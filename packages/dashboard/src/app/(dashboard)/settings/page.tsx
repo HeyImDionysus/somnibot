@@ -43,8 +43,8 @@ const SECTIONS: ConnectionSection[] = [
     iconColor: 'text-emerald-400',
     fields: [
       { key: 'supabase_url', label: 'Project URL', placeholder: 'https://your-project.supabase.co' },
-      { key: 'supabase_anon_key', label: 'Anon / Publishable Key', placeholder: 'eyJhbG...', secret: true },
-      { key: 'supabase_service_role_key', label: 'Service Role Key', placeholder: 'eyJhbG...', secret: true, helpText: 'Server-side only. Never exposed to the browser.' },
+      { key: 'supabase_anon_key', label: 'Publishable Key', placeholder: 'sb_publishable_...', secret: true },
+      { key: 'supabase_secret_key', label: 'Secret Key', placeholder: 'sb_secret_...', secret: true, helpText: 'Server-side only. Never exposed to the browser.' },
     ],
   },
   {
