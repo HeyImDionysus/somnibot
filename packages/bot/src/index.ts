@@ -22,7 +22,11 @@ import { AuditService, DiagnosticsService } from './features/audit/index.js';
 import { runMigrations } from './services/migration-runner.js';
 import { startPeriodicSnapshots } from './services/guild-snapshot.js';
 import { startActionQueueListener } from './services/action-queue.js';
-import { scheduleReconciliation } from './services/reconciliation.js';
+import { buildModerationCommands } from './features/moderation/commands.js';
+import { buildHelpCommand } from './features/help/index.js';
+import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
+import { ConfigWatcher } from './services/config-watcher.js';
+import { OwnerNotificationService } from './services/owner-notifications.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -141,10 +145,6 @@ async function main(): Promise<void> {
 
       await startActionQueueListener(guild, client.supabase);
       console.log('[Boot] ✅ Bot action queue listener started');
-
-      const reconciliationTimer = scheduleReconciliation(guild, client.supabase);
-      (client as unknown as Record<string, unknown>)._reconciliationTimer = reconciliationTimer;
-      console.log('[Boot] ✅ Entitlement reconciliation scheduled (every 6 hours)');
     }
 
     // Start sync engine (Phase 5)
@@ -419,7 +419,88 @@ async function main(): Promise<void> {
       console.error('[Boot] ⚠️  Phase 13 (Audit & Diagnostics) initialization error:', err);
     }
 
-    console.log('[Boot] ✅ All Phase 3-13 systems initialized');
+    // Phase 14: Moderation commands, Help, Context Menus, Config Watcher, Notifications
+    if (guild) {
+      try {
+        const rest14 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+
+        // 14a: Register moderation slash commands (/warn, /mute, /kick, /ban, /pardon, /infractions)
+        const modCmds = buildModerationCommands();
+        for (const cmd of Object.values(modCmds)) {
+          try {
+            await rest14.post(
+              Routes.applicationGuildCommands(client.user!.id, client.guildId),
+              { body: cmd.toJSON() },
+            );
+          } catch (regErr) {
+            console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
+          }
+        }
+        console.log('[Boot] ✅ Moderation commands registered (/warn, /mute, /kick, /ban, /pardon, /infractions)');
+
+        // 14b: Register /help command
+        const helpCmd = buildHelpCommand();
+        try {
+          await rest14.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: helpCmd.toJSON() },
+          );
+          console.log('[Boot] ✅ /help command registered');
+        } catch (regErr) {
+          console.warn('[Boot] ⚠️  Failed to register /help:', regErr);
+        }
+
+        // 14c: Register context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
+        const contextMenuCmds = buildContextMenuCommands();
+        for (const cmd of contextMenuCmds) {
+          try {
+            await rest14.post(
+              Routes.applicationGuildCommands(client.user!.id, client.guildId),
+              { body: cmd.toJSON() },
+            );
+          } catch (regErr) {
+            console.warn(`[Boot] ⚠️  Failed to register context menu "${cmd.name}":`, regErr);
+          }
+        }
+        console.log(`[Boot] ✅ ${contextMenuCmds.length} context menu commands registered`);
+
+        // 14d: Start ConfigWatcher for hot-reload from dashboard changes
+        const configWatcher = new ConfigWatcher(
+          guild,
+          client.supabase,
+          client.eventBus,
+          client.valkey,
+        );
+        configWatcher.start();
+        (client as unknown as Record<string, unknown>)._configWatcher = configWatcher;
+        console.log('[Boot] ✅ ConfigWatcher started — dashboard changes hot-reload');
+
+        // 14e: Start BotPresenceManager (rotating status)
+        const presenceManager = new BotPresenceManager(
+          client,
+          client.guildId,
+          client.supabase,
+        );
+        presenceManager.start();
+        (client as unknown as Record<string, unknown>)._presenceManager = presenceManager;
+        console.log('[Boot] ✅ BotPresenceManager started');
+
+        // 14f: Start OwnerNotificationService (DMs owner on critical events)
+        const notificationService = new OwnerNotificationService(
+          client,
+          client.guildId,
+          client.supabase,
+          client.eventBus,
+        );
+        await notificationService.start();
+        (client as unknown as Record<string, unknown>)._notificationService = notificationService;
+        console.log('[Boot] ✅ Owner notification service started');
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 14 initialization error:', err);
+      }
+    }
+
+    console.log('[Boot] ✅ All systems initialized (Phases 3-14)');
   });
 
   // Graceful shutdown
