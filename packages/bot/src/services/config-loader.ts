@@ -7,7 +7,7 @@
  * This allows operators to configure the bot via the dashboard
  * Settings page instead of requiring every value as an env var.
  *
- * Bootstrap requirement: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
+ * Bootstrap requirement: SUPABASE_URL + SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY)
  * must be in env vars (needed to connect to DB at all).
  */
 
@@ -42,8 +42,8 @@ export async function loadConfigFromDatabase(): Promise<number> {
   const supabaseUrl = process.env.SUPABASE_URL
     || process.env.NEXT_PUBLIC_SUPABASE_URL
     || '';
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-    || process.env.SUPABASE_SECRET_KEY
+  const serviceKey = process.env.SUPABASE_SECRET_KEY
+    || process.env.SUPABASE_SERVICE_ROLE_KEY
     || '';
 
   if (!supabaseUrl || !serviceKey) {
