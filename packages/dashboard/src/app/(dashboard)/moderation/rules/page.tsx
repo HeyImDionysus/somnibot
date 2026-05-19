@@ -283,6 +283,19 @@ export default function AutoModRulesPage() {
           onCancel={() => setEditingRule(null)}
         />
       )}
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Auto-Mod Rule"
+        description="Are you sure you want to delete this rule? This action cannot be undone."
+        confirmLabel="Delete Rule"
+        variant="danger"
+        onConfirm={() => {
+          if (confirmDelete) handleDelete(confirmDelete);
+          setConfirmDelete(null);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
@@ -447,18 +460,6 @@ function RuleEditor({
         </div>
       </div>
 
-      <ConfirmDialog
-        open={!!confirmDelete}
-        title="Delete Auto-Mod Rule"
-        description="Are you sure you want to delete this rule? This action cannot be undone."
-        confirmLabel="Delete Rule"
-        variant="danger"
-        onConfirm={() => {
-          if (confirmDelete) handleDelete(confirmDelete);
-          setConfirmDelete(null);
-        }}
-        onCancel={() => setConfirmDelete(null)}
-      />
     </div>
   );
 }
