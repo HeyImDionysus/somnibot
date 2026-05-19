@@ -23,6 +23,7 @@ export async function GET() {
     .from('bot_diagnostics')
     .select('*')
     .eq('guild_id', guildId)
+    .eq('type', 'health')
     .maybeSingle();
 
   // Check Supabase health (if we got this far, it's working)
