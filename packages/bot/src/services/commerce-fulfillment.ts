@@ -281,12 +281,21 @@ export class CommerceFulfillmentService {
       }
     }
 
-    // Emit event
+    // Emit subscription lapsed event
     this.eventBus.emit('subscription.lapsed', payload.guild_id, {
       discordId: payload.discord_id,
       productId: payload.product_id,
       planId: payload.plan_id ?? '',
       status: 'lapsed',
+    });
+
+    // Emit payment.failed so owner gets notified
+    this.eventBus.emit('payment.failed', payload.guild_id, {
+      discordId: payload.discord_id,
+      orderId: payload.order_id,
+      productName: payload.product_name,
+      amount: payload.amount_cents,
+      currency: payload.currency,
     });
     result.eventEmitted = true;
 
