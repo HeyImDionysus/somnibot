@@ -7,12 +7,14 @@
  * DELETE: Delete a reward or multiplier
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const section = searchParams.get('section');
@@ -26,7 +28,7 @@ export async function GET(req: NextRequest) {
     const { data, count } = await supabase
       .from('member_levels')
       .select('member_id, xp, level, total_messages, voice_minutes', { count: 'exact' })
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .order('xp', { ascending: false })
       .range(offset, offset + pageSize - 1);
 
@@ -44,19 +46,19 @@ export async function GET(req: NextRequest) {
     supabase
       .from('guild_config')
       .select(
-        'levels_enabled, min_xp, max_xp, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background',
+        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background',
       )
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .maybeSingle(),
     supabase
       .from('level_rewards')
       .select('*')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .order('level', { ascending: true }),
     supabase
       .from('xp_multipliers')
       .select('*')
-      .eq('guild_id', GUILD_ID)
+      .eq('guild_id', guildId)
       .order('multiplier', { ascending: false }),
   ]);
 
@@ -69,13 +71,17 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
 
   const allowedFields = [
     'levels_enabled',
-    'min_xp',
-    'max_xp',
+    'xp_min',
+    'xp_max',
     'xp_cooldown_seconds',
     'voice_xp_enabled',
     'voice_xp_per_interval',
@@ -100,8 +106,7 @@ export async function PUT(req: NextRequest) {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .update(updates)
-    .eq('guild_id', GUILD_ID)
+    .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' })
     .select()
     .single();
 
@@ -115,6 +120,10 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
   const type = body.type as string;
@@ -131,7 +140,7 @@ export async function POST(req: NextRequest) {
     const { data, error } = await supabase
       .from('level_rewards')
       .insert({
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         level,
         role_id,
         remove_at_level: remove_at_level ?? null,
@@ -161,7 +170,7 @@ export async function POST(req: NextRequest) {
     const { data, error } = await supabase
       .from('xp_multipliers')
       .insert({
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         role_id,
         multiplier,
       })
@@ -181,6 +190,10 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const type = searchParams.get('type');
@@ -199,7 +212,7 @@ export async function DELETE(req: NextRequest) {
     .from(table)
     .delete()
     .eq('id', id)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

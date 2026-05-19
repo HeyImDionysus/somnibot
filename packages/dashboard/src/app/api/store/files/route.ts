@@ -6,14 +6,17 @@
  * DELETE: Remove a file from storage and database
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes } from 'crypto';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const productId = searchParams.get('product_id');
@@ -39,6 +42,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   // Ensure storage bucket exists
@@ -70,7 +77,7 @@ export async function POST(req: NextRequest) {
     .from('products')
     .select('id, name')
     .eq('id', productId)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .single();
 
   if (!product) {
@@ -90,7 +97,7 @@ export async function POST(req: NextRequest) {
   // Generate unique storage path
   const fileId = randomBytes(8).toString('hex');
   const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const storagePath = `${GUILD_ID}/${productId}/${fileId}/${safeFileName}`;
+  const storagePath = `${guildId}/${productId}/${fileId}/${safeFileName}`;
 
   // Upload to Supabase Storage
   const arrayBuffer = await file.arrayBuffer();
@@ -119,7 +126,7 @@ export async function POST(req: NextRequest) {
     .from('product_files')
     .insert({
       product_id: productId,
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       file_name: file.name,
       display_name: displayName ?? file.name,
       description: description ?? null,
@@ -146,6 +153,10 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const fileId = searchParams.get('id');
@@ -162,7 +173,7 @@ export async function DELETE(req: NextRequest) {
     .from('product_files')
     .select('*')
     .eq('id', fileId)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .single();
 
   if (!fileRecord) {

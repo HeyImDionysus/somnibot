@@ -2,12 +2,14 @@
  * /api/welcome — GET/PUT welcome + goodbye configuration.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
@@ -17,7 +19,7 @@ export async function GET() {
       'welcome_card_background, welcome_dm_enabled, welcome_dm_message, welcome_auto_roles, ' +
       'goodbye_enabled, goodbye_channel_id, goodbye_message',
     )
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   if (error) {
@@ -28,6 +30,10 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
 
@@ -46,7 +52,7 @@ export async function PUT(req: NextRequest) {
   const { error } = await supabase
     .from('guild_config')
     .update(allowed)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
