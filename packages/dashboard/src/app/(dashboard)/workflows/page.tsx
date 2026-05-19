@@ -7,6 +7,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/hooks/use-toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -76,6 +77,7 @@ function formatDate(iso: string): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function WorkflowsPage() {
+  const { toast } = useToast();
   const [tab, setTab] = useState<'events' | 'dead-letter'>('events');
   const [events, setEvents] = useState<WorkflowEvent[]>([]);
   const [dlqItems, setDlqItems] = useState<DeadLetterItem[]>([]);
@@ -120,11 +122,17 @@ export default function WorkflowsPage() {
   }, [tab, loadEvents, loadDLQ]);
 
   const handleDLQAction = async (id: string, action: 'retry' | 'discard' | 'resolve', note?: string) => {
-    await fetch('/api/workflows/dead-letter', {
+    const res = await fetch('/api/workflows/dead-letter', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, action, note }),
     });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      toast({ title: `Failed to ${action} item`, description: json.error || 'Unknown error', variant: 'error' });
+      return;
+    }
+    toast({ title: `Item ${action === 'retry' ? 'retried' : action === 'discard' ? 'discarded' : 'resolved'}`, variant: 'success' });
     loadDLQ();
   };
 
