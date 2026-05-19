@@ -25,6 +25,15 @@ export interface LauncherConfig {
 
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
+
+  // ── Phase 6: First-run onboarding ──
+  firstRunComplete: boolean;
+
+  // ── Phase 6: Lavalink management ──
+  lavalinkEnabled: boolean;
+
+  // ── Phase 6: Stale process tracking (PIDs from last run) ──
+  lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null };
 }
 
 const DEFAULTS: LauncherConfig = {
@@ -35,6 +44,9 @@ const DEFAULTS: LauncherConfig = {
   supabaseUrl: '',
   supabaseSecretKey: '',
   supabasePublishableKey: '',
+  firstRunComplete: false,
+  lavalinkEnabled: false,
+  lastPids: { bot: null, dashboard: null, lavalink: null },
 };
 
 const store = new Store<LauncherConfig>({
@@ -54,6 +66,9 @@ export function getConfig(): LauncherConfig {
     supabaseSecretKey: store.get('supabaseSecretKey', ''),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     windowBounds: store.get('windowBounds'),
+    firstRunComplete: store.get('firstRunComplete', false),
+    lavalinkEnabled: store.get('lavalinkEnabled', false),
+    lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null }),
   };
 }
 
