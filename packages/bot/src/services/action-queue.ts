@@ -14,9 +14,11 @@
  * - create_category: Create a new Discord category
  * - delete_category: Delete a Discord category
  * - refresh_snapshot: Force a guild snapshot refresh
+ * - send_embed: Send an embed template to a Discord channel
+ * - test_welcome: Send a test welcome/goodbye message to a Discord channel
  */
 
-import { ChannelType, PermissionsBitField, type Guild, type GuildChannel, type TextChannel } from 'discord.js';
+import { ChannelType, EmbedBuilder, PermissionsBitField, type Guild, type GuildChannel, type TextChannel } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
@@ -468,6 +470,157 @@ async function handleConfigReload(
   return { success: true, data: { section, reloaded: true } };
 }
 
+// ── Send Embed Handler ────────────────────────────────
+
+interface EmbedConfig {
+  title: string | null;
+  description: string | null;
+  color: number | null;
+  fields: Array<{ name: string; value: string; inline?: boolean }>;
+  image_url: string | null;
+  thumbnail_url: string | null;
+  footer_text: string | null;
+  footer_icon_url: string | null;
+  author_name: string | null;
+  author_url: string | null;
+  author_icon_url: string | null;
+  include_timestamp: boolean;
+}
+
+function replaceEmbedVariables(text: string, guild: Guild): string {
+  return text
+    .replace(/\{server\}/g, guild.name)
+    .replace(/\{server\.name\}/g, guild.name)
+    .replace(/\{members\}/g, String(guild.memberCount))
+    .replace(/\{memberCount\}/g, String(guild.memberCount))
+    .replace(/\{date\}/g, new Date().toLocaleDateString())
+    .replace(/\{time\}/g, new Date().toLocaleTimeString())
+    .replace(/\{timestamp\}/g, String(Math.floor(Date.now() / 1000)));
+}
+
+function buildEmbedFromConfig(cfg: EmbedConfig, guild: Guild): EmbedBuilder {
+  const embed = new EmbedBuilder();
+  if (cfg.title) embed.setTitle(replaceEmbedVariables(cfg.title, guild));
+  if (cfg.description) embed.setDescription(replaceEmbedVariables(cfg.description, guild));
+  if (cfg.color != null) embed.setColor(cfg.color);
+  if (cfg.image_url) embed.setImage(cfg.image_url);
+  if (cfg.thumbnail_url) embed.setThumbnail(cfg.thumbnail_url);
+  if (cfg.footer_text) embed.setFooter({
+    text: replaceEmbedVariables(cfg.footer_text, guild),
+    iconURL: cfg.footer_icon_url ?? undefined,
+  });
+  if (cfg.author_name) embed.setAuthor({
+    name: replaceEmbedVariables(cfg.author_name, guild),
+    url: cfg.author_url ?? undefined,
+    iconURL: cfg.author_icon_url ?? undefined,
+  });
+  if (cfg.include_timestamp) embed.setTimestamp();
+  if (cfg.fields?.length) {
+    for (const field of cfg.fields) {
+      embed.addFields({
+        name: replaceEmbedVariables(field.name, guild),
+        value: replaceEmbedVariables(field.value, guild),
+        inline: field.inline ?? false,
+      });
+    }
+  }
+  return embed;
+}
+
+async function handleSendEmbed(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const embedId = payload.embed_id as string;
+  const channelId = payload.channel_id as string;
+  if (!embedId) return { success: false, error: 'Missing embed_id' };
+  if (!channelId) return { success: false, error: 'Missing channel_id' };
+
+  // Look up embed config
+  const { data, error: dbError } = await supabase
+    .from('embed_configs')
+    .select('*')
+    .eq('id', embedId)
+    .maybeSingle();
+
+  if (dbError || !data) {
+    return { success: false, error: `Embed config "${embedId}" not found` };
+  }
+
+  const channel = guild.channels.cache.get(channelId) as TextChannel | undefined;
+  if (!channel?.isTextBased()) {
+    return { success: false, error: `Channel ${channelId} not found or not text-based` };
+  }
+
+  const embed = buildEmbedFromConfig(data as EmbedConfig, guild);
+  const sent = await channel.send({ embeds: [embed] });
+
+  console.log(`[ActionQueue] Embed "${data.name ?? embedId}" sent to #${channel.name}`);
+  return { success: true, data: { messageId: sent.id, channelId, embedName: data.name } };
+}
+
+// ── Test Welcome Handler ──────────────────────────────
+
+async function handleTestWelcome(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const channelId = payload.channel_id as string;
+  const type = (payload.type as string) ?? 'welcome';
+  if (!channelId) return { success: false, error: 'Missing channel_id' };
+
+  const channel = guild.channels.cache.get(channelId) as TextChannel | undefined;
+  if (!channel?.isTextBased()) {
+    return { success: false, error: `Channel ${channelId} not found or not text-based` };
+  }
+
+  // Load current welcome config
+  const { data: configData } = await supabase
+    .from('guild_config')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  // Build mock variables for the test message
+  const botMember = guild.members.me;
+  const mockVars: Record<string, string> = {
+    user: `<@${botMember?.id ?? guild.client.user?.id ?? '0'}>`,
+    'user.name': botMember?.displayName ?? 'TestUser',
+    'user.tag': botMember?.user.tag ?? 'TestUser#0',
+    'user.avatar': botMember?.user.displayAvatarURL({ size: 256 }) ?? '',
+    server: guild.name,
+    'server.icon': guild.iconURL({ size: 256 }) ?? '',
+    memberCount: guild.memberCount.toLocaleString(),
+    memberNumber: `#${guild.memberCount.toLocaleString()}`,
+    level: '0',
+    duration: '42 days',
+  };
+
+  function interpolate(template: string): string {
+    return template.replace(/\{([^}]+)\}/g, (match, key: string) => {
+      return mockVars[key.trim()] ?? match;
+    });
+  }
+
+  const defaultWelcome = 'Welcome to {server}, {user}! 🎉 You\'re member {memberNumber}.';
+  const defaultGoodbye = '{user.name} left. They were with us for {duration}. 👋';
+
+  let messageText: string;
+  if (type === 'goodbye') {
+    messageText = interpolate(configData?.goodbye_message ?? defaultGoodbye);
+  } else {
+    messageText = interpolate(configData?.welcome_message ?? defaultWelcome);
+  }
+
+  const label = type === 'goodbye' ? '👋 Goodbye' : '🎉 Welcome';
+  const sent = await channel.send(`**[TEST ${label} Preview]**\n${messageText}`);
+
+  console.log(`[ActionQueue] Test ${type} message sent to #${channel.name}`);
+  return { success: true, data: { messageId: sent.id, channelId, type } };
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -485,6 +638,8 @@ const ACTION_HANDLERS: Record<
   fulfill_cancellation: handleFulfillment,
   fulfill_suspension: handleFulfillment,
   config_reload: handleConfigReload,
+  send_embed: handleSendEmbed,
+  test_welcome: handleTestWelcome,
 };
 
 async function processAction(
