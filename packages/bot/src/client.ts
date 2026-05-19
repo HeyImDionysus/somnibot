@@ -4,7 +4,7 @@ import {
   Partials,
   type ClientOptions,
 } from 'discord.js';
-import { Shoukaku } from 'shoukaku';
+import { Shoukaku, Connectors } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { getSupabase } from './services/supabase.js';
@@ -76,7 +76,7 @@ export class SomniClient extends Client {
 
     // Initialize Shoukaku (Lavalink connector)
     this.shoukaku = new Shoukaku(
-      this,
+      new Connectors.DiscordJS(this),
       [
         {
           name: 'main',
