@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { createClient } from '@/lib/supabase/client';
 import {
@@ -35,6 +35,7 @@ import {
   Workflow,
   History,
   UserCog,
+  ChevronDown,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -42,23 +43,28 @@ interface NavItem {
   label: string;
   href: string;
   icon: LucideIcon;
-  /** Which integration is required — if not connected, item is greyed out */
   requires?: 'discord' | 'paypal' | 'lavalink';
 }
 
 interface NavGroup {
+  id: string;
   title: string;
   items: NavItem[];
+  /** If true, this group is never collapsible (always shown) */
+  alwaysOpen?: boolean;
 }
 
 const navigation: NavGroup[] = [
   {
+    id: 'overview',
     title: 'Overview',
+    alwaysOpen: true,
     items: [
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     ],
   },
   {
+    id: 'server',
     title: 'Server',
     items: [
       { label: 'Roles & Permissions', href: '/roles', icon: Shield, requires: 'discord' },
@@ -69,6 +75,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'moderation',
     title: 'Moderation',
     items: [
       { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield, requires: 'discord' },
@@ -77,6 +84,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'engagement',
     title: 'Engagement',
     items: [
       { label: 'Levels & XP', href: '/levels', icon: Trophy, requires: 'discord' },
@@ -86,6 +94,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'features',
     title: 'Features',
     items: [
       { label: 'Music', href: '/music', icon: Music, requires: 'lavalink' },
@@ -95,6 +104,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'automation',
     title: 'Automation',
     items: [
       { label: 'Automations', href: '/automations', icon: Zap, requires: 'discord' },
@@ -102,6 +112,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'commerce',
     title: 'Commerce',
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
@@ -113,6 +124,7 @@ const navigation: NavGroup[] = [
     ],
   },
   {
+    id: 'operations',
     title: 'Operations',
     items: [
       { label: 'Incidents', href: '/incidents', icon: Siren },
@@ -125,6 +137,26 @@ const navigation: NavGroup[] = [
   },
 ];
 
+const STORAGE_KEY = 'somnibot-sidebar-collapsed';
+
+function loadCollapsed(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsed(state: Record<string, boolean>) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 interface UserInfo {
   name: string;
   avatarUrl: string | null;
@@ -133,6 +165,11 @@ interface UserInfo {
 export function Sidebar() {
   const pathname = usePathname();
   const [user, setUser] = useState<UserInfo | null>(null);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setCollapsed(loadCollapsed());
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -152,6 +189,23 @@ export function Sidebar() {
     })();
   }, []);
 
+  const toggleGroup = useCallback((groupId: string) => {
+    setCollapsed((prev) => {
+      const next = { ...prev, [groupId]: !prev[groupId] };
+      saveCollapsed(next);
+      return next;
+    });
+  }, []);
+
+  /** Check if any item in a group is active (used to auto-expand) */
+  const groupHasActive = useCallback(
+    (group: NavGroup) =>
+      group.items.some(
+        (item) => pathname === item.href || pathname.startsWith(item.href + '/'),
+      ),
+    [pathname],
+  );
+
   return (
     <aside className="flex h-screen w-60 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary">
       {/* Brand */}
@@ -168,46 +222,77 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-2 py-3">
-        {navigation.map((group) => (
-          <div key={group.title} className="mb-4">
-            <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
-              {group.title}
-            </h3>
-            {group.items.map((item) => {
-              const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
-              const Icon = item.icon;
-              // For now, nothing is locked — all items are navigable.
-              // In the future, feature gating will check integration status from context.
-              const isLocked = false;
+        {navigation.map((group) => {
+          const isCollapsed = collapsed[group.id] && !group.alwaysOpen && !groupHasActive(group);
 
-              return (
-                <Link
-                  key={item.href}
-                  href={isLocked ? '#' : item.href}
-                  className={cn(
-                    'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
-                    isActive && !isLocked
-                      ? 'bg-discord-accent/20 text-white'
-                      : isLocked
-                        ? 'cursor-not-allowed text-discord-text-muted/50'
-                        : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
-                  )}
-                  onClick={isLocked ? (e) => e.preventDefault() : undefined}
-                  aria-disabled={isLocked}
+          return (
+            <div key={group.id} className="mb-1">
+              {/* Group header */}
+              {group.alwaysOpen ? (
+                <h3 className="mb-1 px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted">
+                  {group.title}
+                </h3>
+              ) : (
+                <button
+                  onClick={() => toggleGroup(group.id)}
+                  className="mb-1 flex w-full items-center justify-between px-2 text-[11px] font-semibold uppercase tracking-wide text-discord-text-muted hover:text-discord-text-secondary transition-colors"
                 >
-                  <Icon
-                    size={18}
+                  <span>{group.title}</span>
+                  <ChevronDown
+                    size={12}
                     className={cn(
-                      isActive && !isLocked ? 'text-discord-accent' : '',
-                      isLocked ? 'opacity-40' : '',
+                      'transition-transform duration-200',
+                      isCollapsed && '-rotate-90',
                     )}
                   />
-                  <span className="flex-1 truncate">{item.label}</span>
-                </Link>
-              );
-            })}
-          </div>
-        ))}
+                </button>
+              )}
+
+              {/* Items — animate collapse */}
+              <div
+                className={cn(
+                  'overflow-hidden transition-all duration-200',
+                  isCollapsed ? 'max-h-0 opacity-0' : 'max-h-[500px] opacity-100',
+                )}
+              >
+                {group.items.map((item) => {
+                  const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
+                  const Icon = item.icon;
+                  const isLocked = false;
+
+                  return (
+                    <Link
+                      key={item.href}
+                      href={isLocked ? '#' : item.href}
+                      className={cn(
+                        'group flex items-center gap-2 rounded-[4px] px-2 py-1.5 text-sm transition-standard',
+                        isActive && !isLocked
+                          ? 'bg-discord-accent/20 text-white'
+                          : isLocked
+                            ? 'cursor-not-allowed text-discord-text-muted/50'
+                            : 'text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary',
+                      )}
+                      onClick={isLocked ? (e) => e.preventDefault() : undefined}
+                      aria-disabled={isLocked}
+                    >
+                      <Icon
+                        size={18}
+                        className={cn(
+                          isActive && !isLocked ? 'text-discord-accent' : '',
+                          isLocked ? 'opacity-40' : '',
+                        )}
+                      />
+                      <span className="flex-1 truncate">{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+
+              {/* Spacer after group */}
+              <div className={cn(isCollapsed ? 'mb-1' : 'mb-3')} />
+            </div>
+          );
+        })}
 
         {/* Settings — always at bottom of nav */}
         <div className="mb-4">

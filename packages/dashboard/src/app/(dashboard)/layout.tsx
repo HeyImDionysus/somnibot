@@ -2,9 +2,10 @@ import { redirect } from 'next/navigation';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { Sidebar } from '@/components/layout/sidebar';
 import { DashboardProviders } from '@/components/layout/dashboard-providers';
+import { Breadcrumb } from '@/components/shared/breadcrumb';
 
 /**
- * Dashboard layout — sidebar + content area.
+ * Dashboard layout — sidebar + content area with breadcrumbs.
  * Requires authentication — redirects to /login if not signed in.
  */
 export default async function DashboardLayout({
@@ -25,6 +26,7 @@ export default async function DashboardLayout({
       <main className="flex-1 overflow-y-auto bg-discord-bg-primary">
         <div className="mx-auto max-w-5xl p-6">
           <DashboardProviders>
+            <Breadcrumb />
             {children}
           </DashboardProviders>
         </div>

@@ -1,5 +1,6 @@
 /**
  * Embed Builder — visual editor with live preview for Discord embeds.
+ * Phase 4: Added "Send to Channel" functionality.
  *
  * Architecture doc §22
  */
@@ -7,8 +8,10 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
+import { ChannelPicker } from '@/components/shared/channel-picker';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { Send, Loader2 } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -78,6 +81,10 @@ export default function EmbedBuilderPage() {
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
 
+  // Send-to-channel state
+  const [sendTargetId, setSendTargetId] = useState<string | null>(null);
+  const [sendChannelId, setSendChannelId] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
 
   const fetchEmbeds = useCallback(async () => {
     try {
@@ -193,6 +200,29 @@ export default function EmbedBuilderPage() {
       }
     } catch {
       setError('Failed to delete embed');
+    }
+  };
+
+  const sendEmbed = async (embedId: string, channelId: string) => {
+    setSending(true);
+    try {
+      const res = await fetch('/api/embeds/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ embed_id: embedId, channel_id: channelId }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        toast({ title: 'Embed queued — bot will send it shortly', variant: 'success' });
+        setSendTargetId(null);
+        setSendChannelId(null);
+      } else {
+        toast({ title: json.error || 'Failed to send embed', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to send embed', variant: 'error' });
+    } finally {
+      setSending(false);
     }
   };
 
@@ -417,6 +447,49 @@ export default function EmbedBuilderPage() {
         </div>
       )}
 
+      {/* ── Send to Channel Dialog ─────────────────────── */}
+      {sendTargetId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-6 shadow-xl">
+            <h2 className="mb-1 text-lg font-semibold text-discord-text-primary">Send Embed</h2>
+            <p className="mb-4 text-sm text-discord-text-muted">
+              Choose a channel to send &ldquo;{embeds.find((e) => e.id === sendTargetId)?.name}&rdquo; to.
+            </p>
+            <ChannelPicker
+              label="Target Channel"
+              value={sendChannelId}
+              onChange={(v) => setSendChannelId(v as string | null)}
+              placeholder="Select channel…"
+              channelTypes={['text', 'announcement']}
+            />
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={() => { setSendTargetId(null); setSendChannelId(null); }}
+                className="rounded-input bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-secondary hover:bg-discord-bg-primary/50 transition-standard"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (sendTargetId && sendChannelId) {
+                    sendEmbed(sendTargetId, sendChannelId);
+                  }
+                }}
+                disabled={!sendChannelId || sending}
+                className="flex items-center gap-2 rounded-input bg-discord-success px-4 py-2 text-sm font-medium text-white hover:bg-discord-success/80 transition-standard disabled:opacity-50"
+              >
+                {sending ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Send size={14} />
+                )}
+                Send Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Embed List ─────────────────────────────────── */}
       {embeds.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
@@ -448,6 +521,13 @@ export default function EmbedBuilderPage() {
                   {embed.fields?.length || 0} fields
                 </span>
                 <div className="flex gap-2">
+                  <button
+                    onClick={() => setSendTargetId(embed.id)}
+                    className="flex items-center gap-1 text-discord-text-muted hover:text-discord-success text-xs transition-standard"
+                  >
+                    <Send size={11} />
+                    Send
+                  </button>
                   <button onClick={() => openEditor(embed)} className="text-discord-text-muted hover:text-discord-accent text-xs transition-standard">
                     Edit
                   </button>
