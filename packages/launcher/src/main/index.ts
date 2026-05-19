@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { validateAllCredentials } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning } from './process-manager.js';
+import { pushToSupabase, pullFromSupabase, type SyncableCredentials } from './supabase-sync.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -105,7 +106,7 @@ function registerIpcHandlers(): void {
   });
 
   // ── Process control ──
-  ipcMain.handle('start-bot', () => {
+  ipcMain.handle('start-bot', async () => {
     const config = getConfig();
 
     // Validate that required fields are filled
@@ -119,6 +120,18 @@ function registerIpcHandlers(): void {
     // Build env vars and start processes
     const envVars = buildEnvVars(config, sessionToken);
     startAll(envVars);
+
+    // Sync credentials to Supabase in background (best-effort).
+    // This ensures they survive machine changes per the rehydration prompt.
+    pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
+      discordToken: config.discordToken,
+      discordApplicationId: config.discordApplicationId,
+      discordClientSecret: config.discordClientSecret,
+      discordGuildId: config.discordGuildId,
+      supabasePublishableKey: config.supabasePublishableKey,
+    }).catch(() => {
+      // Silent — sync is best-effort. Table may not exist until wizard runs.
+    });
 
     return { ok: true };
   });
@@ -143,6 +156,16 @@ function registerIpcHandlers(): void {
     if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
     }
+  });
+
+  // ── Cloud sync ──
+  ipcMain.handle('pull-from-supabase', async (_event, supabaseUrl: string, supabaseSecretKey: string) => {
+    const result = await pullFromSupabase(supabaseUrl, supabaseSecretKey);
+    if (result.ok && result.credentials) {
+      // Save pulled credentials to local store
+      saveConfig(result.credentials);
+    }
+    return result;
   });
 
   // ── App info ──
