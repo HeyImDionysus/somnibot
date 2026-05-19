@@ -6,6 +6,9 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -38,6 +41,18 @@ const emptyForm = {
   remove_on_unreact: true,
   log_actions: false,
 };
+
+// ── Name display helpers ──────────────────────────────────
+
+function RRChannelName({ id }: { id: string }) {
+  const { resolveChannel } = useDiscordNames({ channelIds: [id] });
+  return <span>{resolveChannel(id)}</span>;
+}
+
+function RRRoleName({ id }: { id: string }) {
+  const { resolveRole, roleColor } = useDiscordNames({ roleIds: [id] });
+  return <span style={{ color: roleColor(id) }}>{resolveRole(id)}</span>;
+}
 
 // ── Main Component ────────────────────────────────────────
 
@@ -217,13 +232,18 @@ export default function ReactionRolesPage() {
             <div className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Channel ID *</label>
-                  <input type="text" value={form.channel_id} onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <ChannelPicker
+                    label="Channel *"
+                    value={form.channel_id || null}
+                    onChange={(v) => setForm({ ...form, channel_id: (v as string) ?? '' })}
+                    placeholder="Select channel…"
+                    channelTypes={['text', 'announcement']}
+                  />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-discord-text-muted">Message ID *</label>
                   <input type="text" value={form.message_id} onChange={(e) => setForm({ ...form, message_id: e.target.value })}
+                    placeholder="Right-click message → Copy ID"
                     className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
                 </div>
               </div>
@@ -234,9 +254,12 @@ export default function ReactionRolesPage() {
                     className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Role ID *</label>
-                  <input type="text" value={form.role_id} onChange={(e) => setForm({ ...form, role_id: e.target.value })}
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <RolePicker
+                    label="Role *"
+                    value={form.role_id || null}
+                    onChange={(v) => setForm({ ...form, role_id: (v as string) ?? '' })}
+                    placeholder="Select role to assign…"
+                  />
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
@@ -246,9 +269,13 @@ export default function ReactionRolesPage() {
                     className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Role</label>
-                  <input type="text" value={form.require_role} onChange={(e) => setForm({ ...form, require_role: e.target.value })} placeholder="Role ID"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <RolePicker
+                    label="Required Role"
+                    value={form.require_role || null}
+                    onChange={(v) => setForm({ ...form, require_role: (v as string) ?? '' })}
+                    placeholder="Optional"
+                    allowNone
+                  />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Level</label>
@@ -294,7 +321,7 @@ export default function ReactionRolesPage() {
           <div key={key} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
             <div className="border-b border-discord-border-subtle px-5 py-3">
               <p className="text-sm font-medium text-discord-text-primary">Message: {mappings[0].message_id}</p>
-              <p className="text-xs text-discord-text-muted">Channel: {mappings[0].channel_id}</p>
+              <p className="text-xs text-discord-text-muted">Channel: <RRChannelName id={mappings[0].channel_id} /></p>
             </div>
             <div className="divide-y divide-discord-border-subtle">
               {mappings.map((rr) => (
@@ -302,7 +329,7 @@ export default function ReactionRolesPage() {
                   <div className="flex items-center gap-3">
                     <span className="text-2xl">{rr.emoji}</span>
                     <div>
-                      <p className="text-sm font-medium text-discord-text-primary">Role {rr.role_id}</p>
+                      <p className="text-sm font-medium text-discord-text-primary"><RRRoleName id={rr.role_id} /></p>
                       <p className="text-xs text-discord-text-muted">
                         {rr.exclusive_group ? `Group: ${rr.exclusive_group}` : 'No group'}
                         {rr.require_level != null ? ` · Min level ${rr.require_level}` : ''}

@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -286,14 +288,23 @@ export default function CustomCommandsPage() {
               {/* Restrictions */}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Allowed Roles (comma-separated IDs)</label>
-                  <input type="text" value={draft.allowed_roles} onChange={(e) => setDraft({ ...draft, allowed_roles: e.target.value })} placeholder="Leave empty for all"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <RolePicker
+                    label="Allowed Roles"
+                    hint="Leave empty to allow all"
+                    value={draft.allowed_roles ? draft.allowed_roles.split(',').map(s => s.trim()).filter(Boolean) : []}
+                    onChange={(v) => setDraft({ ...draft, allowed_roles: (v as string[] ?? []).join(', ') })}
+                    multi
+                    placeholder="All roles allowed"
+                  />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Denied Roles</label>
-                  <input type="text" value={draft.denied_roles} onChange={(e) => setDraft({ ...draft, denied_roles: e.target.value })} placeholder="Leave empty for none"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <RolePicker
+                    label="Denied Roles"
+                    value={draft.denied_roles ? draft.denied_roles.split(',').map(s => s.trim()).filter(Boolean) : []}
+                    onChange={(v) => setDraft({ ...draft, denied_roles: (v as string[] ?? []).join(', ') })}
+                    multi
+                    placeholder="None denied"
+                  />
                 </div>
               </div>
 
@@ -344,12 +355,10 @@ export default function CustomCommandsPage() {
                           />
                         )}
                         {(action.type === 'give_role' || action.type === 'remove_role') && (
-                          <input
-                            type="text"
-                            value={action.roleId ?? ''}
-                            onChange={(e) => updateAction(i, { roleId: e.target.value })}
-                            placeholder="Role ID"
-                            className="w-full rounded-input bg-discord-bg-secondary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
+                          <RolePicker
+                            value={action.roleId || null}
+                            onChange={(v) => updateAction(i, { roleId: (v as string) ?? '' })}
+                            placeholder="Select role…"
                           />
                         )}
                         {action.type === 'send_embed' && (

@@ -6,6 +6,9 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -76,6 +79,25 @@ function numToHex(n: number | null): string {
 
 function hexToNum(hex: string): number {
   return parseInt(hex.replace('#', ''), 16);
+}
+
+// ── Helper: Inline member name display ────────────────────
+
+function MemberName({ memberId }: { memberId: string }) {
+  const { resolveMember } = useDiscordNames({ memberIds: [memberId] });
+  return <p className="truncate text-sm font-medium text-discord-text-primary">{resolveMember(memberId)}</p>;
+}
+
+// ── Helper: Inline role name display ──────────────────────
+
+function RoleDisplay({ roleId }: { roleId: string }) {
+  const { resolveRole, roleColor } = useDiscordNames({ roleIds: [roleId] });
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="h-2 w-2 rounded-full shrink-0" style={{ backgroundColor: roleColor(roleId) }} />
+      <span style={{ color: roleColor(roleId) }}>{resolveRole(roleId)}</span>
+    </span>
+  );
 }
 
 // ── Main Component ────────────────────────────────────────
@@ -437,31 +459,13 @@ export default function LevelsPage() {
 
             {/* Channel list */}
             <div className="mt-4">
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                {config.xp_channel_mode === 'blacklist' ? 'Blacklisted Channels' : 'Whitelisted Channels'}
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={channelInput}
-                  onChange={(e) => setChannelInput(e.target.value)}
-                  placeholder="Channel ID"
-                  className="flex-1 rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
-                />
-                <button onClick={addChannel} className="rounded-input bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/80 transition-standard">
-                  Add
-                </button>
-              </div>
-              {config.xp_channel_list.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {config.xp_channel_list.map((ch) => (
-                    <span key={ch} className="flex items-center gap-1 rounded-input bg-discord-bg-tertiary px-2 py-1 text-xs text-discord-text-secondary">
-                      #{ch}
-                      <button onClick={() => removeChannel(ch)} className="text-discord-danger hover:text-discord-danger/80 ml-1">×</button>
-                    </span>
-                  ))}
-                </div>
-              )}
+              <ChannelPicker
+                label={config.xp_channel_mode === 'blacklist' ? 'Blacklisted Channels' : 'Whitelisted Channels'}
+                value={config.xp_channel_list}
+                onChange={(v) => setConfig({ ...config, xp_channel_list: (v as string[]) ?? [] })}
+                multi
+                placeholder="Select channels…"
+              />
             </div>
           </div>
 
@@ -470,13 +474,12 @@ export default function LevelsPage() {
             <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">Level-Up Announcements</h2>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Announcement Channel ID</label>
-                <input
-                  type="text"
-                  value={config.level_up_channel_id ?? ''}
-                  onChange={(e) => setConfig({ ...config, level_up_channel_id: e.target.value || null })}
-                  placeholder="Leave empty to disable"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
+                <ChannelPicker
+                  label="Announcement Channel"
+                  value={config.level_up_channel_id}
+                  onChange={(v) => setConfig({ ...config, level_up_channel_id: (v as string) || null })}
+                  placeholder="Select channel (or none to disable)"
+                  allowNone
                 />
               </div>
               <div>
@@ -528,9 +531,12 @@ export default function LevelsPage() {
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Role ID</label>
-                <input type="text" value={newRewardRoleId} onChange={(e) => setNewRewardRoleId(e.target.value)} placeholder="Role ID"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <RolePicker
+                  label="Reward Role"
+                  value={newRewardRoleId || null}
+                  onChange={(v) => setNewRewardRoleId((v as string) ?? '')}
+                  placeholder="Select role…"
+                />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Remove at Level</label>
@@ -563,7 +569,7 @@ export default function LevelsPage() {
                       {r.level}
                     </span>
                     <div>
-                      <p className="text-sm font-medium text-discord-text-primary">Level {r.level} → Role {r.role_id}</p>
+                      <p className="text-sm font-medium text-discord-text-primary">Level {r.level} → <RoleDisplay roleId={r.role_id} /></p>
                       <p className="text-xs text-discord-text-muted">
                         {r.remove_at_level ? `Removed at level ${r.remove_at_level}` : 'Permanent'}
                         {r.announce ? ' · Announced' : ''}
@@ -587,9 +593,12 @@ export default function LevelsPage() {
             <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">Add XP Multiplier</h2>
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Role ID</label>
-                <input type="text" value={newMultRoleId} onChange={(e) => setNewMultRoleId(e.target.value)} placeholder="Role ID"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <RolePicker
+                  label="Role"
+                  value={newMultRoleId || null}
+                  onChange={(v) => setNewMultRoleId((v as string) ?? '')}
+                  placeholder="Select role…"
+                />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Multiplier</label>
@@ -619,7 +628,7 @@ export default function LevelsPage() {
                     <span className="flex h-10 w-10 items-center justify-center rounded-full bg-discord-warning/10 text-sm font-bold text-discord-warning">
                       {m.multiplier}×
                     </span>
-                    <p className="text-sm font-medium text-discord-text-primary">Role {m.role_id}</p>
+                    <p className="text-sm font-medium text-discord-text-primary"><RoleDisplay roleId={m.role_id} /></p>
                   </div>
                   <button onClick={() => deleteMultiplier(m.id)} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
                     Remove
@@ -652,7 +661,7 @@ export default function LevelsPage() {
                         {rank <= 3 ? medals[rank - 1] : `#${rank}`}
                       </span>
                       <div className="flex-1 min-w-0">
-                        <p className="truncate text-sm font-medium text-discord-text-primary">{entry.member_id}</p>
+                        <MemberName memberId={entry.member_id} />
                         <p className="text-xs text-discord-text-muted">
                           {entry.total_messages.toLocaleString()} msgs · {entry.voice_minutes} voice min
                         </p>

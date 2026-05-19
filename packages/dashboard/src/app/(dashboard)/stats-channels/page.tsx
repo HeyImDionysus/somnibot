@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -230,10 +231,14 @@ export default function StatsChannelsPage() {
                 <p className="mt-1 text-xs text-discord-text-muted">Use {'{value}'} or {'{count}'} where the number should appear</p>
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Category ID (optional)</label>
-                <input type="text" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}
+                <ChannelPicker
+                  label="Category (optional)"
+                  value={form.category_id || null}
+                  onChange={(v) => setForm({ ...form, category_id: (v as string) ?? '' })}
                   placeholder="Place channel in this category"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  channelTypes={['category']}
+                  allowNone
+                />
               </div>
               {form.stat_type === 'custom_counter' && (
                 <div>
