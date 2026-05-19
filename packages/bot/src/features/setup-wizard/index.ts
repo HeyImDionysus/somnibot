@@ -3,7 +3,7 @@
  *
  * Provides:
  * - /setup slash command (guild owner only)
- * - Sequential flow: PayPal → Lavalink → done
+ * - Sequential flow: PayPal → Deployment → Supabase Management
  * - Button, modal, and select menu interaction handlers
  * - Credential verification via real API calls
  * - Progress persistence in Supabase instance_settings
