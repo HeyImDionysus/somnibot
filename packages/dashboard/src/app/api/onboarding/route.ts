@@ -2,12 +2,14 @@
  * /api/onboarding — GET/PUT onboarding configuration.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
@@ -16,7 +18,7 @@ export async function GET() {
       'member_role_id, onboarding_enabled, interest_role_mapping, ' +
       'returning_member_skip_welcome_dm, returning_member_restore_entitlements, returning_member_restore_levels',
     )
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   if (error) {
@@ -27,6 +29,10 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
 
@@ -44,8 +50,7 @@ export async function PUT(req: NextRequest) {
 
   const { error } = await supabase
     .from('guild_config')
-    .update(allowed)
-    .eq('guild_id', GUILD_ID);
+    .upsert({ guild_id: guildId, ...allowed }, { onConflict: 'guild_id' });
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

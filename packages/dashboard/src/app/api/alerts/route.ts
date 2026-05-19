@@ -7,11 +7,13 @@
  * Phase C: Real diagnostics & alerting.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function GET(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
 
@@ -23,7 +25,7 @@ export async function GET(req: NextRequest) {
   let query = supabase
     .from('alerts')
     .select('*')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .limit(limit);
 
@@ -62,6 +64,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   let body: { id?: string; action?: string };
@@ -89,7 +95,7 @@ export async function PATCH(req: NextRequest) {
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)
-      .eq('guild_id', GUILD_ID);
+      .eq('guild_id', guildId);
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
@@ -106,7 +112,7 @@ export async function PATCH(req: NextRequest) {
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)
-      .eq('guild_id', GUILD_ID);
+      .eq('guild_id', guildId);
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });

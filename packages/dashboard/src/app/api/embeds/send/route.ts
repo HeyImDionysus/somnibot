@@ -5,11 +5,13 @@
  * The bot picks it up, resolves the embed config, and sends it.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   let body: { embed_id?: string; channel_id?: string };
@@ -36,7 +38,7 @@ export async function POST(req: NextRequest) {
     .from('embed_configs')
     .select('id')
     .eq('id', embed_id)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   if (embedError || !embed) {
@@ -50,7 +52,7 @@ export async function POST(req: NextRequest) {
   const { error: queueError } = await supabase
     .from('bot_action_queue')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       action: 'send_embed',
       payload: {
         embed_config_id: embed_id,

@@ -8,20 +8,22 @@
  *   music:stats:top_tracks:{guildId} — top tracks
  */
 import { NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 // For now, read from Supabase since we can't directly connect to Valkey from dashboard.
 // The bot writes music status to bot_diagnostics periodically.
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   // Try reading from bot_diagnostics (the bot's DiagnosticsService writes these)
   const { data: diag } = await supabase
     .from('bot_diagnostics')
     .select('data')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .eq('type', 'music_status')
     .order('created_at', { ascending: false })
     .limit(1)
@@ -31,14 +33,14 @@ export async function GET() {
   const { data: config } = await supabase
     .from('guild_config')
     .select('music_enabled')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   // Read from workflow_events as a recent track history source
   const { data: recentTracks } = await supabase
     .from('audit_logs')
     .select('details, timestamp')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .like('action', 'music.%')
     .order('timestamp', { ascending: false })
     .limit(10);

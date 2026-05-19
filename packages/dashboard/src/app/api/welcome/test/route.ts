@@ -5,11 +5,13 @@
  * The bot picks it up, renders the template with mock data, and sends it.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   let body: { channel_id?: string; type?: 'welcome' | 'goodbye' };
@@ -42,7 +44,7 @@ export async function POST(req: NextRequest) {
   const { error: queueError } = await supabase
     .from('bot_action_queue')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       action: 'test_welcome',
       payload: {
         channel_id,
