@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
 import { Badge } from '@/components/shared/badge';
 import { cn } from '@/lib/utils/cn';
@@ -277,11 +278,7 @@ export default function SetupPage() {
   const canAdvance = completedSteps.has(currentStep);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-8 w-8 animate-spin text-discord-accent" />
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   return (

@@ -4,6 +4,10 @@
  */
 'use client';
 
+import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
+import { EmptyState } from '@/components/shared/empty-state';
+import { ShoppingCart } from 'lucide-react';
+
 import { useEffect, useState, useCallback } from 'react';
 
 // ── Types ─────────────────────────────────────────────────
@@ -109,11 +113,7 @@ export default function AnalyticsPage() {
   useEffect(() => { load(); }, [load]);
 
   if (loading || !data) {
-    return (
-      <div className="flex items-center justify-center py-24">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
-      </div>
-    );
+    return <DashboardSkeleton />;
   }
 
   const revChange = changeIndicator(data.revenue.change);
@@ -336,7 +336,7 @@ export default function AnalyticsPage() {
       <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-4">
         <h2 className="text-sm font-semibold text-discord-text-secondary mb-4">Product Performance</h2>
         {data.products.length === 0 ? (
-          <p className="text-sm text-discord-text-muted py-4 text-center">No products yet</p>
+          <EmptyState compact icon={ShoppingCart} title="No products yet" description="Create a product in the Store to see analytics." />
         ) : (
           <div className="space-y-2">
             {data.products.map((p) => (

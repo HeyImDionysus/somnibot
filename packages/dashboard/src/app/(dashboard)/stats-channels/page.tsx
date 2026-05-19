@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useToast } from '@/components/shared/toast';
+import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
@@ -175,11 +176,7 @@ export default function StatsChannelsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="animate-pulse text-discord-text-muted">Loading stats channels…</div>
-      </div>
-    );
+    return <CardListSkeleton />;
   }
 
   return (

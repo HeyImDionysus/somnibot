@@ -5,6 +5,8 @@
  */
 'use client';
 
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+
 import { useEffect, useState, useCallback } from 'react';
 
 interface AutoModRule {
@@ -150,11 +152,7 @@ export default function AutoModRulesPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading auto-mod rules...</div>
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   return (

@@ -5,6 +5,8 @@
  */
 'use client';
 
+import { CardListSkeleton } from '@/components/shared/loading-skeleton';
+
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import Link from 'next/link';
@@ -247,11 +249,7 @@ export default function TicketsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading ticketing system...</div>
-      </div>
-    );
+    return <CardListSkeleton />;
   }
 
   // ── Panel Editor ─────────────────────────────────────

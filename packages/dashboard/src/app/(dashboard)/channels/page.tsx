@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
+import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
 import { Input, Select, Toggle } from '@/components/shared/input';
 import { Badge } from '@/components/shared/badge';
@@ -243,12 +244,7 @@ export default function ChannelsPage() {
 
   // ── Loading state ──
   if (loading) {
-    return (
-      <div className="flex h-64 items-center justify-center">
-        <RefreshCw size={20} className="animate-spin text-discord-text-muted" />
-        <span className="ml-2 text-sm text-discord-text-muted">Loading Discord channels...</span>
-      </div>
-    );
+    return <CardListSkeleton />;
   }
 
   return (

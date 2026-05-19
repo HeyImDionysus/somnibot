@@ -5,6 +5,8 @@
  */
 'use client';
 
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
+
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
@@ -232,7 +234,7 @@ export default function InfractionsPage() {
 
       {/* Table */}
       {loading ? (
-        <div className="text-center text-discord-text-muted py-8">Loading...</div>
+        <TableSkeleton rows={8} />
       ) : infractions.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-discord-border bg-discord-bg-secondary py-16">
           <span className="text-4xl">📋</span>

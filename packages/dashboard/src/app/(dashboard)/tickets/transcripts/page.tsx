@@ -5,6 +5,8 @@
  */
 'use client';
 
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
+
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 
@@ -82,11 +84,7 @@ export default function TranscriptsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading transcripts...</div>
-      </div>
-    );
+    return <TableSkeleton />;
   }
 
   // ── Viewing a specific transcript ──────────────────

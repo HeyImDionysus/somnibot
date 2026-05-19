@@ -11,6 +11,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 interface OnboardingConfig {
   member_role_id: string | null;
@@ -116,11 +117,7 @@ export default function OnboardingPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading...</div>
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   return (

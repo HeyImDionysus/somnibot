@@ -6,6 +6,10 @@
  */
 'use client';
 
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
+import { EmptyState } from '@/components/shared/empty-state';
+import { ScrollText } from 'lucide-react';
+
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
@@ -231,13 +235,9 @@ export default function AuditLogPage() {
       {/* Log entries */}
       <div className="space-y-1">
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
-          </div>
+          <TableSkeleton rows={10} />
         ) : entries.length === 0 ? (
-          <div className="rounded-lg bg-discord-bg-secondary py-12 text-center text-discord-text-muted">
-            No audit log entries found
-          </div>
+          <EmptyState icon={ScrollText} title="No audit log entries found" description="Activity will appear here as the bot processes events." />
         ) : (
           entries.map((entry) => {
             const isExpanded = expandedId === entry.id;
