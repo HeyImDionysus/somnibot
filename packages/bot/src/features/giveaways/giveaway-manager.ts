@@ -186,30 +186,43 @@ export class GiveawayManager {
 
     // Check if already entered
     if (giveaway.entries.includes(userId)) {
-      // Allow withdraw
-      const newEntries = giveaway.entries.filter((e: string) => e !== userId);
-      await this.supabase
-        .from('giveaways')
-        .update({ entries: newEntries })
-        .eq('id', giveawayId);
+      // Withdraw — atomic array_remove to avoid race condition
+      const { data: updated } = await this.supabase.rpc('giveaway_remove_entry', {
+        p_giveaway_id: giveawayId,
+        p_user_id: userId,
+      });
 
-      // Update embed
+      // Fallback if RPC doesn't exist yet: filter locally
+      const newEntries = updated?.entries ?? giveaway.entries.filter((e: string) => e !== userId);
+      if (!updated) {
+        await this.supabase
+          .from('giveaways')
+          .update({ entries: newEntries })
+          .eq('id', giveawayId);
+      }
+
       await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
-
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
       return true;
     }
 
-    // Add entry
-    const newEntries = [...giveaway.entries, userId];
-    await this.supabase
-      .from('giveaways')
-      .update({ entries: newEntries })
-      .eq('id', giveawayId);
+    // Add entry — atomic array_append to avoid race condition
+    // Two users clicking simultaneously won't overwrite each other's entry
+    const { data: updated } = await this.supabase.rpc('giveaway_add_entry', {
+      p_giveaway_id: giveawayId,
+      p_user_id: userId,
+    });
 
-    // Update embed
+    // Fallback if RPC doesn't exist yet: append locally
+    const newEntries = updated?.entries ?? [...giveaway.entries, userId];
+    if (!updated) {
+      await this.supabase
+        .from('giveaways')
+        .update({ entries: newEntries })
+        .eq('id', giveawayId);
+    }
+
     await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
-
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });
     return true;
   }

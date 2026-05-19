@@ -13,6 +13,8 @@ import {
   X,
 } from 'lucide-react';
 import { deployApi } from '@/lib/api/client';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ============================================================
 // Types
@@ -237,6 +239,7 @@ const STEPS: StepConfig[] = [
 
 export default function SetupPage() {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
+  const { toast } = useToast();
   const [completedSteps, setCompletedSteps] = useState<Set<WizardStep>>(new Set());
   const [deploying, setDeploying] = useState(false);
   const [setupData, setSetupData] = useState<SetupData | null>(null);
@@ -1151,6 +1154,7 @@ function Step7GoLive({
   const [confirming, setConfirming] = useState(false);
   const [confirmed, setConfirmed] = useState(setupData?.guild?.setupCompleted ?? false);
   const [error, setError] = useState<string | null>(null);
+  const { toast } = useToast();
 
   const handleConfirm = async () => {
     setConfirming(true);
@@ -1168,9 +1172,11 @@ function Step7GoLive({
       } else {
         const data = await res.json();
         setError(data.error ?? 'Confirmation failed');
+      toast({ title: data.error ?? 'Confirmation failed', variant: 'error' });
       }
     } catch {
       setError('Network error — try again');
+      toast({ title: 'Network error — try again', variant: 'error' });
     } finally {
       setConfirming(false);
     }

@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
 
     // Log the attempt to license_validations with a synthetic reference
     await supabase.from('license_validations').insert({
-      license_key_id: null as unknown as string, // No FK — logged for audit
+      license_key_id: null, // FK is nullable — no key found, logged for audit
       product_id: product_id,
       device_fingerprint: device_fingerprint ?? null,
       result: 'invalid_key',
