@@ -260,11 +260,12 @@ const deploymentStep: WizardStep = {
 
 const supabaseManagementStep: WizardStep = {
   id: 'supabase_mgmt',
-  title: 'Supabase Management',
+  title: 'Database Setup',
   emoji: '🗄️',
-  description: 'Connect the Supabase Management API so the bot can auto-run database migrations on updates.',
+  description: 'Connect to your Supabase database so the bot can create and update its schema.',
   instructions: [
-    'This step is **optional** but recommended.',
+    '**This step is required.** The bot needs database access to create',
+    'all its tables on first run and keep them updated after upgrades.',
     '',
     '1. Go to your Supabase Dashboard → Account → Access Tokens',
     '2. Generate a new token and copy it',
@@ -272,8 +273,8 @@ const supabaseManagementStep: WizardStep = {
     '4. Copy the **Connection String (URI)** — the `postgresql://...` URL',
     '5. Click "I have my credentials" and paste both values',
     '',
-    '> Without this, database migrations need to be run manually after updates.',
-    '> With it, the bot handles schema changes automatically when it restarts.',
+    '> The bot runs migrations automatically on startup. Without these',
+    '> credentials, the database has no tables and nothing will work.',
   ].join('\n'),
   url: 'https://supabase.com/dashboard/account/tokens',
   urlLabel: 'Open Supabase Dashboard',
@@ -345,9 +346,9 @@ const supabaseManagementStep: WizardStep = {
 /* ------------------------------------------------------------------ */
 
 export const WIZARD_STEPS: WizardStep[] = [
+  supabaseManagementStep,
   paypalStep,
   deploymentStep,
-  supabaseManagementStep,
 ];
 
 /* ------------------------------------------------------------------ */
