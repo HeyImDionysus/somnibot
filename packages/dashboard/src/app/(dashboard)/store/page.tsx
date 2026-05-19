@@ -10,6 +10,7 @@ import ProductFiles from '@/components/store/product-files';
 import { RolePicker } from '@/components/shared/role-picker';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -383,7 +384,7 @@ export default function StorePage() {
 
       {/* Product List */}
       {loading ? (
-        <div className="text-center py-12 text-discord-text-muted">Loading products…</div>
+        <CardListSkeleton cards={4} />
       ) : products.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
           <div className="text-4xl mb-3">🏪</div>

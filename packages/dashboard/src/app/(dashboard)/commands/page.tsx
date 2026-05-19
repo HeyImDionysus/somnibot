@@ -9,6 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useToast } from '@/components/shared/toast';
+import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
@@ -213,11 +214,7 @@ export default function CustomCommandsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="animate-pulse text-discord-text-muted">Loading custom commands…</div>
-      </div>
-    );
+    return <CardListSkeleton />;
   }
 
   return (

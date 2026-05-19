@@ -10,6 +10,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 interface SyncConfig {
   sync_enabled: boolean;
@@ -147,11 +148,7 @@ export default function SyncPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading sync status...</div>
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   if (!status) {

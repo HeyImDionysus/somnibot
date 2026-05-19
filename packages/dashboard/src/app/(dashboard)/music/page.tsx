@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import NowPlayingWidget from '@/components/music/now-playing-widget';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -113,11 +114,7 @@ export default function MusicSettingsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   return (

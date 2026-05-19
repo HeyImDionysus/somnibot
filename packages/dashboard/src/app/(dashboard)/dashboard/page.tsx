@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
+import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
 import {
   Shield, Users, Zap, Settings, Music, ShoppingCart, Ticket,
-  CheckCircle2, XCircle, Loader2, Rocket,
+  CheckCircle2, XCircle, Rocket,
   BarChart3, DollarSign, Headphones, Activity, Clock, Wifi,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -24,6 +25,7 @@ interface GuildData {
 }
 
 interface DashboardStats {
+  botOnline: boolean;
   memberCount: number;
   trackedMembers: number;
   activeTickets: number;
@@ -31,7 +33,7 @@ interface DashboardStats {
   revenueThisMonth: number;
   activeGiveaways: number;
   eventsToday: number;
-  uptime: string;
+  uptime: string | null;
   uptimeSeconds: number;
   wsPing: number | null;
   activeVoice: number;
@@ -92,11 +94,7 @@ export default function DashboardPage() {
   useAutoRefresh('audit_log', undefined, refreshStats);
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-8 w-8 animate-spin text-discord-accent" />
-      </div>
-    );
+    return <DashboardSkeleton />;
   }
 
   const guild = data?.guild;
@@ -129,34 +127,38 @@ export default function DashboardPage() {
           </CardHeader>
         </Card>
 
-        {/* Bot Status */}
+        {/* Bot Status — truthful: checks diagnostics snapshot recency */}
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium">Bot</CardTitle>
-              {guild?.bot_joined_at ? (
+              {stats?.botOnline ? (
                 <CheckCircle2 size={18} className="text-green-500" />
+              ) : guild?.bot_joined_at ? (
+                <XCircle size={18} className="text-discord-danger" />
               ) : (
                 <XCircle size={18} className="text-discord-text-muted" />
               )}
             </div>
             <CardDescription>
-              {guild?.bot_joined_at
-                ? (() => {
-                    const pos = guild.bot_role_position;
-                    const total = data?.totalRoles;
-                    const ping = stats?.wsPing;
-                    let statusText = 'Online';
-                    if (pos != null && total && total > 0) {
-                      const fromTop = total - pos;
-                      statusText = fromTop <= 1
-                        ? 'Online · Highest role ✓'
-                        : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
-                    }
-                    if (ping != null) statusText += ` · ${ping}ms`;
-                    return statusText;
-                  })()
-                : 'Bot not connected'}
+              {!guild?.bot_joined_at
+                ? 'Bot not connected'
+                : !stats?.botOnline
+                  ? 'Offline — bot is not responding'
+                  : (() => {
+                      const pos = guild.bot_role_position;
+                      const total = data?.totalRoles;
+                      const ping = stats?.wsPing;
+                      let statusText = 'Online';
+                      if (pos != null && total && total > 0) {
+                        const fromTop = total - pos;
+                        statusText = fromTop <= 1
+                          ? 'Online · Highest role ✓'
+                          : `Online · ${fromTop - 1} role${fromTop - 1 === 1 ? '' : 's'} above bot`;
+                      }
+                      if (ping != null) statusText += ` · ${ping}ms`;
+                      return statusText;
+                    })()}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -215,7 +217,8 @@ export default function DashboardPage() {
           <MetricCard
             icon={Headphones}
             label="Voice Connections"
-            value={stats?.activeVoice ?? '—'}
+            value={stats?.botOnline ? (stats?.activeVoice ?? '—') : '—'}
+            subValue={!stats?.botOnline ? 'Bot offline' : undefined}
             color="text-purple-400"
           />
           <MetricCard
@@ -227,14 +230,15 @@ export default function DashboardPage() {
           <MetricCard
             icon={Clock}
             label="Uptime"
-            value={stats?.uptime ?? '—'}
+            value={stats?.botOnline ? (stats?.uptime ?? '—') : '—'}
+            subValue={!stats?.botOnline ? 'Bot offline' : undefined}
             color="text-cyan-400"
           />
           <MetricCard
             icon={Wifi}
-            label="Events Today"
-            value={stats?.eventsToday ?? '—'}
-            subValue={stats?.valkeyConnected ? 'Cache ✓' : 'No cache'}
+            label="Tracked Members"
+            value={stats?.trackedMembers ?? '—'}
+            subValue={stats?.botOnline && stats?.valkeyConnected ? 'Cache ✓' : stats?.botOnline ? 'No cache' : 'Bot offline'}
             color="text-blue-400"
           />
         </div>
