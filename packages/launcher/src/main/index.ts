@@ -12,9 +12,18 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { validateAllCredentials } from './validators.js';
-import { startAll, stopAll, getStatus, isRunning } from './process-manager.js';
+import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { pushToSupabase } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
+import {
+  checkJava,
+  downloadLavalink,
+  startLavalink,
+  stopLavalink,
+  getLavalinkStatus,
+  getLavalinkError,
+  isLavalinkJarPresent,
+} from './lavalink-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -86,7 +95,6 @@ function registerIpcHandlers(): void {
   // ── Config ──
   ipcMain.handle('get-config', () => {
     const config = getConfig();
-    // Return as plain object (no class methods)
     return {
       discordToken: config.discordToken,
       discordApplicationId: config.discordApplicationId,
@@ -116,6 +124,24 @@ function registerIpcHandlers(): void {
       return { ok: false, error: 'Fill in all required fields first.' };
     }
 
+    // Phase 6: Check port availability before starting
+    const portFree = await checkPortAvailable(3456);
+    if (!portFree) {
+      return {
+        ok: false,
+        error: 'Port 3456 is already in use. Close the application using that port, or restart your computer and try again.',
+      };
+    }
+
+    // Phase 6: Start managed Lavalink if enabled (non-blocking)
+    if (config.lavalinkEnabled) {
+      const llResult = await startLavalink();
+      if (!llResult.ok) {
+        // Non-fatal — music just won't work. Notify but continue.
+        console.warn('[Launcher] Lavalink failed to start:', llResult.error);
+      }
+    }
+
     // Generate a new session token for this run
     sessionToken = crypto.randomBytes(32).toString('hex');
 
@@ -123,8 +149,7 @@ function registerIpcHandlers(): void {
     const envVars = buildEnvVars(config, sessionToken);
     startAll(envVars);
 
-    // Sync credentials to Supabase in background (best-effort).
-    // This ensures they survive machine changes per the rehydration prompt.
+    // Sync credentials to Supabase in background (best-effort)
     pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
       discordToken: config.discordToken,
       discordApplicationId: config.discordApplicationId,
@@ -132,7 +157,7 @@ function registerIpcHandlers(): void {
       discordGuildId: config.discordGuildId,
       supabasePublishableKey: config.supabasePublishableKey,
     }).catch(() => {
-      // Silent — sync is best-effort. Table may not exist until wizard runs.
+      // Silent — sync is best-effort
     });
 
     return { ok: true };
@@ -140,6 +165,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('stop-bot', () => {
     stopAll();
+    stopLavalink();
     sessionToken = null;
   });
 
@@ -154,7 +180,6 @@ function registerIpcHandlers(): void {
 
   // ── External links ──
   ipcMain.handle('open-external', (_event, url: string) => {
-    // Only allow http/https URLs
     if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
     }
@@ -165,7 +190,6 @@ function registerIpcHandlers(): void {
     const { pullFromSupabase } = await import('./supabase-sync.js');
     const result = await pullFromSupabase(supabaseUrl, supabaseSecretKey);
     if (result.ok && result.credentials) {
-      // Save pulled credentials to local store
       saveConfig(result.credentials);
     }
     return result;
@@ -175,6 +199,48 @@ function registerIpcHandlers(): void {
   ipcMain.on('get-version', (event) => {
     event.returnValue = app.getVersion();
   });
+
+  // ── Phase 6: First-run onboarding ──
+  ipcMain.handle('is-first-run', () => {
+    return !getConfig().firstRunComplete;
+  });
+
+  ipcMain.handle('complete-first-run', () => {
+    saveConfig({ firstRunComplete: true });
+  });
+
+  // ── Phase 6: Lavalink management ──
+  ipcMain.handle('get-lavalink-enabled', () => {
+    return getConfig().lavalinkEnabled;
+  });
+
+  ipcMain.handle('set-lavalink-enabled', (_event, enabled: boolean) => {
+    saveConfig({ lavalinkEnabled: enabled });
+  });
+
+  ipcMain.handle('check-java', async () => {
+    return checkJava();
+  });
+
+  ipcMain.handle('download-lavalink', async () => {
+    const result = await downloadLavalink((percent, downloadedMB, totalMB) => {
+      // Forward progress to renderer
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('lavalink-download-progress', { percent, downloadedMB, totalMB });
+        }
+      }
+    });
+    return result;
+  });
+
+  ipcMain.handle('get-lavalink-info', () => {
+    return {
+      status: getLavalinkStatus(),
+      jarPresent: isLavalinkJarPresent(),
+      error: getLavalinkError(),
+    };
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,6 +248,9 @@ function registerIpcHandlers(): void {
 /* ------------------------------------------------------------------ */
 
 app.whenReady().then(() => {
+  // Phase 6: Clean up stale processes from a previous crash
+  cleanupStaleProcesses();
+
   registerIpcHandlers();
   createWindow();
 
@@ -192,7 +261,7 @@ app.whenReady().then(() => {
     }
   });
 
-  // Auto-updater — handles check-on-launch, download, and install lifecycle
+  // Auto-updater
   initUpdater();
 });
 
@@ -209,14 +278,15 @@ app.on('before-quit', () => {
   if (isRunning()) {
     stopAll();
   }
+  stopLavalink();
 });
 
 app.on('window-all-closed', () => {
-  // On macOS, apps stay open until Cmd+Q
   if (process.platform !== 'darwin') {
     if (isRunning()) {
       stopAll();
     }
+    stopLavalink();
     app.quit();
   }
 });
