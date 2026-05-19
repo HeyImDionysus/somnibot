@@ -33,6 +33,7 @@ import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
+import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { REST, Routes } from 'discord.js';
 
 /**
@@ -519,6 +520,18 @@ async function main(): Promise<void> {
           console.log('[Boot] ✅ /help command registered');
         } catch (regErr) {
           console.warn('[Boot] ⚠️  Failed to register /help:', regErr);
+        }
+
+        // Register /setup command (setup wizard — owner only)
+        const setupCmd = buildSetupCommand();
+        try {
+          await rest14.post(
+            Routes.applicationGuildCommands(client.user!.id, client.guildId),
+            { body: setupCmd.toJSON() },
+          );
+          console.log('[Boot] ✅ /setup command registered');
+        } catch (regErr) {
+          console.warn('[Boot] ⚠️  Failed to register /setup:', regErr);
         }
 
         // 14c: Register context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
