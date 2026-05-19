@@ -4,7 +4,7 @@ services:
     container_name: somni-lavalink
     restart: unless-stopped
     ports:
-      - "2333:2333"
+      - "127.0.0.1:2333:2333"
     volumes:
       - ./services/lavalink/application.yml:/opt/Lavalink/application.yml
     environment:
@@ -15,7 +15,7 @@ services:
     container_name: somni-valkey
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - valkey-data:/data
     command: valkey-server --save 60 1 --loglevel warning

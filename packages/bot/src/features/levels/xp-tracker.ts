@@ -44,6 +44,7 @@ export interface XpResult {
   leveledUp?: boolean;
 }
 
+// TODO: scope caches by guildId for multi-guild support
 let _levelConfigCache: LevelConfig | null = null;
 let _levelConfigCacheTime = 0;
 const CONFIG_TTL = 60_000;

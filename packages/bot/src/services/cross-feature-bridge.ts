@@ -21,7 +21,7 @@
 import { Guild } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
-import type { Redis } from 'ioredis';
+import type Valkey from 'iovalkey';
 import type { PlatformEvent } from '@somnibot/shared';
 
 export class CrossFeatureBridge {
@@ -31,7 +31,7 @@ export class CrossFeatureBridge {
     private guild: Guild,
     private supabase: SupabaseClient,
     private eventBus: PlatformEventBus,
-    private valkey: Redis,
+    private valkey: Valkey,
   ) {}
 
   /**
