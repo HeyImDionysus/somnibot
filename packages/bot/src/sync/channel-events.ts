@@ -15,6 +15,26 @@ import { writeAuditLog } from '../services/audit.js';
 type GuildBasedChannel = Exclude<GuildChannel, DMChannel>;
 
 /**
+ * Channels the bot or Discord creates that should never be flagged as drift.
+ * - Community-required channels (rules, moderator-only) are created by Discord itself
+ * - Ticket channels are dynamically created/closed by the bot
+ */
+function isKnownDynamicChannel(channel: GuildBasedChannel): boolean {
+  const guild = 'guild' in channel ? channel.guild : null;
+  if (!guild) return false;
+
+  // Discord Community-required channels — created by Discord, not the user
+  if (guild.rulesChannelId === channel.id) return true;
+  if (guild.publicUpdatesChannelId === channel.id) return true;
+  if (channel.name === 'moderator-only') return true;
+
+  // Ticket channels created by the bot (pattern: ticket-NNN-username or ticket-NNN)
+  if (/^ticket-\d+/.test(channel.name)) return true;
+
+  return false;
+}
+
+/**
  * Handle channelCreate — a new channel was created outside the dashboard.
  */
 export async function handleChannelCreate(
@@ -22,6 +42,9 @@ export async function handleChannelCreate(
   channel: GuildBasedChannel,
 ): Promise<void> {
   if (!('guild' in channel) || channel.guild.id !== client.guildId) return;
+
+  // Skip channels we know aren't drift
+  if (isKnownDynamicChannel(channel)) return;
 
   // Check if this channel is tracked in our ID map
   const { data: mapping } = await client.supabase

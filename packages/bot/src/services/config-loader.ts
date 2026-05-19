@@ -1,21 +1,21 @@
 /**
- * Config loader with instance_settings fallback.
+ * Config loader with two-way instance_settings sync.
  *
- * Reads environment variables first, then fills missing values
- * from the instance_settings table in Supabase.
+ * 1. On boot: reads missing env vars from instance_settings (DB → process.env)
+ * 2. After boot: writes current env vars back to instance_settings (process.env → DB)
  *
- * This allows operators to configure the bot via the dashboard
- * Settings page instead of requiring every value as an env var.
+ * This keeps the dashboard Settings page in sync with the bot's actual config,
+ * so operators can see connection statuses at a glance.
  *
  * Bootstrap requirement: SUPABASE_URL + SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY)
  * must be in env vars (needed to connect to DB at all).
  */
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 /**
  * Map of instance_settings keys → env var names.
- * Only fills env vars that aren't already set.
+ * Used for both directions: DB → env and env → DB.
  */
 const SETTINGS_TO_ENV: Record<string, string> = {
   discord_bot_token: 'DISCORD_TOKEN',
@@ -107,6 +107,90 @@ export async function loadConfigFromDatabase(): Promise<number> {
     return loaded;
   } catch (err) {
     console.warn('[ConfigLoader] Error loading config from database (non-fatal):', err);
+    return 0;
+  }
+}
+
+/**
+ * Section groupings for instance_settings rows.
+ */
+const KEY_TO_SECTION: Record<string, string> = {
+  discord_bot_token: 'discord',
+  discord_application_id: 'discord',
+  discord_client_secret: 'discord',
+  discord_guild_id: 'discord',
+  paypal_client_id: 'paypal',
+  paypal_client_secret: 'paypal',
+  paypal_webhook_id: 'paypal',
+  paypal_sandbox: 'paypal',
+  lavalink_host: 'lavalink',
+  lavalink_port: 'lavalink',
+  lavalink_password: 'lavalink',
+  valkey_url: 'valkey',
+};
+
+/**
+ * Write current env vars back to instance_settings so the dashboard can display them.
+ *
+ * Call this AFTER loadConfig() / loadConfigFromDatabase() — once all env vars are final.
+ * Only writes values that are actually set; never overwrites with empty strings.
+ *
+ * Returns the number of values synced to the database.
+ */
+export async function syncConfigToDatabase(): Promise<number> {
+  const supabaseUrl = process.env.SUPABASE_URL
+    || process.env.NEXT_PUBLIC_SUPABASE_URL
+    || '';
+  const serviceKey = process.env.SUPABASE_SECRET_KEY
+    || process.env.SUPABASE_SERVICE_ROLE_KEY
+    || '';
+
+  if (!supabaseUrl || !serviceKey) {
+    console.log('[ConfigLoader] No Supabase credentials — skipping sync-to-DB');
+    return 0;
+  }
+
+  try {
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+
+    const rows: { key: string; value: string; section: string; updated_at: string }[] = [];
+
+    for (const [settingsKey, envVar] of Object.entries(SETTINGS_TO_ENV)) {
+      const value = process.env[envVar];
+      if (value) {
+        rows.push({
+          key: settingsKey,
+          value,
+          section: KEY_TO_SECTION[settingsKey] ?? 'other',
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      console.log('[ConfigLoader] No env vars to sync to database');
+      return 0;
+    }
+
+    const { error } = await supabase
+      .from('instance_settings')
+      .upsert(rows, { onConflict: 'key' });
+
+    if (error) {
+      if (error.code === '42P01') {
+        console.log('[ConfigLoader] instance_settings table not found — skipping sync-to-DB');
+        return 0;
+      }
+      console.warn('[ConfigLoader] Failed to sync config to DB:', error.message);
+      return 0;
+    }
+
+    console.log(`[ConfigLoader] ✅ Synced ${rows.length} config value(s) to instance_settings`);
+    return rows.length;
+  } catch (err) {
+    console.warn('[ConfigLoader] Error syncing config to DB (non-fatal):', err);
     return 0;
   }
 }
