@@ -475,7 +475,7 @@ export default function AutomationsPage() {
                         Logs
                       </button>
                       <button
-                        onClick={() => deleteAutomation(auto.id)}
+                        onClick={() => setConfirmAction({ id: auto.id, name: auto.name })}
                         className="rounded-md bg-discord-bg-tertiary px-3 py-1.5 text-xs font-medium text-red-400 hover:text-red-300 border border-discord-border-subtle"
                       >
                         Delete
@@ -627,6 +627,22 @@ export default function AutomationsPage() {
           )}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmAction}
+        title="Delete Automation"
+        description={`Are you sure you want to delete "${confirmAction?.name}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmAction) {
+            await deleteAutomation(confirmAction.id);
+            setConfirmAction(null);
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }
@@ -982,22 +998,6 @@ function AutomationEditor({
           </div>
         )}
       </div>
-
-      {/* Confirm Delete Dialog */}
-      <ConfirmDialog
-        open={!!confirmAction}
-        title="Delete Automation"
-        description={`Are you sure you want to delete "${confirmAction?.name}"? This cannot be undone.`}
-        confirmLabel="Delete"
-        variant="danger"
-        onConfirm={async () => {
-          if (confirmAction) {
-            await deleteAutomation(confirmAction.id);
-            setConfirmAction(null);
-          }
-        }}
-        onCancel={() => setConfirmAction(null)}
-      />
     </div>
   );
 }
