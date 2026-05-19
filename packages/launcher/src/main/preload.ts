@@ -25,6 +25,7 @@ export interface SomniBotAPI {
   getStatus: () => Promise<{
     bot: string;
     dashboard: string;
+    lavalink: string;
     botPid?: number;
     dashboardPid?: number;
     lastHeartbeat?: number;
@@ -66,6 +67,20 @@ export interface SomniBotAPI {
   }) => void) => void;
   onUpdateDownloaded: (callback: () => void) => void;
   onUpdateError: (callback: (info: { message: string }) => void) => void;
+
+  // Phase 6: First-run onboarding
+  isFirstRun: () => Promise<boolean>;
+  completeFirstRun: () => Promise<void>;
+
+  // Phase 6: Lavalink management
+  getLavalinkEnabled: () => Promise<boolean>;
+  setLavalinkEnabled: (enabled: boolean) => Promise<void>;
+  checkJava: () => Promise<{ available: boolean; version?: string; error?: string }>;
+  downloadLavalink: () => Promise<{ ok: boolean; error?: string }>;
+  getLavalinkInfo: () => Promise<{ status: string; jarPresent: boolean; error: string }>;
+  onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => void;
+  onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => void;
+  onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => void;
 
   // App
   getVersion: () => string;
@@ -134,6 +149,26 @@ contextBridge.exposeInMainWorld('somnibot', {
   },
   onUpdateError: (callback: (info: { message: string }) => void) => {
     ipcRenderer.on('updater:error', (_event, info) => callback(info));
+  },
+
+  // Phase 6: First-run onboarding
+  isFirstRun: () => ipcRenderer.invoke('is-first-run'),
+  completeFirstRun: () => ipcRenderer.invoke('complete-first-run'),
+
+  // Phase 6: Lavalink management
+  getLavalinkEnabled: () => ipcRenderer.invoke('get-lavalink-enabled'),
+  setLavalinkEnabled: (enabled: boolean) => ipcRenderer.invoke('set-lavalink-enabled', enabled),
+  checkJava: () => ipcRenderer.invoke('check-java'),
+  downloadLavalink: () => ipcRenderer.invoke('download-lavalink'),
+  getLavalinkInfo: () => ipcRenderer.invoke('get-lavalink-info'),
+  onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => {
+    ipcRenderer.on('lavalink-status', (_event, info) => callback(info));
+  },
+  onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => {
+    ipcRenderer.on('lavalink-log', (_event, log) => callback(log));
+  },
+  onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => {
+    ipcRenderer.on('lavalink-download-progress', (_event, progress) => callback(progress));
   },
 
   // App
