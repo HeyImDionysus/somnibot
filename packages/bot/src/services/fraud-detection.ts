@@ -6,11 +6,13 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { PlatformEventBus } from './event-bus.js';
 import type { FraudSignalType, FraudSeverity } from '@somnibot/shared';
 
 interface FraudContext {
   supabase: SupabaseClient;
   guildId: string;
+  eventBus?: PlatformEventBus;
 }
 
 interface CreateSignalParams {
@@ -31,6 +33,15 @@ async function createSignal(ctx: FraudContext, params: CreateSignalParams): Prom
     guild_id: ctx.guildId,
     ...params,
     status: 'open',
+  });
+
+  // Notify owner via event bus (if available)
+  ctx.eventBus?.emit('fraud.detected', ctx.guildId, {
+    signal: params.signal_type,
+    severity: params.severity,
+    discordId: params.discord_id ?? undefined,
+    action: params.auto_action,
+    evidence: params.evidence,
   });
 }
 
@@ -214,6 +225,15 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
           event_type: 'auto_created',
           message: `${count} critical fraud signals detected in the last hour. Automatic incident created.`,
           metadata: { signal_count: count },
+        });
+
+        // Notify owner via event bus
+        ctx.eventBus?.emit('incident.created', ctx.guildId, {
+          incidentId: incident.id,
+          incidentNumber: nextNumber,
+          title: incident.title,
+          severity: 'critical',
+          source: 'fraud_auto',
         });
       }
     }
