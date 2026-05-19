@@ -99,7 +99,10 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/license/validate') ||
     request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||
     request.nextUrl.pathname.startsWith('/api/license/deactivate') ||
-    // Downloads handle their own auth (session OR license key)
+    // Portal routes use x-portal-token auth (Discord identity), not Supabase session
+    request.nextUrl.pathname.startsWith('/portal') ||
+    request.nextUrl.pathname.startsWith('/api/portal/') ||
+    // Downloads use portal token auth internally
     request.nextUrl.pathname.startsWith('/api/downloads/');
 
   if (!user && !isPublicRoute) {

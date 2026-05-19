@@ -51,36 +51,42 @@ export class OwnerNotificationService {
     };
 
     // Subscribe to critical events
-    this.eventBus.on('fraud.detected', (_guildId, data) => {
+    // fraud.detected — emitted by fraud-detection service when signals are created
+    this.eventBus.on('fraud.detected', (event) => {
+      const data = event.data;
       this.notify('fraud.detected', {
         title: '🚨 Fraud Detected',
         description: `A potentially fraudulent transaction was flagged.`,
         color: 0xFF0000,
         fields: [
-          { name: 'Signal', value: String(data?.signal ?? 'Unknown'), inline: true },
-          { name: 'Order', value: String(data?.orderId ?? 'N/A'), inline: true },
-          { name: 'Customer', value: data?.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
-          { name: 'Action', value: String(data?.action ?? 'Flagged for review'), inline: false },
+          { name: 'Signal', value: String(data.signal ?? 'Unknown'), inline: true },
+          { name: 'Order', value: String(data.orderId ?? 'N/A'), inline: true },
+          { name: 'Customer', value: data.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
+          { name: 'Action', value: String(data.action ?? 'Flagged for review'), inline: false },
         ],
       });
     });
 
-    this.eventBus.on('incident.created', (_guildId, data) => {
-      if (data?.severity === 'critical' || data?.severity === 'high') {
+    // incident.created — emitted when a critical incident is auto-created
+    this.eventBus.on('incident.created', (event) => {
+      const data = event.data;
+      if (data.severity === 'critical' || data.severity === 'high') {
         this.notify('incident.created', {
           title: '🔴 Critical Incident',
-          description: String(data?.title ?? 'An incident has been created'),
+          description: String(data.title ?? 'An incident has been created'),
           color: 0xFF0000,
           fields: [
-            { name: 'Severity', value: String(data?.severity ?? 'unknown').toUpperCase(), inline: true },
-            { name: 'Category', value: String(data?.category ?? 'unknown'), inline: true },
+            { name: 'Severity', value: data.severity.toUpperCase(), inline: true },
+            { name: 'Category', value: String(data.category ?? 'unknown'), inline: true },
           ],
         });
       }
     });
 
-    this.eventBus.on('moderation.action', (_guildId, data) => {
-      if (data?.action === 'ban') {
+    // moderation.action — emitted by moderation/commands.ts on warn, mute, kick, ban
+    this.eventBus.on('moderation.action', (event) => {
+      const data = event.data;
+      if (data.action === 'ban') {
         this.notify('moderation.ban', {
           title: '🔨 Member Banned',
           description: `A member has been banned from the server.`,
@@ -94,16 +100,17 @@ export class OwnerNotificationService {
       }
     });
 
-    // Payment failures
-    this.eventBus.on('payment.failed', (_guildId, data) => {
+    // payment.failed — emitted by commerce-fulfillment on subscription_suspended
+    this.eventBus.on('payment.failed', (event) => {
+      const data = event.data;
       this.notify('payment.failed', {
         title: '💳 Payment Failed',
         description: `A payment could not be processed.`,
         color: 0xFFAA00,
         fields: [
-          { name: 'Customer', value: data?.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
-          { name: 'Amount', value: data?.amount ? `$${(data.amount / 100).toFixed(2)}` : 'Unknown', inline: true },
-          { name: 'Error', value: String(data?.error ?? 'Unknown error'), inline: false },
+          { name: 'Customer', value: data.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
+          { name: 'Amount', value: data.amount ? `$${(data.amount / 100).toFixed(2)}` : 'Unknown', inline: true },
+          { name: 'Error', value: String(data.error ?? 'Unknown error'), inline: false },
         ],
       });
     });

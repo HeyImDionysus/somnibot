@@ -49,13 +49,13 @@ export class AutoModSync {
    */
   start(): void {
     // Listen for config reload events targeting moderation
-    this.eventBus.on('config.changed' as never, ((data: { section?: string }) => {
-      if (data.section === 'moderation') {
+    this.eventBus.on('config.changed', (event) => {
+      if (event.data.section === 'moderation') {
         this.syncRules().catch((err) =>
           console.error('[AutoModSync] Sync failed:', err),
         );
       }
-    }) as never);
+    });
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
