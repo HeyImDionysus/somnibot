@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
@@ -76,6 +77,8 @@ export default function StatsChannelsPage() {
   useEffect(() => {
     fetchChannels();
   }, [fetchChannels]);
+
+  useAutoRefresh('stats_channels', undefined, fetchChannels);
 
   const openEditor = (sc?: StatsChannel) => {
     if (sc) {

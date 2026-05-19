@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
@@ -201,6 +202,8 @@ export default function AutomationsPage() {
     Promise.all([fetchAutomations(), fetchTemplates()])
       .finally(() => setLoading(false));
   }, [fetchAutomations, fetchTemplates]);
+
+  useAutoRefresh('automations', undefined, fetchAutomations);
 
   useEffect(() => {
     if (activeTab === 'logs') {
