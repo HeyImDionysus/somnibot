@@ -1,14 +1,17 @@
 /**
  * Welcome & Goodbye Configuration Page
+ * Phase 4: Added "Send Test" buttons and ChannelPicker + RolePicker.
  *
- * Controls welcome messages (channel + DM + card + auto-roles)
- * and goodbye messages. Architecture doc §17.5.
+ * Architecture doc §17.5.
  */
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { Send, Loader2 } from 'lucide-react';
 
 interface WelcomeConfig {
   welcome_enabled: boolean;
@@ -22,20 +25,6 @@ interface WelcomeConfig {
   goodbye_enabled: boolean;
   goodbye_channel_id: string | null;
   goodbye_message: string | null;
-}
-
-interface DiscordChannel {
-  id: string;
-  name: string;
-  type: number;
-  parent_name?: string;
-}
-
-interface DiscordRole {
-  id: string;
-  name: string;
-  color: number;
-  position: number;
 }
 
 const DEFAULT_CONFIG: WelcomeConfig = {
@@ -67,29 +56,19 @@ export default function WelcomePage() {
   const { toast } = useToast();
 
   const [config, setConfig] = useState<WelcomeConfig>(DEFAULT_CONFIG);
-  const [channels, setChannels] = useState<DiscordChannel[]>([]);
-  const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [sendingTest, setSendingTest] = useState<'welcome' | 'goodbye' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const [welcomeRes, channelsRes, rolesRes] = await Promise.all([
-          fetch('/api/welcome'),
-          fetch('/api/channels'),
-          fetch('/api/roles'),
-        ]);
-        const welcomeJson = await welcomeRes.json();
-        const channelsJson = await channelsRes.json();
-        const rolesJson = await rolesRes.json();
-
-        if (welcomeJson.success && welcomeJson.data) {
-          setConfig({ ...DEFAULT_CONFIG, ...welcomeJson.data });
+        const res = await fetch('/api/welcome');
+        const json = await res.json();
+        if (json.success && json.data) {
+          setConfig({ ...DEFAULT_CONFIG, ...json.data });
         }
-        if (channelsJson.success) setChannels(channelsJson.data ?? []);
-        if (rolesJson.success) setRoles(rolesJson.data ?? []);
       } catch {
         setError('Failed to load configuration');
       } finally {
@@ -116,18 +95,32 @@ export default function WelcomePage() {
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, toast]);
 
-  const textChannels = channels.filter((c) => c.type === 0 || c.type === 5);
-
-  const toggleAutoRole = (roleId: string) => {
-    setConfig((prev) => {
-      const current = prev.welcome_auto_roles ?? [];
-      const next = current.includes(roleId)
-        ? current.filter((id) => id !== roleId)
-        : [...current, roleId];
-      return { ...prev, welcome_auto_roles: next };
-    });
+  const sendTest = async (type: 'welcome' | 'goodbye') => {
+    const channelId = type === 'welcome' ? config.welcome_channel_id : config.goodbye_channel_id;
+    if (!channelId) {
+      toast({ title: `Select a ${type} channel first`, variant: 'error' });
+      return;
+    }
+    setSendingTest(type);
+    try {
+      const res = await fetch('/api/welcome/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_id: channelId, type }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        toast({ title: `Test ${type} message queued — check Discord`, variant: 'success' });
+      } else {
+        toast({ title: json.error || 'Failed to send test', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to send test', variant: 'error' });
+    } finally {
+      setSendingTest(null);
+    }
   };
 
   if (loading) {
@@ -156,7 +149,6 @@ export default function WelcomePage() {
             <span
               key={v.key}
               className="rounded bg-discord-bg-tertiary px-2 py-1 text-xs text-discord-text-muted"
-              title={v.desc}
             >
               <code className="text-somni-cyan">{v.key}</code>{' '}
               <span className="text-discord-text-muted">— {v.desc}</span>
@@ -187,26 +179,15 @@ export default function WelcomePage() {
         {config.welcome_enabled && (
           <div className="mt-4 space-y-4">
             {/* Channel */}
-            <div>
-              <label className="mb-1 block text-sm text-discord-text-muted">Channel</label>
-              <select
-                value={config.welcome_channel_id ?? ''}
-                onChange={(e) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    welcome_channel_id: e.target.value || null,
-                  }))
-                }
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
-              >
-                <option value="">Select channel...</option>
-                {textChannels.map((ch) => (
-                  <option key={ch.id} value={ch.id}>
-                    #{ch.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <ChannelPicker
+              label="Channel"
+              value={config.welcome_channel_id}
+              onChange={(v) =>
+                setConfig((prev) => ({ ...prev, welcome_channel_id: v as string | null }))
+              }
+              placeholder="Select welcome channel…"
+              channelTypes={['text', 'announcement']}
+            />
 
             {/* Message */}
             <div>
@@ -259,6 +240,20 @@ export default function WelcomePage() {
                 />
               </div>
             )}
+
+            {/* Send Test Welcome */}
+            <button
+              onClick={() => sendTest('welcome')}
+              disabled={!config.welcome_channel_id || sendingTest === 'welcome'}
+              className="flex items-center gap-2 rounded-md bg-discord-bg-tertiary px-4 py-2 text-sm font-medium text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary transition-colors disabled:opacity-50 ring-1 ring-discord-border-subtle"
+            >
+              {sendingTest === 'welcome' ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Send size={14} />
+              )}
+              Send Test Welcome
+            </button>
           </div>
         )}
       </section>
@@ -306,26 +301,16 @@ export default function WelcomePage() {
         <p className="mt-1 text-sm text-discord-text-muted">
           Additional roles granted alongside the Member role when a member is verified.
         </p>
-        <div className="mt-4 space-y-2">
-          {roles
-            .filter((r) => r.name !== '@everyone')
-            .sort((a, b) => b.position - a.position)
-            .map((role) => (
-              <label key={role.id} className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  checked={config.welcome_auto_roles?.includes(role.id) ?? false}
-                  onChange={() => toggleAutoRole(role.id)}
-                  className="h-4 w-4 rounded border-discord-border bg-discord-bg-tertiary accent-somni-pink"
-                />
-                <span
-                  className="text-sm"
-                  style={{ color: role.color ? `#${role.color.toString(16).padStart(6, '0')}` : undefined }}
-                >
-                  {role.name}
-                </span>
-              </label>
-            ))}
+        <div className="mt-4">
+          <RolePicker
+            label="Roles to assign on join"
+            value={config.welcome_auto_roles ?? []}
+            onChange={(v) =>
+              setConfig((prev) => ({ ...prev, welcome_auto_roles: v as string[] }))
+            }
+            placeholder="Select roles…"
+            multi
+          />
         </div>
       </section>
 
@@ -350,26 +335,15 @@ export default function WelcomePage() {
 
         {config.goodbye_enabled && (
           <div className="mt-4 space-y-4">
-            <div>
-              <label className="mb-1 block text-sm text-discord-text-muted">Channel</label>
-              <select
-                value={config.goodbye_channel_id ?? ''}
-                onChange={(e) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    goodbye_channel_id: e.target.value || null,
-                  }))
-                }
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
-              >
-                <option value="">Select channel...</option>
-                {textChannels.map((ch) => (
-                  <option key={ch.id} value={ch.id}>
-                    #{ch.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <ChannelPicker
+              label="Channel"
+              value={config.goodbye_channel_id}
+              onChange={(v) =>
+                setConfig((prev) => ({ ...prev, goodbye_channel_id: v as string | null }))
+              }
+              placeholder="Select goodbye channel…"
+              channelTypes={['text', 'announcement']}
+            />
 
             <div>
               <label className="mb-1 block text-sm text-discord-text-muted">Message</label>
@@ -383,6 +357,20 @@ export default function WelcomePage() {
                 placeholder="{user.name} left. They were with us for {duration}. 👋"
               />
             </div>
+
+            {/* Send Test Goodbye */}
+            <button
+              onClick={() => sendTest('goodbye')}
+              disabled={!config.goodbye_channel_id || sendingTest === 'goodbye'}
+              className="flex items-center gap-2 rounded-md bg-discord-bg-tertiary px-4 py-2 text-sm font-medium text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary transition-colors disabled:opacity-50 ring-1 ring-discord-border-subtle"
+            >
+              {sendingTest === 'goodbye' ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Send size={14} />
+              )}
+              Send Test Goodbye
+            </button>
           </div>
         )}
       </section>
