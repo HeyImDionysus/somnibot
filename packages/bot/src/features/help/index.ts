@@ -44,6 +44,7 @@ function getCategories(enabledFeatures: Record<string, boolean>): CommandCategor
     description: 'Basic bot commands',
     commands: [
       { name: '/help', description: 'View this help menu' },
+      { name: '/setup', description: 'Set up optional services (owner only)' },
     ],
   });
 
