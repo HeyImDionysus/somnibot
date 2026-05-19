@@ -34,7 +34,7 @@ import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
-import { REST, Routes } from 'discord.js';
+import { REST, Routes, EmbedBuilder } from 'discord.js';
 
 /**
  * SomniBot entry point.
@@ -609,6 +609,65 @@ async function main(): Promise<void> {
     }
 
     console.log('[Boot] ✅ All systems initialized (Phases 3-14)');
+
+    // ── Phase 6: First-boot DM to guild owner ──
+    // Sends a one-time welcome DM with next steps when the bot first connects.
+    try {
+      const { data: dmFlag } = await client.supabase
+        .from('instance_settings')
+        .select('value')
+        .eq('key', 'first_boot_dm_sent')
+        .single();
+
+      if (!dmFlag) {
+        const ownerGuild = client.guilds.cache.get(client.guildId);
+        if (ownerGuild) {
+          const owner = await ownerGuild.fetchOwner().catch(() => null);
+          if (owner) {
+            const embed = new EmbedBuilder()
+              .setColor(0xFF1493)
+              .setTitle('🌙 SomniBot is Online!')
+              .setDescription(
+                `Your bot is now running in **${ownerGuild.name}**. Here's what to do next:`,
+              )
+              .addFields(
+                {
+                  name: '1️⃣  Run the Setup Wizard',
+                  value:
+                    'Type `/setup` in any channel to configure optional services like PayPal and deployment.',
+                },
+                {
+                  name: '2️⃣  Open the Dashboard',
+                  value:
+                    'Visit **http://localhost:3456** in your browser to manage everything from a web UI.',
+                },
+                {
+                  name: '3️⃣  Explore Commands',
+                  value:
+                    'Type `/help` to see all available commands, or check the dashboard for a full overview.',
+                },
+              )
+              .setFooter({ text: 'This message is sent once on first boot.' })
+              .setTimestamp();
+
+            await owner.send({ embeds: [embed] }).catch(() => {
+              console.warn('[Boot] Could not DM guild owner (DMs may be disabled)');
+            });
+            console.log('[Boot] ✅ Sent first-boot welcome DM to guild owner');
+          }
+        }
+
+        // Mark as sent regardless (so we don't retry on every restart)
+        await client.supabase
+          .from('instance_settings')
+          .upsert({ key: 'first_boot_dm_sent', value: 'true' })
+          .then(() => {})
+          .catch(() => {});
+      }
+    } catch (err) {
+      // Non-fatal — skip if instance_settings doesn't exist yet
+      console.warn('[Boot] First-boot DM check skipped:', (err as Error).message);
+    }
   });
 
   // Graceful shutdown
