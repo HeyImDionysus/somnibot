@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self';" />
+  <title>SomniBot</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ─── Header ─── -->
+    <header id="header">
+      <div class="header-left">
+        <h1 class="brand">Somni<span class="accent">Bot</span></h1>
+        <span class="version" id="version"></span>
+      </div>
+      <div class="header-right">
+        <div class="status-group">
+          <div class="status-item">
+            <span class="status-dot" id="bot-dot"></span>
+            <span class="status-label">Bot</span>
+          </div>
+          <div class="status-item">
+            <span class="status-dot" id="dash-dot"></span>
+            <span class="status-label">Dashboard</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ─── Main Content ─── -->
+    <main id="main">
+      <!-- Config Form -->
+      <section id="config-section">
+        <div class="section-header">
+          <h2>Discord</h2>
+          <button class="link-btn" id="btn-open-discord">
+            Open Developer Portal ↗
+          </button>
+        </div>
+
+        <div class="field-group">
+          <div class="field">
+            <label for="discordToken">Bot Token <span class="req">*</span></label>
+            <input type="password" id="discordToken" placeholder="MTI3NjEz..." autocomplete="off" />
+            <button class="toggle-vis" data-target="discordToken" title="Show/hide">👁</button>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="discordApplicationId">Application ID <span class="req">*</span></label>
+              <input type="text" id="discordApplicationId" placeholder="1234567890123456789" />
+            </div>
+            <div class="field">
+              <label for="discordClientSecret">Client Secret <span class="req">*</span></label>
+              <input type="password" id="discordClientSecret" placeholder="Wq3k8f..." autocomplete="off" />
+              <button class="toggle-vis" data-target="discordClientSecret" title="Show/hide">👁</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="discordGuildId">Guild ID <span class="opt">(optional — auto-detects)</span></label>
+            <input type="text" id="discordGuildId" placeholder="9876543210987654321" />
+          </div>
+        </div>
+
+        <div class="section-header" style="margin-top: 24px;">
+          <h2>Supabase</h2>
+          <button class="link-btn" id="btn-open-supabase">
+            Open Dashboard ↗
+          </button>
+        </div>
+
+        <div class="field-group">
+          <div class="field">
+            <label for="supabaseUrl">Project URL <span class="req">*</span></label>
+            <input type="url" id="supabaseUrl" placeholder="https://your-project.supabase.co" />
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="supabaseSecretKey">Secret Key <span class="req">*</span></label>
+              <input type="password" id="supabaseSecretKey" placeholder="sb_secret_..." autocomplete="off" />
+              <button class="toggle-vis" data-target="supabaseSecretKey" title="Show/hide">👁</button>
+            </div>
+            <div class="field">
+              <label for="supabasePublishableKey">Publishable Key <span class="req">*</span></label>
+              <input type="password" id="supabasePublishableKey" placeholder="sb_publishable_..." autocomplete="off" />
+              <button class="toggle-vis" data-target="supabasePublishableKey" title="Show/hide">👁</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Error/Info area -->
+      <div id="message-area" class="message-area hidden"></div>
+
+      <!-- Meta info (shows after validation) -->
+      <div id="meta-area" class="meta-area hidden"></div>
+    </main>
+
+    <!-- ─── Footer Controls ─── -->
+    <footer id="footer">
+      <div class="footer-left">
+        <button class="btn btn-secondary" id="btn-open-dashboard" disabled>
+          Open Dashboard
+        </button>
+        <button class="link-btn small" id="btn-help">Need help?</button>
+      </div>
+      <div class="footer-right">
+        <button class="btn btn-primary" id="btn-start">
+          Validate &amp; Start
+        </button>
+        <button class="btn btn-danger hidden" id="btn-stop">
+          Stop
+        </button>
+      </div>
+    </footer>
+
+    <!-- ─── Log Panel (collapsible) ─── -->
+    <div id="log-panel" class="log-panel hidden">
+      <div class="log-header">
+        <span>Logs</span>
+        <button class="log-close" id="btn-close-logs">✕</button>
+      </div>
+      <div class="log-content" id="log-content"></div>
+    </div>
+
+    <!-- Toggle logs button -->
+    <button class="log-toggle" id="btn-toggle-logs" title="Show logs">⌘</button>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
