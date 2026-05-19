@@ -1,5 +1,6 @@
 /**
  * Scheduled Messages — Recurring bot posts via cron expressions.
+ * Phase 4: Replaced raw embed_config_id UUID input with embed picker dropdown.
  *
  * Architecture doc §27
  */
@@ -30,6 +31,11 @@ interface ScheduledMessage {
   active: boolean;
   last_sent_at: string | null;
   created_at: string;
+}
+
+interface EmbedOption {
+  id: string;
+  name: string;
 }
 
 const PRESETS: Record<string, { label: string; cron: string }> = {
@@ -105,7 +111,7 @@ export default function ScheduledMessagesPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
-
+  const [embedOptions, setEmbedOptions] = useState<EmbedOption[]>([]);
 
   const fetchMessages = useCallback(async () => {
     try {
@@ -120,9 +126,27 @@ export default function ScheduledMessagesPage() {
     }
   }, []);
 
+  const fetchEmbeds = useCallback(async () => {
+    try {
+      const res = await fetch('/api/embeds');
+      const json = await res.json();
+      if (json.success) {
+        setEmbedOptions(
+          (json.data as { id: string; name: string }[]).map((e) => ({
+            id: e.id,
+            name: e.name,
+          })),
+        );
+      }
+    } catch {
+      // Non-critical — embed picker will just be empty
+    }
+  }, []);
+
   useEffect(() => {
     fetchMessages();
-  }, [fetchMessages]);
+    fetchEmbeds();
+  }, [fetchMessages, fetchEmbeds]);
 
   const openEditor = (sm?: ScheduledMessage) => {
     if (sm) {
@@ -224,6 +248,13 @@ export default function ScheduledMessagesPage() {
     }
   };
 
+  /** Resolve embed name from ID */
+  const resolveEmbedName = (id: string | null): string | null => {
+    if (!id) return null;
+    const found = embedOptions.find((e) => e.id === id);
+    return found ? found.name : null;
+  };
+
   if (loading) {
     return <CardListSkeleton />;
   }
@@ -278,11 +309,27 @@ export default function ScheduledMessagesPage() {
                   rows={4} placeholder="Message text (supports {server}, {members}, {date}, {time})"
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none resize-none" />
               </div>
+
+              {/* Embed picker — replaces raw UUID input */}
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Embed Config ID (optional)</label>
-                <input type="text" value={form.embed_config_id} onChange={(e) => setForm({ ...form, embed_config_id: e.target.value })}
-                  placeholder="UUID from Embed Builder"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Embed Template (optional)</label>
+                <select
+                  value={form.embed_config_id}
+                  onChange={(e) => setForm({ ...form, embed_config_id: e.target.value })}
+                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
+                >
+                  <option value="">None — text message only</option>
+                  {embedOptions.map((embed) => (
+                    <option key={embed.id} value={embed.id}>
+                      {embed.name}
+                    </option>
+                  ))}
+                </select>
+                {embedOptions.length === 0 && (
+                  <p className="mt-1 text-xs text-discord-text-muted">
+                    No embed templates yet — create one in the Embed Builder first.
+                  </p>
+                )}
               </div>
 
               {/* Schedule */}
@@ -375,43 +422,48 @@ export default function ScheduledMessagesPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {messages.map((sm) => (
-            <div key={sm.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
-              <div className="flex items-center justify-between px-5 py-4">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">⏰</span>
-                    <div>
-                      <p className="text-sm font-medium text-discord-text-primary">{sm.name}</p>
-                      <p className="text-xs text-discord-text-muted">
-                        {describeCron(sm.cron_expression)} · {sm.timezone} · <SMChannelName id={sm.channel_id} />
-                      </p>
-                      <p className="text-xs text-discord-text-muted mt-0.5">
-                        Sent: {sm.current_sends}{sm.max_sends != null ? `/${sm.max_sends}` : ''} · Last: {relativeTime(sm.last_sent_at)}
-                      </p>
-                      {sm.message && (
-                        <p className="text-xs text-discord-text-muted mt-0.5 truncate max-w-md">{sm.message}</p>
-                      )}
+          {messages.map((sm) => {
+            const embedName = resolveEmbedName(sm.embed_config_id);
+
+            return (
+              <div key={sm.id} className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary">
+                <div className="flex items-center justify-between px-5 py-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl">⏰</span>
+                      <div>
+                        <p className="text-sm font-medium text-discord-text-primary">{sm.name}</p>
+                        <p className="text-xs text-discord-text-muted">
+                          {describeCron(sm.cron_expression)} · {sm.timezone} · <SMChannelName id={sm.channel_id} />
+                        </p>
+                        <p className="text-xs text-discord-text-muted mt-0.5">
+                          Sent: {sm.current_sends}{sm.max_sends != null ? `/${sm.max_sends}` : ''} · Last: {relativeTime(sm.last_sent_at)}
+                          {embedName && <> · Embed: <span className="text-discord-accent">{embedName}</span></>}
+                        </p>
+                        {sm.message && (
+                          <p className="text-xs text-discord-text-muted mt-0.5 truncate max-w-md">{sm.message}</p>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2 ml-4">
-                  <div
-                    className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${sm.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
-                    onClick={() => toggleActive(sm)}
-                  >
-                    <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${sm.active ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                  <div className="flex items-center gap-2 ml-4">
+                    <div
+                      className={`relative h-5 w-9 cursor-pointer rounded-full transition-colors ${sm.active ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+                      onClick={() => toggleActive(sm)}
+                    >
+                      <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${sm.active ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                    </div>
+                    <button onClick={() => openEditor(sm)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
+                      Edit
+                    </button>
+                    <button onClick={() => setConfirmDelete(sm.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                      Delete
+                    </button>
                   </div>
-                  <button onClick={() => openEditor(sm)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
-                    Edit
-                  </button>
-                  <button onClick={() => setConfirmDelete(sm.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
-                    Delete
-                  </button>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

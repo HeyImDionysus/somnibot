@@ -4,10 +4,11 @@ import { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
+import { useToast } from '@/components/shared/toast';
 import { cn } from '@/lib/utils/cn';
 import {
   Database, MessageSquare, CreditCard, Music, Server,
-  CheckCircle2, XCircle, Loader2, Eye, EyeOff, Save, Lock,
+  CheckCircle2, XCircle, Loader2, Save, Lock, Pencil, ShieldCheck,
 } from 'lucide-react';
 
 // ============================================================
@@ -99,42 +100,79 @@ const SECTIONS: ConnectionSection[] = [
 ];
 
 // ============================================================
+// Helpers
+// ============================================================
+
+/** Mask a secret value for display, showing first 4 + last 2 chars */
+function maskSecret(value: string): string {
+  if (!value || value.length < 8) return '••••••••••';
+  return value.slice(0, 4) + '••••••' + value.slice(-2);
+}
+
+// ============================================================
 // Components
 // ============================================================
 
-function SecretField({
+function LockedSecretField({
+  maskedValue,
+  onUnlock,
+}: {
+  maskedValue: string;
+  onUnlock: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-muted/70 ring-1 ring-discord-border-subtle font-mono select-none">
+        {maskedValue}
+      </div>
+      <button
+        type="button"
+        onClick={onUnlock}
+        className="flex items-center gap-1.5 rounded-input bg-discord-bg-tertiary px-3 py-2 text-xs font-medium text-discord-text-secondary hover:bg-discord-bg-primary/50 hover:text-discord-text-primary ring-1 ring-discord-border-subtle transition-standard"
+      >
+        <Pencil size={12} />
+        Change
+      </button>
+    </div>
+  );
+}
+
+function EditableSecretField({
   value,
   onChange,
   placeholder,
   disabled,
+  onCancel,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder: string;
   disabled?: boolean;
+  onCancel?: () => void;
 }) {
-  const [visible, setVisible] = useState(false);
-
   return (
-    <div className="relative">
+    <div className="flex items-center gap-2">
       <input
-        type={visible ? 'text' : 'password'}
+        type="password"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         disabled={disabled}
+        autoFocus
         className={cn(
-          'w-full rounded-input bg-discord-bg-tertiary px-3 py-2 pr-10 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard',
+          'flex-1 rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-accent transition-standard',
           disabled && 'opacity-60 cursor-not-allowed',
         )}
       />
-      <button
-        type="button"
-        onClick={() => setVisible(!visible)}
-        className="absolute right-2 top-1/2 -translate-y-1/2 text-discord-text-muted hover:text-discord-text-secondary transition-standard"
-      >
-        {visible ? <EyeOff size={16} /> : <Eye size={16} />}
-      </button>
+      {onCancel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-input bg-discord-bg-tertiary px-3 py-2 text-xs text-discord-text-muted hover:text-discord-text-secondary ring-1 ring-discord-border-subtle transition-standard"
+        >
+          Cancel
+        </button>
+      )}
     </div>
   );
 }
@@ -171,11 +209,17 @@ function StatusDot({ status }: { status: 'connected' | 'disconnected' | 'checkin
 // ============================================================
 
 export default function SettingsPage() {
+  const { toast } = useToast();
+
   const [values, setValues] = useState<Record<string, string>>({});
   const [sources, setSources] = useState<Record<string, 'env' | 'db' | 'none'>>({});
   const [statuses, setStatuses] = useState<Record<string, 'connected' | 'disconnected' | 'checking'>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Track which secret fields are in "edit mode" — key = field key */
+  const [editingSecrets, setEditingSecrets] = useState<Record<string, boolean>>({});
+  /** Temporary edit values for secrets being changed */
+  const [secretEdits, setSecretEdits] = useState<Record<string, string>>({});
 
   useEffect(() => {
     (async () => {
@@ -199,6 +243,24 @@ export default function SettingsPage() {
     setValues((prev) => ({ ...prev, [key]: value }));
   };
 
+  const startEditingSecret = (key: string) => {
+    setEditingSecrets((prev) => ({ ...prev, [key]: true }));
+    setSecretEdits((prev) => ({ ...prev, [key]: '' }));
+  };
+
+  const cancelEditingSecret = (key: string) => {
+    setEditingSecrets((prev) => ({ ...prev, [key]: false }));
+    setSecretEdits((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const updateSecretEdit = (key: string, value: string) => {
+    setSecretEdits((prev) => ({ ...prev, [key]: value }));
+  };
+
   const saveSection = async (sectionId: string) => {
     setSaving(sectionId);
     try {
@@ -207,7 +269,10 @@ export default function SettingsPage() {
 
       const sectionValues: Record<string, string> = {};
       for (const field of section.fields) {
-        if (values[field.key]) {
+        if (field.secret && editingSecrets[field.key] && secretEdits[field.key]) {
+          // Use the new edit value for secrets being changed
+          sectionValues[field.key] = secretEdits[field.key];
+        } else if (!field.secret && values[field.key]) {
           sectionValues[field.key] = values[field.key];
         }
       }
@@ -223,12 +288,20 @@ export default function SettingsPage() {
         const refreshRes = await fetch('/api/settings');
         if (refreshRes.ok) {
           const data = await refreshRes.json();
+          setValues(data.values || {});
           setStatuses(data.statuses || {});
           setSources(data.sources || {});
         }
+        // Clear all editing states for this section's secrets
+        for (const field of section.fields) {
+          if (field.secret) {
+            cancelEditingSecret(field.key);
+          }
+        }
+        toast({ title: `${section.title} settings saved`, variant: 'success' });
       }
     } catch {
-      // Handle error
+      toast({ title: 'Failed to save settings', variant: 'error' });
     } finally {
       setSaving(null);
     }
@@ -238,6 +311,10 @@ export default function SettingsPage() {
     return <ConfigSkeleton />;
   }
 
+  // Count connected sections
+  const connectedCount = Object.values(statuses).filter((s) => s === 'connected').length;
+  const totalSections = SECTIONS.length;
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -245,14 +322,44 @@ export default function SettingsPage() {
         <h1 className="text-xl font-bold text-discord-text-primary">Settings</h1>
         <p className="mt-1 text-sm text-discord-text-muted">
           Configure external connections. Features become available as you connect each service.
-          Values set via environment variables are shown as locked — override them here or in your hosting provider.
+          Values set via environment variables are shown as locked.
         </p>
       </div>
+
+      {/* Setup Progress */}
+      {connectedCount > 0 && (
+        <div className="flex items-center gap-3 rounded-card border border-discord-border-subtle bg-discord-bg-secondary px-4 py-3">
+          <ShieldCheck size={20} className={connectedCount === totalSections ? 'text-discord-success' : 'text-discord-warning'} />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-discord-text-primary">
+              {connectedCount === totalSections
+                ? 'All services connected'
+                : `${connectedCount} of ${totalSections} services connected`}
+            </p>
+            <p className="text-xs text-discord-text-muted">
+              {connectedCount === totalSections
+                ? 'Your dashboard is fully configured. Secrets are locked for security.'
+                : 'Configure remaining services to unlock all features.'}
+            </p>
+          </div>
+          {/* Progress bar */}
+          <div className="w-24 h-2 rounded-full bg-discord-bg-tertiary overflow-hidden">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all',
+                connectedCount === totalSections ? 'bg-discord-success' : 'bg-discord-warning',
+              )}
+              style={{ width: `${(connectedCount / totalSections) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Connection Sections */}
       {SECTIONS.map((section) => {
         const Icon = section.icon;
         const status = statuses[section.id] || 'disconnected';
+        const isConnected = status === 'connected';
 
         return (
           <Card key={section.id}>
@@ -275,6 +382,9 @@ export default function SettingsPage() {
               {section.fields.map((field) => {
                 const source = sources[field.key];
                 const isFromEnv = source === 'env';
+                const hasValue = !!values[field.key];
+                const isSecretConfigured = field.secret && hasValue && isConnected;
+                const isEditingThis = editingSecrets[field.key];
 
                 return (
                   <div key={field.key}>
@@ -289,14 +399,38 @@ export default function SettingsPage() {
                         </span>
                       )}
                     </div>
+
+                    {/* Secret fields: locked state when configured, edit mode when changing */}
                     {field.secret ? (
-                      <SecretField
-                        value={values[field.key] || ''}
-                        onChange={(v) => updateField(field.key, v)}
-                        placeholder={field.placeholder}
-                        disabled={isFromEnv}
-                      />
+                      isFromEnv ? (
+                        /* ENV-locked secret — just show masked, no edit */
+                        <div className="rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-muted/70 ring-1 ring-discord-border-subtle font-mono select-none opacity-60">
+                          {maskSecret(values[field.key] || '')}
+                        </div>
+                      ) : isSecretConfigured && !isEditingThis ? (
+                        /* Configured secret — locked with Change button */
+                        <LockedSecretField
+                          maskedValue={maskSecret(values[field.key])}
+                          onUnlock={() => startEditingSecret(field.key)}
+                        />
+                      ) : (
+                        /* Unconfigured or actively editing */
+                        <EditableSecretField
+                          value={isEditingThis ? (secretEdits[field.key] ?? '') : (values[field.key] || '')}
+                          onChange={(v) => {
+                            if (isEditingThis) {
+                              updateSecretEdit(field.key, v);
+                            } else {
+                              updateField(field.key, v);
+                            }
+                          }}
+                          placeholder={field.placeholder}
+                          disabled={false}
+                          onCancel={isEditingThis ? () => cancelEditingSecret(field.key) : undefined}
+                        />
+                      )
                     ) : (
+                      /* Non-secret fields — always editable */
                       <input
                         type="text"
                         value={values[field.key] || ''}
@@ -309,6 +443,7 @@ export default function SettingsPage() {
                         )}
                       />
                     )}
+
                     {field.helpText && (
                       <p className="mt-1 text-xs text-discord-text-muted">{field.helpText}</p>
                     )}
