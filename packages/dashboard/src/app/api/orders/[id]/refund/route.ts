@@ -8,27 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 
-const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
-const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
-const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
-
-async function getPayPalToken(): Promise<string | null> {
-  try {
-    const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
-      },
-      body: 'grant_type=client_credentials',
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.access_token;
-  } catch {
-    return null;
-  }
-}
+import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
 
 export async function POST(
   req: NextRequest,
@@ -61,7 +41,7 @@ export async function POST(
 
   // Attempt PayPal refund if we have a payment
   const payment = order.payments?.[0];
-  if (payment?.paypal_payment_id && PAYPAL_CLIENT_ID) {
+  if (payment?.paypal_payment_id) {
     const token = await getPayPalToken();
     if (token) {
       try {
