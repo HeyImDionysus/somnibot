@@ -70,6 +70,11 @@ import type { EscalationStep } from '@somnibot/shared';
  * Phase 9: Levels/XP, reaction roles, custom commands.
  */
 export function registerEvents(client: SomniClient): void {
+  // Safety net: prevent unhandled rejections from crashing the bot
+  process.on('unhandledRejection', (error) => {
+    console.error('[Events] Unhandled promise rejection:', error);
+  });
+
   // ── Ready ──────────────────────────────────────────────
   client.once('ready', async (readyClient) => {
     console.log(`[Bot] Logged in as ${readyClient.user.tag}`);

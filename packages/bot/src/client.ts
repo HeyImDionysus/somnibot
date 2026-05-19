@@ -4,7 +4,7 @@ import {
   Partials,
   type ClientOptions,
 } from 'discord.js';
-import { Shoukaku, Connectors } from 'shoukaku';
+import { Shoukaku } from 'shoukaku';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import { getSupabase } from './services/supabase.js';
@@ -22,6 +22,12 @@ import { getConfig, type BotEnv } from './config.js';
  * - Platform event bus
  * - Guild ID (single-guild architecture)
  */
+// TODO: Replace Record<string, unknown> casts with typed manager properties:
+//   giveawayManager?: GiveawayManager;
+//   musicPlayer?: MusicPlayerManager;
+//   tempChannelManager?: TempChannelManager;
+//   etc.
+// This eliminates 48 unsafe casts across index.ts, handler.ts, and shutdown.
 export class SomniClient extends Client {
   public readonly shoukaku: Shoukaku;
   public readonly supabase: SupabaseClient;
@@ -70,7 +76,7 @@ export class SomniClient extends Client {
 
     // Initialize Shoukaku (Lavalink connector)
     this.shoukaku = new Shoukaku(
-      new Connectors.DiscordJS(this),
+      this,
       [
         {
           name: 'main',

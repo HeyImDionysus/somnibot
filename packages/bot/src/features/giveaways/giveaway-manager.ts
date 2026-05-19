@@ -192,14 +192,12 @@ export class GiveawayManager {
         p_user_id: userId,
       });
 
-      // Fallback if RPC doesn't exist yet: filter locally
-      const newEntries = updated?.entries ?? giveaway.entries.filter((e: string) => e !== userId);
       if (!updated) {
-        await this.supabase
-          .from('giveaways')
-          .update({ entries: newEntries })
-          .eq('id', giveawayId);
+        console.error('[Giveaways] giveaway_remove_entry RPC not found — run migrations');
+        await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
+        return true;
       }
+      const newEntries = updated.entries;
 
       await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
@@ -213,14 +211,12 @@ export class GiveawayManager {
       p_user_id: userId,
     });
 
-    // Fallback if RPC doesn't exist yet: append locally
-    const newEntries = updated?.entries ?? [...giveaway.entries, userId];
     if (!updated) {
-      await this.supabase
-        .from('giveaways')
-        .update({ entries: newEntries })
-        .eq('id', giveawayId);
+      console.error('[Giveaways] giveaway_add_entry RPC not found — run migrations');
+      await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
+      return true;
     }
+    const newEntries = updated.entries;
 
     await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });

@@ -640,6 +640,7 @@ const ACTION_HANDLERS: Record<
   config_reload: handleConfigReload,
   send_embed: handleSendEmbed,
   test_welcome: handleTestWelcome,
+  fulfill_giveaway_prize: handleFulfillment,
 };
 
 async function processAction(
