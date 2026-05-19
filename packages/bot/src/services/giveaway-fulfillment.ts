@@ -29,19 +29,24 @@ export class GiveawayFulfillmentService {
    * Start listening for giveaway.ended events.
    */
   start(): void {
-    this.eventBus.on('giveaway.ended', (_guildId: string, data: Record<string, unknown>) => {
-      this.handleGiveawayEnded(data).catch((err) => {
+    this.eventBus.on('giveaway.ended', (event) => {
+      this.handleGiveawayEnded(event.data).catch((err) => {
         console.error('[GiveawayFulfillment] Error handling giveaway end:', err);
       });
     });
     console.log('[GiveawayFulfillment] Service started — listening for giveaway.ended');
   }
 
-  private async handleGiveawayEnded(data: Record<string, unknown>): Promise<void> {
-    const winnerIds = data.winnerIds as string[] | undefined;
-    const prizeProductId = data.prizeProductId as string | undefined;
-    const giveawayId = data.giveawayId as string;
-    const title = data.title as string;
+  private async handleGiveawayEnded(data: {
+    giveawayId: string;
+    title: string;
+    winnerIds: string[];
+    prizeProductId: string | null;
+  }): Promise<void> {
+    const winnerIds = data.winnerIds;
+    const prizeProductId = data.prizeProductId;
+    const giveawayId = data.giveawayId;
+    const title = data.title;
 
     if (!winnerIds || winnerIds.length === 0) {
       console.log(`[GiveawayFulfillment] No winners for giveaway ${giveawayId} — skipping`);

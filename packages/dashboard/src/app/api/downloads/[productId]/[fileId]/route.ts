@@ -1,11 +1,17 @@
 /**
  * GET /api/downloads/[productId]/[fileId] — Protected file downloads.
  *
- * Validates entitlement before allowing download.
- * Increments download counter.
+ * Authenticates via portal token (x-portal-token header) and validates
+ * that the customer has an active entitlement for the product before
+ * serving the file. Increments download counter on success.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { createHash } from 'crypto';
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
 
 export async function GET(
   req: NextRequest,
@@ -14,7 +20,39 @@ export async function GET(
   const { productId, fileId } = await params;
   const supabase = createAdminSupabase();
 
-  // Get the file
+  // ── Auth: require a valid portal token ──
+  const token = req.headers.get('x-portal-token');
+  if (!token) {
+    return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+  }
+
+  const { data: session } = await supabase
+    .from('portal_sessions')
+    .select('customer_id, guild_id')
+    .eq('token_hash', hashToken(token))
+    .eq('revoked', false)
+    .gt('expires_at', new Date().toISOString())
+    .single();
+
+  if (!session) {
+    return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+  }
+
+  // ── Entitlement check: customer must own the product ──
+  const { data: entitlement } = await supabase
+    .from('entitlements')
+    .select('id')
+    .eq('customer_id', session.customer_id)
+    .eq('product_id', productId)
+    .in('status', ['active', 'grace_period'])
+    .limit(1)
+    .maybeSingle();
+
+  if (!entitlement) {
+    return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
+  }
+
+  // ── Get the file ──
   const { data: file } = await supabase
     .from('product_files')
     .select('*')
