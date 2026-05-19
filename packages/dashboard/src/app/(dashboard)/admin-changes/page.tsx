@@ -7,6 +7,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/hooks/use-toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ function formatDate(iso: string): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function AdminChangesPage() {
+  const { toast } = useToast();
   const [changes, setChanges] = useState<AdminChange[]>([]);
   const [loading, setLoading] = useState(true);
   const [undoableOnly, setUndoableOnly] = useState(false);
@@ -76,9 +78,13 @@ export default function AdminChangesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'undo', id }),
       });
-      const json = await res.json();
-      if (json.success) load();
-      else alert(`Undo failed: ${json.error}`);
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        toast({ title: 'Undo failed', description: json.error || 'Unknown error', variant: 'error' });
+        return;
+      }
+      toast({ title: 'Change undone', variant: 'success' });
+      load();
     } finally {
       setUndoing(null);
     }

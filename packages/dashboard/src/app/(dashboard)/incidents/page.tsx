@@ -7,6 +7,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/hooks/use-toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -83,6 +84,7 @@ function formatDuration(seconds: number): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function IncidentsPage() {
+  const { toast } = useToast();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [summary, setSummary] = useState<Summary>({ total: 0, open: 0, investigating: 0, identified: 0, monitoring: 0, resolved: 0, critical: 0, outage: 0 });
   const [loading, setLoading] = useState(true);
@@ -128,11 +130,17 @@ export default function IncidentsPage() {
 
   const createIncident = async () => {
     if (!newTitle.trim()) return;
-    await fetch('/api/incidents', {
+    const res = await fetch('/api/incidents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: newTitle, description: newDescription, severity: newSeverity }),
     });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      toast({ title: 'Failed to create incident', description: json.error || 'Unknown error', variant: 'error' });
+      return;
+    }
+    toast({ title: 'Incident created', variant: 'success' });
     setNewTitle('');
     setNewDescription('');
     setShowCreate(false);
@@ -140,22 +148,32 @@ export default function IncidentsPage() {
   };
 
   const updateStatus = async (id: string, status: string) => {
-    await fetch('/api/incidents', {
+    const res = await fetch('/api/incidents', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, status }),
     });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      toast({ title: 'Failed to update status', description: json.error || 'Unknown error', variant: 'error' });
+      return;
+    }
     load();
     loadEvents(id);
   };
 
   const addNote = async (id: string) => {
     if (!noteText.trim()) return;
-    await fetch(`/api/incidents/${id}/events`, {
+    const res = await fetch(`/api/incidents/${id}/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: noteText, event_type: 'note' }),
     });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      toast({ title: 'Failed to add note', description: json.error || 'Unknown error', variant: 'error' });
+      return;
+    }
     setNoteText('');
     loadEvents(id);
   };
