@@ -408,7 +408,7 @@ async function handleSubscriptionActivated(
   const { data: order } = await supabase
     .from('orders')
     .insert({
-      order_number: `INS-${Date.now().toString().slice(-5)}`,
+      order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
       customer_id: meta.customer_id,
       guild_id: meta.guild_id,
       product_id: meta.product_id,

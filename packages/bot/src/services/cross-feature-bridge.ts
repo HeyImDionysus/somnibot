@@ -13,12 +13,16 @@
  * 8. Music Idle → pause after timeout, free resources
  *
  * GAP 3: Features Completely Siloed
+ *
+ * FIXED: Event names now match PlatformEventMap, handler signature correctly
+ * unwraps PlatformEvent wrapper, field names match typed event data.
  */
 
 import { Guild } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type { Redis } from 'ioredis';
+import type { PlatformEvent } from '@somnibot/shared';
 
 export class CrossFeatureBridge {
   private listeners: (() => void)[] = [];
@@ -38,8 +42,8 @@ export class CrossFeatureBridge {
 
     // ── 1. Ban/Kick → Giveaway + Ticket cleanup ────────────
 
-    this.on('member.banned', async (data) => {
-      const userId = data.userId as string;
+    this.on('member.banned', async (event) => {
+      const userId = event.data.discordId;
       if (!userId) return;
 
       // Remove from all active giveaway entries
@@ -51,8 +55,8 @@ export class CrossFeatureBridge {
       console.log(`[CrossFeatureBridge] Cleaned up giveaways + tickets for banned user ${userId}`);
     });
 
-    this.on('member.kicked', async (data) => {
-      const userId = data.userId as string;
+    this.on('member.kicked', async (event) => {
+      const userId = event.data.discordId;
       if (!userId) return;
 
       // Remove from active giveaway entries
@@ -61,9 +65,9 @@ export class CrossFeatureBridge {
 
     // ── 2. Level Up → Discount unlocks + Role grants ───────
 
-    this.on('level.up', async (data) => {
-      const userId = data.userId as string;
-      const newLevel = data.newLevel as number;
+    this.on('level.up', async (event) => {
+      const userId = event.data.discordId;
+      const newLevel = event.data.newLevel;
       if (!userId || !newLevel) return;
 
       // Check for level-gated discount unlocks
@@ -120,10 +124,10 @@ export class CrossFeatureBridge {
 
     // ── 3. Purchase Complete → XP bonus + Celebration ──────
 
-    this.on('commerce.purchase_completed', async (data) => {
-      const userId = data.customerId as string ?? data.userId as string;
-      const productName = data.productName as string ?? 'a product';
-      const orderId = data.orderId as string;
+    this.on('purchase.completed', async (event) => {
+      const userId = event.data.discordId;
+      const productName = event.data.productName ?? 'a product';
+      const orderId = event.data.orderId;
       if (!userId) return;
 
       // Grant XP bonus for purchase
@@ -144,63 +148,12 @@ export class CrossFeatureBridge {
 
         console.log(`[CrossFeatureBridge] Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
       }
-
-      // Emit event for audit logging
-      this.eventBus.emit('audit.log', {
-        action: 'cross_feature.purchase_xp_bonus',
-        actorType: 'system',
-        actorId: 'cross-feature-bridge',
-        targetType: 'user',
-        targetId: userId,
-        details: { xpBonus: XP_BONUS, orderId, productName },
-      });
     });
 
-    // ── 4. Fraud Flag → Tag related tickets ────────────────
+    // ── 4. Ticket Closed → Resolution metrics ──────────────
 
-    this.on('commerce.fraud_flagged', async (data) => {
-      const userId = data.userId as string ?? data.customerId as string;
-      const reason = data.reason as string ?? 'Fraud detection triggered';
-      if (!userId) return;
-
-      // Flag all open tickets by this user
-      const { data: tickets } = await this.supabase
-        .from('tickets')
-        .select('id')
-        .eq('guild_id', this.guild.id)
-        .eq('creator_id', userId)
-        .eq('status', 'open');
-
-      if (tickets && tickets.length > 0) {
-        for (const ticket of tickets) {
-          await this.supabase
-            .from('tickets')
-            .update({
-              tags: this.supabase.rpc ? undefined : undefined, // Supabase doesn't have array_append via JS
-              notes: `⚠️ FRAUD FLAG: ${reason}`,
-            })
-            .eq('id', ticket.id);
-
-          // Add internal note to ticket
-          await this.supabase
-            .from('ticket_messages')
-            .insert({
-              ticket_id: ticket.id,
-              author_id: 'system',
-              author_type: 'system',
-              content: `⚠️ **Fraud Alert**: This user was flagged by the fraud detection system. Reason: ${reason}`,
-              is_internal: true,
-            });
-        }
-
-        console.log(`[CrossFeatureBridge] Flagged ${tickets.length} tickets for fraud-flagged user ${userId}`);
-      }
-    });
-
-    // ── 5. Ticket Closed → Resolution metrics ──────────────
-
-    this.on('ticket.closed', async (data) => {
-      const ticketId = data.ticketId as string;
+    this.on('ticket.closed', async (event) => {
+      const ticketId = event.data.ticketId;
       if (!ticketId) return;
 
       // Calculate resolution time
@@ -236,11 +189,11 @@ export class CrossFeatureBridge {
       }
     });
 
-    // ── 6. Infraction → Escalation + Giveaway cleanup ──────
+    // ── 5. Infraction → Escalation + Giveaway cleanup ──────
 
-    this.on('moderation.infraction_created', async (data) => {
-      const userId = data.userId as string;
-      const type = data.type as string;
+    this.on('infraction.created', async (event) => {
+      const userId = event.data.userId;
+      const type = event.data.type;
       if (!userId) return;
 
       // If it's a ban, clean up giveaway entries
@@ -249,22 +202,33 @@ export class CrossFeatureBridge {
       }
     });
 
-    // ── 7. Giveaway Won → Commerce fulfillment ─────────────
+    // ── 6. Giveaway Ended → Commerce fulfillment ───────────
 
-    this.on('giveaway.winner_selected', async (data) => {
-      const winnerId = data.winnerId as string;
-      const prizeProductId = data.prizeProductId as string;
-      if (!winnerId || !prizeProductId) return;
+    this.on('giveaway.ended', async (event) => {
+      const winnerIds = event.data.winnerIds;
+      const prizeProductId = event.data.prizeProductId;
+      const giveawayId = event.data.giveawayId;
+      if (!winnerIds || winnerIds.length === 0 || !prizeProductId) return;
 
-      // Trigger license generation for product prizes
-      this.eventBus.emit('commerce.grant_entitlement', {
-        userId: winnerId,
-        productId: prizeProductId,
-        source: 'giveaway',
-        giveawayId: data.giveawayId,
-      });
+      // Trigger license generation for each winner
+      for (const winnerId of winnerIds) {
+        // Use action queue instead of event emit to ensure fulfillment
+        await this.supabase.from('bot_action_queue').insert({
+          guild_id: this.guild.id,
+          action: 'fulfill_giveaway_prize',
+          payload: {
+            winner_id: winnerId,
+            product_id: prizeProductId,
+            giveaway_id: giveawayId,
+            source: 'giveaway',
+          },
+          status: 'pending',
+        }).catch((err) => {
+          console.error(`[CrossFeatureBridge] Failed to queue giveaway fulfillment for ${winnerId}:`, err);
+        });
 
-      console.log(`[CrossFeatureBridge] Triggered fulfillment for giveaway winner ${winnerId} → product ${prizeProductId}`);
+        console.log(`[CrossFeatureBridge] Queued fulfillment for giveaway winner ${winnerId} → product ${prizeProductId}`);
+      }
     });
 
     console.log(`[CrossFeatureBridge] ✅ ${this.listeners.length} cross-feature event bridges active`);
@@ -283,9 +247,18 @@ export class CrossFeatureBridge {
 
   // ── Helpers ──────────────────────────────────────────────
 
-  private on(event: string, handler: (data: Record<string, unknown>) => Promise<void> | void): void {
-    const wrapped = (data: Record<string, unknown>) => {
-      Promise.resolve(handler(data)).catch((err) => {
+  /**
+   * Register an event listener that correctly unwraps PlatformEvent.
+   * The EventBus passes PlatformEvent<T, D> to handlers (with {type, guildId, timestamp, data}).
+   */
+  private on<T extends string>(
+    event: T,
+    handler: (event: PlatformEvent<T>) => Promise<void> | void,
+  ): void {
+    const wrapped = (evt: PlatformEvent<T>) => {
+      // Only process events for our guild
+      if (evt.guildId !== this.guild.id) return;
+      Promise.resolve(handler(evt)).catch((err) => {
         console.error(`[CrossFeatureBridge] Error handling ${event}:`, err);
       });
     };
