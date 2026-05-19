@@ -1,5 +1,5 @@
 import { loadConfig } from './config.js';
-import { loadConfigFromDatabase } from './services/config-loader.js';
+import { loadConfigFromDatabase, syncConfigToDatabase } from './services/config-loader.js';
 import { SomniClient } from './client.js';
 import { registerEvents } from './events/handler.js';
 import { connectValkey } from './services/valkey.js';
@@ -67,6 +67,13 @@ async function main(): Promise<void> {
     await loadConfigFromDatabase();
   } catch (err) {
     console.warn('[Boot] Config DB fallback failed (non-fatal):', err);
+  }
+
+  // 0.75. Sync current env vars → instance_settings (so dashboard can see them)
+  try {
+    await syncConfigToDatabase();
+  } catch (err) {
+    console.warn('[Boot] Config sync-to-DB failed (non-fatal):', err);
   }
 
   // 1. Validate environment
@@ -137,6 +144,44 @@ async function main(): Promise<void> {
             if (error) console.error('[Boot] Failed to update guild record:', error.message);
             else console.log('[Boot] Guild record updated in Supabase');
           });
+      }
+    }
+
+    // Register community-required channels in id_map so they don't appear as drift
+    if (guild) {
+      try {
+        const communityIds: { key: string; discordId: string }[] = [];
+        if (guild.rulesChannelId) {
+          communityIds.push({ key: 'channel:rules', discordId: guild.rulesChannelId });
+        }
+        if (guild.publicUpdatesChannelId) {
+          communityIds.push({ key: 'channel:public-updates', discordId: guild.publicUpdatesChannelId });
+        }
+        const modOnly = guild.channels.cache.find(
+          (c) => c.name === 'moderator-only',
+        );
+        if (modOnly) {
+          communityIds.push({ key: 'channel:moderator-only', discordId: modOnly.id });
+        }
+
+        if (communityIds.length > 0) {
+          const rows = communityIds.map((c) => ({
+            guild_id: guild.id,
+            entity_type: 'channel',
+            template_key: c.key,
+            discord_id: c.discordId,
+          }));
+
+          await client.supabase
+            .from('discord_id_map')
+            .upsert(rows, { onConflict: 'guild_id,template_key' })
+            .then(({ error }) => {
+              if (error) console.warn('[Boot] Failed to register community channels:', error.message);
+              else console.log(`[Boot] ✅ Registered ${communityIds.length} community channel(s) in id_map`);
+            });
+        }
+      } catch (err) {
+        console.warn('[Boot] Community channel registration failed (non-fatal):', err);
       }
     }
 
