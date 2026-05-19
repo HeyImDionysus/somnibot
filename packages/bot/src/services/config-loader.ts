@@ -18,18 +18,27 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
  * Used for both directions: DB → env and env → DB.
  */
 const SETTINGS_TO_ENV: Record<string, string> = {
+  // Discord (collected by launcher)
   discord_bot_token: 'DISCORD_TOKEN',
   discord_application_id: 'DISCORD_APPLICATION_ID',
   discord_client_secret: 'DISCORD_CLIENT_SECRET',
   discord_guild_id: 'DISCORD_GUILD_ID',
+  // PayPal (setup wizard)
   paypal_client_id: 'PAYPAL_CLIENT_ID',
   paypal_client_secret: 'PAYPAL_CLIENT_SECRET',
   paypal_webhook_id: 'PAYPAL_WEBHOOK_ID',
   paypal_sandbox: 'PAYPAL_SANDBOX',
+  // Lavalink (defaults — self-managing)
   lavalink_host: 'LAVALINK_HOST',
   lavalink_port: 'LAVALINK_PORT',
   lavalink_password: 'LAVALINK_PASSWORD',
+  // Valkey (defaults — self-managing)
   valkey_url: 'VALKEY_URL',
+  // Supabase Management — auto-migration (setup wizard, optional)
+  supabase_access_token: 'SUPABASE_ACCESS_TOKEN',
+  supabase_db_url: 'SUPABASE_DB_URL',
+  // Deployment (setup wizard)
+  dashboard_url: 'DASHBOARD_URL',
 };
 
 /**
@@ -127,6 +136,9 @@ const KEY_TO_SECTION: Record<string, string> = {
   lavalink_port: 'lavalink',
   lavalink_password: 'lavalink',
   valkey_url: 'valkey',
+  supabase_access_token: 'supabase_mgmt',
+  supabase_db_url: 'supabase_mgmt',
+  dashboard_url: 'deployment',
 };
 
 /**
