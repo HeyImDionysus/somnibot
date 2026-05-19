@@ -202,7 +202,7 @@ function PermissionEditor({
   onChange: (perms: string) => void;
 }) {
   const { toast } = useToast();
-  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<LiveRoleData | null>(null);
 
   const [expanded, setExpanded] = useState(false);
   const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
@@ -482,7 +482,7 @@ export default function RolesPage() {
             <Pencil size={12} />
           </button>
           <button
-            onClick={(e) => { e.stopPropagation(); handleDeleteRole(role); }}
+            onClick={(e) => { e.stopPropagation(); setConfirmDelete(role); }}
             className="rounded p-1 text-discord-text-muted hover:bg-discord-danger/20 hover:text-discord-danger"
             title="Delete role"
           >
@@ -901,7 +901,7 @@ export default function RolesPage() {
         variant="danger"
         onConfirm={async () => {
           if (confirmDelete) {
-            await deleteRole(confirmDelete.id);
+            await handleDeleteRole(confirmDelete);
             setConfirmDelete(null);
           }
         }}
