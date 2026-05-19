@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
@@ -102,6 +103,8 @@ export default function EmbedBuilderPage() {
   useEffect(() => {
     fetchEmbeds();
   }, [fetchEmbeds]);
+
+  useAutoRefresh('embeds', undefined, fetchEmbeds);
 
   const openEditor = (embed?: EmbedConfig) => {
     if (embed) {

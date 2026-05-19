@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
 import { useToast } from '@/components/shared/toast';
@@ -147,6 +148,8 @@ export default function ScheduledMessagesPage() {
     fetchMessages();
     fetchEmbeds();
   }, [fetchMessages, fetchEmbeds]);
+
+  useAutoRefresh('scheduled_messages', undefined, fetchMessages);
 
   const openEditor = (sm?: ScheduledMessage) => {
     if (sm) {

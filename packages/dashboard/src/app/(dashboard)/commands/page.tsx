@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useToast } from '@/components/shared/toast';
@@ -76,6 +77,7 @@ export default function CustomCommandsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
+  const [search, setSearch] = useState('');
 
 
   const fetchCommands = useCallback(async () => {
@@ -94,6 +96,8 @@ export default function CustomCommandsPage() {
   useEffect(() => {
     fetchCommands();
   }, [fetchCommands]);
+
+  useAutoRefresh('custom_commands', undefined, fetchCommands);
 
   const openEditor = (cmd?: CustomCommand) => {
     if (cmd) {
@@ -391,6 +395,19 @@ export default function CustomCommandsPage() {
         </div>
       )}
 
+      {/* ── Search ────────────────────────────────────── */}
+      {commands.length > 0 && (
+        <div className="mb-4">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search commands..."
+            className="w-full rounded-input border border-discord-border-subtle bg-discord-bg-tertiary px-4 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted outline-none focus:border-discord-accent"
+          />
+        </div>
+      )}
+
       {/* ── Command List ───────────────────────────────── */}
       {commands.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
@@ -403,7 +420,11 @@ export default function CustomCommandsPage() {
         </div>
       ) : (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary divide-y divide-discord-border-subtle">
-          {commands.map((cmd) => (
+          {commands.filter((cmd) => {
+            if (!search) return true;
+            const q = search.toLowerCase();
+            return cmd.name.toLowerCase().includes(q) || cmd.description?.toLowerCase().includes(q);
+          }).map((cmd) => (
             <div key={cmd.id} className="flex items-center justify-between px-5 py-4">
               <div className="flex items-center gap-4 flex-1 min-w-0">
                 <span className="flex h-10 w-10 items-center justify-center rounded-full bg-discord-accent/10 text-lg">

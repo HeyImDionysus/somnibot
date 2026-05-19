@@ -10,6 +10,7 @@ import { useToast } from '@/components/shared/toast';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
 interface AutoModRule {
   id: string;
@@ -85,6 +86,8 @@ export default function AutoModRulesPage() {
   useEffect(() => {
     loadRules();
   }, [loadRules]);
+
+  useAutoRefresh('automod_rules', undefined, loadRules);
 
   const handleCreate = () => {
     setIsCreating(true);
