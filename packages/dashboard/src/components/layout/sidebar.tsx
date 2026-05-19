@@ -155,7 +155,14 @@ export function Sidebar() {
   return (
     <aside className="flex h-screen w-60 flex-col border-r border-discord-border-subtle bg-discord-bg-secondary">
       {/* Brand */}
-      <div className="flex h-12 items-center border-b border-discord-border-subtle px-4">
+      <div className="flex h-14 items-center gap-2.5 border-b border-discord-border-subtle px-3">
+        <div className="h-9 w-9 shrink-0 overflow-hidden rounded-xl ring-1 ring-white/10">
+          <img
+            src="/somnibot-logo.png"
+            alt="SomniBot"
+            className="h-full w-full object-cover"
+          />
+        </div>
         <span className="text-base font-bold text-discord-text-primary">SomniBot</span>
       </div>
 

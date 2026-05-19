@@ -6,6 +6,9 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -34,6 +37,13 @@ const emptyForm = {
   allow_text_channel: false,
   moderator_roles: '',
 };
+
+// ── Name display helper ───────────────────────────────────
+
+function TCChannelName({ id }: { id: string }) {
+  const { resolveChannel } = useDiscordNames({ channelIds: [id] });
+  return <span>{resolveChannel(id)}</span>;
+}
 
 // ── Main Component ────────────────────────────────────────
 
@@ -203,16 +213,22 @@ export default function TempChannelsPage() {
             <div className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Hub Voice Channel ID *</label>
-                  <input type="text" value={form.hub_channel_id} onChange={(e) => setForm({ ...form, hub_channel_id: e.target.value })}
-                    placeholder="Right-click voice channel → Copy ID"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <ChannelPicker
+                    label="Hub Voice Channel *"
+                    value={form.hub_channel_id || null}
+                    onChange={(v) => setForm({ ...form, hub_channel_id: (v as string) ?? '' })}
+                    placeholder="Select voice channel…"
+                    channelTypes={['voice']}
+                  />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Category ID *</label>
-                  <input type="text" value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}
-                    placeholder="Category for new channels"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                  <ChannelPicker
+                    label="Category *"
+                    value={form.category_id || null}
+                    onChange={(v) => setForm({ ...form, category_id: (v as string) ?? '' })}
+                    placeholder="Select category…"
+                    channelTypes={['category']}
+                  />
                 </div>
               </div>
               <div>
@@ -250,10 +266,13 @@ export default function TempChannelsPage() {
                 </div>
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Moderator Roles (comma-separated IDs)</label>
-                <input type="text" value={form.moderator_roles} onChange={(e) => setForm({ ...form, moderator_roles: e.target.value })}
-                  placeholder="Role IDs that can control any temp channel"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <RolePicker
+                  label="Moderator Roles"
+                  value={form.moderator_roles ? form.moderator_roles.split(',').map(s => s.trim()).filter(Boolean) : []}
+                  onChange={(v) => setForm({ ...form, moderator_roles: (v as string[] ?? []).join(', ') })}
+                  multi
+                  placeholder="Roles that can control any temp channel"
+                />
               </div>
               <label className="flex items-center gap-2 text-sm text-discord-text-secondary cursor-pointer">
                 <input type="checkbox" checked={form.allow_text_channel} onChange={(e) => setForm({ ...form, allow_text_channel: e.target.checked })} className="rounded" />
@@ -291,9 +310,9 @@ export default function TempChannelsPage() {
                   <div className="flex items-center gap-3">
                     <span className="text-2xl">🔊</span>
                     <div>
-                      <p className="text-sm font-medium text-discord-text-primary">Hub: {hub.hub_channel_id}</p>
+                      <p className="text-sm font-medium text-discord-text-primary">Hub: <TCChannelName id={hub.hub_channel_id} /></p>
                       <p className="text-xs text-discord-text-muted">
-                        Category: {hub.category_id} · Format: <code className="bg-discord-bg-tertiary px-1 rounded">{hub.naming_format}</code>
+                        Category: <TCChannelName id={hub.category_id} /> · Format: <code className="bg-discord-bg-tertiary px-1 rounded">{hub.naming_format}</code>
                       </p>
                       <p className="text-xs text-discord-text-muted mt-0.5">
                         {bitrateLabel(hub.default_bitrate)} · {hub.default_user_limit === 0 ? 'No limit' : `${hub.default_user_limit} users`} · Keep-alive: {hub.keep_alive_minutes}m

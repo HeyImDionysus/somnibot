@@ -8,6 +8,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import Link from 'next/link';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { RolePicker } from '@/components/shared/role-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 interface TicketType {
   id: string;
@@ -65,6 +68,11 @@ const EMOJI_OPTIONS = ['🎫', '💳', '🔧', '❓', '📦', '🛡️', '💬',
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 10);
+}
+
+function TicketMemberName({ id }: { id: string }) {
+  const { resolveMember } = useDiscordNames({ memberIds: [id] });
+  return <span>{resolveMember(id)}</span>;
 }
 
 export default function TicketsPage() {
@@ -280,50 +288,48 @@ export default function TicketsPage() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-discord-text-primary mb-1">Channel ID</label>
-              <p className="text-xs text-discord-text-muted mb-2">The channel where the panel message will be posted.</p>
-              <input
-                type="text"
-                value={editingPanel.channel_id}
-                onChange={(e) => setEditingPanel({ ...editingPanel, channel_id: e.target.value })}
-                placeholder="Channel ID"
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              <ChannelPicker
+                label="Panel Channel"
+                hint="The channel where the panel message will be posted."
+                value={editingPanel.channel_id || null}
+                onChange={(v) => setEditingPanel({ ...editingPanel, channel_id: (v as string) ?? '' })}
+                placeholder="Select channel…"
+                channelTypes={['text', 'announcement']}
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-discord-text-primary mb-1">Open Tickets Category ID</label>
-              <p className="text-xs text-discord-text-muted mb-2">Discord category where new tickets are created.</p>
-              <input
-                type="text"
-                value={editingPanel.open_category_id}
-                onChange={(e) => setEditingPanel({ ...editingPanel, open_category_id: e.target.value })}
-                placeholder="Category ID"
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              <ChannelPicker
+                label="Open Tickets Category"
+                hint="Discord category where new tickets are created."
+                value={editingPanel.open_category_id || null}
+                onChange={(v) => setEditingPanel({ ...editingPanel, open_category_id: (v as string) ?? '' })}
+                placeholder="Select category…"
+                channelTypes={['category']}
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-discord-text-primary mb-1">Closed Tickets Category ID</label>
-              <p className="text-xs text-discord-text-muted mb-2">Optional. Move closed tickets here.</p>
-              <input
-                type="text"
-                value={editingPanel.closed_category_id || ''}
-                onChange={(e) => setEditingPanel({ ...editingPanel, closed_category_id: e.target.value || null })}
-                placeholder="Category ID (optional)"
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              <ChannelPicker
+                label="Closed Tickets Category"
+                hint="Optional. Move closed tickets here."
+                value={editingPanel.closed_category_id}
+                onChange={(v) => setEditingPanel({ ...editingPanel, closed_category_id: (v as string) || null })}
+                placeholder="Select category (optional)"
+                channelTypes={['category']}
+                allowNone
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-discord-text-primary mb-1">Transcript Channel ID</label>
-              <p className="text-xs text-discord-text-muted mb-2">Optional. Post transcripts to this channel.</p>
-              <input
-                type="text"
-                value={editingPanel.transcript_channel_id || ''}
-                onChange={(e) => setEditingPanel({ ...editingPanel, transcript_channel_id: e.target.value || null })}
-                placeholder="Channel ID (optional)"
-                className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+              <ChannelPicker
+                label="Transcript Channel"
+                hint="Optional. Post transcripts to this channel."
+                value={editingPanel.transcript_channel_id}
+                onChange={(v) => setEditingPanel({ ...editingPanel, transcript_channel_id: (v as string) || null })}
+                placeholder="Select channel (optional)"
+                channelTypes={['text']}
+                allowNone
               />
             </div>
           </div>
@@ -365,14 +371,13 @@ export default function TicketsPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-discord-text-primary mb-1">Manager Role IDs</label>
-            <p className="text-xs text-discord-text-muted mb-2">Comma-separated Discord role IDs that can see and manage tickets.</p>
-            <input
-              type="text"
-              value={editingPanel.manager_roles.join(', ')}
-              onChange={(e) => setEditingPanel({ ...editingPanel, manager_roles: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
-              placeholder="Role ID 1, Role ID 2"
-              className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+            <RolePicker
+              label="Manager Roles"
+              hint="Roles that can see and manage tickets."
+              value={editingPanel.manager_roles}
+              onChange={(v) => setEditingPanel({ ...editingPanel, manager_roles: (v as string[]) ?? [] })}
+              multi
+              placeholder="Select manager roles…"
             />
           </div>
 
@@ -766,8 +771,8 @@ export default function TicketsPage() {
                         <td className="px-4 py-3 text-sm font-mono text-discord-text-primary">
                           {ticket.ticket_number}
                         </td>
-                        <td className="px-4 py-3 text-sm text-discord-text-secondary font-mono">
-                          {ticket.creator_id}
+                        <td className="px-4 py-3 text-sm text-discord-text-secondary">
+                          <TicketMemberName id={ticket.creator_id} />
                         </td>
                         <td className="px-4 py-3 text-sm text-discord-text-secondary">
                           {ticket.type}
@@ -777,8 +782,8 @@ export default function TicketsPage() {
                             {ticket.status}
                           </span>
                         </td>
-                        <td className="px-4 py-3 text-sm text-discord-text-muted font-mono">
-                          {ticket.claimed_by || '—'}
+                        <td className="px-4 py-3 text-sm text-discord-text-muted">
+                          {ticket.claimed_by ? <TicketMemberName id={ticket.claimed_by} /> : '—'}
                         </td>
                         <td className="px-4 py-3 text-sm text-discord-text-muted">
                           {ticket.message_count}

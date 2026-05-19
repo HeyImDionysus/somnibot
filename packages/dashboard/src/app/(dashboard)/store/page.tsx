@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import ProductFiles from '@/components/store/product-files';
+import { RolePicker } from '@/components/shared/role-picker';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -59,18 +60,18 @@ const emptyForm: {
   description: string;
   type: 'one_time' | 'subscription';
   delivery_type: 'file' | 'link' | 'access_pass' | 'mixed';
-  price_cents: string;
+  price_dollars: string;
   currency: string;
-  granted_role_ids: string;
+  granted_role_ids: string[];
   active: boolean;
 } = {
   name: '',
   description: '',
   type: 'one_time',
   delivery_type: 'access_pass',
-  price_cents: '',
+  price_dollars: '',
   currency: 'USD',
-  granted_role_ids: '',
+  granted_role_ids: [],
   active: true,
 };
 
@@ -143,9 +144,9 @@ export default function StorePage() {
       description: p.description ?? '',
       type: p.type,
       delivery_type: p.delivery_type,
-      price_cents: String(p.price_cents),
+      price_dollars: (p.price_cents / 100).toFixed(2),
       currency: p.currency,
-      granted_role_ids: p.granted_role_ids.join(', '),
+      granted_role_ids: p.granted_role_ids,
       active: p.active,
     });
     setEditingId(p.id);
@@ -155,17 +156,16 @@ export default function StorePage() {
   const save = async () => {
     setSaving(true);
     try {
+      const priceCents = Math.round((parseFloat(form.price_dollars) || 0) * 100);
       const payload = {
         ...(editingId ? { id: editingId } : {}),
         name: form.name,
         description: form.description || null,
         type: form.type,
         delivery_type: form.delivery_type,
-        price_cents: parseInt(form.price_cents, 10) || 0,
+        price_cents: priceCents,
         currency: form.currency,
-        granted_role_ids: form.granted_role_ids
-          ? form.granted_role_ids.split(',').map((s) => s.trim()).filter(Boolean)
-          : [],
+        granted_role_ids: form.granted_role_ids,
         active: form.active,
       };
 
@@ -262,15 +262,20 @@ export default function StorePage() {
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Price (cents) *
+                Price ($) *
               </label>
-              <input
-                type="number"
-                value={form.price_cents}
-                onChange={(e) => setForm({ ...form, price_cents: e.target.value })}
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-                placeholder="999 = $9.99"
-              />
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-discord-text-muted">$</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={form.price_dollars}
+                  onChange={(e) => setForm({ ...form, price_dollars: e.target.value })}
+                  className="w-full rounded-input bg-discord-bg-tertiary pl-7 pr-3 py-2 text-sm text-discord-text-primary outline-none"
+                  placeholder="9.99"
+                />
+              </div>
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-discord-text-muted">
@@ -320,14 +325,13 @@ export default function StorePage() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-discord-text-muted">
-                Granted Role IDs (comma-separated)
-              </label>
-              <input
+              <RolePicker
+                label="Granted Roles"
+                hint="Roles given to buyers on purchase"
                 value={form.granted_role_ids}
-                onChange={(e) => setForm({ ...form, granted_role_ids: e.target.value })}
-                className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
-                placeholder="123456789012345678"
+                onChange={(v) => setForm({ ...form, granted_role_ids: (v as string[]) ?? [] })}
+                multi
+                placeholder="Select roles to grant…"
               />
             </div>
             <div>

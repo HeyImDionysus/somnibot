@@ -7,6 +7,9 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
+import { ChannelPicker, useChannelName } from '@/components/shared/channel-picker';
+import { RolePicker, useRoleName } from '@/components/shared/role-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -66,6 +69,29 @@ function statusBadge(status: string) {
     default:
       return { label: status, color: 'bg-discord-bg-tertiary text-discord-text-muted' };
   }
+}
+
+// ── Name display helpers ──────────────────────────────────
+
+function GiveawayChannelName({ id }: { id: string }) {
+  const { resolveChannel } = useDiscordNames({ channelIds: [id] });
+  return <span>{resolveChannel(id)}</span>;
+}
+
+function GiveawayRoleName({ id }: { id: string }) {
+  const { resolveRole, roleColor } = useDiscordNames({ roleIds: [id] });
+  return <span style={{ color: roleColor(id) }}>{resolveRole(id)}</span>;
+}
+
+function GiveawayWinners({ winnerIds }: { winnerIds: string[] }) {
+  const { resolveMember } = useDiscordNames({ memberIds: winnerIds });
+  return (
+    <p className="text-xs text-discord-success mt-0.5">
+      🏆 Winners: {winnerIds.map((id, i) => (
+        <span key={id}>{i > 0 ? ', ' : ''}{resolveMember(id)}</span>
+      ))}
+    </p>
+  );
 }
 
 // ── Main Component ────────────────────────────────────────
@@ -273,10 +299,13 @@ export default function GiveawaysPage() {
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Channel ID *</label>
-                <input type="text" value={form.channel_id} onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
-                  placeholder="Channel to post the giveaway in"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <ChannelPicker
+                  label="Channel *"
+                  value={form.channel_id || null}
+                  onChange={(v) => setForm({ ...form, channel_id: (v as string) ?? '' })}
+                  placeholder="Select channel to post giveaway in…"
+                  channelTypes={['text', 'announcement']}
+                />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -294,10 +323,13 @@ export default function GiveawaysPage() {
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Role ID</label>
-                  <input type="text" value={form.required_role_id} onChange={(e) => setForm({ ...form, required_role_id: e.target.value })}
+                  <RolePicker
+                    label="Required Role"
+                    value={form.required_role_id || null}
+                    onChange={(v) => setForm({ ...form, required_role_id: (v as string) ?? '' })}
                     placeholder="Optional role restriction"
-                    className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                    allowNone
+                  />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-discord-text-muted">Required Level</label>
@@ -361,19 +393,17 @@ export default function GiveawaysPage() {
                           </span>
                         </div>
                         <p className="text-xs text-discord-text-muted">
-                          {g.entries.length} entries · {g.winner_count} winner{g.winner_count > 1 ? 's' : ''} · Channel: {g.channel_id}
+                          {g.entries.length} entries · {g.winner_count} winner{g.winner_count > 1 ? 's' : ''} · <GiveawayChannelName id={g.channel_id} />
                         </p>
                         <p className="text-xs text-discord-text-muted mt-0.5">
                           {g.status === 'active'
                             ? `⏰ Ends in ${timeRemaining(g.ends_at)}`
                             : `Ended ${new Date(g.ends_at).toLocaleDateString()}`}
-                          {g.required_role_id ? ` · Role: ${g.required_role_id}` : ''}
+                          {g.required_role_id ? <> · <GiveawayRoleName id={g.required_role_id} /></> : ''}
                           {g.required_level ? ` · Level ${g.required_level}+` : ''}
                         </p>
                         {g.winners.length > 0 && (
-                          <p className="text-xs text-discord-success mt-0.5">
-                            🏆 Winners: {g.winners.join(', ')}
-                          </p>
+                          <GiveawayWinners winnerIds={g.winners} />
                         )}
                       </div>
                     </div>

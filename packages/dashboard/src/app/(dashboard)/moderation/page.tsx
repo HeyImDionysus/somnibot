@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
+import { ChannelPicker } from '@/components/shared/channel-picker';
 
 interface EscalationStep {
   threshold: number;
@@ -186,19 +187,14 @@ export default function ModerationPage() {
 
         <div className="mt-6 space-y-5">
           {/* Mod Log Channel */}
-          <div>
-            <label className="block text-sm font-medium text-discord-text-primary">
-              Mod Log Channel ID
-            </label>
-            <p className="text-xs text-discord-text-muted mb-2">
-              Channel where moderation actions are logged. Leave empty to disable.
-            </p>
-            <input
-              type="text"
-              value={config.mod_log_channel_id ?? ''}
-              onChange={(e) => setConfig({ ...config, mod_log_channel_id: e.target.value || null })}
-              placeholder="Channel ID (e.g. 123456789012345678)"
-              className="w-full max-w-md rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-somni-pink focus:outline-none"
+          <div className="max-w-md">
+            <ChannelPicker
+              label="Mod Log Channel"
+              hint="Channel where moderation actions are logged. Leave empty to disable."
+              value={config.mod_log_channel_id}
+              onChange={(v) => setConfig({ ...config, mod_log_channel_id: (v as string) || null })}
+              placeholder="Select mod log channel…"
+              allowNone
             />
           </div>
 
