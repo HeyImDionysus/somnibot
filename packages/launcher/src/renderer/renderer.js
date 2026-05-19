@@ -36,12 +36,28 @@ const restoreBanner = $('restore-banner');
 
 const botDot = $('bot-dot');
 const dashDot = $('dash-dot');
+const lavalinkDot = $('lavalink-dot');
+const lavalinkStatusItem = $('lavalink-status-item');
 const messageArea = $('message-area');
 const metaArea = $('meta-area');
 const logPanel = $('log-panel');
 const logContent = $('log-content');
 const versionEl = $('version');
 const updateBanner = $('update-banner');
+const offlineBanner = $('offline-banner');
+
+// Onboarding
+const onboardingOverlay = $('onboarding-overlay');
+
+// Lavalink
+const lavalinkToggle = $('lavalink-toggle');
+const lavalinkPanel = $('lavalink-panel');
+const lavalinkJavaStatus = $('lavalink-java-status');
+const lavalinkJarStatus = $('lavalink-jar-status');
+const lavalinkDownloadRow = $('lavalink-download-row');
+const btnDownloadLavalink = $('btn-download-lavalink');
+const lavalinkDownloadProgress = $('lavalink-download-progress');
+const btnLavalinkHelp = $('btn-lavalink-help');
 
 /* ================================================================== */
 /*  State                                                              */
@@ -89,15 +105,22 @@ async function init() {
     input.addEventListener('input', () => {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
-      // Clear field validation state on edit
       input.classList.remove('error', 'valid');
-      // Re-check restore banner visibility
       updateRestoreBanner();
     });
   }
 
   // Show restore banner if appropriate
   updateRestoreBanner();
+
+  // Phase 6: Network status
+  initNetworkMonitor();
+
+  // Phase 6: Onboarding
+  await initOnboarding();
+
+  // Phase 6: Lavalink
+  await initLavalink();
 }
 
 /* ================================================================== */
@@ -123,7 +146,6 @@ async function saveConfig() {
 btnStart.addEventListener('click', async () => {
   if (isValidating || isRunning) return;
 
-  // Collect values
   const config = {};
   for (const [key, input] of Object.entries(fields)) {
     config[key] = input.value.trim();
@@ -138,12 +160,16 @@ btnStart.addEventListener('click', async () => {
     return;
   }
 
-  // Clear old errors
+  // Check network before validating (Phase 6)
+  if (!navigator.onLine) {
+    showMessage('error', 'No internet connection. Credential validation requires network access.');
+    return;
+  }
+
   for (const input of Object.values(fields)) input.classList.remove('error', 'valid');
   hideMessage();
   hideMeta();
 
-  // Start validation
   isValidating = true;
   btnStart.innerHTML = '<span class="spinner"></span>Validating...';
   btnStart.classList.add('loading');
@@ -161,18 +187,14 @@ btnStart.addEventListener('click', async () => {
       return;
     }
 
-    // Show meta info
     if (result.meta) {
       showMeta(result.meta);
     }
 
-    // Mark all fields as valid
     for (const input of Object.values(fields)) input.classList.add('valid');
 
-    // Save config before starting
     await saveConfig();
 
-    // Start the bot
     btnStart.innerHTML = '<span class="spinner"></span>Starting...';
 
     const startResult = await window.somnibot.startBot();
@@ -185,7 +207,6 @@ btnStart.addEventListener('click', async () => {
       return;
     }
 
-    // Started successfully — switch to running state
     isRunning = true;
     isValidating = false;
     btnStart.classList.add('hidden');
@@ -247,6 +268,10 @@ btnHelp.addEventListener('click', () => {
   window.somnibot.openExternal('https://github.com/HeyImDionysus/somnibot#readme');
 });
 
+btnLavalinkHelp.addEventListener('click', () => {
+  window.somnibot.openExternal('https://lavalink.dev/getting-started/');
+});
+
 /* ================================================================== */
 /*  Show/hide password fields                                          */
 /* ================================================================== */
@@ -281,13 +306,11 @@ function appendLog(source, type, line) {
   el.textContent = `[${ts}] [${source}] ${line}`;
   logContent.appendChild(el);
 
-  // Auto-scroll if near bottom
   const isNearBottom = logContent.scrollHeight - logContent.scrollTop - logContent.clientHeight < 60;
   if (isNearBottom) {
     logContent.scrollTop = logContent.scrollHeight;
   }
 
-  // Cap log lines
   while (logContent.children.length > 500) {
     logContent.removeChild(logContent.firstChild);
   }
@@ -309,6 +332,11 @@ window.somnibot.onDashboardLog((log) => {
   appendLog('dashboard', log.type, log.line);
 });
 
+// Phase 6: Lavalink logs
+window.somnibot.onLavalinkLog((log) => {
+  appendLog('lavalink', log.type, log.line);
+});
+
 function updateStatusUI(status) {
   // Bot status dot
   botDot.className = 'status-dot';
@@ -317,6 +345,13 @@ function updateStatusUI(status) {
   // Dashboard status dot
   dashDot.className = 'status-dot';
   if (status.dashboard) dashDot.classList.add(status.dashboard);
+
+  // Lavalink status dot (Phase 6)
+  if (status.lavalink && status.lavalink !== 'offline') {
+    lavalinkStatusItem.style.display = '';
+    lavalinkDot.className = 'status-dot';
+    lavalinkDot.classList.add(status.lavalink);
+  }
 
   // Enable dashboard button when it's online
   if (status.dashboard === 'online') {
@@ -338,6 +373,173 @@ function updateStatusUI(status) {
     btnOpenDashboard.disabled = true;
     setFieldsDisabled(false);
   }
+}
+
+/* ================================================================== */
+/*  Phase 6: First-Run Onboarding                                     */
+/* ================================================================== */
+
+async function initOnboarding() {
+  try {
+    const isFirstRun = await window.somnibot.isFirstRun();
+    if (!isFirstRun) return;
+
+    onboardingOverlay.classList.remove('hidden');
+
+    // Step navigation
+    let currentStep = 1;
+    const showStep = (n) => {
+      currentStep = n;
+      document.querySelectorAll('.onboarding-step').forEach((el) => {
+        el.classList.toggle('hidden', parseInt(el.dataset.step) !== n);
+      });
+      document.querySelectorAll('.onboarding-dots .dot').forEach((dot) => {
+        dot.classList.toggle('active', parseInt(dot.dataset.dot) === n);
+      });
+    };
+
+    $('onboarding-next-1').addEventListener('click', () => showStep(2));
+    $('onboarding-next-2').addEventListener('click', () => showStep(3));
+
+    $('onboarding-open-discord').addEventListener('click', () => {
+      window.somnibot.openExternal('https://discord.com/developers/applications');
+    });
+
+    $('onboarding-open-supabase').addEventListener('click', () => {
+      window.somnibot.openExternal('https://supabase.com/dashboard');
+    });
+
+    // Final step → dismiss overlay, focus first field
+    $('onboarding-next-3').addEventListener('click', () => {
+      dismissOnboarding();
+    });
+
+    // Skip button
+    $('onboarding-skip').addEventListener('click', () => {
+      dismissOnboarding();
+    });
+  } catch (err) {
+    console.error('Onboarding init failed:', err);
+  }
+}
+
+function dismissOnboarding() {
+  onboardingOverlay.classList.add('hidden');
+  window.somnibot.completeFirstRun();
+  // Focus the first field
+  fields.discordToken.focus();
+}
+
+/* ================================================================== */
+/*  Phase 6: Lavalink Management                                       */
+/* ================================================================== */
+
+async function initLavalink() {
+  try {
+    const enabled = await window.somnibot.getLavalinkEnabled();
+    lavalinkToggle.checked = enabled;
+    if (enabled) {
+      lavalinkPanel.classList.remove('hidden');
+      lavalinkStatusItem.style.display = '';
+      await refreshLavalinkPanel();
+    }
+  } catch (err) {
+    console.error('Lavalink init failed:', err);
+  }
+}
+
+lavalinkToggle.addEventListener('change', async () => {
+  const enabled = lavalinkToggle.checked;
+  await window.somnibot.setLavalinkEnabled(enabled);
+
+  if (enabled) {
+    lavalinkPanel.classList.remove('hidden');
+    lavalinkStatusItem.style.display = '';
+    await refreshLavalinkPanel();
+  } else {
+    lavalinkPanel.classList.add('hidden');
+    lavalinkStatusItem.style.display = 'none';
+  }
+});
+
+async function refreshLavalinkPanel() {
+  // Check Java
+  const java = await window.somnibot.checkJava();
+  if (java.available) {
+    lavalinkJavaStatus.className = 'lavalink-info ok';
+    lavalinkJavaStatus.innerHTML = `<span class="status-icon">✓</span> Java ${escapeHtml(java.version || 'unknown')} detected`;
+  } else {
+    lavalinkJavaStatus.className = 'lavalink-info error';
+    lavalinkJavaStatus.innerHTML = `<span class="status-icon">✗</span> Java not found — <a href="#" onclick="window.somnibot.openExternal('https://adoptium.net');return false;" style="color:var(--hot-pink)">install Java 17+</a>`;
+  }
+
+  // Check JAR
+  const info = await window.somnibot.getLavalinkInfo();
+  if (info.jarPresent) {
+    lavalinkJarStatus.className = 'lavalink-info ok';
+    lavalinkJarStatus.innerHTML = '<span class="status-icon">✓</span> Lavalink.jar ready';
+    lavalinkDownloadRow.classList.add('hidden');
+    lavalinkDownloadProgress.classList.add('hidden');
+  } else {
+    lavalinkJarStatus.className = 'lavalink-info warn';
+    lavalinkJarStatus.innerHTML = '<span class="status-icon">⬇</span> Lavalink.jar not found';
+    lavalinkDownloadRow.classList.remove('hidden');
+  }
+}
+
+btnDownloadLavalink.addEventListener('click', async () => {
+  btnDownloadLavalink.disabled = true;
+  btnDownloadLavalink.textContent = 'Downloading...';
+  lavalinkDownloadRow.classList.add('hidden');
+  lavalinkDownloadProgress.classList.remove('hidden');
+
+  const result = await window.somnibot.downloadLavalink();
+
+  lavalinkDownloadProgress.classList.add('hidden');
+  btnDownloadLavalink.disabled = false;
+  btnDownloadLavalink.textContent = 'Download Lavalink';
+
+  if (result.ok) {
+    await refreshLavalinkPanel();
+  } else {
+    lavalinkDownloadRow.classList.remove('hidden');
+    showMessage('error', `Lavalink download failed: ${result.error}`);
+  }
+});
+
+// Lavalink download progress
+window.somnibot.onLavalinkDownloadProgress((progress) => {
+  lavalinkDownloadProgress.classList.remove('hidden');
+  const infoEl = lavalinkDownloadProgress.querySelector('.lavalink-progress-info');
+  const barEl = lavalinkDownloadProgress.querySelector('.lavalink-progress-bar');
+  if (infoEl) {
+    infoEl.textContent = `Downloading... ${progress.percent}%  (${progress.downloadedMB} / ${progress.totalMB} MB)`;
+  }
+  if (barEl) {
+    barEl.style.width = `${progress.percent}%`;
+  }
+});
+
+// Lavalink status updates
+window.somnibot.onLavalinkStatus((info) => {
+  if (info.status !== 'offline') {
+    lavalinkStatusItem.style.display = '';
+    lavalinkDot.className = 'status-dot';
+    lavalinkDot.classList.add(info.status);
+  }
+});
+
+/* ================================================================== */
+/*  Phase 6: Network Monitor                                           */
+/* ================================================================== */
+
+function initNetworkMonitor() {
+  const update = () => {
+    offlineBanner.classList.toggle('hidden', navigator.onLine);
+  };
+  window.addEventListener('online', update);
+  window.addEventListener('offline', update);
+  update();
 }
 
 /* ================================================================== */
@@ -404,10 +606,6 @@ function escapeHtml(str) {
 /*  Cloud Restore                                                      */
 /* ================================================================== */
 
-/**
- * Show the "Restore from Cloud" banner when Supabase creds are present
- * but Discord creds are empty — suggests this is a new machine.
- */
 function updateRestoreBanner() {
   const hasSupabase = fields.supabaseUrl.value.trim() && fields.supabaseSecretKey.value.trim();
   const missingDiscord = !fields.discordToken.value.trim();
@@ -435,7 +633,6 @@ btnRestoreCloud.addEventListener('click', async () => {
       return;
     }
 
-    // Fill in the pulled credentials
     const creds = result.credentials;
     if (creds) {
       for (const [key, value] of Object.entries(creds)) {
@@ -459,32 +656,19 @@ btnRestoreCloud.addEventListener('click', async () => {
 /*  Auto-Update Flow                                                   */
 /* ================================================================== */
 
-/**
- * Full auto-update lifecycle:
- *   check → available → download (with progress) → downloaded → install
- *
- * On launch, the main process auto-checks silently.
- * Manual "Check for Updates" button triggers the same flow.
- */
-
 let pendingUpdateVersion = null;
-
-// State for progress bar DOM refs (avoids recreating on every progress tick)
 let progressInfoEl = null;
 let progressBarEl = null;
 let downloadingSetup = false;
 
-/* ── Manual check button ── */
 btnCheckUpdates.addEventListener('click', () => {
   window.somnibot.checkForUpdates();
 });
 
-/* ── Checking ── */
 window.somnibot.onUpdaterChecking(() => {
   showUpdateBanner('checking', 'Checking for updates...');
 });
 
-/* ── Update available ── */
 window.somnibot.onUpdateAvailable((info) => {
   pendingUpdateVersion = info.version;
   downloadingSetup = false;
@@ -520,7 +704,6 @@ window.somnibot.onUpdateAvailable((info) => {
   updateBanner.appendChild(actions);
 });
 
-/* ── No update available ── */
 window.somnibot.onUpdateNotAvailable(() => {
   showUpdateBanner('up-to-date', "You're up to date!");
   setTimeout(() => {
@@ -528,9 +711,7 @@ window.somnibot.onUpdateNotAvailable(() => {
   }, 4000);
 });
 
-/* ── Download progress ── */
 window.somnibot.onDownloadProgress((progress) => {
-  // Set up the downloading banner structure once on first progress event
   if (!downloadingSetup) {
     updateBanner.innerHTML = '';
     updateBanner.className = 'update-banner downloading';
@@ -566,7 +747,6 @@ window.somnibot.onDownloadProgress((progress) => {
   }
 });
 
-/* ── Downloaded — ready to install ── */
 window.somnibot.onUpdateDownloaded(() => {
   downloadingSetup = false;
   progressInfoEl = null;
@@ -587,7 +767,6 @@ window.somnibot.onUpdateDownloaded(() => {
   updateBanner.appendChild(btn);
 });
 
-/* ── Error ── */
 window.somnibot.onUpdateError((info) => {
   downloadingSetup = false;
   progressInfoEl = null;
@@ -599,9 +778,6 @@ window.somnibot.onUpdateError((info) => {
   }, 8000);
 });
 
-/**
- * Simple text-only banner for transient states (checking, up-to-date, error).
- */
 function showUpdateBanner(type, message) {
   updateBanner.innerHTML = `<span>${escapeHtml(message)}</span>`;
   updateBanner.className = `update-banner ${type}`;
