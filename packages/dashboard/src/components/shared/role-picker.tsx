@@ -318,7 +318,7 @@ export function RolePicker({
                       {role.name}
                     </span>
                     {role.managed && (
-                      <Shield size={12} className="ml-auto text-discord-text-muted/50 shrink-0" title="Managed role" />
+                      <span title="Managed role"><Shield size={12} className="ml-auto text-discord-text-muted/50 shrink-0" /></span>
                     )}
                   </button>
                 );
