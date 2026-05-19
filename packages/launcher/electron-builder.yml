@@ -1,0 +1,59 @@
+appId: com.somnibot.launcher
+productName: SomniBot
+copyright: Copyright © 2026 SomniBot
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - src/renderer/**/*
+  - "!node_modules/**/*"
+
+extraResources:
+  # Bot dist and dashboard standalone are copied here by the build pipeline
+  - from: ../../packages/bot/dist
+    to: bot/dist
+    filter:
+      - "**/*"
+  - from: ../../packages/dashboard/.next/standalone
+    to: dashboard
+    filter:
+      - "**/*"
+  - from: ../../packages/dashboard/.next/static
+    to: dashboard/.next/static
+    filter:
+      - "**/*"
+  - from: ../../packages/dashboard/public
+    to: dashboard/public
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  icon: build/icon.icns
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  icon: build/icon.png
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+
+publish:
+  provider: github
+  owner: HeyImDionysus
+  repo: somnibot
