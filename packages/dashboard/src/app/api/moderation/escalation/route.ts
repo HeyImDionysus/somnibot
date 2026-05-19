@@ -99,8 +99,7 @@ export async function PUT(req: NextRequest) {
 
   const { error } = await supabase
     .from('guild_config')
-    .update(updates)
-    .eq('guild_id', guildId);
+    .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

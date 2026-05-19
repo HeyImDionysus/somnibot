@@ -62,13 +62,12 @@ export async function POST(request: NextRequest) {
   if (body.action === 'update_config') {
     const { error } = await admin
       .from('guild_config')
-      .update({
+      .upsert({ guild_id: guildId,
         sync_enabled: body.syncEnabled,
         sync_interval_minutes: body.syncIntervalMinutes,
         sync_auto_repair: body.autoRepair,
         sync_auto_repair_everyone: body.autoRepairEveryone,
-      })
-      .eq('guild_id', guildId);
+       }, { onConflict: 'guild_id' });
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ success: true });

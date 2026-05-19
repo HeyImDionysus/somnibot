@@ -7,18 +7,20 @@
  * DELETE: Delete a hub by ID
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
-
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export async function GET() {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
     .from('temp_channel_hubs')
     .select('*')
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: true });
 
   if (error) {
@@ -29,6 +31,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
 
@@ -54,7 +60,7 @@ export async function POST(req: NextRequest) {
   const { count } = await supabase
     .from('temp_channel_hubs')
     .select('id', { count: 'exact', head: true })
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if ((count ?? 0) >= 10) {
     return NextResponse.json(
@@ -66,7 +72,7 @@ export async function POST(req: NextRequest) {
   const { data, error } = await supabase
     .from('temp_channel_hubs')
     .insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       hub_channel_id,
       category_id,
       naming_format: naming_format ?? "{username}'s Channel",
@@ -90,6 +96,10 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const body = await req.json();
 
@@ -121,7 +131,7 @@ export async function PUT(req: NextRequest) {
     .from('temp_channel_hubs')
     .update(updates)
     .eq('id', body.id)
-    .eq('guild_id', GUILD_ID)
+    .eq('guild_id', guildId)
     .select()
     .single();
 
@@ -135,6 +145,10 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireGuildOwner();
+  if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
+
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
@@ -147,7 +161,7 @@ export async function DELETE(req: NextRequest) {
     .from('temp_channel_hubs')
     .delete()
     .eq('id', id)
-    .eq('guild_id', GUILD_ID);
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

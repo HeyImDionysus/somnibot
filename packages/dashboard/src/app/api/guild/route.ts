@@ -79,8 +79,7 @@ export async function PATCH(request: NextRequest) {
 
   const { error } = await admin
     .from('guild_config')
-    .update(updates)
-    .eq('guild_id', guildId);
+    .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
