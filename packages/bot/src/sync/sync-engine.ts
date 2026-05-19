@@ -144,8 +144,8 @@ export async function runSyncCycle(
       guild_id: guild.id,
       actor_type: 'system',
       action: 'drift.detected',
-      entity_type: 'guild',
-      entity_id: guild.id,
+      target_type: 'guild',
+      target_id: guild.id,
       details: {
         driftCount: driftItems.length,
         criticalCount: driftItems.filter(d => d.severity === 'critical').length,

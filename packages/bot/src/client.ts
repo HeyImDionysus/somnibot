@@ -22,6 +22,12 @@ import { getConfig, type BotEnv } from './config.js';
  * - Platform event bus
  * - Guild ID (single-guild architecture)
  */
+// TODO: Replace Record<string, unknown> casts with typed manager properties:
+//   giveawayManager?: GiveawayManager;
+//   musicPlayer?: MusicPlayerManager;
+//   tempChannelManager?: TempChannelManager;
+//   etc.
+// This eliminates 48 unsafe casts across index.ts, handler.ts, and shutdown.
 export class SomniClient extends Client {
   public readonly shoukaku: Shoukaku;
   public readonly supabase: SupabaseClient;

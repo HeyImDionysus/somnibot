@@ -153,7 +153,7 @@ export class ConfigWatcher {
   }
 
   private async reloadModeration(): Promise<void> {
-    await this.reloadGuildConfig();
+    // Guild config already loaded by reloadAll() caller
     // Clear cached automod rules
     await this.valkey.del(`automod:rules:${this.guild.id}`).catch(() => {});
     // Clear cached infraction config
@@ -162,7 +162,7 @@ export class ConfigWatcher {
   }
 
   private async reloadLevels(): Promise<void> {
-    await this.reloadGuildConfig();
+    // Guild config already loaded by reloadAll() caller
     // Clear cached level config
     await this.valkey.del(`levels:config:${this.guild.id}`).catch(() => {});
     await this.valkey.del(`levels:rewards:${this.guild.id}`).catch(() => {});
@@ -170,7 +170,7 @@ export class ConfigWatcher {
   }
 
   private async reloadWelcome(): Promise<void> {
-    await this.reloadGuildConfig();
+    // Guild config already loaded by reloadAll() caller
     // Clear cached welcome messages
     await this.valkey.del(`welcome:config:${this.guild.id}`).catch(() => {});
     console.log('[ConfigWatcher] ✅ Welcome config reloaded');
