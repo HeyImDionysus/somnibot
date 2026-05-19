@@ -4,51 +4,141 @@
  * Phase B: Prevents brute-force and abuse on public license endpoints.
  * Uses a sliding window approach with configurable window size and max hits.
  *
- * Uses Valkey/Redis when available (shared state across restarts and instances).
+ * Uses Valkey/Redis when available (shared state across restarts and instances)
+ * via raw RESP protocol over TCP — zero external dependencies.
  * Falls back to in-memory store if Valkey is unavailable.
  */
 
-import Valkey from 'iovalkey';
+import { createConnection, type Socket } from 'node:net';
 
-// ── Valkey connection (lazy singleton) ──────────────────────
+// ── Lightweight Valkey client (raw RESP, zero deps) ─────────
 
-let valkeyClient: Valkey | null = null;
+let valkeySocket: Socket | null = null;
+let valkeyReady = false;
 let valkeyFailed = false;
+let pendingCallbacks: Array<(reply: string | number | null) => void> = [];
 
-function getValkey(): Valkey | null {
-  if (valkeyFailed) return null;
-  if (valkeyClient) return valkeyClient;
+function parseRedisUrl(url: string): { host: string; port: number } {
+  try {
+    const u = new URL(url);
+    return { host: u.hostname || '127.0.0.1', port: Number(u.port) || 6379 };
+  } catch {
+    return { host: '127.0.0.1', port: 6379 };
+  }
+}
+
+function ensureValkey(): boolean {
+  if (valkeyFailed) return false;
+  if (valkeyReady) return true;
+  if (valkeySocket) return false; // connecting
 
   const url = process.env.VALKEY_URL || process.env.REDIS_URL;
   if (!url) {
     valkeyFailed = true;
-    return null;
+    return false;
   }
+
+  const { host, port } = parseRedisUrl(url);
 
   try {
-    valkeyClient = new Valkey(url, {
-      maxRetriesPerRequest: 1,
-      connectTimeout: 2000,
-      lazyConnect: true,
+    const sock = createConnection({ host, port, timeout: 2000 });
+    valkeySocket = sock;
+
+    let buffer = '';
+
+    sock.on('connect', () => {
+      valkeyReady = true;
     });
 
-    valkeyClient.on('error', () => {
-      // Silently fall back to in-memory on connection errors
+    sock.on('data', (data) => {
+      buffer += data.toString();
+      // Process complete RESP replies (each ends with \r\n)
+      while (buffer.includes('\r\n')) {
+        const lineEnd = buffer.indexOf('\r\n');
+        const line = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 2);
+
+        const cb = pendingCallbacks.shift();
+        if (!cb) continue;
+
+        const prefix = line[0];
+        const payload = line.slice(1);
+
+        if (prefix === ':') {
+          cb(Number(payload));
+        } else if (prefix === '+') {
+          cb(payload);
+        } else if (prefix === '-') {
+          cb(null);
+        } else if (prefix === '$') {
+          const len = Number(payload);
+          if (len === -1) {
+            cb(null);
+          } else {
+            // Bulk string: next chunk is the data + \r\n
+            if (buffer.length >= len + 2) {
+              const val = buffer.slice(0, len);
+              buffer = buffer.slice(len + 2);
+              cb(val);
+            }
+          }
+        } else {
+          cb(null);
+        }
+      }
+    });
+
+    sock.on('error', () => {
       valkeyFailed = true;
-      valkeyClient?.disconnect();
-      valkeyClient = null;
+      valkeyReady = false;
+      valkeySocket = null;
+      // Reject all pending
+      for (const cb of pendingCallbacks) cb(null);
+      pendingCallbacks = [];
     });
 
-    valkeyClient.connect().catch(() => {
+    sock.on('close', () => {
+      valkeyReady = false;
+      valkeySocket = null;
+    });
+
+    sock.on('timeout', () => {
       valkeyFailed = true;
-      valkeyClient = null;
+      sock.destroy();
     });
-
-    return valkeyClient;
   } catch {
     valkeyFailed = true;
-    return null;
   }
+
+  return false;
+}
+
+function sendCommand(...args: (string | number)[]): Promise<string | number | null> {
+  return new Promise((resolve) => {
+    if (!valkeySocket || !valkeyReady) {
+      resolve(null);
+      return;
+    }
+
+    // Build RESP array
+    let cmd = `*${args.length}\r\n`;
+    for (const arg of args) {
+      const s = String(arg);
+      cmd += `$${Buffer.byteLength(s)}\r\n${s}\r\n`;
+    }
+
+    pendingCallbacks.push(resolve);
+    valkeySocket.write(cmd);
+
+    // Safety timeout per command
+    setTimeout(() => {
+      const idx = pendingCallbacks.indexOf(resolve as never);
+      if (idx !== -1) {
+        pendingCallbacks.splice(idx, 1);
+        resolve(null);
+      }
+    }, 1000);
+  });
 }
 
 // ── In-memory fallback ──────────────────────────────────────
@@ -100,37 +190,6 @@ function checkRateLimitMemory(
   return { limited: false, remaining: maxHits - entry.hits, retryAfterMs: 0 };
 }
 
-// ── Valkey-backed check ─────────────────────────────────────
-
-async function checkRateLimitValkey(
-  client: Valkey,
-  key: string,
-  maxHits: number,
-  windowMs: number,
-): Promise<{ limited: boolean; remaining: number; retryAfterMs: number }> {
-  const valkeyKey = `ratelimit:${key}`;
-  const windowSec = Math.ceil(windowMs / 1000);
-
-  try {
-    const hits = await client.incr(valkeyKey);
-
-    if (hits === 1) {
-      // First hit in this window — set expiry
-      await client.expire(valkeyKey, windowSec);
-    }
-
-    if (hits > maxHits) {
-      const ttl = await client.ttl(valkeyKey);
-      return { limited: true, remaining: 0, retryAfterMs: ttl > 0 ? ttl * 1000 : windowMs };
-    }
-
-    return { limited: false, remaining: maxHits - hits, retryAfterMs: 0 };
-  } catch {
-    // Valkey error — fall back to memory for this request
-    return checkRateLimitMemory(key, maxHits, windowMs);
-  }
-}
-
 // ── Public API ──────────────────────────────────────────────
 
 /**
@@ -146,10 +205,31 @@ export async function checkRateLimit(
   maxHits: number,
   windowMs: number,
 ): Promise<{ limited: boolean; remaining: number; retryAfterMs: number }> {
-  const client = getValkey();
-  if (client) {
-    return checkRateLimitValkey(client, key, maxHits, windowMs);
+  // Try Valkey first
+  if (ensureValkey() && valkeyReady) {
+    try {
+      const valkeyKey = `ratelimit:${key}`;
+      const windowSec = Math.ceil(windowMs / 1000);
+
+      const hits = await sendCommand('INCR', valkeyKey);
+      if (typeof hits === 'number') {
+        if (hits === 1) {
+          await sendCommand('EXPIRE', valkeyKey, windowSec);
+        }
+
+        if (hits > maxHits) {
+          const ttl = await sendCommand('TTL', valkeyKey);
+          const retryMs = typeof ttl === 'number' && ttl > 0 ? ttl * 1000 : windowMs;
+          return { limited: true, remaining: 0, retryAfterMs: retryMs };
+        }
+
+        return { limited: false, remaining: maxHits - hits, retryAfterMs: 0 };
+      }
+    } catch {
+      // Fall through to memory
+    }
   }
+
   return checkRateLimitMemory(key, maxHits, windowMs);
 }
 
