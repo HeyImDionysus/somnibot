@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
 import { useToast } from '@/components/shared/toast';
+import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { cn } from '@/lib/utils/cn';
 import {
   Database, MessageSquare, CreditCard, Music, Server,
@@ -216,6 +217,8 @@ export default function SettingsPage() {
   const [statuses, setStatuses] = useState<Record<string, 'connected' | 'disconnected' | 'checking'>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  useUnsavedWarning(dirty);
   /** Track which secret fields are in "edit mode" — key = field key */
   const [editingSecrets, setEditingSecrets] = useState<Record<string, boolean>>({});
   /** Temporary edit values for secrets being changed */
@@ -241,6 +244,7 @@ export default function SettingsPage() {
 
   const updateField = (key: string, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));
+    setDirty(true);
   };
 
   const startEditingSecret = (key: string) => {
@@ -299,6 +303,7 @@ export default function SettingsPage() {
           }
         }
         toast({ title: `${section.title} settings saved`, variant: 'success' });
+        setDirty(false);
       }
     } catch {
       toast({ title: 'Failed to save settings', variant: 'error' });

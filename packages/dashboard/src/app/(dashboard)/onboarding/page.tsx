@@ -9,7 +9,8 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
@@ -45,6 +46,8 @@ export default function OnboardingPage() {
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  useUnsavedWarning(dirty);
   const [error, setError] = useState<string | null>(null);
 
   // New interest mapping inputs
@@ -69,12 +72,20 @@ export default function OnboardingPage() {
         }
       } catch (err) {
         setError('Failed to load configuration');
+        toast({ title: 'Failed to load configuration', variant: 'error' });
       } finally {
         setLoading(false);
       }
     }
     load();
   }, []);
+
+  // Track unsaved changes
+  const configLoaded = useRef(false);
+  useEffect(() => {
+    if (!loading && configLoaded.current) setDirty(true);
+    if (!loading) configLoaded.current = true;
+  }, [config, loading]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -88,8 +99,11 @@ export default function OnboardingPage() {
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
       toast({ title: 'Settings saved', variant: 'success' });
+      setDirty(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     } finally {
       setSaving(false);
     }

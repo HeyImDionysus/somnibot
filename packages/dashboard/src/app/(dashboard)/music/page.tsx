@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import NowPlayingWidget from '@/components/music/now-playing-widget';
 import { useToast } from '@/components/shared/toast';
+import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 // ── Types ─────────────────────────────────────────────────
@@ -46,7 +47,7 @@ export default function MusicSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-
+  useUnsavedWarning(dirty);
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -60,6 +61,7 @@ export default function MusicSettingsPage() {
         setConfig(musicJson.data);
       } else {
         setError(musicJson.error);
+        toast({ title: musicJson.error || 'Failed to load music config', variant: 'error' });
       }
 
       const rolesJson = await rolesRes.json();
@@ -104,10 +106,13 @@ export default function MusicSettingsPage() {
         toast({ title: 'Music settings saved', variant: 'success' });
         setDirty(false);
       } else {
-        setError(json.error || 'Failed to save');
+        const msg = json.error || 'Failed to save';
+        setError(msg);
+        toast({ title: msg, variant: 'error' });
       }
     } catch {
       setError('Failed to save music settings');
+      toast({ title: 'Failed to save music settings', variant: 'error' });
     } finally {
       setSaving(false);
     }
