@@ -10,6 +10,9 @@
 </head>
 <body>
   <div id="app">
+    <!-- ─── Update Banner (managed by renderer.js — hidden until an update is found) ─── -->
+    <div id="update-banner" class="update-banner hidden"></div>
+
     <!-- ─── Header ─── -->
     <header id="header">
       <div class="header-left">
@@ -116,6 +119,7 @@
           Open Dashboard
         </button>
         <button class="link-btn small" id="btn-help">Need help?</button>
+        <button class="link-btn small" id="btn-check-updates">Check for Updates</button>
       </div>
       <div class="footer-right">
         <button class="btn btn-primary" id="btn-start">

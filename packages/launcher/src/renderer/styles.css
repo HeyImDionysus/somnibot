@@ -601,18 +601,68 @@ footer {
   vertical-align: middle;
 }
 
-/* ─── Update banner ─── */
+/* ─── Update Banner ─── */
 .update-banner {
-  background: var(--hot-pink-glow);
-  border-bottom: 1px solid rgba(255, 20, 147, 0.3);
   padding: 8px 24px;
   font-size: 12px;
-  color: var(--hot-pink);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-shrink: 0;
+  gap: 12px;
 }
 
+.update-banner.hidden {
+  display: none !important;
+}
+
+/* Banner state: checking */
+.update-banner.checking {
+  background: rgba(0, 212, 255, 0.06);
+  border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+  color: var(--cyan);
+}
+
+/* Banner state: update available */
+.update-banner.available {
+  background: var(--hot-pink-glow);
+  border-bottom: 1px solid rgba(255, 20, 147, 0.3);
+  color: var(--hot-pink);
+}
+
+/* Banner state: downloading (column layout for progress bar) */
+.update-banner.downloading {
+  background: rgba(0, 212, 255, 0.06);
+  border-bottom: 1px solid rgba(0, 212, 255, 0.15);
+  color: var(--text-secondary);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 24px;
+}
+
+/* Banner state: downloaded */
+.update-banner.downloaded {
+  background: rgba(35, 165, 89, 0.08);
+  border-bottom: 1px solid rgba(35, 165, 89, 0.3);
+  color: var(--text-success);
+}
+
+/* Banner state: up to date */
+.update-banner.up-to-date {
+  background: rgba(35, 165, 89, 0.06);
+  border-bottom: 1px solid rgba(35, 165, 89, 0.2);
+  color: var(--text-success);
+}
+
+/* Banner state: error */
+.update-banner.error {
+  background: rgba(237, 66, 69, 0.08);
+  border-bottom: 1px solid rgba(237, 66, 69, 0.25);
+  color: var(--text-danger);
+}
+
+/* Banner buttons */
 .update-banner button {
   background: var(--hot-pink);
   color: #fff;
@@ -622,8 +672,66 @@ footer {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
 }
 
 .update-banner button:hover {
   background: var(--hot-pink-dim);
+}
+
+.update-banner.downloaded button {
+  background: var(--text-success);
+}
+
+.update-banner.downloaded button:hover {
+  background: #1e8f4d;
+}
+
+/* Actions container (Install now + dismiss) */
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Dismiss button */
+.update-dismiss {
+  background: none !important;
+  color: var(--text-muted) !important;
+  font-size: 14px !important;
+  padding: 2px 6px !important;
+  border-radius: var(--radius-sm) !important;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.update-dismiss:hover {
+  background: var(--bg-hover) !important;
+  opacity: 1;
+}
+
+/* Download progress info row */
+.update-progress-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Download progress track + bar */
+.update-progress-track {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.update-progress-bar {
+  height: 100%;
+  background: var(--cyan);
+  border-radius: 2px;
+  transition: width 0.2s ease;
 }
