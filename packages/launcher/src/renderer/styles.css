@@ -130,6 +130,11 @@ header {
   box-shadow: 0 0 6px var(--text-danger);
 }
 
+.status-dot.downloading {
+  background: var(--cyan);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -584,6 +589,10 @@ footer {
   color: var(--hot-pink);
 }
 
+.log-line.lavalink {
+  color: #a78bfa;
+}
+
 /* ─── Spinner ─── */
 @keyframes spin {
   to { transform: rotate(360deg); }
@@ -616,21 +625,18 @@ footer {
   display: none !important;
 }
 
-/* Banner state: checking */
 .update-banner.checking {
   background: rgba(0, 212, 255, 0.06);
   border-bottom: 1px solid rgba(0, 212, 255, 0.15);
   color: var(--cyan);
 }
 
-/* Banner state: update available */
 .update-banner.available {
   background: var(--hot-pink-glow);
   border-bottom: 1px solid rgba(255, 20, 147, 0.3);
   color: var(--hot-pink);
 }
 
-/* Banner state: downloading (column layout for progress bar) */
 .update-banner.downloading {
   background: rgba(0, 212, 255, 0.06);
   border-bottom: 1px solid rgba(0, 212, 255, 0.15);
@@ -641,28 +647,24 @@ footer {
   padding: 10px 24px;
 }
 
-/* Banner state: downloaded */
 .update-banner.downloaded {
   background: rgba(35, 165, 89, 0.08);
   border-bottom: 1px solid rgba(35, 165, 89, 0.3);
   color: var(--text-success);
 }
 
-/* Banner state: up to date */
 .update-banner.up-to-date {
   background: rgba(35, 165, 89, 0.06);
   border-bottom: 1px solid rgba(35, 165, 89, 0.2);
   color: var(--text-success);
 }
 
-/* Banner state: error */
 .update-banner.error {
   background: rgba(237, 66, 69, 0.08);
   border-bottom: 1px solid rgba(237, 66, 69, 0.25);
   color: var(--text-danger);
 }
 
-/* Banner buttons */
 .update-banner button {
   background: var(--hot-pink);
   color: #fff;
@@ -688,7 +690,6 @@ footer {
   background: #1e8f4d;
 }
 
-/* Actions container (Install now + dismiss) */
 .update-actions {
   display: flex;
   align-items: center;
@@ -696,7 +697,6 @@ footer {
   flex-shrink: 0;
 }
 
-/* Dismiss button */
 .update-dismiss {
   background: none !important;
   color: var(--text-muted) !important;
@@ -712,7 +712,6 @@ footer {
   opacity: 1;
 }
 
-/* Download progress info row */
 .update-progress-info {
   display: flex;
   justify-content: space-between;
@@ -720,7 +719,6 @@ footer {
   color: var(--text-secondary);
 }
 
-/* Download progress track + bar */
 .update-progress-track {
   width: 100%;
   height: 4px;
@@ -732,6 +730,343 @@ footer {
 .update-progress-bar {
   height: 100%;
   background: var(--cyan);
+  border-radius: 2px;
+  transition: width 0.2s ease;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Phase 6: Offline Banner
+   ═══════════════════════════════════════════════════════════════════ */
+
+.offline-banner {
+  padding: 8px 24px;
+  font-size: 12px;
+  background: rgba(255, 107, 0, 0.08);
+  border-bottom: 1px solid rgba(255, 107, 0, 0.25);
+  color: var(--orange);
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.offline-banner.hidden {
+  display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Phase 6: First-Run Onboarding Overlay
+   ═══════════════════════════════════════════════════════════════════ */
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.3s ease;
+}
+
+.onboarding-overlay.hidden {
+  display: none !important;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.onboarding-card {
+  width: 520px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 40px 36px 28px;
+  text-align: center;
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.onboarding-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.onboarding-title {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 12px;
+  color: var(--text-primary);
+}
+
+.onboarding-title .accent {
+  color: var(--hot-pink);
+}
+
+.onboarding-desc {
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+
+.onboarding-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+  margin-bottom: 28px;
+}
+
+.onboarding-check-item {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.check-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--hot-pink);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.onboarding-check-item strong {
+  display: block;
+  font-size: 14px;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.onboarding-check-item p {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.onboarding-steps-list {
+  text-align: left;
+  margin: 0 auto 28px;
+  max-width: 420px;
+  padding-left: 20px;
+}
+
+.onboarding-steps-list li {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin-bottom: 4px;
+}
+
+.onboarding-steps-list li strong {
+  color: var(--text-primary);
+}
+
+.onboarding-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.onboarding-dots {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.onboarding-dots .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  transition: background 0.2s;
+}
+
+.onboarding-dots .dot.active {
+  background: var(--hot-pink);
+}
+
+.onboarding-skip {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s;
+}
+
+.onboarding-skip:hover {
+  color: var(--text-secondary);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Phase 6: Lavalink Section
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lavalink-section {
+  margin-top: 4px;
+}
+
+.lavalink-toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.toggle-label input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: var(--bg-hover);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.toggle-label input:checked + .toggle-switch {
+  background: var(--hot-pink-glow);
+  border-color: var(--hot-pink);
+}
+
+.toggle-label input:checked + .toggle-switch::after {
+  transform: translateX(16px);
+  background: var(--hot-pink);
+}
+
+.toggle-text {
+  font-weight: 500;
+}
+
+.lavalink-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-left: 46px;
+}
+
+.lavalink-panel {
+  margin-top: 10px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lavalink-panel.hidden {
+  display: none !important;
+}
+
+.lavalink-info {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lavalink-info .status-icon {
+  font-size: 14px;
+}
+
+.lavalink-info.ok .status-icon { color: var(--text-success); }
+.lavalink-info.warn .status-icon { color: var(--orange); }
+.lavalink-info.error .status-icon { color: var(--text-danger); }
+
+#lavalink-download-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#lavalink-download-row.hidden {
+  display: none !important;
+}
+
+.lavalink-download-note {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lavalink-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lavalink-progress.hidden {
+  display: none !important;
+}
+
+.lavalink-progress-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  justify-content: space-between;
+}
+
+.lavalink-progress-track {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.lavalink-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--hot-pink);
   border-radius: 2px;
   transition: width 0.2s ease;
 }
