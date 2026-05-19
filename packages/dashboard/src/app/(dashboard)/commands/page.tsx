@@ -174,7 +174,7 @@ export default function CustomCommandsPage() {
           setCommands([...commands, json.data]);
         }
         setShowEditor(false);
-        flash(editingId ? 'Command updated' : 'Command created');
+        toast({ title: editingId ? 'Command updated' : 'Command created', variant: 'success' });
       } else {
         setError(json.error);
       }
