@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
@@ -87,6 +88,8 @@ export default function ReactionRolesPage() {
   useEffect(() => {
     fetchRoles();
   }, [fetchRoles]);
+
+  useAutoRefresh('reaction_role_panels', undefined, fetchRoles);
 
   const openEditor = (rr?: ReactionRole) => {
     if (rr) {

@@ -6,6 +6,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
@@ -78,6 +79,8 @@ export default function TempChannelsPage() {
   useEffect(() => {
     fetchHubs();
   }, [fetchHubs]);
+
+  useAutoRefresh('temp_channel_hubs', undefined, fetchHubs);
 
   const openEditor = (hub?: TempChannelHub) => {
     if (hub) {
