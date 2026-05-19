@@ -182,6 +182,13 @@ export default function ScheduledMessagesPage() {
       setError('Either a message or an embed config is required');
       return;
     }
+    // Basic cron expression validation (5 or 6 parts)
+    const cronParts = form.cron_expression.trim().split(/\s+/);
+    if (cronParts.length < 5 || cronParts.length > 6) {
+      setError('Invalid cron expression — expected 5 or 6 fields (e.g. "0 9 * * 1-5")');
+      toast({ title: 'Invalid cron expression', variant: 'error' });
+      return;
+    }
 
     const payload = {
       ...(editingId ? { id: editingId } : {}),
@@ -213,9 +220,11 @@ export default function ScheduledMessagesPage() {
         toast({ title: editingId ? 'Schedule updated' : 'Schedule created', variant: 'success' });
       } else {
         setError(json.error);
+        toast({ title: json.error || 'Failed to save', variant: 'error' });
       }
     } catch {
       setError('Failed to save schedule');
+      toast({ title: 'Failed to save schedule', variant: 'error' });
     }
   };
 
