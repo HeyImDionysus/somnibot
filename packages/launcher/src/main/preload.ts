@@ -44,15 +44,31 @@ export interface SomniBotAPI {
   // Links
   openExternal: (url: string) => Promise<void>;
 
-  // Events
+  // Events — process status
   onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => void;
   onBotLog: (callback: (log: { type: string; line: string }) => void) => void;
   onDashboardLog: (callback: (log: { type: string; line: string }) => void) => void;
+
+  // Auto-updater — actions
+  checkForUpdates: () => Promise<{ ok: boolean; error?: string }>;
+  downloadUpdate: () => Promise<{ ok: boolean; error?: string }>;
+  installUpdate: () => Promise<void>;
+
+  // Auto-updater — events
+  onUpdaterChecking: (callback: () => void) => void;
   onUpdateAvailable: (callback: (info: { version: string }) => void) => void;
+  onUpdateNotAvailable: (callback: () => void) => void;
+  onDownloadProgress: (callback: (progress: {
+    percent: number;
+    transferred: number;
+    total: number;
+    bytesPerSecond: number;
+  }) => void) => void;
+  onUpdateDownloaded: (callback: () => void) => void;
+  onUpdateError: (callback: (info: { message: string }) => void) => void;
 
   // App
   getVersion: () => string;
-  checkForUpdates: () => Promise<void>;
 }
 
 contextBridge.exposeInMainWorld('somnibot', {
@@ -79,7 +95,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Links
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
 
-  // Events
+  // Events — process status
   onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => {
     ipcRenderer.on('status-update', (_event, status) => callback(status));
   },
@@ -89,11 +105,37 @@ contextBridge.exposeInMainWorld('somnibot', {
   onDashboardLog: (callback: (log: { type: string; line: string }) => void) => {
     ipcRenderer.on('dashboard-log', (_event, log) => callback(log));
   },
+
+  // Auto-updater — actions
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+
+  // Auto-updater — events
+  onUpdaterChecking: (callback: () => void) => {
+    ipcRenderer.on('updater:checking', () => callback());
+  },
   onUpdateAvailable: (callback: (info: { version: string }) => void) => {
-    ipcRenderer.on('update-available', (_event, info) => callback(info));
+    ipcRenderer.on('updater:available', (_event, info) => callback(info));
+  },
+  onUpdateNotAvailable: (callback: () => void) => {
+    ipcRenderer.on('updater:not-available', () => callback());
+  },
+  onDownloadProgress: (callback: (progress: {
+    percent: number;
+    transferred: number;
+    total: number;
+    bytesPerSecond: number;
+  }) => void) => {
+    ipcRenderer.on('updater:progress', (_event, progress) => callback(progress));
+  },
+  onUpdateDownloaded: (callback: () => void) => {
+    ipcRenderer.on('updater:downloaded', () => callback());
+  },
+  onUpdateError: (callback: (info: { message: string }) => void) => {
+    ipcRenderer.on('updater:error', (_event, info) => callback(info));
   },
 
   // App
   getVersion: () => ipcRenderer.sendSync('get-version'),
-  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
 } satisfies SomniBotAPI);

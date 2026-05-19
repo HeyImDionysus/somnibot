@@ -2,7 +2,8 @@
  * SomniBot Launcher — Main Process.
  *
  * Creates the launcher window, handles IPC from the renderer,
- * manages bot + dashboard child processes, and handles auto-updates.
+ * manages bot + dashboard child processes, and delegates auto-updates
+ * to the updater module.
  */
 
 import { app, BrowserWindow, ipcMain, shell } from 'electron';
@@ -12,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { validateAllCredentials } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning } from './process-manager.js';
-import { pushToSupabase, pullFromSupabase, type SyncableCredentials } from './supabase-sync.js';
+import { pushToSupabase } from './supabase-sync.js';
+import { initUpdater } from './updater.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -160,6 +162,7 @@ function registerIpcHandlers(): void {
 
   // ── Cloud sync ──
   ipcMain.handle('pull-from-supabase', async (_event, supabaseUrl: string, supabaseSecretKey: string) => {
+    const { pullFromSupabase } = await import('./supabase-sync.js');
     const result = await pullFromSupabase(supabaseUrl, supabaseSecretKey);
     if (result.ok && result.credentials) {
       // Save pulled credentials to local store
@@ -171,16 +174,6 @@ function registerIpcHandlers(): void {
   // ── App info ──
   ipcMain.on('get-version', (event) => {
     event.returnValue = app.getVersion();
-  });
-
-  ipcMain.handle('check-for-updates', async () => {
-    try {
-      // Dynamic import — electron-updater might not be available in dev
-      const { autoUpdater } = await import('electron-updater');
-      autoUpdater.checkForUpdatesAndNotify();
-    } catch {
-      // Updater not available in dev mode — silently ignore
-    }
   });
 }
 
@@ -199,27 +192,8 @@ app.whenReady().then(() => {
     }
   });
 
-  // Auto-update check on launch (production only)
-  if (app.isPackaged) {
-    import('electron-updater').then(({ autoUpdater }) => {
-      autoUpdater.autoDownload = false;
-      autoUpdater.checkForUpdatesAndNotify().catch(() => {
-        // Silent — don't block app startup if update check fails
-      });
-
-      autoUpdater.on('update-available', (info) => {
-        for (const win of BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) {
-            win.webContents.send('update-available', {
-              version: info.version,
-            });
-          }
-        }
-      });
-    }).catch(() => {
-      // electron-updater not available — fine
-    });
-  }
+  // Auto-updater — handles check-on-launch, download, and install lifecycle
+  initUpdater();
 });
 
 // Second instance: focus the existing window
