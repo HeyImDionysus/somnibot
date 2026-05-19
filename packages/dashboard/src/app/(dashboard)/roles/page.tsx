@@ -202,7 +202,6 @@ function PermissionEditor({
   onChange: (perms: string) => void;
 }) {
   const { toast } = useToast();
-  const [confirmDelete, setConfirmDelete] = useState<LiveRoleData | null>(null);
 
   const [expanded, setExpanded] = useState(false);
   const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
@@ -317,6 +316,7 @@ export default function RolesPage() {
     name: '', tier: 'member', color: '#99AAB5', hoist: false, mentionable: false,
   });
   const [actionPending, setActionPending] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<LiveRoleData | null>(null);
 
   // ── Load roles from live state ──
   const loadRoles = useCallback(async () => {
