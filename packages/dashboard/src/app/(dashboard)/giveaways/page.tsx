@@ -137,8 +137,19 @@ export default function GiveawaysPage() {
       setError('Channel ID and Prize are required');
       return;
     }
+    const winnerCount = parseInt(form.winner_count, 10) || 1;
+    if (winnerCount < 1 || winnerCount > 50) {
+      setError('Winner count must be between 1 and 50');
+      toast({ title: 'Winner count must be between 1 and 50', variant: 'error' });
+      return;
+    }
 
     const hours = parseFloat(form.duration_hours) || 24;
+    if (hours < 0.0167 || hours > 720) { // min ~1 minute, max 30 days
+      setError('Duration must be between 1 minute and 30 days');
+      toast({ title: 'Duration must be between 1 minute and 30 days', variant: 'error' });
+      return;
+    }
     const endsAt = new Date(Date.now() + hours * 3_600_000);
 
     const payload = {
@@ -167,9 +178,11 @@ export default function GiveawaysPage() {
         toast({ title: 'Giveaway created! The bot will post the entry embed in the channel.', variant: 'success' });
       } else {
         setError(json.error);
+        toast({ title: json.error || 'Failed to create giveaway', variant: 'error' });
       }
     } catch {
       setError('Failed to create giveaway');
+      toast({ title: 'Failed to create giveaway', variant: 'error' });
     }
   };
 

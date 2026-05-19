@@ -149,6 +149,27 @@ export default function EmbedBuilderPage() {
       setError('Embed name is required');
       return;
     }
+    // Discord embed limits
+    if (draft.title && draft.title.length > 256) {
+      setError('Embed title cannot exceed 256 characters');
+      toast({ title: 'Embed title too long (max 256)', variant: 'error' });
+      return;
+    }
+    if (draft.description && draft.description.length > 4096) {
+      setError('Embed description cannot exceed 4096 characters');
+      toast({ title: 'Description too long (max 4096)', variant: 'error' });
+      return;
+    }
+    if (draft.fields.length > 25) {
+      setError('Discord embeds support a maximum of 25 fields');
+      toast({ title: 'Too many fields (max 25)', variant: 'error' });
+      return;
+    }
+    if (draft.footer_text && draft.footer_text.length > 2048) {
+      setError('Footer text cannot exceed 2048 characters');
+      toast({ title: 'Footer text too long (max 2048)', variant: 'error' });
+      return;
+    }
 
     const payload = {
       ...(editingId ? { id: editingId } : {}),
@@ -184,9 +205,11 @@ export default function EmbedBuilderPage() {
         toast({ title: editingId ? 'Embed updated' : 'Embed saved', variant: 'success' });
       } else {
         setError(json.error);
+        toast({ title: json.error || 'Failed to save', variant: 'error' });
       }
     } catch {
       setError('Failed to save embed');
+      toast({ title: 'Failed to save embed', variant: 'error' });
     }
   };
 
