@@ -144,7 +144,7 @@ export default function ReactionRolesPage() {
           setRoles([...roles, json.data]);
         }
         setShowForm(false);
-        flash(editingId ? 'Reaction role updated' : 'Reaction role created');
+        toast({ title: editingId ? 'Reaction role updated' : 'Reaction role created', variant: 'success' });
       } else {
         setError(json.error);
       }

@@ -131,7 +131,7 @@ export default function TempChannelsPage() {
           setHubs([...hubs, json.data]);
         }
         setShowForm(false);
-        flash(editingId ? 'Hub updated' : 'Hub created');
+        toast({ title: editingId ? 'Hub updated' : 'Hub created', variant: 'success' });
       } else {
         setError(json.error);
       }
