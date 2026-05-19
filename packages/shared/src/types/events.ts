@@ -234,6 +234,46 @@ export interface EntitlementRevokedData {
   reason: 'expired' | 'cancelled' | 'suspended' | 'revoked' | 'refund';
 }
 
+
+// ── Owner Notification Event Types ─────────────────────────
+// These events power the OwnerNotificationService (DMs to guild owner).
+
+export interface ModerationActionData {
+  action: 'warn' | 'mute' | 'kick' | 'ban';
+  discordId: string;
+  moderatorId: string;
+  reason: string | null;
+  infractionId?: string;
+  durationMinutes?: number;
+}
+
+export interface FraudDetectedData {
+  signal: string;
+  severity: string;
+  orderId?: string;
+  discordId?: string;
+  action?: string;
+  evidence?: Record<string, unknown>;
+}
+
+export interface IncidentCreatedData {
+  incidentId: string;
+  incidentNumber: number;
+  title: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  category?: string;
+  source: string;
+}
+
+export interface PaymentFailedData {
+  discordId: string;
+  orderId: string;
+  productName: string;
+  amount: number;
+  currency: string;
+  error?: string;
+}
+
 export interface PlatformEventMap {
   'member.joined': MemberJoinedData;
   'member.left': MemberLeftData;
@@ -271,6 +311,10 @@ export interface PlatformEventMap {
   'deploy.failed': DeployFailedData;
   'drift.detected': DriftDetectedData;
   'sync.completed': SyncCompletedData;
+  'moderation.action': ModerationActionData;
+  'fraud.detected': FraudDetectedData;
+  'incident.created': IncidentCreatedData;
+  'payment.failed': PaymentFailedData;
 }
 
 export type PlatformEventType = keyof PlatformEventMap;
