@@ -6,6 +6,8 @@
 'use client';
 
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
@@ -52,6 +54,8 @@ export default function InfractionsPage() {
   const [showManualWarn, setShowManualWarn] = useState(false);
   const [manualForm, setManualForm] = useState({ member_id: '', type: 'warn', reason: '' });
   const [saving, setSaving] = useState(false);
+  const [confirmPardon, setConfirmPardon] = useState<string | null>(null);
+  const { toast } = useToast();
 
   const PAGE_SIZE = 20;
 
@@ -94,9 +98,12 @@ export default function InfractionsPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
+      toast({ title: 'Infraction pardoned', variant: 'success' });
       await loadInfractions();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to pardon');
+      const msg = err instanceof Error ? err.message : 'Failed to pardon';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     }
   };
 
@@ -113,11 +120,14 @@ export default function InfractionsPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
+      toast({ title: `${manualForm.type.charAt(0).toUpperCase() + manualForm.type.slice(1)} issued`, variant: 'success' });
       setShowManualWarn(false);
       setManualForm({ member_id: '', type: 'warn', reason: '' });
       await loadInfractions();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create infraction');
+      const msg = err instanceof Error ? err.message : 'Failed to create infraction';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     } finally {
       setSaving(false);
     }
@@ -295,7 +305,7 @@ export default function InfractionsPage() {
                   <td className="px-4 py-3">
                     {inf.active && !inf.pardoned && (
                       <button
-                        onClick={() => handlePardon(inf.id)}
+                        onClick={() => setConfirmPardon(inf.id)}
                         className="rounded bg-green-500/20 px-2.5 py-1 text-xs font-medium text-green-400 hover:bg-green-500/30"
                       >
                         Pardon
@@ -331,6 +341,19 @@ export default function InfractionsPage() {
           </button>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!confirmPardon}
+        title="Pardon Infraction"
+        description="Are you sure you want to pardon this infraction? This will deactivate it and it won't count toward escalation thresholds."
+        confirmLabel="Pardon"
+        variant="default"
+        onConfirm={() => {
+          if (confirmPardon) handlePardon(confirmPardon);
+          setConfirmPardon(null);
+        }}
+        onCancel={() => setConfirmPardon(null)}
+      />
     </div>
   );
 }
