@@ -6,27 +6,23 @@ directories:
   output: release
   buildResources: build
 
+# Launcher's own files go into the asar.
+# Production node_modules (electron-store, electron-updater) are included
+# automatically by electron-builder — no need to list them.
 files:
   - dist/**/*
   - src/renderer/**/*
-  - "!node_modules/**/*"
+  - package.json
 
+# Bot and dashboard are staged into .resources/ by the build script
+# (scripts/build-launcher.mjs) before electron-builder runs.
 extraResources:
-  # Bot dist and dashboard standalone are copied here by the build pipeline
-  - from: ../../packages/bot/dist
-    to: bot/dist
+  - from: .resources/bot
+    to: bot
     filter:
       - "**/*"
-  - from: ../../packages/dashboard/.next/standalone
+  - from: .resources/dashboard
     to: dashboard
-    filter:
-      - "**/*"
-  - from: ../../packages/dashboard/.next/static
-    to: dashboard/.next/static
-    filter:
-      - "**/*"
-  - from: ../../packages/dashboard/public
-    to: dashboard/public
     filter:
       - "**/*"
 
@@ -41,12 +37,14 @@ mac:
     - target: dmg
       arch: [x64, arm64]
   icon: build/icon.icns
+  category: public.app-category.utilities
 
 linux:
   target:
     - target: AppImage
       arch: [x64]
   icon: build/icon.png
+  category: Utility
 
 nsis:
   oneClick: true
