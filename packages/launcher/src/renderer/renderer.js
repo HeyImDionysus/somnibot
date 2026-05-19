@@ -29,6 +29,7 @@ const btnCloseLogs = $('btn-close-logs');
 const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
 const btnOpenSupabase = $('btn-open-supabase');
+const btnCheckUpdates = $('btn-check-updates');
 
 const btnRestoreCloud = $('btn-restore-cloud');
 const restoreBanner = $('restore-banner');
@@ -40,6 +41,7 @@ const metaArea = $('meta-area');
 const logPanel = $('log-panel');
 const logContent = $('log-content');
 const versionEl = $('version');
+const updateBanner = $('update-banner');
 
 /* ================================================================== */
 /*  State                                                              */
@@ -454,23 +456,156 @@ btnRestoreCloud.addEventListener('click', async () => {
 });
 
 /* ================================================================== */
-/*  Update Banner                                                      */
+/*  Auto-Update Flow                                                   */
 /* ================================================================== */
 
-window.somnibot.onUpdateAvailable((info) => {
-  // Create and show update banner at top of app
-  const existing = document.querySelector('.update-banner');
-  if (existing) return; // Already showing
+/**
+ * Full auto-update lifecycle:
+ *   check → available → download (with progress) → downloaded → install
+ *
+ * On launch, the main process auto-checks silently.
+ * Manual "Check for Updates" button triggers the same flow.
+ */
 
-  const banner = document.createElement('div');
-  banner.className = 'update-banner';
-  banner.innerHTML = `<span>Update available: v${escapeHtml(info.version)}</span>`;
-  const btn = document.createElement('button');
-  btn.textContent = 'Install & Restart';
-  btn.addEventListener('click', () => window.somnibot.checkForUpdates());
-  banner.appendChild(btn);
-  document.getElementById('app').prepend(banner);
+let pendingUpdateVersion = null;
+
+// State for progress bar DOM refs (avoids recreating on every progress tick)
+let progressInfoEl = null;
+let progressBarEl = null;
+let downloadingSetup = false;
+
+/* ── Manual check button ── */
+btnCheckUpdates.addEventListener('click', () => {
+  window.somnibot.checkForUpdates();
 });
+
+/* ── Checking ── */
+window.somnibot.onUpdaterChecking(() => {
+  showUpdateBanner('checking', 'Checking for updates...');
+});
+
+/* ── Update available ── */
+window.somnibot.onUpdateAvailable((info) => {
+  pendingUpdateVersion = info.version;
+  downloadingSetup = false;
+  progressInfoEl = null;
+  progressBarEl = null;
+
+  updateBanner.innerHTML = '';
+  updateBanner.className = 'update-banner available';
+
+  const text = document.createElement('span');
+  text.textContent = `Update available: v${info.version}`;
+  updateBanner.appendChild(text);
+
+  const actions = document.createElement('div');
+  actions.className = 'update-actions';
+
+  const installBtn = document.createElement('button');
+  installBtn.textContent = 'Install now';
+  installBtn.addEventListener('click', () => {
+    window.somnibot.downloadUpdate();
+  });
+  actions.appendChild(installBtn);
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.className = 'update-dismiss';
+  dismissBtn.textContent = '✕';
+  dismissBtn.title = 'Dismiss';
+  dismissBtn.addEventListener('click', () => {
+    updateBanner.classList.add('hidden');
+  });
+  actions.appendChild(dismissBtn);
+
+  updateBanner.appendChild(actions);
+});
+
+/* ── No update available ── */
+window.somnibot.onUpdateNotAvailable(() => {
+  showUpdateBanner('up-to-date', "You're up to date!");
+  setTimeout(() => {
+    updateBanner.classList.add('hidden');
+  }, 4000);
+});
+
+/* ── Download progress ── */
+window.somnibot.onDownloadProgress((progress) => {
+  // Set up the downloading banner structure once on first progress event
+  if (!downloadingSetup) {
+    updateBanner.innerHTML = '';
+    updateBanner.className = 'update-banner downloading';
+
+    const info = document.createElement('div');
+    info.className = 'update-progress-info';
+    updateBanner.appendChild(info);
+    progressInfoEl = info;
+
+    const track = document.createElement('div');
+    track.className = 'update-progress-track';
+    const bar = document.createElement('div');
+    bar.className = 'update-progress-bar';
+    track.appendChild(bar);
+    updateBanner.appendChild(track);
+    progressBarEl = bar;
+
+    downloadingSetup = true;
+  }
+
+  const pct = Math.round(progress.percent);
+  const mbTransferred = (progress.transferred / 1_048_576).toFixed(1);
+  const mbTotal = (progress.total / 1_048_576).toFixed(1);
+  const speed = (progress.bytesPerSecond / 1_048_576).toFixed(1);
+
+  if (progressInfoEl) {
+    progressInfoEl.innerHTML =
+      `<span>Downloading v${escapeHtml(pendingUpdateVersion || '?')}... ${pct}%</span>` +
+      `<span>${mbTransferred}/${mbTotal} MB · ${speed} MB/s</span>`;
+  }
+  if (progressBarEl) {
+    progressBarEl.style.width = `${pct}%`;
+  }
+});
+
+/* ── Downloaded — ready to install ── */
+window.somnibot.onUpdateDownloaded(() => {
+  downloadingSetup = false;
+  progressInfoEl = null;
+  progressBarEl = null;
+
+  updateBanner.innerHTML = '';
+  updateBanner.className = 'update-banner downloaded';
+
+  const text = document.createElement('span');
+  text.textContent = `v${pendingUpdateVersion || 'New version'} ready — restart to apply.`;
+  updateBanner.appendChild(text);
+
+  const btn = document.createElement('button');
+  btn.textContent = 'Restart';
+  btn.addEventListener('click', () => {
+    window.somnibot.installUpdate();
+  });
+  updateBanner.appendChild(btn);
+});
+
+/* ── Error ── */
+window.somnibot.onUpdateError((info) => {
+  downloadingSetup = false;
+  progressInfoEl = null;
+  progressBarEl = null;
+
+  showUpdateBanner('error', `Update failed: ${info.message}`);
+  setTimeout(() => {
+    updateBanner.classList.add('hidden');
+  }, 8000);
+});
+
+/**
+ * Simple text-only banner for transient states (checking, up-to-date, error).
+ */
+function showUpdateBanner(type, message) {
+  updateBanner.innerHTML = `<span>${escapeHtml(message)}</span>`;
+  updateBanner.className = `update-banner ${type}`;
+}
 
 /* ================================================================== */
 /*  Boot                                                               */
