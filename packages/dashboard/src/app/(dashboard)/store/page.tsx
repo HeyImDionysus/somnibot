@@ -160,9 +160,19 @@ export default function StorePage() {
   };
 
   const save = async () => {
+    // Client-side validation
+    const priceCents = Math.round((parseFloat(form.price_dollars) || 0) * 100);
+    if (priceCents < 0) {
+      toast({ title: 'Price cannot be negative', variant: 'error' });
+      return;
+    }
+    if (!form.currency.trim()) {
+      toast({ title: 'Currency is required', variant: 'error' });
+      return;
+    }
+
     setSaving(true);
     try {
-      const priceCents = Math.round((parseFloat(form.price_dollars) || 0) * 100);
       const payload = {
         ...(editingId ? { id: editingId } : {}),
         name: form.name,
@@ -170,39 +180,65 @@ export default function StorePage() {
         type: form.type,
         delivery_type: form.delivery_type,
         price_cents: priceCents,
-        currency: form.currency,
+        currency: form.currency.toUpperCase(),
         granted_role_ids: form.granted_role_ids,
         active: form.active,
       };
 
-      await fetch('/api/store/products', {
+      const res = await fetch('/api/store/products', {
         method: editingId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
+      const json = await res.json();
+      if (!res.ok || json.success === false) {
+        toast({ title: json.error ?? 'Failed to save product', variant: 'error' });
+        return;
+      }
+
       setShowForm(false);
       toast({ title: editingId ? 'Product updated' : 'Product created', variant: 'success' });
       load();
+    } catch {
+      toast({ title: 'Network error — could not save product', variant: 'error' });
     } finally {
       setSaving(false);
     }
   };
 
   const deleteProduct = async (id: string) => {
-    await fetch(`/api/store/products?id=${id}`, { method: 'DELETE' });
-    toast({ title: 'Product deleted', variant: 'success' });
-    load();
+    try {
+      const res = await fetch(`/api/store/products?id=${id}`, { method: 'DELETE' });
+      const json = await res.json();
+      if (!res.ok || json.success === false) {
+        toast({ title: json.error ?? 'Failed to delete product', variant: 'error' });
+        return;
+      }
+      toast({ title: 'Product deleted', variant: 'success' });
+      load();
+    } catch {
+      toast({ title: 'Network error — could not delete product', variant: 'error' });
+    }
   };
 
   const toggleActive = async (p: Product) => {
-    await fetch('/api/store/products', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: p.id, active: !p.active }),
-    });
-    toast({ title: p.active ? 'Product deactivated' : 'Product activated', variant: 'success' });
-    load();
+    try {
+      const res = await fetch('/api/store/products', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: p.id, active: !p.active }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.success === false) {
+        toast({ title: json.error ?? 'Failed to update product', variant: 'error' });
+        return;
+      }
+      toast({ title: p.active ? 'Product deactivated' : 'Product activated', variant: 'success' });
+      load();
+    } catch {
+      toast({ title: 'Network error — could not update product', variant: 'error' });
+    }
   };
 
   // ── Stats ──
