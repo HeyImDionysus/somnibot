@@ -132,6 +132,7 @@ export class DiagnosticsService {
 
       const snapshot = {
         guild_id: this.client.guildId,
+        type: 'health',
         uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
         memory_rss_mb: memoryRssMb,
         memory_heap_mb: memoryHeapMb,
@@ -146,10 +147,10 @@ export class DiagnosticsService {
         snapshot_at: new Date().toISOString(),
       };
 
-      // Upsert by guild_id (one row per guild)
+      // Upsert by (guild_id, type) — composite PK supports multiple diagnostic types
       const { error } = await this.supabase
         .from('bot_diagnostics')
-        .upsert(snapshot, { onConflict: 'guild_id' });
+        .upsert(snapshot, { onConflict: 'guild_id,type' });
 
       if (error) {
         console.error('[DiagnosticsService] Failed to write snapshot:', error.message);
