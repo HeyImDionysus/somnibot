@@ -31,20 +31,6 @@ export async function createServerSupabase() {
   );
 }
 
-/**
- * Supabase admin client (service role — bypasses RLS).
- * Only use in server-side contexts that need full DB access.
- */
-export function createAdminSupabase() {
-  const { createClient } = require('@supabase/supabase-js');
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SECRET_KEY!,
-    {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    },
-  );
-}
+// Admin client is exported from ./admin — import from there.
+// Removed duplicate to avoid ambiguity.
+export { createAdminSupabase } from './admin';

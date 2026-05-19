@@ -6,6 +6,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requirePermission } from '@/lib/rbac';
 
 const ALLOWED_TABLES = new Set([
   'tickets',
@@ -24,8 +25,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const ctx = await requirePermission(null);
     const supabase = createAdminSupabase();
-    let query = supabase.from(table).select('id', { count: 'exact', head: true });
+    let query = supabase.from(table).select('id', { count: 'exact', head: true }).eq('guild_id', ctx.guildId);
 
     // Apply status filter for tables that have status columns
     if (table === 'tickets') {
