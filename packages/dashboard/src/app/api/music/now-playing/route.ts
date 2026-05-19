@@ -48,7 +48,7 @@ export async function GET() {
   return NextResponse.json({
     success: true,
     data: {
-      enabled: config?.music_enabled ?? false,
+      enabled: config?.music_enabled ?? true,
       nowPlaying: musicData?.now_playing ?? null,
       queue: musicData?.queue ?? { length: 0, duration: 0 },
       listeners: musicData?.listeners ?? 0,
