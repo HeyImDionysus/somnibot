@@ -23,7 +23,7 @@ import {
 } from '../features/discord-ux/index.js';
 import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
 import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
-import { handleTicketInteraction, handleTicketCommand } from '../features/tickets/index.js';
+import { handleTicketInteraction, handleTicketCommand, checkInactiveTickets } from '../features/tickets/index.js';
 import {
   handleRoleCreate,
   handleRoleUpdate,
@@ -614,6 +614,18 @@ export function registerEvents(client: SomniClient): void {
       console.error('[Events] Infraction expiry error:', err);
     }
   }, 15 * 60 * 1000);
+
+  // ── Ticket Inactivity Check (every 30 minutes) ───────
+  setInterval(async () => {
+    try {
+      const guild = client.guilds.cache.get(client.guildId);
+      if (guild) {
+        await checkInactiveTickets(client.supabase, guild, client.eventBus);
+      }
+    } catch (err) {
+      console.error('[Events] Ticket inactivity check error:', err);
+    }
+  }, 30 * 60 * 1000);
 }
 
 // ── Helpers ───────────────────────────────────────────────

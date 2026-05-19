@@ -818,8 +818,25 @@ export class MusicPlayerManager {
           });
           this.setupPlayerEvents(newPlayer);
 
-          // Resume playback if we had a track
-          if (queue.nowPlaying?.track) {
+          // Resume playback — re-resolve via URI in case encoded track expired
+          if (queue.nowPlaying?.uri) {
+            try {
+              const resolved = await newPlayer.node.rest.resolve(queue.nowPlaying.uri);
+              if (resolved?.data && !Array.isArray(resolved.data) && 'encoded' in resolved.data) {
+                await newPlayer.playTrack({ track: { encoded: resolved.data.encoded } });
+              } else if (resolved?.data && Array.isArray(resolved.data) && resolved.data.length > 0) {
+                await newPlayer.playTrack({ track: { encoded: resolved.data[0].encoded } });
+              } else if (queue.nowPlaying.track) {
+                // Fallback to the original encoded track
+                await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+              }
+            } catch {
+              // Last resort: try the stale encoded track
+              if (queue.nowPlaying.track) {
+                await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+              }
+            }
+          } else if (queue.nowPlaying?.track) {
             await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
           }
           console.log(`[Music] Reconnected after ${attempt} attempt(s)`);
