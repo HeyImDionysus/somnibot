@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ChannelPicker } from '@/components/shared/channel-picker';
+import { useDiscordNames } from '@/hooks/use-discord-names';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -79,6 +81,13 @@ function relativeTime(dateStr: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
+}
+
+// ── Name display helper ───────────────────────────────────
+
+function SMChannelName({ id }: { id: string }) {
+  const { resolveChannel } = useDiscordNames({ channelIds: [id] });
+  return <span>{resolveChannel(id)}</span>;
 }
 
 // ── Main Component ────────────────────────────────────────
@@ -261,10 +270,13 @@ export default function ScheduledMessagesPage() {
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-discord-text-muted">Channel ID *</label>
-                <input type="text" value={form.channel_id} onChange={(e) => setForm({ ...form, channel_id: e.target.value })}
-                  placeholder="Target channel ID"
-                  className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none" />
+                <ChannelPicker
+                  label="Channel *"
+                  value={form.channel_id || null}
+                  onChange={(v) => setForm({ ...form, channel_id: (v as string) ?? '' })}
+                  placeholder="Select target channel…"
+                  channelTypes={['text', 'announcement']}
+                />
               </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Message</label>
@@ -378,7 +390,7 @@ export default function ScheduledMessagesPage() {
                     <div>
                       <p className="text-sm font-medium text-discord-text-primary">{sm.name}</p>
                       <p className="text-xs text-discord-text-muted">
-                        {describeCron(sm.cron_expression)} · {sm.timezone} · Channel: {sm.channel_id}
+                        {describeCron(sm.cron_expression)} · {sm.timezone} · <SMChannelName id={sm.channel_id} />
                       </p>
                       <p className="text-xs text-discord-text-muted mt-0.5">
                         Sent: {sm.current_sends}{sm.max_sends != null ? `/${sm.max_sends}` : ''} · Last: {relativeTime(sm.last_sent_at)}
