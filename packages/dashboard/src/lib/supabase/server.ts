@@ -31,6 +31,3 @@ export async function createServerSupabase() {
   );
 }
 
-// Admin client is exported from ./admin — import from there.
-// Removed duplicate to avoid ambiguity.
-export { createAdminSupabase } from './admin';

@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
   const clientIp = getClientIp(req);
 
   // ── B.5: Rate limit by IP ──
-  const ipLimit = rateLimits.licenseValidate(clientIp);
+  const ipLimit = await rateLimits.licenseValidate(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(
       { valid: false, status: 'rate_limited', error: 'Too many requests' },
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest) {
   const keyHash = sha256(license_key);
 
   // ── B.5: Per-key rate limit ──
-  const keyLimit = rateLimits.licensePerKey(keyHash);
+  const keyLimit = await rateLimits.licensePerKey(keyHash);
   if (keyLimit.limited) {
     return NextResponse.json(
       { valid: false, status: 'rate_limited', error: 'Too many requests for this license' },
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
 
   if (!licenseKey) {
     // ── B.5: Log invalid key attempt with IP (even though key not found) ──
-    const failedLimit = rateLimits.licenseFailedAttempt(clientIp);
+    const failedLimit = await rateLimits.licenseFailedAttempt(clientIp);
 
     // Log the attempt to license_validations with a synthetic reference
     await supabase.from('license_validations').insert({

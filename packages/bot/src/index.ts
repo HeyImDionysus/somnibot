@@ -6,7 +6,8 @@ import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
-import { registerTicketCommands } from './features/tickets/register-commands.js';
+// registerTicketCommands no longer used — ticket command now part of bulk PUT
+// import { registerTicketCommands } from './features/tickets/register-commands.js';
 import { AutomationEngine } from './features/automations/index.js';
 import { initVoiceTracking, startVoiceXpTicker, buildLevelCommands } from './features/levels/index.js';
 import { loadReactionRoles } from './features/reaction-roles/index.js';
@@ -30,11 +31,13 @@ import { OwnerNotificationService } from './services/owner-notifications.js';
 import { GiveawayFulfillmentService } from './services/giveaway-fulfillment.js';
 import { MusicStatusReporter } from './services/music-status-reporter.js';
 import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
+import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
-import { REST, Routes, EmbedBuilder } from 'discord.js';
+import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody } from 'discord.js';
+import { ticketCommand } from './features/tickets/ticket-commands.js';
 
 /**
  * SomniBot entry point.
@@ -225,8 +228,13 @@ async function main(): Promise<void> {
       }
     }
 
-    // Register slash commands (Phase 7: Tickets)
-    await registerTicketCommands(client);
+    // ── Slash Command Collector ──
+    // All commands are collected here and registered in one bulk PUT at the end.
+    // This is atomic, faster (1 API call instead of 20+), and auto-removes stale commands.
+    const allCommands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [];
+
+    // Phase 7: Ticket command
+    allCommands.push(ticketCommand.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
 
     // Phase 8: Automation Engine
     if (guild) {
@@ -250,23 +258,12 @@ async function main(): Promise<void> {
     if (guild) {
       try {
         // Register /rank and /leaderboard slash commands
-        const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
         const { rankCmd, leaderboardCmd } = buildLevelCommands();
-
-        // Register level commands as guild commands
-        try {
-          await rest.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: rankCmd.toJSON() },
-          );
-          await rest.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: leaderboardCmd.toJSON() },
-          );
-          console.log('[Boot] ✅ Level commands registered (/rank, /leaderboard)');
-        } catch (err) {
-          console.error('[Boot] ⚠️  Failed to register level commands:', err);
-        }
+        allCommands.push(
+          rankCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody,
+          leaderboardCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody,
+        );
+        console.log('[Boot] ✅ Level commands queued (/rank, /leaderboard)');
 
         // Initialize voice XP tracking
         await initVoiceTracking(guild);
@@ -301,21 +298,16 @@ async function main(): Promise<void> {
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        const rest10 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
-
         // 10a: Temp Channels
         if (guildConfig?.temp_channels_enabled !== false) {
           const tempChannelManager = new TempChannelManager(guild, client.supabase);
           await tempChannelManager.start();
           (client as unknown as Record<string, unknown>)._tempChannelManager = tempChannelManager;
 
-          // Register /voice command
+          // Queue /voice command for bulk registration
           const voiceCmd = buildTempChannelCommands();
-          await rest10.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: voiceCmd.toJSON() },
-          );
-          console.log('[Boot] ✅ Temp channels started + /voice command registered');
+          allCommands.push(voiceCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          console.log('[Boot] ✅ Temp channels started + /voice command queued');
         }
 
         // 10b: Stats Channels
@@ -346,13 +338,10 @@ async function main(): Promise<void> {
           await giveawayManager.start();
           (client as unknown as Record<string, unknown>)._giveawayManager = giveawayManager;
 
-          // Register /giveaway command
+          // Queue /giveaway command for bulk registration
           const giveawayCmd = buildGiveawayCommands();
-          await rest10.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: giveawayCmd.toJSON() },
-          );
-          console.log('[Boot] ✅ Giveaway manager started + /giveaway command registered');
+          allCommands.push(giveawayCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          console.log('[Boot] ✅ Giveaway manager started + /giveaway command queued');
 
           // Start giveaway prize fulfillment service
           const giveawayFulfillment = new GiveawayFulfillmentService(
@@ -389,22 +378,12 @@ async function main(): Promise<void> {
           await musicPlayer.init();
           (client as unknown as Record<string, unknown>)._musicPlayer = musicPlayer;
 
-          // Register music slash commands (individual POST to avoid clobbering other commands)
-          const rest11 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+          // Queue music slash commands for bulk registration
           const musicCmds = buildMusicCommands();
-          let registered = 0;
           for (const cmd of musicCmds) {
-            try {
-              await rest11.post(
-                Routes.applicationGuildCommands(client.user!.id, client.guildId),
-                { body: cmd.toJSON() },
-              );
-              registered++;
-            } catch (regErr) {
-              console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
-            }
+            allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
           }
-          console.log(`[Boot] ✅ Music system started + ${registered}/${musicCmds.length} commands registered (/play, /skip, /stop, /queue, /np, /volume, /loop, /shuffle, /seek, /remove, /pause, /filter)`);
+          console.log(`[Boot] ✅ Music system started + ${musicCmds.length} music commands queued`);
 
           // Start music status reporter for dashboard now-playing widget
           const musicStatusReporter = new MusicStatusReporter(
@@ -440,27 +419,28 @@ async function main(): Promise<void> {
           );
           (client as unknown as Record<string, unknown>)._entitlementService = entitlementService;
 
-          // Register commerce slash commands
-          const rest12 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+          // Queue commerce slash commands for bulk registration
           const commerceCmds = [buildStoreCommand(), buildLicenseCommand()];
-          let registered = 0;
           for (const cmd of commerceCmds) {
-            try {
-              await rest12.post(
-                Routes.applicationGuildCommands(client.user!.id, client.guildId),
-                { body: cmd.toJSON() },
-              );
-              registered++;
-            } catch (regErr) {
-              console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
-            }
+            allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
           }
-          console.log(`[Boot] ✅ Commerce system started + ${registered}/${commerceCmds.length} commands registered (/store, /license)`);
+          console.log('[Boot] ✅ Commerce system started + commands queued (/store, /license)');
         } else {
           console.log('[Boot] ⏸️  Commerce system disabled in config');
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 12 (Commerce) initialization error:', err);
+      }
+    }
+
+    // Phase 12b: Entitlement Reconciliation (periodic entitlement↔role sync)
+    if (guild) {
+      try {
+        const reconTimer = scheduleReconciliation(guild, client.supabase);
+        (client as unknown as Record<string, unknown>)._reconciliationTimer = reconTimer;
+        console.log('[Boot] ✅ Entitlement reconciliation scheduled (startup + every 6h)');
+      } catch (err) {
+        console.error('[Boot] ⚠️  Reconciliation scheduler failed to start:', err);
       }
     }
 
@@ -494,59 +474,26 @@ async function main(): Promise<void> {
     // Phase 14: Moderation commands, Help, Context Menus, Config Watcher, Notifications
     if (guild) {
       try {
-        const rest14 = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
-
-        // 14a: Register moderation slash commands (/warn, /mute, /kick, /ban, /pardon, /infractions)
+        // 14a: Queue moderation slash commands
         const modCmds = buildModerationCommands();
         for (const cmd of Object.values(modCmds)) {
-          try {
-            await rest14.post(
-              Routes.applicationGuildCommands(client.user!.id, client.guildId),
-              { body: cmd.toJSON() },
-            );
-          } catch (regErr) {
-            console.warn(`[Boot] ⚠️  Failed to register /${cmd.name}:`, regErr);
-          }
+          allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
         }
-        console.log('[Boot] ✅ Moderation commands registered (/warn, /mute, /kick, /ban, /pardon, /infractions)');
+        console.log('[Boot] ✅ Moderation commands queued (/warn, /mute, /kick, /ban, /pardon, /infractions)');
 
-        // 14b: Register /help command
+        // 14b: Queue /help and /setup commands
         const helpCmd = buildHelpCommand();
-        try {
-          await rest14.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: helpCmd.toJSON() },
-          );
-          console.log('[Boot] ✅ /help command registered');
-        } catch (regErr) {
-          console.warn('[Boot] ⚠️  Failed to register /help:', regErr);
-        }
-
-        // Register /setup command (setup wizard — owner only)
+        allCommands.push(helpCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
         const setupCmd = buildSetupCommand();
-        try {
-          await rest14.post(
-            Routes.applicationGuildCommands(client.user!.id, client.guildId),
-            { body: setupCmd.toJSON() },
-          );
-          console.log('[Boot] ✅ /setup command registered');
-        } catch (regErr) {
-          console.warn('[Boot] ⚠️  Failed to register /setup:', regErr);
-        }
+        allCommands.push(setupCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+        console.log('[Boot] ✅ /help and /setup commands queued');
 
-        // 14c: Register context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
+        // 14c: Queue context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
         const contextMenuCmds = buildContextMenuCommands();
         for (const cmd of contextMenuCmds) {
-          try {
-            await rest14.post(
-              Routes.applicationGuildCommands(client.user!.id, client.guildId),
-              { body: cmd.toJSON() },
-            );
-          } catch (regErr) {
-            console.warn(`[Boot] ⚠️  Failed to register context menu "${cmd.name}":`, regErr);
-          }
+          allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
         }
-        console.log(`[Boot] ✅ ${contextMenuCmds.length} context menu commands registered`);
+        console.log(`[Boot] ✅ ${contextMenuCmds.length} context menu commands queued`);
 
         // 14d: Start ConfigWatcher for hot-reload from dashboard changes
         const configWatcher = new ConfigWatcher(
@@ -605,6 +552,21 @@ async function main(): Promise<void> {
         console.log('[Boot] ✅ Owner notification service started');
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 14 initialization error:', err);
+      }
+    }
+
+    // ── Bulk Slash Command Registration ──
+    // Single PUT replaces all guild commands atomically and auto-removes stale ones.
+    if (allCommands.length > 0) {
+      try {
+        const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+        await rest.put(
+          Routes.applicationGuildCommands(client.user!.id, client.guildId),
+          { body: allCommands },
+        );
+        console.log(`[Boot] ✅ ${allCommands.length} slash/context-menu commands registered (bulk PUT)`);
+      } catch (err) {
+        console.error('[Boot] ⚠️  Bulk command registration failed:', err);
       }
     }
 
@@ -701,6 +663,9 @@ async function main(): Promise<void> {
     if (auditSvc?.stop) auditSvc.stop();
     const diagSvc = (client as unknown as Record<string, unknown>)._diagnosticsService as { stop?: () => void } | undefined;
     if (diagSvc?.stop) diagSvc.stop();
+    // Reconciliation timer
+    const reconTimer = (client as unknown as Record<string, unknown>)._reconciliationTimer as NodeJS.Timeout | undefined;
+    if (reconTimer) clearInterval(reconTimer);
     // Cross-feature bridge + Discord native services
     const crossBridge = (client as unknown as Record<string, unknown>)._crossFeatureBridge as { stop?: () => void } | undefined;
     if (crossBridge?.stop) crossBridge.stop();
