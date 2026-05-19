@@ -5,11 +5,12 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
 import { useToast } from '@/components/shared/toast';
+import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { EmptyState } from '@/components/shared/empty-state';
 import { Trophy } from 'lucide-react';
@@ -118,7 +119,9 @@ export default function LevelsPage() {
   const [lbPage, setLbPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useUnsavedWarning(dirty);
   const [confirmDelete, setConfirmDelete] = useState<{ type: 'reward' | 'multiplier'; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'settings' | 'rewards' | 'multipliers' | 'leaderboard'>('settings');
 
@@ -154,6 +157,15 @@ export default function LevelsPage() {
       setLoading(false);
     }
   }, []);
+
+  // Track unsaved changes — skip the initial render + fetch-set
+  const configLoaded = useRef(false);
+  useEffect(() => {
+    if (!loading && configLoaded.current) {
+      setDirty(true);
+    }
+    if (!loading) configLoaded.current = true;
+  }, [config, loading]);
 
   const fetchLeaderboard = useCallback(async (page = 0) => {
     try {
@@ -222,6 +234,7 @@ export default function LevelsPage() {
         toast({ title: json.error || 'Failed to save', variant: 'error' });
       } else {
         toast({ title: 'Settings saved', variant: 'success' });
+        setDirty(false);
       }
     } catch {
       setError('Failed to save settings');
