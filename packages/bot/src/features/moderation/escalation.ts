@@ -14,6 +14,7 @@ import { DEFAULT_ESCALATION_CHAIN } from '@somnibot/shared';
 import {
   createInfraction,
   getActiveWarningCount,
+  getActiveInfractionCount,
   calculateExpiryDate,
 } from './infraction-service.js';
 import { postModLogEntry } from './mod-log.js';
@@ -60,7 +61,9 @@ export async function executeEscalation(
     modLogChannelId: string | null;
   },
 ): Promise<{ action: InfractionType; durationMinutes?: number } | null> {
-  const activeWarnings = await getActiveWarningCount(
+  // Count ALL active infractions, not just warns — a mute/kick should also
+  // push the user closer to escalation thresholds (matches MEE6/Dyno behavior).
+  const activeWarnings = await getActiveInfractionCount(
     client.supabase,
     client.guildId,
     member.id,

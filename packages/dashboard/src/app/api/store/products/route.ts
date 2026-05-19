@@ -8,6 +8,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { notifyBot } from '@/lib/notify-bot';
 
 const GUILD_ID = process.env.DISCORD_GUILD_ID!;
 const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
@@ -261,6 +262,9 @@ export async function POST(req: NextRequest) {
     .eq('id', data.id)
     .single();
 
+  // Notify bot about new product
+  await notifyBot('commerce', { product_created: data.id });
+
   return NextResponse.json({
     success: true,
     data: fullProduct ?? data,
@@ -296,13 +300,8 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
-  // Queue config reload so bot knows about product changes
-  await supabase.from('bot_action_queue').insert({
-    guild_id: GUILD_ID,
-    action: 'config_reload',
-    payload: { section: 'commerce', changes: { product_updated: id } },
-    status: 'pending',
-  });
+  // Notify bot so it hot-reloads product changes
+  await notifyBot('commerce', { product_updated: id });
 
   return NextResponse.json({ success: true, data });
 }
@@ -326,6 +325,9 @@ export async function DELETE(req: NextRequest) {
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
+
+  // Notify bot so deactivated product is no longer purchasable
+  await notifyBot('commerce', { product_deactivated: id });
 
   return NextResponse.json({ success: true });
 }
