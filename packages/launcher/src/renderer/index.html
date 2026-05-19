@@ -9,9 +9,99 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- ─── First-Run Onboarding Overlay ─── -->
+  <div id="onboarding-overlay" class="onboarding-overlay hidden">
+    <div class="onboarding-card">
+      <!-- Step 1: Welcome -->
+      <div class="onboarding-step" data-step="1">
+        <div class="onboarding-icon">🌙</div>
+        <h1 class="onboarding-title">Welcome to <span class="accent">SomniBot</span></h1>
+        <p class="onboarding-desc">
+          Let's get your bot online. You'll need two things:
+        </p>
+        <div class="onboarding-checklist">
+          <div class="onboarding-check-item">
+            <span class="check-num">1</span>
+            <div>
+              <strong>Discord Bot Credentials</strong>
+              <p>A bot token, application ID, and client secret from the Discord Developer Portal.</p>
+            </div>
+          </div>
+          <div class="onboarding-check-item">
+            <span class="check-num">2</span>
+            <div>
+              <strong>Supabase Project</strong>
+              <p>A Supabase project URL, secret key, and publishable key for your database.</p>
+            </div>
+          </div>
+        </div>
+        <div class="onboarding-actions">
+          <button class="btn btn-primary" id="onboarding-next-1">Let's Go →</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Discord Setup -->
+      <div class="onboarding-step hidden" data-step="2">
+        <div class="onboarding-icon">🤖</div>
+        <h1 class="onboarding-title">Create a Discord Bot</h1>
+        <p class="onboarding-desc">
+          If you don't have a bot yet, create one in the Developer Portal:
+        </p>
+        <ol class="onboarding-steps-list">
+          <li>Go to <strong>discord.com/developers/applications</strong></li>
+          <li>Click <strong>New Application</strong> → name it → Create</li>
+          <li>Go to <strong>Bot</strong> tab → <strong>Reset Token</strong> → copy the token</li>
+          <li>Scroll down and enable all <strong>Privileged Gateway Intents</strong></li>
+          <li>Go to <strong>OAuth2</strong> → copy the <strong>Client Secret</strong></li>
+          <li>Copy the <strong>Application ID</strong> from the General tab</li>
+        </ol>
+        <div class="onboarding-actions">
+          <button class="btn btn-secondary" id="onboarding-open-discord">Open Developer Portal ↗</button>
+          <button class="btn btn-primary" id="onboarding-next-2">Next →</button>
+        </div>
+      </div>
+
+      <!-- Step 3: Supabase Setup -->
+      <div class="onboarding-step hidden" data-step="3">
+        <div class="onboarding-icon">🗄️</div>
+        <h1 class="onboarding-title">Set Up Supabase</h1>
+        <p class="onboarding-desc">
+          Create a free Supabase project for your bot's database:
+        </p>
+        <ol class="onboarding-steps-list">
+          <li>Go to <strong>supabase.com/dashboard</strong></li>
+          <li>Create a new project (any region)</li>
+          <li>Go to <strong>Settings → API</strong></li>
+          <li>Copy the <strong>Project URL</strong></li>
+          <li>Copy the <strong>anon/public key</strong> (publishable key)</li>
+          <li>Copy the <strong>service_role key</strong> (secret key)</li>
+        </ol>
+        <div class="onboarding-actions">
+          <button class="btn btn-secondary" id="onboarding-open-supabase">Open Supabase ↗</button>
+          <button class="btn btn-primary" id="onboarding-next-3">I'm Ready →</button>
+        </div>
+      </div>
+
+      <!-- Step indicators -->
+      <div class="onboarding-dots">
+        <span class="dot active" data-dot="1"></span>
+        <span class="dot" data-dot="2"></span>
+        <span class="dot" data-dot="3"></span>
+      </div>
+
+      <!-- Skip link -->
+      <button class="onboarding-skip" id="onboarding-skip">Skip setup guide</button>
+    </div>
+  </div>
+
   <div id="app">
     <!-- ─── Update Banner (managed by renderer.js — hidden until an update is found) ─── -->
     <div id="update-banner" class="update-banner hidden"></div>
+
+    <!-- ─── Offline Banner (Phase 6: network error handling) ─── -->
+    <div id="offline-banner" class="offline-banner hidden">
+      ⚠ No internet connection — credential validation and cloud sync require network access.
+    </div>
 
     <!-- ─── Header ─── -->
     <header id="header">
@@ -28,6 +118,10 @@
           <div class="status-item">
             <span class="status-dot" id="dash-dot"></span>
             <span class="status-label">Dashboard</span>
+          </div>
+          <div class="status-item" id="lavalink-status-item" style="display:none;">
+            <span class="status-dot" id="lavalink-dot"></span>
+            <span class="status-label">Lavalink</span>
           </div>
         </div>
       </div>
@@ -95,9 +189,42 @@
             </div>
           </div>
         </div>
+
+        <!-- ─── Phase 6: Lavalink (Music) Section ─── -->
+        <div class="section-header" style="margin-top: 24px;">
+          <h2>Music (Lavalink)</h2>
+          <button class="link-btn small" id="btn-lavalink-help">What's this?</button>
+        </div>
+
+        <div class="lavalink-section" id="lavalink-section">
+          <div class="lavalink-toggle-row">
+            <label class="toggle-label" for="lavalink-toggle">
+              <input type="checkbox" id="lavalink-toggle" />
+              <span class="toggle-switch"></span>
+              <span class="toggle-text">Manage Lavalink automatically</span>
+            </label>
+            <span class="lavalink-hint" id="lavalink-hint">Starts a Lavalink server alongside the bot for music playback</span>
+          </div>
+
+          <!-- Lavalink sub-panel: shown when toggle is ON -->
+          <div id="lavalink-panel" class="lavalink-panel hidden">
+            <div id="lavalink-java-status" class="lavalink-info"></div>
+            <div id="lavalink-jar-status" class="lavalink-info"></div>
+            <div id="lavalink-download-row" class="hidden">
+              <button class="btn btn-small btn-accent" id="btn-download-lavalink">Download Lavalink</button>
+              <span class="lavalink-download-note">~70 MB from GitHub</span>
+            </div>
+            <div id="lavalink-download-progress" class="lavalink-progress hidden">
+              <div class="lavalink-progress-info"></div>
+              <div class="lavalink-progress-track">
+                <div class="lavalink-progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <!-- Cloud restore banner (shows when Supabase creds filled but Discord creds empty) -->
+      <!-- Cloud restore banner -->
       <div id="restore-banner" class="restore-banner hidden">
         <span>Have Supabase credentials from another machine?</span>
         <button class="btn btn-small btn-accent" id="btn-restore-cloud">
