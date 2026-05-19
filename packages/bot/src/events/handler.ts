@@ -54,6 +54,12 @@ import { handleMusicCommand } from '../features/music/commands.js';
 import { handleStoreCommand } from '../features/commerce/store-command.js';
 import { handleLicenseCommand } from '../features/commerce/license-commands.js';
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import {
+  handleSetupCommand,
+  handleSetupButton,
+  handleSetupModal,
+  handleReconfigureSelect,
+} from '../features/setup-wizard/index.js';
 import type { EscalationStep } from '@somnibot/shared';
 
 /**
@@ -351,6 +357,16 @@ export function registerEvents(client: SomniClient): void {
     if (!interaction.guild || interaction.guild.id !== client.guildId) return;
 
     try {
+      // Handle setup wizard interactions (buttons + select menu)
+      if (interaction.isButton() && interaction.customId.startsWith('setup:')) {
+        await handleSetupButton(interaction, client);
+        return;
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'setup:reconfigure') {
+        await handleReconfigureSelect(interaction, client);
+        return;
+      }
+
       // Handle ticket button/dropdown interactions
       if (interaction.isButton() || interaction.isStringSelectMenu()) {
         const handled = await handleTicketInteraction(interaction, client);
@@ -447,8 +463,14 @@ export function registerEvents(client: SomniClient): void {
         }
       }
 
-      // Handle modal submissions (from context menus and warn user)
+      // Handle modal submissions
       if (interaction.isModalSubmit()) {
+        // Setup wizard modals
+        if (interaction.customId.startsWith('setup:modal:')) {
+          await handleSetupModal(interaction, client);
+          return;
+        }
+        // Context menus and warn user modals
         const guild = interaction.guild;
         if (guild) {
           await handleModalSubmit(interaction, guild, client.supabase, client.eventBus);
@@ -494,6 +516,9 @@ export function registerEvents(client: SomniClient): void {
             return;
           case 'help':
             await handleHelpCommand(interaction, client);
+            return;
+          case 'setup':
+            await handleSetupCommand(interaction, client);
             return;
         }
 
