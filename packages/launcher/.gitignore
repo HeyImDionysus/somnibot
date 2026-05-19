@@ -1,0 +1,8 @@
+# Staging directory created by build script
+.resources/
+
+# Electron-builder output
+release/
+
+# TypeScript output
+dist/
