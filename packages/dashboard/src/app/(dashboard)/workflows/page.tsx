@@ -7,7 +7,7 @@
 import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useToast } from '@/hooks/use-toast';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
