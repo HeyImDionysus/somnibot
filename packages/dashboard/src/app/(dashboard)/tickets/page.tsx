@@ -6,6 +6,8 @@
 'use client';
 
 import { CardListSkeleton } from '@/components/shared/loading-skeleton';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
@@ -88,6 +90,8 @@ export default function TicketsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ type: string; id: string; label: string } | null>(null);
+  const { toast } = useToast();
   const [ticketFilter, setTicketFilter] = useState<string>('all');
 
   const loadPanels = useCallback(async () => {
@@ -180,12 +184,16 @@ export default function TicketsPage() {
 
       if (!json.success) throw new Error(json.error);
 
-      setSuccess(isNew ? 'Panel created! Post it to Discord from the panel list.' : 'Panel updated!');
+      const msg = isNew ? 'Panel created! Post it to Discord from the panel list.' : 'Panel updated!';
+      setSuccess(msg);
+      toast({ title: msg, variant: 'success' });
       setShowEditor(false);
       setEditingPanel(null);
       await loadPanels();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save panel');
+      const msg = err instanceof Error ? err.message : 'Failed to save panel';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     } finally {
       setSaving(false);
     }
@@ -198,9 +206,12 @@ export default function TicketsPage() {
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
       setSuccess('Panel deleted');
+      toast({ title: 'Panel deleted', variant: 'success' });
       await loadPanels();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete panel');
+      const msg = err instanceof Error ? err.message : 'Failed to delete panel';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     }
   };
 
@@ -214,9 +225,12 @@ export default function TicketsPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
+      toast({ title: panel.active ? 'Panel disabled' : 'Panel enabled', variant: 'success' });
       await loadPanels();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to toggle panel');
+      const msg = err instanceof Error ? err.message : 'Failed to toggle panel';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     }
   };
 
@@ -698,7 +712,7 @@ export default function TicketsPage() {
                       Edit
                     </button>
                     <button
-                      onClick={() => deletePanel(panel.id)}
+                      onClick={() => setConfirmAction({ type: 'delete_panel', id: panel.id, label: panel.name })}
                       className="rounded-md border border-red-500/30 px-3 py-1 text-xs text-red-400 hover:bg-red-500/10"
                     >
                       Delete
@@ -798,6 +812,19 @@ export default function TicketsPage() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!confirmAction}
+        title={confirmAction?.type === 'delete_panel' ? 'Delete Ticket Panel' : 'Confirm Action'}
+        description={`Are you sure you want to delete "${confirmAction?.label ?? 'this panel'}"? Existing tickets won't be affected, but no new tickets can be created from it.`}
+        confirmLabel="Delete Panel"
+        variant="danger"
+        onConfirm={() => {
+          if (confirmAction?.type === 'delete_panel') deletePanel(confirmAction.id);
+          setConfirmAction(null);
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }

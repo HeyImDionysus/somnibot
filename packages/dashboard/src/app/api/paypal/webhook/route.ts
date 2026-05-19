@@ -400,7 +400,10 @@ async function handleSubscriptionActivated(
   let meta: { guild_id: string; product_id: string; plan_id: string; customer_id: string; discord_id: string };
   try {
     meta = JSON.parse(customId);
-  } catch { return; }
+  } catch {
+    console.error('[Webhook] Malformed custom_id in subscription event:', customId);
+    return;
+  }
 
   const subscriptionId = resource.id as string;
 

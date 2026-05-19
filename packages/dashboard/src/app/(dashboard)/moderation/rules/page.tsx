@@ -6,6 +6,8 @@
 'use client';
 
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 import { useEffect, useState, useCallback } from 'react';
 
@@ -63,6 +65,8 @@ export default function AutoModRulesPage() {
   const [editingRule, setEditingRule] = useState<Partial<AutoModRule> | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const { toast } = useToast();
 
   const loadRules = useCallback(async () => {
     try {
@@ -117,9 +121,12 @@ export default function AutoModRulesPage() {
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
       setEditingRule(null);
+      toast({ title: isCreating ? 'Rule created' : 'Rule updated', variant: 'success' });
       await loadRules();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save rule');
+      const msg = err instanceof Error ? err.message : 'Failed to save rule';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     } finally {
       setSaving(false);
     }
@@ -130,9 +137,12 @@ export default function AutoModRulesPage() {
       const res = await fetch(`/api/moderation/rules?id=${ruleId}`, { method: 'DELETE' });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
+      toast({ title: 'Rule deleted', variant: 'success' });
       await loadRules();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete rule');
+      const msg = err instanceof Error ? err.message : 'Failed to delete rule';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     }
   };
 
@@ -145,9 +155,12 @@ export default function AutoModRulesPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
+      toast({ title: rule.enabled ? 'Rule disabled' : 'Rule enabled', variant: 'success' });
       await loadRules();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to toggle rule');
+      const msg = err instanceof Error ? err.message : 'Failed to toggle rule';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     }
   };
 
@@ -248,7 +261,7 @@ export default function AutoModRulesPage() {
                   Edit
                 </button>
                 <button
-                  onClick={() => handleDelete(rule.id)}
+                  onClick={() => setConfirmDelete(rule.id)}
                   className="rounded bg-discord-bg-tertiary px-3 py-1.5 text-xs text-red-400 hover:bg-red-500/20"
                 >
                   Delete
@@ -433,6 +446,19 @@ function RuleEditor({
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Auto-Mod Rule"
+        description="Are you sure you want to delete this rule? This action cannot be undone."
+        confirmLabel="Delete Rule"
+        variant="danger"
+        onConfirm={() => {
+          if (confirmDelete) handleDelete(confirmDelete);
+          setConfirmDelete(null);
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

@@ -201,6 +201,14 @@ export default function WelcomePage() {
                 className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
                 placeholder="Welcome to {server}, {user}!"
               />
+              <p className="mt-1.5 text-xs text-discord-text-muted">
+                <span className="font-medium text-discord-text-secondary">Variables:</span>{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user}'}</code> mention,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user.name}'}</code> name,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{server}'}</code> server name,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberCount}'}</code> total members,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberNumber}'}</code> join position
+              </p>
             </div>
 
             {/* Welcome Card */}
@@ -356,6 +364,13 @@ export default function WelcomePage() {
                 className="w-full rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
                 placeholder="{user.name} left. They were with us for {duration}. 👋"
               />
+              <p className="mt-1.5 text-xs text-discord-text-muted">
+                <span className="font-medium text-discord-text-secondary">Variables:</span>{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{user.name}'}</code> name,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{server}'}</code> server name,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{memberCount}'}</code> total members,{' '}
+                <code className="rounded bg-discord-bg-tertiary px-1 py-0.5">{'{duration}'}</code> time in server
+              </p>
             </div>
 
             {/* Send Test Goodbye */}
