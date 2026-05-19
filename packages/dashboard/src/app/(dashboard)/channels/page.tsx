@@ -231,7 +231,7 @@ export default function ChannelsPage() {
             <Pencil size={12} />
           </button>
           <button
-            onClick={(e) => { e.stopPropagation(); handleDeleteChannel(channel.id, channel.name); }}
+            onClick={(e) => { e.stopPropagation(); setConfirmAction({ type: 'channel', id: channel.id, name: channel.name }); }}
             className="rounded p-1 text-discord-text-muted hover:bg-discord-danger/20 hover:text-discord-danger"
           >
             <Trash2 size={12} />
@@ -372,7 +372,7 @@ export default function ChannelsPage() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleDeleteCategory(cat.id, cat.name);
+                          setConfirmAction({ type: 'category', id: cat.id, name: cat.name });
                         }}
                         className="rounded p-0.5 text-discord-text-muted hover:text-discord-danger"
                         title="Delete category"
@@ -613,9 +613,9 @@ export default function ChannelsPage() {
         onConfirm={async () => {
           if (confirmAction) {
             if (confirmAction.type === 'channel') {
-              await deleteChannel(confirmAction.id, confirmAction.name);
+              await handleDeleteChannel(confirmAction.id, confirmAction.name);
             } else {
-              await deleteCategory(confirmAction.id, confirmAction.name);
+              await handleDeleteCategory(confirmAction.id, confirmAction.name);
             }
             setConfirmAction(null);
           }
