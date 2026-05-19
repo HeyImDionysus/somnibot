@@ -70,40 +70,9 @@ export class CrossFeatureBridge {
       const newLevel = event.data.newLevel;
       if (!userId || !newLevel) return;
 
-      // Check for level-gated discount unlocks
-      const { data: discounts } = await this.supabase
-        .from('promotions')
-        .select('id, code, discount_percent, min_level')
-        .eq('guild_id', this.guild.id)
-        .eq('active', true)
-        .not('min_level', 'is', null)
-        .lte('min_level', newLevel);
-
-      if (discounts && discounts.length > 0) {
-        // DM user about unlocked discounts
-        try {
-          const member = await this.guild.members.fetch(userId).catch(() => null);
-          if (member) {
-            const discountList = discounts.map(
-              (d) => `• **${d.code}** — ${d.discount_percent}% off`,
-            ).join('\n');
-
-            await member.send({
-              embeds: [{
-                title: '🎉 Discount Unlocked!',
-                description: `You reached level **${newLevel}** and unlocked new discounts:\n\n${discountList}\n\nUse these in the store!`,
-                color: 0x5865f2,
-              }],
-            }).catch(() => {}); // DMs might be disabled
-          }
-        } catch {
-          // Non-fatal
-        }
-      }
-
       // Check for level-gated role grants
       const { data: roleRewards } = await this.supabase
-        .from('level_role_rewards')
+        .from('level_rewards')
         .select('role_id')
         .eq('guild_id', this.guild.id)
         .eq('level', newLevel);
@@ -136,7 +105,7 @@ export class CrossFeatureBridge {
         .from('member_levels')
         .select('xp')
         .eq('guild_id', this.guild.id)
-        .eq('user_id', userId)
+        .eq('member_id', userId)
         .maybeSingle();
 
       if (existing) {
@@ -144,7 +113,7 @@ export class CrossFeatureBridge {
           .from('member_levels')
           .update({ xp: existing.xp + XP_BONUS })
           .eq('guild_id', this.guild.id)
-          .eq('user_id', userId);
+          .eq('member_id', userId);
 
         console.log(`[CrossFeatureBridge] Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
       }
@@ -177,7 +146,9 @@ export class CrossFeatureBridge {
             resolution_time_ms: resolutionMs,
             resolved_at: new Date().toISOString(),
           }, { onConflict: 'ticket_id' })
-          .catch(() => {}); // Table might not exist yet
+          .then(({ error }) => {
+            if (error) console.error('[CrossFeatureBridge] ticket_metrics upsert failed:', error.message);
+          });
 
         // Update Valkey stats
         await this.valkey.hincrby(`stats:tickets:${this.guild.id}`, 'total_resolved', 1).catch(() => {});
@@ -270,21 +241,20 @@ export class CrossFeatureBridge {
     try {
       const { data: giveaways } = await this.supabase
         .from('giveaways')
-        .select('id, entries')
+        .select('id')
         .eq('guild_id', this.guild.id)
         .eq('status', 'active');
 
       if (!giveaways) return;
 
       for (const g of giveaways) {
-        const entries = (g.entries as string[]) || [];
-        const filtered = entries.filter((e: string) => e !== userId);
-        if (filtered.length !== entries.length) {
-          await this.supabase
-            .from('giveaways')
-            .update({ entries: filtered })
-            .eq('id', g.id);
+        // Use atomic RPC to avoid read-modify-write race conditions
+        const { data } = await this.supabase.rpc('giveaway_remove_entry', {
+          p_giveaway_id: g.id,
+          p_user_id: userId,
+        });
 
+        if (data && data.length > 0) {
           console.log(`[CrossFeatureBridge] Removed ${userId} from giveaway ${g.id} (${reason})`);
         }
       }
