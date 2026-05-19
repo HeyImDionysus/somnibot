@@ -12,6 +12,8 @@ import {
   X, Save, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ============================================================
 // Constants
@@ -69,6 +71,9 @@ interface NewChannelForm {
 // ============================================================
 
 export default function ChannelsPage() {
+  const { toast } = useToast();
+  const [confirmAction, setConfirmAction] = useState<{ type: 'channel' | 'category'; id: string; name: string } | null>(null);
+
   const [channels, setChannels] = useState<LiveChannelData[]>([]);
   const [categories, setCategories] = useState<LiveCategoryData[]>([]);
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
@@ -168,7 +173,6 @@ export default function ChannelsPage() {
 
   // ── Delete channel ──
   const handleDeleteChannel = async (id: string, name: string) => {
-    if (!confirm(`Delete channel #${name}? This cannot be undone.`)) return;
     setActionPending(true);
     try {
       await channelsApi.deleteChannel(id);
@@ -183,7 +187,6 @@ export default function ChannelsPage() {
 
   // ── Delete category ──
   const handleDeleteCategory = async (id: string, name: string) => {
-    if (!confirm(`Delete category "${name}"? Channels inside it will become uncategorized.`)) return;
     setActionPending(true);
     try {
       await channelsApi.deleteCategory(id);
@@ -597,6 +600,28 @@ export default function ChannelsPage() {
           <Badge variant="default">{channels.length} total channels</Badge>
         </div>
       </Card>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmAction}
+        title={confirmAction?.type === 'channel' ? 'Delete Channel' : 'Delete Category'}
+        description={confirmAction?.type === 'channel'
+          ? `Delete channel #${confirmAction?.name}? This cannot be undone.`
+          : `Delete category "${confirmAction?.name}"? Channels inside it will become uncategorized.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmAction) {
+            if (confirmAction.type === 'channel') {
+              await deleteChannel(confirmAction.id, confirmAction.name);
+            } else {
+              await deleteCategory(confirmAction.id, confirmAction.name);
+            }
+            setConfirmAction(null);
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }

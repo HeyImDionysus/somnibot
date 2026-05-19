@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -83,6 +85,10 @@ function relativeTime(iso: string): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function LicensesPage() {
+  const { toast } = useToast();
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [revokeTargetId, setRevokeTargetId] = useState<string | null>(null);
+
   const [search, setSearch] = useState('');
   const [selectedKey, setSelectedKey] = useState<LicenseKey | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -128,7 +134,6 @@ export default function LicensesPage() {
   };
 
   const revokeKey = async (keyId: string) => {
-    if (!confirm('Revoke this license key? All sessions will be terminated.')) return;
     await fetch(`/api/license-keys/${keyId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -233,7 +238,7 @@ export default function LicensesPage() {
                     Suspend
                   </button>
                   <button
-                    onClick={() => revokeKey(selectedKey.id)}
+                    onClick={() => { setRevokeTargetId(selectedKey.id); setConfirmRevoke(true); }}
                     className="rounded-input bg-discord-danger/20 px-3 py-1.5 text-xs text-discord-danger hover:bg-discord-danger/30 transition-standard"
                   >
                     Revoke
@@ -351,6 +356,23 @@ export default function LicensesPage() {
           </p>
         </div>
       )}
+
+      {/* Confirm Revoke Dialog */}
+      <ConfirmDialog
+        open={confirmRevoke}
+        title="Revoke License Key"
+        description="Are you sure? All active sessions will be terminated immediately. This action cannot be undone."
+        confirmLabel="Revoke"
+        variant="danger"
+        onConfirm={async () => {
+          if (revokeTargetId) {
+            await revokeKey(revokeTargetId);
+          }
+          setConfirmRevoke(false);
+          setRevokeTargetId(null);
+        }}
+        onCancel={() => { setConfirmRevoke(false); setRevokeTargetId(null); }}
+      />
     </div>
   );
 }

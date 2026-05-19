@@ -7,6 +7,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -82,6 +84,9 @@ function formatDate(iso: string): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function OrdersPage() {
+  const { toast } = useToast();
+  const [confirmRefund, setConfirmRefund] = useState<{ id: string; orderNumber: string } | null>(null);
+
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -111,7 +116,6 @@ export default function OrdersPage() {
   useAutoRefresh('orders', undefined, load);
 
   const refundOrder = async (orderId: string) => {
-    if (!confirm('Issue a refund for this order? Entitlements and license keys will be revoked.')) return;
     await fetch(`/api/orders/${orderId}/refund`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     load();
   };
@@ -212,7 +216,7 @@ export default function OrdersPage() {
                   </span>
                   {order.status === 'completed' && (
                     <button
-                      onClick={() => refundOrder(order.id)}
+                      onClick={() => setConfirmRefund({ id: order.id, orderNumber: order.order_number })}
                       className="rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger hover:bg-discord-danger/30 transition-standard"
                     >
                       Refund
@@ -224,6 +228,22 @@ export default function OrdersPage() {
           })}
         </div>
       )}
+
+      {/* Confirm Refund Dialog */}
+      <ConfirmDialog
+        open={!!confirmRefund}
+        title="Refund Order"
+        description={`Issue a refund for order ${confirmRefund?.orderNumber}? Entitlements and license keys will be revoked.`}
+        confirmLabel="Refund"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmRefund) {
+            await refundOrder(confirmRefund.id);
+            setConfirmRefund(null);
+          }
+        }}
+        onCancel={() => setConfirmRefund(null)}
+      />
     </div>
   );
 }

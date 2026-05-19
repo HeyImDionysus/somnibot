@@ -8,6 +8,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import ProductFiles from '@/components/store/product-files';
 import { RolePicker } from '@/components/shared/role-picker';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -110,6 +112,9 @@ function deliveryBadge(type: string) {
 // ── Component ─────────────────────────────────────────────
 
 export default function StorePage() {
+  const { toast } = useToast();
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -176,6 +181,7 @@ export default function StorePage() {
       });
 
       setShowForm(false);
+      toast({ title: editingId ? 'Product updated' : 'Product created', variant: 'success' });
       load();
     } finally {
       setSaving(false);
@@ -183,8 +189,8 @@ export default function StorePage() {
   };
 
   const deleteProduct = async (id: string) => {
-    if (!confirm('Delete this product? This cannot be undone.')) return;
     await fetch(`/api/store/products?id=${id}`, { method: 'DELETE' });
+    toast({ title: 'Product deleted', variant: 'success' });
     load();
   };
 
@@ -194,6 +200,7 @@ export default function StorePage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: p.id, active: !p.active }),
     });
+    toast({ title: p.active ? 'Product deactivated' : 'Product activated', variant: 'success' });
     load();
   };
 
@@ -446,7 +453,7 @@ export default function StorePage() {
                     Edit
                   </button>
                   <button
-                    onClick={() => deleteProduct(p.id)}
+                    onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
                     className="rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger hover:bg-discord-danger/30 transition-standard"
                   >
                     Delete
@@ -473,6 +480,22 @@ export default function StorePage() {
           <ProductFiles productId={filesProductId} productName={filesProductName} />
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Product"
+        description={`Delete "${confirmDelete?.name}"? This cannot be undone. All associated files and configurations will be removed.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteProduct(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

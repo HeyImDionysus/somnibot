@@ -9,6 +9,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -57,18 +59,16 @@ function RRRoleName({ id }: { id: string }) {
 // ── Main Component ────────────────────────────────────────
 
 export default function ReactionRolesPage() {
+  const { toast } = useToast();
+
   const [roles, setRoles] = useState<ReactionRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; emoji: string } | null>(null);
   const [form, setForm] = useState(emptyForm);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchRoles = useCallback(async () => {
     try {
@@ -175,7 +175,7 @@ export default function ReactionRolesPage() {
       const json = await res.json();
       if (json.success) {
         setRoles(roles.filter((r) => r.id !== id));
-        flash('Reaction role deleted');
+        toast({ title: 'Reaction role deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete reaction role');
@@ -217,9 +217,6 @@ export default function ReactionRolesPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor Modal ───────────────────────────────── */}
@@ -347,7 +344,7 @@ export default function ReactionRolesPage() {
                     <button onClick={() => openEditor(rr)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
                       Edit
                     </button>
-                    <button onClick={() => deleteRole(rr.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                    <button onClick={() => setConfirmDelete({ id: rr.id, emoji: rr.emoji })} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                       Delete
                     </button>
                   </div>
@@ -357,6 +354,22 @@ export default function ReactionRolesPage() {
           </div>
         ))
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Reaction Role"
+        description={`Remove the ${confirmDelete?.emoji} reaction role mapping? Members will no longer receive the role from this reaction.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteRole(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

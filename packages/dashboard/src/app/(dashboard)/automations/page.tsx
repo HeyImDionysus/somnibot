@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -152,17 +154,19 @@ function timeAgo(dateStr: string): string {
 // ── Main Component ────────────────────────────────────────
 
 export default function AutomationsPage() {
+  const { toast } = useToast();
+
   const [automations, setAutomations] = useState<Automation[]>([]);
   const [templates, setTemplates] = useState<AutomationTemplate[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'automations' | 'templates' | 'logs'>('automations');
   const [showEditor, setShowEditor] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ id: string; name: string } | null>(null);
   const [draft, setDraft] = useState(emptyAutomation());
 
   // Selected automation for execution log
@@ -229,25 +233,22 @@ export default function AutomationsPage() {
         return;
       }
 
-      setSuccess(editingId ? 'Automation updated!' : 'Automation created!');
+      toast({ title: editingId ? 'Automation updated!' : 'Automation created!', variant: 'success' });
       setShowEditor(false);
       setEditingId(null);
       setDraft(emptyAutomation());
       await fetchAutomations();
-      setTimeout(() => setSuccess(null), 3000);
     } finally {
       setSaving(false);
     }
   };
 
   const deleteAutomation = async (id: string) => {
-    if (!confirm('Delete this automation?')) return;
     const res = await fetch(`/api/automations?id=${id}`, { method: 'DELETE' });
     const json = await res.json();
     if (json.success) {
-      setSuccess('Automation deleted');
+      toast({ title: 'Automation deleted', variant: 'success' });
       await fetchAutomations();
-      setTimeout(() => setSuccess(null), 3000);
     } else {
       setError(json.error);
     }
@@ -275,10 +276,9 @@ export default function AutomationsPage() {
       });
       const json = await res.json();
       if (json.success) {
-        setSuccess(`Template "${template.name}" deployed!`);
+        toast({ title: `Template "${template.name}" deployed!`, variant: 'success' });
         setActiveTab('automations');
         await fetchAutomations();
-        setTimeout(() => setSuccess(null), 3000);
       } else {
         setError(json.error);
       }
@@ -345,11 +345,6 @@ export default function AutomationsPage() {
         <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
           {error}
           <button onClick={() => setError(null)} className="ml-2 text-red-300 hover:text-red-200">✕</button>
-        </div>
-      )}
-      {success && (
-        <div className="mb-4 rounded-md border border-green-500/30 bg-green-500/10 px-4 py-3 text-sm text-green-400">
-          {success}
         </div>
       )}
 
@@ -987,6 +982,22 @@ function AutomationEditor({
           </div>
         )}
       </div>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmAction}
+        title="Delete Automation"
+        description={`Are you sure you want to delete "${confirmAction?.name}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmAction) {
+            await deleteAutomation(confirmAction.id);
+            setConfirmAction(null);
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }
