@@ -31,6 +31,13 @@ export interface SomniBotAPI {
     error?: string;
   }>;
 
+  // Cloud sync
+  pullFromSupabase: (supabaseUrl: string, supabaseSecretKey: string) => Promise<{
+    ok: boolean;
+    credentials?: Record<string, string>;
+    error?: string;
+  }>;
+
   // Dashboard
   openDashboard: () => Promise<void>;
 
@@ -41,6 +48,7 @@ export interface SomniBotAPI {
   onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => void;
   onBotLog: (callback: (log: { type: string; line: string }) => void) => void;
   onDashboardLog: (callback: (log: { type: string; line: string }) => void) => void;
+  onUpdateAvailable: (callback: (info: { version: string }) => void) => void;
 
   // App
   getVersion: () => string;
@@ -61,6 +69,10 @@ contextBridge.exposeInMainWorld('somnibot', {
   stopBot: () => ipcRenderer.invoke('stop-bot'),
   getStatus: () => ipcRenderer.invoke('get-status'),
 
+  // Cloud sync
+  pullFromSupabase: (supabaseUrl: string, supabaseSecretKey: string) =>
+    ipcRenderer.invoke('pull-from-supabase', supabaseUrl, supabaseSecretKey),
+
   // Dashboard
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),
 
@@ -76,6 +88,9 @@ contextBridge.exposeInMainWorld('somnibot', {
   },
   onDashboardLog: (callback: (log: { type: string; line: string }) => void) => {
     ipcRenderer.on('dashboard-log', (_event, log) => callback(log));
+  },
+  onUpdateAvailable: (callback: (info: { version: string }) => void) => {
+    ipcRenderer.on('update-available', (_event, info) => callback(info));
   },
 
   // App

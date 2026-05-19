@@ -30,6 +30,9 @@ const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
 const btnOpenSupabase = $('btn-open-supabase');
 
+const btnRestoreCloud = $('btn-restore-cloud');
+const restoreBanner = $('restore-banner');
+
 const botDot = $('bot-dot');
 const dashDot = $('dash-dot');
 const messageArea = $('message-area');
@@ -86,8 +89,13 @@ async function init() {
       saveTimeout = setTimeout(saveConfig, 500);
       // Clear field validation state on edit
       input.classList.remove('error', 'valid');
+      // Re-check restore banner visibility
+      updateRestoreBanner();
     });
   }
+
+  // Show restore banner if appropriate
+  updateRestoreBanner();
 }
 
 /* ================================================================== */
@@ -331,15 +339,6 @@ function updateStatusUI(status) {
 }
 
 /* ================================================================== */
-/*  Update banner                                                      */
-/* ================================================================== */
-
-if (window.somnibot.onStatusUpdate) {
-  // Listen for update-available event (sent from main via webContents.send)
-  // This is handled by the preload bridge if we add it — for now, check manually
-}
-
-/* ================================================================== */
 /*  Helpers                                                            */
 /* ================================================================== */
 
@@ -398,6 +397,80 @@ function escapeHtml(str) {
   div.textContent = str;
   return div.innerHTML;
 }
+
+/* ================================================================== */
+/*  Cloud Restore                                                      */
+/* ================================================================== */
+
+/**
+ * Show the "Restore from Cloud" banner when Supabase creds are present
+ * but Discord creds are empty — suggests this is a new machine.
+ */
+function updateRestoreBanner() {
+  const hasSupabase = fields.supabaseUrl.value.trim() && fields.supabaseSecretKey.value.trim();
+  const missingDiscord = !fields.discordToken.value.trim();
+  restoreBanner.classList.toggle('hidden', !(hasSupabase && missingDiscord));
+}
+
+btnRestoreCloud.addEventListener('click', async () => {
+  const url = fields.supabaseUrl.value.trim();
+  const key = fields.supabaseSecretKey.value.trim();
+
+  if (!url || !key) {
+    showMessage('error', 'Enter your Supabase URL and Secret Key first.');
+    return;
+  }
+
+  btnRestoreCloud.disabled = true;
+  btnRestoreCloud.textContent = 'Restoring...';
+  hideMessage();
+
+  try {
+    const result = await window.somnibot.pullFromSupabase(url, key);
+
+    if (!result.ok) {
+      showMessage('error', result.error || 'Could not restore credentials from Supabase.');
+      return;
+    }
+
+    // Fill in the pulled credentials
+    const creds = result.credentials;
+    if (creds) {
+      for (const [key, value] of Object.entries(creds)) {
+        if (fields[key] && value) {
+          fields[key].value = value;
+        }
+      }
+      await saveConfig();
+      showMessage('success', 'Credentials restored from Supabase! Review the values and hit "Validate & Start".');
+      restoreBanner.classList.add('hidden');
+    }
+  } catch (err) {
+    showMessage('error', `Restore failed: ${err.message || err}`);
+  } finally {
+    btnRestoreCloud.disabled = false;
+    btnRestoreCloud.textContent = 'Restore from Cloud';
+  }
+});
+
+/* ================================================================== */
+/*  Update Banner                                                      */
+/* ================================================================== */
+
+window.somnibot.onUpdateAvailable((info) => {
+  // Create and show update banner at top of app
+  const existing = document.querySelector('.update-banner');
+  if (existing) return; // Already showing
+
+  const banner = document.createElement('div');
+  banner.className = 'update-banner';
+  banner.innerHTML = `<span>Update available: v${escapeHtml(info.version)}</span>`;
+  const btn = document.createElement('button');
+  btn.textContent = 'Install & Restart';
+  btn.addEventListener('click', () => window.somnibot.checkForUpdates());
+  banner.appendChild(btn);
+  document.getElementById('app').prepend(banner);
+});
 
 /* ================================================================== */
 /*  Boot                                                               */

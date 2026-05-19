@@ -297,6 +297,48 @@ main::-webkit-scrollbar-thumb:hover {
   opacity: 1;
 }
 
+/* ─── Cloud Restore Banner ─── */
+.restore-banner {
+  margin-top: 16px;
+  padding: 10px 16px;
+  background: var(--hot-pink-glow);
+  border: 1px solid rgba(255, 20, 147, 0.25);
+  border-radius: var(--radius);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.restore-banner.hidden {
+  display: none;
+}
+
+.btn-small {
+  padding: 6px 14px;
+  font-size: 11px;
+}
+
+.btn-accent {
+  background: var(--hot-pink);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-accent:hover {
+  background: var(--hot-pink-dim);
+}
+
+.btn-accent:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ─── Messages ─── */
 .message-area {
   margin-top: 16px;
