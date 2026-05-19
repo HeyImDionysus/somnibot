@@ -127,7 +127,14 @@ export async function GET() {
           ? `${uptimeHours}h ${Math.floor((uptimeSeconds % 3600) / 60)}m`
           : `${Math.floor(uptimeSeconds / 60)}m`;
 
+    // Bot is online only if the last diagnostics snapshot is recent (within 2 minutes)
+    const lastSnapshot = diagnosticsResult.data?.snapshot_at ?? null;
+    const botOnline = lastSnapshot
+      ? (now.getTime() - new Date(lastSnapshot).getTime()) < 120_000
+      : false;
+
     return NextResponse.json({
+      botOnline,
       memberCount: diagnosticsResult.data?.guild_member_count ?? memberCountResult.count ?? 0,
       trackedMembers: memberCountResult.count ?? 0,
       activeTickets: ticketResult.count ?? 0,
@@ -136,13 +143,13 @@ export async function GET() {
       activeGiveaways: giveawayResult.count ?? 0,
       recentEvents,
       eventsToday: todayMessagesResult.count ?? 0,
-      uptime: uptimeDisplay,
-      uptimeSeconds,
-      wsPing: diagnosticsResult.data?.discord_ws_ping ?? null,
-      activeVoice: diagnosticsResult.data?.active_voice_connections ?? 0,
-      valkeyConnected: diagnosticsResult.data?.valkey_connected ?? false,
-      memoryMb: diagnosticsResult.data?.memory_rss_mb ?? null,
-      lastSnapshot: diagnosticsResult.data?.snapshot_at ?? null,
+      uptime: botOnline ? uptimeDisplay : null,
+      uptimeSeconds: botOnline ? uptimeSeconds : 0,
+      wsPing: botOnline ? (diagnosticsResult.data?.discord_ws_ping ?? null) : null,
+      activeVoice: botOnline ? (diagnosticsResult.data?.active_voice_connections ?? 0) : 0,
+      valkeyConnected: botOnline ? (diagnosticsResult.data?.valkey_connected ?? false) : false,
+      memoryMb: botOnline ? (diagnosticsResult.data?.memory_rss_mb ?? null) : null,
+      lastSnapshot,
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes('Unauthorized')) {

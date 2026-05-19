@@ -9,6 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -174,7 +175,7 @@ export default function OrdersPage() {
 
       {/* Order List */}
       {loading ? (
-        <div className="text-center py-12 text-discord-text-muted">Loading orders…</div>
+        <TableSkeleton rows={8} />
       ) : orders.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
           <div className="text-4xl mb-3">📦</div>

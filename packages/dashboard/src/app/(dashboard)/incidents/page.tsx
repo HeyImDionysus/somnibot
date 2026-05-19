@@ -4,6 +4,8 @@
  */
 'use client';
 
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
+
 import { useEffect, useState, useCallback } from 'react';
 
 // ── Types ─────────────────────────────────────────────────
@@ -250,9 +252,7 @@ export default function IncidentsPage() {
         {/* Incident List */}
         <div className="flex-1 space-y-2">
           {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
-            </div>
+            <TableSkeleton rows={6} />
           ) : incidents.length === 0 ? (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
               <div className="text-4xl mb-3">✅</div>

@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -315,7 +316,7 @@ export default function PromotionsPage() {
 
       {/* Promotion List */}
       {loading ? (
-        <div className="text-center py-12 text-discord-text-muted">Loading promotions…</div>
+        <TableSkeleton rows={6} />
       ) : promos.length === 0 ? (
         <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
           <div className="text-4xl mb-3">🏷️</div>

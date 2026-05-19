@@ -10,6 +10,9 @@ import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { EmptyState } from '@/components/shared/empty-state';
+import { Trophy } from 'lucide-react';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
@@ -296,11 +299,7 @@ export default function LevelsPage() {
   // ── Render ─────────────────────────────────────────────
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="animate-pulse text-discord-text-muted">Loading level settings…</div>
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   const tabs = ['settings', 'rewards', 'multipliers', 'leaderboard'] as const;
@@ -644,7 +643,7 @@ export default function LevelsPage() {
               <p className="text-xs text-discord-text-muted">{lbTotal} members ranked</p>
             </div>
             {leaderboard.length === 0 ? (
-              <div className="p-8 text-center text-sm text-discord-text-muted">No XP data yet.</div>
+              <EmptyState compact icon={Trophy} title="No XP data yet" description="Members will appear on the leaderboard as they earn XP." />
             ) : (
               <div className="divide-y divide-discord-border-subtle">
                 {leaderboard.map((entry, i) => {

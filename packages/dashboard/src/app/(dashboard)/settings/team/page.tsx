@@ -7,6 +7,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { EmptyState } from '@/components/shared/empty-state';
+import { UserCog } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -185,9 +188,7 @@ export default function TeamSettingsPage() {
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-discord-accent border-t-transparent" />
-        </div>
+        <ConfigSkeleton />
       ) : tab === 'members' ? (
         <div className="space-y-4">
           <div className="flex justify-end">
@@ -230,7 +231,7 @@ export default function TeamSettingsPage() {
           {members.length === 0 ? (
             <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-12 text-center">
               <div className="text-4xl mb-3">👥</div>
-              <p className="text-discord-text-muted">No team members assigned yet. Only the owner has dashboard access.</p>
+              <EmptyState compact icon={UserCog} title="No team members yet" description="Only the owner has dashboard access. Add team members to delegate permissions." />
             </div>
           ) : (
             members.map((member) => (

@@ -6,6 +6,10 @@
  */
 'use client';
 
+import { TableSkeleton } from '@/components/shared/loading-skeleton';
+import { EmptyState } from '@/components/shared/empty-state';
+import { Users } from 'lucide-react';
+
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 
@@ -164,9 +168,9 @@ export default function CustomersPage() {
         </div>
         <div className="flex-1 overflow-y-auto">
           {loading ? (
-            <p className="text-discord-text-muted text-sm p-4">Loading...</p>
+            <TableSkeleton rows={8} />
           ) : customers.length === 0 ? (
-            <p className="text-discord-text-muted text-sm p-4">No customers found</p>
+            <EmptyState compact icon={Users} title="No customers found" description="Customers appear here after their first purchase." />
           ) : (
             customers.map((c) => (
               <button

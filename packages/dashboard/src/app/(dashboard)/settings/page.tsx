@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
 import { cn } from '@/lib/utils/cn';
 import {
@@ -234,11 +235,7 @@ export default function SettingsPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-8 w-8 animate-spin text-discord-accent" />
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   return (

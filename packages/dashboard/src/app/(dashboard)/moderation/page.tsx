@@ -9,6 +9,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useToast } from '@/components/shared/toast';
+import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 interface EscalationStep {
   threshold: number;
@@ -128,11 +129,7 @@ export default function ModerationPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-discord-text-muted">Loading moderation settings...</div>
-      </div>
-    );
+    return <ConfigSkeleton />;
   }
 
   if (!config) {
