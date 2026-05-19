@@ -6,8 +6,9 @@
  */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useToast } from '@/components/shared/toast';
+import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
@@ -58,6 +59,8 @@ export default function WelcomePage() {
   const [config, setConfig] = useState<WelcomeConfig>(DEFAULT_CONFIG);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  useUnsavedWarning(dirty);
   const [sendingTest, setSendingTest] = useState<'welcome' | 'goodbye' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,6 +81,13 @@ export default function WelcomePage() {
     load();
   }, []);
 
+  // Track unsaved changes
+  const configLoaded = useRef(false);
+  useEffect(() => {
+    if (!loading && configLoaded.current) setDirty(true);
+    if (!loading) configLoaded.current = true;
+  }, [config, loading]);
+
   const handleSave = useCallback(async () => {
     setSaving(true);
     setError(null);
@@ -90,8 +100,11 @@ export default function WelcomePage() {
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
       toast({ title: 'Settings saved', variant: 'success' });
+      setDirty(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      setError(msg);
+      toast({ title: msg, variant: 'error' });
     } finally {
       setSaving(false);
     }
