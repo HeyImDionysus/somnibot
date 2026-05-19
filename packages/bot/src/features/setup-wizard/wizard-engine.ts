@@ -159,11 +159,16 @@ export async function storeCredentials(
   // Also update process.env so the current bot session can use them immediately
   // (maps instance_settings keys → env var names, matching config-loader.ts)
   const SETTINGS_TO_ENV: Record<string, string> = {
+    // PayPal
     paypal_client_id: 'PAYPAL_CLIENT_ID',
     paypal_client_secret: 'PAYPAL_CLIENT_SECRET',
-    lavalink_host: 'LAVALINK_HOST',
-    lavalink_port: 'LAVALINK_PORT',
-    lavalink_password: 'LAVALINK_PASSWORD',
+    paypal_sandbox: 'PAYPAL_SANDBOX',
+    paypal_webhook_id: 'PAYPAL_WEBHOOK_ID',
+    // Supabase Management
+    supabase_access_token: 'SUPABASE_ACCESS_TOKEN',
+    supabase_db_url: 'SUPABASE_DB_URL',
+    // Deployment
+    dashboard_url: 'DASHBOARD_URL',
   };
 
   for (const [fieldId, settingsKey] of Object.entries(step.fieldToSettingsKey)) {
