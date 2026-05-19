@@ -11,6 +11,8 @@ import {
   RefreshCw, AlertTriangle, X, Save, GripVertical, Star, ChevronDown, ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils/cn';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ============================================================
 // Types
@@ -199,6 +201,9 @@ function PermissionEditor({
   tier: string;
   onChange: (perms: string) => void;
 }) {
+  const { toast } = useToast();
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+
   const [expanded, setExpanded] = useState(false);
   const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
 
@@ -401,7 +406,6 @@ export default function RolesPage() {
   // ── Delete role ──
   const handleDeleteRole = async (role: LiveRoleData) => {
     if (role.managed) return;
-    if (!confirm(`Delete role "${role.name}"? This will remove it from Discord.`)) return;
     setActionPending(true);
     try {
       await rolesApi.delete(role.id, role.templateKey ?? undefined);
@@ -887,6 +891,22 @@ export default function RolesPage() {
           )}
         </div>
       </Card>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Role"
+        description={`Delete role "${confirmDelete?.name}"? This will remove it from Discord and cannot be undone.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteRole(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

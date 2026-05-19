@@ -9,6 +9,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/components/shared/toast';
 
 interface SyncConfig {
   sync_enabled: boolean;
@@ -51,12 +52,13 @@ const DRIFT_TYPE_LABELS: Record<string, string> = {
 };
 
 export default function SyncPage() {
+  const { toast } = useToast();
+
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -83,7 +85,6 @@ export default function SyncPage() {
     if (!status) return;
     setSaving(true);
     setError(null);
-    setSaved(false);
     try {
       const res = await fetch('/api/sync/config', {
         method: 'PUT',
@@ -92,8 +93,7 @@ export default function SyncPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      toast({ title: 'Settings saved', variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -481,9 +481,6 @@ export default function SyncPage() {
           >
             {saving ? 'Saving...' : 'Save Settings'}
           </button>
-          {saved && (
-            <span className="text-sm text-green-400">✓ Saved</span>
-          )}
           {error && <span className="text-sm text-red-400">{error}</span>}
         </div>
       </section>

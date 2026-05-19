@@ -10,6 +10,8 @@ import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { ChannelPicker, useChannelName } from '@/components/shared/channel-picker';
 import { RolePicker, useRoleName } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -97,18 +99,16 @@ function GiveawayWinners({ winnerIds }: { winnerIds: string[] }) {
 // ── Main Component ────────────────────────────────────────
 
 export default function GiveawaysPage() {
+  const { toast } = useToast();
+
   const [giveaways, setGiveaways] = useState<Giveaway[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [filter, setFilter] = useState<'all' | 'active' | 'ended'>('all');
+  const [confirmAction, setConfirmAction] = useState<{ type: 'end' | 'cancel' | 'delete'; id: string; prize: string } | null>(null);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchGiveaways = useCallback(async () => {
     try {
@@ -163,7 +163,7 @@ export default function GiveawaysPage() {
         setGiveaways([json.data, ...giveaways]);
         setShowForm(false);
         setForm({ ...emptyForm });
-        flash('Giveaway created! The bot will post the entry embed in the channel.');
+        toast({ title: 'Giveaway created! The bot will post the entry embed in the channel.', variant: 'success' });
       } else {
         setError(json.error);
       }
@@ -182,7 +182,7 @@ export default function GiveawaysPage() {
       const json = await res.json();
       if (json.success) {
         setGiveaways(giveaways.map((g) => (g.id === id ? json.data : g)));
-        flash('Giveaway ended');
+        toast({ title: 'Giveaway ended', variant: 'success' });
       }
     } catch {
       setError('Failed to end giveaway');
@@ -199,7 +199,7 @@ export default function GiveawaysPage() {
       const json = await res.json();
       if (json.success) {
         setGiveaways(giveaways.map((g) => (g.id === id ? json.data : g)));
-        flash('Giveaway cancelled');
+        toast({ title: 'Giveaway cancelled', variant: 'success' });
       }
     } catch {
       setError('Failed to cancel giveaway');
@@ -212,7 +212,7 @@ export default function GiveawaysPage() {
       const json = await res.json();
       if (json.success) {
         setGiveaways(giveaways.filter((g) => g.id !== id));
-        flash('Giveaway deleted');
+        toast({ title: 'Giveaway deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete giveaway');
@@ -281,9 +281,6 @@ export default function GiveawaysPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Create Modal ─────────────────────────────── */}
@@ -411,17 +408,17 @@ export default function GiveawaysPage() {
                   <div className="flex items-center gap-2 ml-4">
                     {g.status === 'active' && (
                       <>
-                        <button onClick={() => endGiveaway(g.id)}
+                        <button onClick={() => setConfirmAction({ type: 'end', id: g.id, prize: g.prize })}
                           className="rounded-input bg-discord-success/20 px-3 py-1.5 text-xs font-medium text-discord-success hover:bg-discord-success/30 transition-standard">
                           End
                         </button>
-                        <button onClick={() => cancelGiveaway(g.id)}
+                        <button onClick={() => setConfirmAction({ type: 'cancel', id: g.id, prize: g.prize })}
                           className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                           Cancel
                         </button>
                       </>
                     )}
-                    <button onClick={() => deleteGiveaway(g.id)}
+                    <button onClick={() => setConfirmAction({ type: 'delete', id: g.id, prize: g.prize })}
                       className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                       Delete
                     </button>
@@ -443,6 +440,30 @@ export default function GiveawaysPage() {
           <div><code className="text-discord-accent">/giveaway list</code> — List active giveaways</div>
         </div>
       </div>
+
+      {/* Confirm Action Dialog */}
+      <ConfirmDialog
+        open={!!confirmAction}
+        title={confirmAction?.type === 'delete' ? 'Delete Giveaway' : confirmAction?.type === 'end' ? 'End Giveaway' : 'Cancel Giveaway'}
+        description={
+          confirmAction?.type === 'delete'
+            ? `Permanently delete the "${confirmAction?.prize}" giveaway and all its entries?`
+            : confirmAction?.type === 'end'
+              ? `End the "${confirmAction?.prize}" giveaway now and pick winners?`
+              : `Cancel the "${confirmAction?.prize}" giveaway? No winners will be selected.`
+        }
+        confirmLabel={confirmAction?.type === 'delete' ? 'Delete' : confirmAction?.type === 'end' ? 'End Now' : 'Cancel Giveaway'}
+        variant={confirmAction?.type === 'delete' ? 'danger' : 'warning'}
+        onConfirm={async () => {
+          if (confirmAction) {
+            if (confirmAction.type === 'end') await endGiveaway(confirmAction.id);
+            else if (confirmAction.type === 'cancel') await cancelGiveaway(confirmAction.id);
+            else await deleteGiveaway(confirmAction.id);
+            setConfirmAction(null);
+          }
+        }}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 }

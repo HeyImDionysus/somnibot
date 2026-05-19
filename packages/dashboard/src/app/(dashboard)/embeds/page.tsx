@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -65,18 +67,16 @@ function hexToNum(hex: string): number {
 // ── Main Component ────────────────────────────────────────
 
 export default function EmbedBuilderPage() {
+  const { toast } = useToast();
+
   const [embeds, setEmbeds] = useState<EmbedConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchEmbeds = useCallback(async () => {
     try {
@@ -188,7 +188,7 @@ export default function EmbedBuilderPage() {
       const json = await res.json();
       if (json.success) {
         setEmbeds(embeds.filter((e) => e.id !== id));
-        flash('Embed deleted');
+        toast({ title: 'Embed deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete embed');
@@ -222,9 +222,6 @@ export default function EmbedBuilderPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor with Preview ────────────────────────── */}
@@ -457,7 +454,7 @@ export default function EmbedBuilderPage() {
                   <button onClick={() => openEditor(embed)} className="text-discord-text-muted hover:text-discord-accent text-xs transition-standard">
                     Edit
                   </button>
-                  <button onClick={() => deleteEmbed(embed.id)} className="text-discord-text-muted hover:text-discord-danger text-xs transition-standard">
+                  <button onClick={() => setConfirmDelete({ id: embed.id, name: embed.name })} className="text-discord-text-muted hover:text-discord-danger text-xs transition-standard">
                     Delete
                   </button>
                 </div>
@@ -466,6 +463,22 @@ export default function EmbedBuilderPage() {
           ))}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Embed"
+        description={`Delete "${confirmDelete?.name}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteEmbed(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

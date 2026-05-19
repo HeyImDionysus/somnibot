@@ -5,6 +5,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -64,6 +66,9 @@ function formatDate(iso: string): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function TeamSettingsPage() {
+  const { toast } = useToast();
+  const [confirmDeleteRole, setConfirmDeleteRole] = useState<{ id: string; name: string } | null>(null);
+
   const [tab, setTab] = useState<'members' | 'roles'>('members');
   const [roles, setRoles] = useState<DashboardRole[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -147,7 +152,6 @@ export default function TeamSettingsPage() {
   };
 
   const deleteRole = async (roleId: string) => {
-    if (!confirm('Delete this role? Members will lose these permissions.')) return;
     await fetch(`/api/rbac/roles?id=${roleId}`, { method: 'DELETE' });
     loadRoles();
   };
@@ -344,7 +348,7 @@ export default function TeamSettingsPage() {
                         {editingRole === role.id ? 'Cancel' : 'Edit'}
                       </button>
                       <button
-                        onClick={() => deleteRole(role.id)}
+                        onClick={() => setConfirmDeleteRole({ id: role.id, name: role.name })}
                         className="text-xs text-discord-text-muted hover:text-red-400 transition-colors"
                       >
                         Delete
@@ -392,6 +396,22 @@ export default function TeamSettingsPage() {
           ))}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDeleteRole}
+        title="Delete Role"
+        description={`Delete role "${confirmDeleteRole?.name}"? Members assigned this role will lose these permissions.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDeleteRole) {
+            await deleteRole(confirmDeleteRole.id);
+            setConfirmDeleteRole(null);
+          }
+        }}
+        onCancel={() => setConfirmDeleteRole(null)}
+      />
     </div>
   );
 }

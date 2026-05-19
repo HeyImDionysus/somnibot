@@ -6,6 +6,8 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -87,6 +89,9 @@ function formatDiscount(type: string, value: number): string {
 // ── Component ─────────────────────────────────────────────
 
 export default function PromotionsPage() {
+  const { toast } = useToast();
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+
   const [promos, setPromos] = useState<Promotion[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -154,6 +159,7 @@ export default function PromotionsPage() {
       });
 
       setShowForm(false);
+      toast({ title: editingId ? 'Promotion updated' : 'Promotion created', variant: 'success' });
       load();
     } finally {
       setSaving(false);
@@ -161,8 +167,8 @@ export default function PromotionsPage() {
   };
 
   const deletePromo = async (id: string) => {
-    if (!confirm('Delete this promotion?')) return;
     await fetch(`/api/store/promotions?id=${id}`, { method: 'DELETE' });
+    toast({ title: 'Promotion deleted', variant: 'success' });
     load();
   };
 
@@ -355,7 +361,7 @@ export default function PromotionsPage() {
                     Edit
                   </button>
                   <button
-                    onClick={() => deletePromo(p.id)}
+                    onClick={() => setConfirmDelete({ id: p.id, name: p.name })}
                     className="rounded-input bg-discord-danger/20 px-3 py-1 text-xs text-discord-danger hover:bg-discord-danger/30 transition-standard"
                   >
                     Delete
@@ -366,6 +372,22 @@ export default function PromotionsPage() {
           })}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Promotion"
+        description={`Delete "${confirmDelete?.name}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deletePromo(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

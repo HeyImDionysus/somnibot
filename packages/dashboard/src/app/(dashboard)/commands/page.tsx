@@ -8,6 +8,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -64,18 +66,16 @@ const emptyDraft = {
 // ── Main Component ────────────────────────────────────────
 
 export default function CustomCommandsPage() {
+  const { toast } = useToast();
+
   const [commands, setCommands] = useState<CustomCommand[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showEditor, setShowEditor] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [draft, setDraft] = useState(emptyDraft);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchCommands = useCallback(async () => {
     try {
@@ -205,7 +205,7 @@ export default function CustomCommandsPage() {
       const json = await res.json();
       if (json.success) {
         setCommands(commands.filter((c) => c.id !== id));
-        flash('Command deleted');
+        toast({ title: 'Command deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete command');
@@ -240,9 +240,6 @@ export default function CustomCommandsPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor Modal ───────────────────────────────── */}
@@ -434,7 +431,7 @@ export default function CustomCommandsPage() {
                 <button onClick={() => openEditor(cmd)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
                   Edit
                 </button>
-                <button onClick={() => deleteCommand(cmd.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                <button onClick={() => setConfirmDelete({ id: cmd.id, name: cmd.name })} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                   Delete
                 </button>
               </div>
@@ -446,6 +443,22 @@ export default function CustomCommandsPage() {
       <p className="text-xs text-discord-text-muted text-center">
         {commands.length}/25 commands · Commands are registered as Discord slash commands and sync on bot restart.
       </p>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Command"
+        description={`Delete /${confirmDelete?.name}? This will unregister the slash command from Discord.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteCommand(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
