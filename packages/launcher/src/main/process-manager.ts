@@ -63,7 +63,9 @@ function getBotEntryPath(): string {
 
 function getDashboardEntryPath(): string {
   if (app.isPackaged) {
-    return path.join(getResourcePath(), 'dashboard', 'server.js');
+    // Standalone build with outputFileTracingRoot preserves monorepo structure:
+    //   resources/dashboard/packages/dashboard/server.js
+    return path.join(getResourcePath(), 'dashboard', 'packages', 'dashboard', 'server.js');
   }
   // Dev mode — use the standalone build
   return path.join(
