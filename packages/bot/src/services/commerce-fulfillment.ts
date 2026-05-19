@@ -18,6 +18,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import { sendReceiptDM } from '../features/commerce/receipt-builder.js';
+import { checkPurchaseVelocity, checkPaymentPattern, checkCriticalThreshold } from './fraud-detection.js';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -150,6 +151,11 @@ export class CommerceFulfillmentService {
 
     // 3. Send receipt DM
     result.receiptSent = await this.sendReceipt(payload);
+
+    // 4. Run fraud checks (non-blocking — don't fail fulfillment)
+    this.runFraudChecks(payload).catch((err) =>
+      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+    );
   }
 
   // ── Subscription Activated ───────────────────────────────
@@ -189,6 +195,11 @@ export class CommerceFulfillmentService {
 
     // 3. Send receipt DM
     result.receiptSent = await this.sendReceipt(payload);
+
+    // Run fraud checks (non-blocking — don't fail fulfillment)
+    this.runFraudChecks(payload).catch((err) =>
+      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+    );
   }
 
   // ── Subscription Renewed ─────────────────────────────────
@@ -299,6 +310,15 @@ export class CommerceFulfillmentService {
     });
     result.eventEmitted = true;
 
+    // Check for payment pattern fraud (non-blocking)
+    const fraudCtx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
+    checkPaymentPattern(fraudCtx, payload.customer_id, payload.discord_id).catch((err) =>
+      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+    );
+    checkCriticalThreshold(fraudCtx).catch((err) =>
+      console.error('[Fulfillment] Critical threshold check error (non-fatal):', err),
+    );
+
     // DM warning
     try {
       const user = await this.guild.client.users.fetch(payload.discord_id);
@@ -308,6 +328,16 @@ export class CommerceFulfillmentService {
     } catch {
       // DMs may be disabled — non-fatal
     }
+  }
+
+  // ── Fraud Checks ──────────────────────────────────────────
+  // Non-blocking checks run after successful fulfillment.
+  // These feed the fraud_signals table and can trigger incidents / owner DMs.
+
+  private async runFraudChecks(payload: FulfillmentPayload): Promise<void> {
+    const ctx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
+    await checkPurchaseVelocity(ctx, payload.customer_id, payload.discord_id);
+    await checkCriticalThreshold(ctx);
   }
 
   // ── Receipt DM ───────────────────────────────────────────
