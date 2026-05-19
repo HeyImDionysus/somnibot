@@ -536,3 +536,80 @@ export async function removeUserFromTicket(
     return { success: false, error: 'Failed to remove user from ticket.' };
   }
 }
+
+// ── Ticket Inactivity Auto-Close ──────────────────────────
+
+/**
+ * Checks all open tickets for inactivity and warns/closes them.
+ * Call this on a periodic interval (e.g., every 15 minutes).
+ *
+ * - After `warnAfterMs` of no messages: sends a warning embed in the channel.
+ * - After `closeAfterMs` of no messages: auto-closes the ticket.
+ */
+export async function checkInactiveTickets(
+  supabase: SupabaseClient,
+  guild: Guild,
+  eventBus: PlatformEventBus,
+  options: { warnAfterMs?: number; closeAfterMs?: number } = {},
+): Promise<{ warned: number; closed: number }> {
+  const warnAfter = options.warnAfterMs ?? 24 * 60 * 60 * 1000;   // 24h default
+  const closeAfter = options.closeAfterMs ?? 48 * 60 * 60 * 1000; // 48h default
+  const now = Date.now();
+
+  const { data: openTickets } = await supabase
+    .from('tickets')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .in('status', ['open', 'claimed'])
+    .order('updated_at', { ascending: true });
+
+  if (!openTickets?.length) return { warned: 0, closed: 0 };
+
+  let warned = 0;
+  let closed = 0;
+
+  for (const ticket of openTickets) {
+    const lastActivity = new Date(ticket.updated_at ?? ticket.created_at).getTime();
+    const idleMs = now - lastActivity;
+    const channel = guild.channels.cache.get(ticket.channel_id) as TextChannel | undefined;
+    if (!channel) continue;
+
+    if (idleMs >= closeAfter) {
+      // Auto-close
+      const result = await closeTicket(
+        supabase,
+        guild,
+        eventBus,
+        ticket.ticket_number,
+        guild.client.user!.id,
+        'Closed due to inactivity',
+      );
+      if (result.success) closed++;
+    } else if (idleMs >= warnAfter && !ticket.inactivity_warned) {
+      // Send warning
+      try {
+        await channel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(SOMNI_PALETTE.warning)
+              .setTitle('⏰ Inactivity Warning')
+              .setDescription(
+                `This ticket has been inactive for over ${Math.round(idleMs / 3600000)} hours. ` +
+                `It will be automatically closed if there is no further activity.`,
+              )
+              .setTimestamp(),
+          ],
+        });
+        await supabase
+          .from('tickets')
+          .update({ inactivity_warned: true })
+          .eq('id', ticket.id);
+        warned++;
+      } catch {
+        // Channel might have been deleted
+      }
+    }
+  }
+
+  return { warned, closed };
+}

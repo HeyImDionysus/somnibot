@@ -798,7 +798,39 @@ export class MusicPlayerManager {
     });
 
     player.on('closed', async () => {
-      console.log('[Music] Player connection closed');
+      console.log('[Music] Player connection closed — attempting reconnect');
+      const queue = await this.queueManager.getQueue(this.guild.id);
+      if (!queue || !queue.voiceChannelId) {
+        // No queue to resume — clean up
+        await this.queueManager.destroyQueue(this.guild.id);
+        this.clearTimers(this.guild.id);
+        return;
+      }
+
+      // Attempt reconnect with back-off
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await new Promise((r) => setTimeout(r, attempt * 2000));
+          const newPlayer = await this.shoukaku.joinVoiceChannel({
+            guildId: this.guild.id,
+            channelId: queue.voiceChannelId,
+            shardId: this.guild.shardId,
+          });
+          this.setupPlayerEvents(newPlayer);
+
+          // Resume playback if we had a track
+          if (queue.nowPlaying?.track) {
+            await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+          }
+          console.log(`[Music] Reconnected after ${attempt} attempt(s)`);
+          return;
+        } catch (err) {
+          console.warn(`[Music] Reconnect attempt ${attempt}/3 failed:`, err);
+        }
+      }
+
+      // All reconnect attempts failed — clean up
+      console.error('[Music] Failed to reconnect after 3 attempts — destroying queue');
       await this.queueManager.destroyQueue(this.guild.id);
       this.clearTimers(this.guild.id);
     });
