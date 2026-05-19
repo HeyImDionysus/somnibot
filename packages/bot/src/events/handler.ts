@@ -105,44 +105,80 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Guild Member Events (Phase 4: Onboarding + Welcome + Goodbye) ──
   client.on('guildMemberAdd', async (member) => {
-    await handleMemberJoin(client, member);
+    try {
+      await handleMemberJoin(client, member);
+    } catch (err) {
+      console.error('[Events] guildMemberAdd handler error:', err);
+    }
   });
 
   client.on('guildMemberRemove', async (member) => {
-    await handleMemberLeave(client, member);
+    try {
+      await handleMemberLeave(client, member);
+    } catch (err) {
+      console.error('[Events] guildMemberRemove handler error:', err);
+    }
   });
 
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
-    await handleMemberUpdate(client, oldMember, newMember);
+    try {
+      await handleMemberUpdate(client, oldMember, newMember);
+    } catch (err) {
+      console.error('[Events] guildMemberUpdate handler error:', err);
+    }
   });
 
   // ── Role Events (Phase 5: Drift Detection) ─────────────
   client.on('roleCreate', async (role) => {
-    await handleRoleCreate(client, role);
+    try {
+      await handleRoleCreate(client, role);
+    } catch (err) {
+      console.error('[Events] roleCreate handler error:', err);
+    }
   });
 
   client.on('roleUpdate', async (oldRole, newRole) => {
-    await handleRoleUpdate(client, oldRole, newRole);
+    try {
+      await handleRoleUpdate(client, oldRole, newRole);
+    } catch (err) {
+      console.error('[Events] roleUpdate handler error:', err);
+    }
   });
 
   client.on('roleDelete', async (role) => {
-    await handleRoleDelete(client, role);
+    try {
+      await handleRoleDelete(client, role);
+    } catch (err) {
+      console.error('[Events] roleDelete handler error:', err);
+    }
   });
 
   // ── Channel Events (Phase 5: Drift Detection) ─────────
   client.on('channelCreate', async (channel) => {
     if (!('guild' in channel)) return;
-    await handleChannelCreate(client, channel);
+    try {
+      await handleChannelCreate(client, channel);
+    } catch (err) {
+      console.error('[Events] channelCreate handler error:', err);
+    }
   });
 
   client.on('channelUpdate', async (oldChannel, newChannel) => {
     if (!('guild' in newChannel)) return;
-    await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel);
+    try {
+      await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel);
+    } catch (err) {
+      console.error('[Events] channelUpdate handler error:', err);
+    }
   });
 
   client.on('channelDelete', async (channel) => {
     if (!('guild' in channel)) return;
-    await handleChannelDelete(client, channel);
+    try {
+      await handleChannelDelete(client, channel);
+    } catch (err) {
+      console.error('[Events] channelDelete handler error:', err);
+    }
   });
 
   // ── Message Events (Phase 6: Auto-Mod + Phase 8: Automations + Phase 9: XP) ──
@@ -630,10 +666,6 @@ export function registerEvents(client: SomniClient): void {
 
   client.on('warn', (info) => {
     console.warn('[Bot] Warning:', info);
-  });
-
-  process.on('unhandledRejection', (error) => {
-    console.error('[Bot] Unhandled rejection:', error);
   });
 
   // ── Infraction Expiry Cron (every 15 minutes) ─────────

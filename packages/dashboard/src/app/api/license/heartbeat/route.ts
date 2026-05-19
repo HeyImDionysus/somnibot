@@ -17,7 +17,7 @@ export async function POST(req: NextRequest) {
 
   // ── B.5: Rate limit ──
   const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-  const ipLimit = rateLimits.licenseHeartbeat(clientIp);
+  const ipLimit = await rateLimits.licenseHeartbeat(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(
       { valid: false, status: 'rate_limited', error: 'Too many requests' },

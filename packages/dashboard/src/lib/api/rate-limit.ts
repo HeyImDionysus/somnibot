@@ -1,21 +1,65 @@
 /**
- * In-memory rate limiter for public API endpoints (license validation, etc.).
+ * Rate limiter for public API endpoints (license validation, etc.).
  *
  * Phase B: Prevents brute-force and abuse on public license endpoints.
  * Uses a sliding window approach with configurable window size and max hits.
  *
- * NOTE: This is per-instance. For multi-instance deployments, use Redis/Valkey.
- * For a single Vercel deployment, this provides good-enough protection.
+ * Uses Valkey/Redis when available (shared state across restarts and instances).
+ * Falls back to in-memory store if Valkey is unavailable.
  */
+
+import Valkey from 'iovalkey';
+
+// ── Valkey connection (lazy singleton) ──────────────────────
+
+let valkeyClient: Valkey | null = null;
+let valkeyFailed = false;
+
+function getValkey(): Valkey | null {
+  if (valkeyFailed) return null;
+  if (valkeyClient) return valkeyClient;
+
+  const url = process.env.VALKEY_URL || process.env.REDIS_URL;
+  if (!url) {
+    valkeyFailed = true;
+    return null;
+  }
+
+  try {
+    valkeyClient = new Valkey(url, {
+      maxRetriesPerRequest: 1,
+      connectTimeout: 2000,
+      lazyConnect: true,
+    });
+
+    valkeyClient.on('error', () => {
+      // Silently fall back to in-memory on connection errors
+      valkeyFailed = true;
+      valkeyClient?.disconnect();
+      valkeyClient = null;
+    });
+
+    valkeyClient.connect().catch(() => {
+      valkeyFailed = true;
+      valkeyClient = null;
+    });
+
+    return valkeyClient;
+  } catch {
+    valkeyFailed = true;
+    return null;
+  }
+}
+
+// ── In-memory fallback ──────────────────────────────────────
 
 interface RateLimitEntry {
   hits: number;
   windowStart: number;
 }
 
-const store = new Map<string, RateLimitEntry>();
+const memStore = new Map<string, RateLimitEntry>();
 
-// Cleanup stale entries every 5 minutes
 const CLEANUP_INTERVAL = 5 * 60 * 1000;
 let lastCleanup = Date.now();
 
@@ -24,22 +68,14 @@ function cleanup(windowMs: number): void {
   if (now - lastCleanup < CLEANUP_INTERVAL) return;
   lastCleanup = now;
 
-  for (const [key, entry] of store) {
+  for (const [key, entry] of memStore) {
     if (now - entry.windowStart > windowMs * 2) {
-      store.delete(key);
+      memStore.delete(key);
     }
   }
 }
 
-/**
- * Check if a request should be rate-limited.
- *
- * @param key - Unique identifier (e.g., IP address, key hash, or combination)
- * @param maxHits - Maximum requests allowed in the window
- * @param windowMs - Window size in milliseconds
- * @returns { limited: boolean, remaining: number, retryAfterMs: number }
- */
-export function checkRateLimit(
+function checkRateLimitMemory(
   key: string,
   maxHits: number,
   windowMs: number,
@@ -47,11 +83,10 @@ export function checkRateLimit(
   cleanup(windowMs);
 
   const now = Date.now();
-  const entry = store.get(key);
+  const entry = memStore.get(key);
 
   if (!entry || now - entry.windowStart > windowMs) {
-    // New window
-    store.set(key, { hits: 1, windowStart: now });
+    memStore.set(key, { hits: 1, windowStart: now });
     return { limited: false, remaining: maxHits - 1, retryAfterMs: 0 };
   }
 
@@ -63,6 +98,59 @@ export function checkRateLimit(
   }
 
   return { limited: false, remaining: maxHits - entry.hits, retryAfterMs: 0 };
+}
+
+// ── Valkey-backed check ─────────────────────────────────────
+
+async function checkRateLimitValkey(
+  client: Valkey,
+  key: string,
+  maxHits: number,
+  windowMs: number,
+): Promise<{ limited: boolean; remaining: number; retryAfterMs: number }> {
+  const valkeyKey = `ratelimit:${key}`;
+  const windowSec = Math.ceil(windowMs / 1000);
+
+  try {
+    const hits = await client.incr(valkeyKey);
+
+    if (hits === 1) {
+      // First hit in this window — set expiry
+      await client.expire(valkeyKey, windowSec);
+    }
+
+    if (hits > maxHits) {
+      const ttl = await client.ttl(valkeyKey);
+      return { limited: true, remaining: 0, retryAfterMs: ttl > 0 ? ttl * 1000 : windowMs };
+    }
+
+    return { limited: false, remaining: maxHits - hits, retryAfterMs: 0 };
+  } catch {
+    // Valkey error — fall back to memory for this request
+    return checkRateLimitMemory(key, maxHits, windowMs);
+  }
+}
+
+// ── Public API ──────────────────────────────────────────────
+
+/**
+ * Check if a request should be rate-limited.
+ *
+ * @param key - Unique identifier (e.g., IP address, key hash, or combination)
+ * @param maxHits - Maximum requests allowed in the window
+ * @param windowMs - Window size in milliseconds
+ * @returns { limited: boolean, remaining: number, retryAfterMs: number }
+ */
+export async function checkRateLimit(
+  key: string,
+  maxHits: number,
+  windowMs: number,
+): Promise<{ limited: boolean; remaining: number; retryAfterMs: number }> {
+  const client = getValkey();
+  if (client) {
+    return checkRateLimitValkey(client, key, maxHits, windowMs);
+  }
+  return checkRateLimitMemory(key, maxHits, windowMs);
 }
 
 /**
