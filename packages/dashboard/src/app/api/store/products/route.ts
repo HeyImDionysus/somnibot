@@ -10,30 +10,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
+import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+
 const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
-const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || '';
-const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || '';
 
 // ── PayPal Helpers ─────────────────────────────────────
-
-async function getPayPalToken(): Promise<string | null> {
-  try {
-    const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
-      },
-      body: 'grant_type=client_credentials',
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.access_token;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Create a PayPal Catalog Product.
@@ -188,11 +169,9 @@ export async function POST(req: NextRequest) {
 
   // 1. Auto-create PayPal Catalog Product
   let paypalProductId: string | null = null;
-  if (PAYPAL_CLIENT_ID && PAYPAL_CLIENT_SECRET) {
-    paypalProductId = await createPayPalCatalogProduct(name, description, type);
-    if (!paypalProductId) {
-      console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
-    }
+  paypalProductId = await createPayPalCatalogProduct(name, description, type);
+  if (!paypalProductId) {
+    console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
   }
 
   // 2. Create product in database
