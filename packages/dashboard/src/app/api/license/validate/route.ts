@@ -252,6 +252,24 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // Run fraud checks (non-blocking — don't delay validation response)
+  if (device_fingerprint && licenseConfig) {
+    // Get guild_id from product for fraud signal tracking
+    const { data: product } = await supabase
+      .from('products')
+      .select('guild_id')
+      .eq('id', product_id)
+      .single();
+
+    if (product?.guild_id) {
+      const guildId = product.guild_id;
+      const maxDevices = licenseConfig.max_devices || 3;
+      // Fire-and-forget — these write to fraud_signals if thresholds exceeded
+      checkDeviceAbuse(supabase, guildId, licenseKey.id, maxDevices, customer?.discord_id ?? null).catch(() => {});
+      checkIPMismatch(supabase, guildId, licenseKey.id, customer?.discord_id ?? null).catch(() => {});
+    }
+  }
+
   // Log validation
   await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'valid', clientIp, app_version);
 
@@ -337,5 +355,79 @@ async function incrementFailedAttempts(
       .eq('id', licenseKeyId);
   } catch {
     // Non-critical
+  }
+}
+
+
+// ── Fraud Signal Checks ────────────────────────────────────
+// Inline checks run during validation. These insert fraud_signals records
+// directly — the bot-side checkCriticalThreshold picks up the cumulative
+// count and triggers incidents / owner DMs.
+
+async function checkDeviceAbuse(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  licenseKeyId: string,
+  maxDevices: number,
+  discordId: string | null,
+): Promise<void> {
+  try {
+    const { count } = await supabase
+      .from('license_sessions')
+      .select('*', { count: 'exact', head: true })
+      .eq('license_key_id', licenseKeyId);
+
+    const totalDevices = count || 0;
+
+    if (totalDevices > maxDevices * 3) {
+      await supabase.from('fraud_signals').insert({
+        guild_id: guildId,
+        signal_type: 'device_abuse',
+        severity: totalDevices > maxDevices * 5 ? 'critical' : 'high',
+        entity_type: 'license_key',
+        entity_id: licenseKeyId,
+        discord_id: discordId,
+        description: `${totalDevices} total device sessions on a ${maxDevices}-device license`,
+        evidence: { total_sessions: totalDevices, max_devices: maxDevices, ratio: totalDevices / maxDevices },
+        status: 'open',
+      });
+    }
+  } catch {
+    // Non-fatal — don't break validation
+  }
+}
+
+async function checkIPMismatch(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  licenseKeyId: string,
+  discordId: string | null,
+): Promise<void> {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: sessions } = await supabase
+      .from('license_sessions')
+      .select('ip_address')
+      .eq('license_key_id', licenseKeyId)
+      .gte('first_seen_at', since);
+
+    const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
+
+    if (uniqueIPs.size >= 5) {
+      await supabase.from('fraud_signals').insert({
+        guild_id: guildId,
+        signal_type: 'ip_mismatch',
+        severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
+        entity_type: 'license_key',
+        entity_id: licenseKeyId,
+        discord_id: discordId,
+        description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
+        evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
+        status: 'open',
+      });
+    }
+  } catch {
+    // Non-fatal — don't break validation
   }
 }
