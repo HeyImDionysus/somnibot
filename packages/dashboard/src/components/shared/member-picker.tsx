@@ -327,7 +327,7 @@ export function MemberPicker({
                         <span className="text-[10px] text-discord-text-muted truncate block">{member.username}</span>
                       )}
                     </div>
-                    {member.bot && <Bot size={12} className="text-discord-accent shrink-0" title="Bot" />}
+                    {member.bot && <span title="Bot"><Bot size={12} className="text-discord-accent shrink-0" /></span>}
                   </button>
                 );
               })}

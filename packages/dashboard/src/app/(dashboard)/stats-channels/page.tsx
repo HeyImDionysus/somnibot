@@ -7,6 +7,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -46,18 +48,16 @@ const emptyForm = {
 // ── Main Component ────────────────────────────────────────
 
 export default function StatsChannelsPage() {
+  const { toast } = useToast();
+
   const [channels, setChannels] = useState<StatsChannel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; label: string } | null>(null);
   const [form, setForm] = useState(emptyForm);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchChannels = useCallback(async () => {
     try {
@@ -167,7 +167,7 @@ export default function StatsChannelsPage() {
       const json = await res.json();
       if (json.success) {
         setChannels(channels.filter((c) => c.id !== id));
-        flash('Stats channel deleted');
+        toast({ title: 'Stats channel deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete stats channel');
@@ -201,9 +201,6 @@ export default function StatsChannelsPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor Modal ─────────────────────────────── */}
@@ -301,7 +298,7 @@ export default function StatsChannelsPage() {
                     <button onClick={() => openEditor(sc)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
                       Edit
                     </button>
-                    <button onClick={() => deleteChannel(sc.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                    <button onClick={() => setConfirmDelete({ id: sc.id, label: meta?.label ?? sc.stat_type })} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                       Delete
                     </button>
                   </div>
@@ -311,6 +308,22 @@ export default function StatsChannelsPage() {
           })}
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Stats Channel"
+        description={`Delete the "${confirmDelete?.label}" stats channel? The voice channel will be removed from Discord.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteChannel(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

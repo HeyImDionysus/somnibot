@@ -8,6 +8,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -93,18 +95,16 @@ function SMChannelName({ id }: { id: string }) {
 // ── Main Component ────────────────────────────────────────
 
 export default function ScheduledMessagesPage() {
+  const { toast } = useToast();
+
   const [messages, setMessages] = useState<ScheduledMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchMessages = useCallback(async () => {
     try {
@@ -216,7 +216,7 @@ export default function ScheduledMessagesPage() {
       const json = await res.json();
       if (json.success) {
         setMessages(messages.filter((m) => m.id !== id));
-        flash('Schedule deleted');
+        toast({ title: 'Schedule deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete schedule');
@@ -250,9 +250,6 @@ export default function ScheduledMessagesPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor Modal ─────────────────────────────── */}
@@ -411,7 +408,7 @@ export default function ScheduledMessagesPage() {
                   <button onClick={() => openEditor(sm)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
                     Edit
                   </button>
-                  <button onClick={() => deleteMessage(sm.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete(sm.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                     Delete
                   </button>
                 </div>
@@ -433,6 +430,22 @@ export default function ScheduledMessagesPage() {
           <div><code className="text-discord-accent">{'{memberCount}'}</code> — Member count</div>
         </div>
       </div>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Scheduled Message"
+        description="Delete this scheduled message? It will no longer be sent at its scheduled times."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteMessage(confirmDelete);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

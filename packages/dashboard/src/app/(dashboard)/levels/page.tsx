@@ -9,6 +9,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -103,6 +105,8 @@ function RoleDisplay({ roleId }: { roleId: string }) {
 // ── Main Component ────────────────────────────────────────
 
 export default function LevelsPage() {
+  const { toast } = useToast();
+
   const [config, setConfig] = useState<LevelConfig>(DEFAULT_CONFIG);
   const [rewards, setRewards] = useState<LevelReward[]>([]);
   const [multipliers, setMultipliers] = useState<XpMultiplier[]>([]);
@@ -112,7 +116,7 @@ export default function LevelsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ type: 'reward' | 'multiplier'; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'settings' | 'rewards' | 'multipliers' | 'leaderboard'>('settings');
 
   // Reward form
@@ -172,10 +176,6 @@ export default function LevelsPage() {
 
   // ── Handlers ───────────────────────────────────────────
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const saveConfig = async () => {
     setSaving(true);
@@ -188,7 +188,7 @@ export default function LevelsPage() {
       });
       const json = await res.json();
       if (!json.success) setError(json.error);
-      else flash('Settings saved');
+      else toast({ title: 'Settings saved', variant: 'success' });
     } catch {
       setError('Failed to save settings');
     } finally {
@@ -216,7 +216,7 @@ export default function LevelsPage() {
         setRewards([...rewards, json.data]);
         setNewRewardRoleId('');
         setNewRewardRemoveAt('');
-        flash('Reward added');
+        toast({ title: 'Reward added', variant: 'success' });
       } else {
         setError(json.error);
       }
@@ -231,7 +231,7 @@ export default function LevelsPage() {
       const json = await res.json();
       if (json.success) {
         setRewards(rewards.filter((r) => r.id !== id));
-        flash('Reward removed');
+        toast({ title: 'Reward removed', variant: 'success' });
       }
     } catch {
       setError('Failed to remove reward');
@@ -255,7 +255,7 @@ export default function LevelsPage() {
       if (json.success) {
         setMultipliers([...multipliers, json.data]);
         setNewMultRoleId('');
-        flash('Multiplier added');
+        toast({ title: 'Multiplier added', variant: 'success' });
       } else {
         setError(json.error);
       }
@@ -270,7 +270,7 @@ export default function LevelsPage() {
       const json = await res.json();
       if (json.success) {
         setMultipliers(multipliers.filter((m) => m.id !== id));
-        flash('Multiplier removed');
+        toast({ title: 'Multiplier removed', variant: 'success' });
       }
     } catch {
       setError('Failed to remove multiplier');
@@ -332,11 +332,6 @@ export default function LevelsPage() {
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">
           {error}
-        </div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">
-          {success}
         </div>
       )}
 
@@ -576,7 +571,7 @@ export default function LevelsPage() {
                       </p>
                     </div>
                   </div>
-                  <button onClick={() => deleteReward(r.id)} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete({ type: 'reward', id: r.id })} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
                     Remove
                   </button>
                 </div>
@@ -630,7 +625,7 @@ export default function LevelsPage() {
                     </span>
                     <p className="text-sm font-medium text-discord-text-primary"><RoleDisplay roleId={m.role_id} /></p>
                   </div>
-                  <button onClick={() => deleteMultiplier(m.id)} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete({ type: 'multiplier', id: m.id })} className="text-discord-danger hover:text-discord-danger/80 text-sm transition-standard">
                     Remove
                   </button>
                 </div>
@@ -697,6 +692,25 @@ export default function LevelsPage() {
           </div>
         </div>
       )}
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title={confirmDelete?.type === 'reward' ? 'Delete Level Reward' : 'Delete XP Multiplier'}
+        description={confirmDelete?.type === 'reward'
+          ? 'Remove this level reward? Members who already received the role will keep it.'
+          : 'Remove this XP multiplier? It will no longer apply to matching members.'}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            if (confirmDelete.type === 'reward') await deleteReward(confirmDelete.id);
+            else await deleteMultiplier(confirmDelete.id);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

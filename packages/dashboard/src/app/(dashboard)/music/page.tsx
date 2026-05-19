@@ -7,6 +7,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import NowPlayingWidget from '@/components/music/now-playing-widget';
+import { useToast } from '@/components/shared/toast';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -36,18 +37,15 @@ const DEFAULT_CONFIG: MusicConfig = {
 // ── Component ─────────────────────────────────────────────
 
 export default function MusicSettingsPage() {
+  const { toast } = useToast();
+
   const [config, setConfig] = useState<MusicConfig>(DEFAULT_CONFIG);
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchConfig = useCallback(async () => {
     try {
@@ -102,7 +100,7 @@ export default function MusicSettingsPage() {
       const json = await res.json();
 
       if (json.success) {
-        flash('Music settings saved');
+        toast({ title: 'Music settings saved', variant: 'success' });
         setDirty(false);
       } else {
         setError(json.error || 'Failed to save');
@@ -152,11 +150,6 @@ export default function MusicSettingsPage() {
       {error && (
         <div className="rounded-md bg-discord-danger/20 px-4 py-3 text-sm text-discord-danger">
           {error}
-        </div>
-      )}
-      {success && (
-        <div className="rounded-md bg-discord-success/20 px-4 py-3 text-sm text-discord-success">
-          {success}
         </div>
       )}
 

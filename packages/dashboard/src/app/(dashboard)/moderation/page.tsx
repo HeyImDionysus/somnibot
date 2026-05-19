@@ -8,6 +8,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { ChannelPicker } from '@/components/shared/channel-picker';
+import { useToast } from '@/components/shared/toast';
 
 interface EscalationStep {
   threshold: number;
@@ -46,10 +47,11 @@ const DEFAULT_CHAIN: EscalationStep[] = [
 ];
 
 export default function ModerationPage() {
+  const { toast } = useToast();
+
   const [config, setConfig] = useState<ModerationConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadConfig = useCallback(async () => {
@@ -74,7 +76,6 @@ export default function ModerationPage() {
     if (!config) return;
     setSaving(true);
     setError(null);
-    setSaved(false);
 
     try {
       const res = await fetch('/api/moderation/escalation', {
@@ -84,8 +85,7 @@ export default function ModerationPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      toast({ title: 'Settings saved', variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -387,7 +387,6 @@ export default function ModerationPage() {
         >
           {saving ? 'Saving...' : 'Save Settings'}
         </button>
-        {saved && <span className="text-sm text-green-400">✓ Saved</span>}
         {error && <span className="text-sm text-red-400">{error}</span>}
       </div>
     </div>

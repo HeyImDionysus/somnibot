@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useToast } from '@/components/shared/toast';
 
 interface WelcomeConfig {
   welcome_enabled: boolean;
@@ -62,12 +63,13 @@ const VARIABLES = [
 ];
 
 export default function WelcomePage() {
+  const { toast } = useToast();
+
   const [config, setConfig] = useState<WelcomeConfig>(DEFAULT_CONFIG);
   const [channels, setChannels] = useState<DiscordChannel[]>([]);
   const [roles, setRoles] = useState<DiscordRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,7 +101,6 @@ export default function WelcomePage() {
   const handleSave = useCallback(async () => {
     setSaving(true);
     setError(null);
-    setSaved(false);
     try {
       const res = await fetch('/api/welcome', {
         method: 'PUT',
@@ -108,8 +109,7 @@ export default function WelcomePage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
+      toast({ title: 'Settings saved', variant: 'success' });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -399,9 +399,6 @@ export default function WelcomePage() {
         >
           {saving ? 'Saving...' : 'Save Changes'}
         </button>
-        {saved && (
-          <span className="text-sm text-green-400">✓ Saved successfully</span>
-        )}
         {error && <span className="text-sm text-red-400">{error}</span>}
       </div>
     </div>

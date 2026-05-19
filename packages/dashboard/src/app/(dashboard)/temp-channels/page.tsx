@@ -9,6 +9,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { RolePicker } from '@/components/shared/role-picker';
 import { useDiscordNames } from '@/hooks/use-discord-names';
+import { useToast } from '@/components/shared/toast';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -48,18 +50,16 @@ function TCChannelName({ id }: { id: string }) {
 // ── Main Component ────────────────────────────────────────
 
 export default function TempChannelsPage() {
+  const { toast } = useToast();
+
   const [hubs, setHubs] = useState<TempChannelHub[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
 
-  const flash = (msg: string) => {
-    setSuccess(msg);
-    setTimeout(() => setSuccess(null), 3000);
-  };
 
   const fetchHubs = useCallback(async () => {
     try {
@@ -162,7 +162,7 @@ export default function TempChannelsPage() {
       const json = await res.json();
       if (json.success) {
         setHubs(hubs.filter((h) => h.id !== id));
-        flash('Hub deleted');
+        toast({ title: 'Hub deleted', variant: 'success' });
       }
     } catch {
       setError('Failed to delete hub');
@@ -198,9 +198,6 @@ export default function TempChannelsPage() {
       {/* Alerts */}
       {error && (
         <div className="rounded-card bg-discord-danger/10 border border-discord-danger/30 px-4 py-3 text-sm text-discord-danger">{error}</div>
-      )}
-      {success && (
-        <div className="rounded-card bg-discord-success/10 border border-discord-success/30 px-4 py-3 text-sm text-discord-success">{success}</div>
       )}
 
       {/* ── Editor Modal ─────────────────────────────── */}
@@ -331,7 +328,7 @@ export default function TempChannelsPage() {
                   <button onClick={() => openEditor(hub)} className="text-discord-text-muted hover:text-discord-accent text-sm transition-standard">
                     Edit
                   </button>
-                  <button onClick={() => deleteHub(hub.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
+                  <button onClick={() => setConfirmDelete(hub.id)} className="text-discord-text-muted hover:text-discord-danger text-sm transition-standard">
                     Delete
                   </button>
                 </div>
@@ -355,6 +352,22 @@ export default function TempChannelsPage() {
           <div><code className="text-discord-accent">/voice claim</code> — Claim ownership</div>
         </div>
       </div>
+
+      {/* Confirm Delete Dialog */}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title="Delete Hub"
+        description="Delete this temp channel hub? New members joining the hub voice channel will no longer get personal channels."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await deleteHub(confirmDelete);
+            setConfirmDelete(null);
+          }
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }
