@@ -183,6 +183,33 @@ export default function LevelsPage() {
   const saveConfig = async () => {
     setSaving(true);
     setError(null);
+
+    // Client-side validation
+    if (config.min_xp < 1 || config.max_xp < 1) {
+      setError('XP values must be at least 1');
+      toast({ title: 'XP values must be at least 1', variant: 'error' });
+      setSaving(false);
+      return;
+    }
+    if (config.min_xp >= config.max_xp) {
+      setError('Min XP must be less than Max XP');
+      toast({ title: 'Min XP must be less than Max XP', variant: 'error' });
+      setSaving(false);
+      return;
+    }
+    if (config.xp_cooldown_seconds < 0) {
+      setError('XP cooldown cannot be negative');
+      toast({ title: 'XP cooldown cannot be negative', variant: 'error' });
+      setSaving(false);
+      return;
+    }
+    if (config.voice_xp_enabled && config.voice_xp_per_interval < 1) {
+      setError('Voice XP per interval must be at least 1');
+      toast({ title: 'Voice XP per interval must be at least 1', variant: 'error' });
+      setSaving(false);
+      return;
+    }
+
     try {
       const res = await fetch('/api/levels', {
         method: 'PUT',
@@ -190,10 +217,15 @@ export default function LevelsPage() {
         body: JSON.stringify(config),
       });
       const json = await res.json();
-      if (!json.success) setError(json.error);
-      else toast({ title: 'Settings saved', variant: 'success' });
+      if (!json.success) {
+        setError(json.error);
+        toast({ title: json.error || 'Failed to save', variant: 'error' });
+      } else {
+        toast({ title: 'Settings saved', variant: 'success' });
+      }
     } catch {
       setError('Failed to save settings');
+      toast({ title: 'Failed to save settings', variant: 'error' });
     } finally {
       setSaving(false);
     }
