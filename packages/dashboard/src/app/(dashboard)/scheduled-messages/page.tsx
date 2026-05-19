@@ -185,7 +185,7 @@ export default function ScheduledMessagesPage() {
           setMessages([...messages, json.data]);
         }
         setShowForm(false);
-        flash(editingId ? 'Schedule updated' : 'Schedule created');
+        toast({ title: editingId ? 'Schedule updated' : 'Schedule created', variant: 'success' });
       } else {
         setError(json.error);
       }

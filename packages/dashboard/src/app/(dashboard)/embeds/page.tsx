@@ -173,7 +173,7 @@ export default function EmbedBuilderPage() {
           setEmbeds([json.data, ...embeds]);
         }
         setShowEditor(false);
-        flash(editingId ? 'Embed updated' : 'Embed saved');
+        toast({ title: editingId ? 'Embed updated' : 'Embed saved', variant: 'success' });
       } else {
         setError(json.error);
       }

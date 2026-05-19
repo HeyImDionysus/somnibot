@@ -136,7 +136,7 @@ export default function StatsChannelsPage() {
           setChannels([...channels, json.data]);
         }
         setShowForm(false);
-        flash(editingId ? 'Stats channel updated' : 'Stats channel created');
+        toast({ title: editingId ? 'Stats channel updated' : 'Stats channel created', variant: 'success' });
       } else {
         setError(json.error);
       }
