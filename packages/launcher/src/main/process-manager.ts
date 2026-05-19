@@ -4,11 +4,23 @@
  * Bot: fork() with env vars, IPC heartbeat monitoring.
  * Dashboard: fork() Next.js standalone server on localhost:3456.
  * Clean shutdown on app close.
+ *
+ * Phase 6 additions:
+ * - checkPortAvailable() — detect port conflicts before starting dashboard
+ * - cleanupStaleProcesses() — kill leftover PIDs from a previous crash
+ * - Lavalink status included in getStatus()
  */
 
 import { fork, type ChildProcess } from 'node:child_process';
+import net from 'node:net';
 import path from 'node:path';
 import { app, BrowserWindow } from 'electron';
+import { getConfig, saveConfig } from './config-store.js';
+import {
+  getLavalinkStatus,
+  getLavalinkPid,
+  type LavalinkStatus,
+} from './lavalink-manager.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -19,6 +31,7 @@ export type ProcessStatus = 'offline' | 'starting' | 'online' | 'error';
 export interface StatusUpdate {
   bot: ProcessStatus;
   dashboard: ProcessStatus;
+  lavalink: LavalinkStatus;
   botPid?: number;
   dashboardPid?: number;
   lastHeartbeat?: number;
@@ -38,18 +51,59 @@ let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let statusCallback: ((status: StatusUpdate) => void) | null = null;
 
 /* ------------------------------------------------------------------ */
-/*  Resource paths                                                     */
+/*  Phase 6: Port-conflict detection                                   */
 /* ------------------------------------------------------------------ */
 
 /**
- * In development, resources are in the repo. In production (packaged),
- * they're in app.getPath('exe')/../resources/.
+ * Returns true if the port is free, false if something is already listening.
  */
+export function checkPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Phase 6: Stale-process cleanup                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Kill any leftover processes from a previous launcher crash.
+ * Called once on app startup before the user can press Start.
+ */
+export function cleanupStaleProcesses(): void {
+  const cfg = getConfig();
+  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null };
+
+  for (const [name, pid] of Object.entries(pids)) {
+    if (pid && typeof pid === 'number') {
+      try {
+        process.kill(pid, 0); // Throws if process doesn't exist
+        console.log(`[ProcessMgr] Killing stale ${name} process (PID ${pid})`);
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        // Process doesn't exist — that's fine
+      }
+    }
+  }
+
+  // Clear stored PIDs
+  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null } });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Resource paths                                                     */
+/* ------------------------------------------------------------------ */
+
 function getResourcePath(): string {
   if (app.isPackaged) {
     return path.join(process.resourcesPath);
   }
-  // Dev mode — resources are at repo root
   return path.join(app.getAppPath(), '..', '..');
 }
 
@@ -57,17 +111,13 @@ function getBotEntryPath(): string {
   if (app.isPackaged) {
     return path.join(getResourcePath(), 'bot', 'dist', 'index.js');
   }
-  // Dev mode — use the built bot directly
   return path.join(getResourcePath(), 'packages', 'bot', 'dist', 'index.js');
 }
 
 function getDashboardEntryPath(): string {
   if (app.isPackaged) {
-    // Standalone build with outputFileTracingRoot preserves monorepo structure:
-    //   resources/dashboard/packages/dashboard/server.js
     return path.join(getResourcePath(), 'dashboard', 'packages', 'dashboard', 'server.js');
   }
-  // Dev mode — use the standalone build
   return path.join(
     getResourcePath(),
     'packages',
@@ -88,6 +138,7 @@ function broadcastStatus(extra?: Partial<StatusUpdate>): void {
   const status: StatusUpdate = {
     bot: botStatus,
     dashboard: dashboardStatus,
+    lavalink: getLavalinkStatus(),
     botPid: botProcess?.pid,
     dashboardPid: dashboardProcess?.pid,
     lastHeartbeat: lastHeartbeat || undefined,
@@ -96,7 +147,6 @@ function broadcastStatus(extra?: Partial<StatusUpdate>): void {
 
   statusCallback?.(status);
 
-  // Also send to all renderer windows
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
       win.webContents.send('status-update', status);
@@ -112,6 +162,7 @@ export function getStatus(): StatusUpdate {
   return {
     bot: botStatus,
     dashboard: dashboardStatus,
+    lavalink: getLavalinkStatus(),
     botPid: botProcess?.pid,
     dashboardPid: dashboardProcess?.pid,
     lastHeartbeat: lastHeartbeat || undefined,
@@ -133,7 +184,9 @@ function startBotProcess(envVars: Record<string, string>): void {
     silent: true,
   });
 
-  // Capture stdout/stderr for log display
+  // Persist PID for stale-process cleanup
+  persistPid('bot', botProcess.pid ?? null);
+
   botProcess.stdout?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (line) {
@@ -156,7 +209,6 @@ function startBotProcess(envVars: Record<string, string>): void {
     }
   });
 
-  // IPC heartbeat from bot
   botProcess.on('message', (msg: unknown) => {
     if (typeof msg === 'object' && msg !== null && 'type' in msg) {
       const typed = msg as { type: string };
@@ -178,20 +230,31 @@ function startBotProcess(envVars: Record<string, string>): void {
     const wasOnline = botStatus === 'online';
     botStatus = 'offline';
     botProcess = null;
-    broadcastStatus({
-      error: wasOnline
-        ? `Bot process exited (code: ${code}, signal: ${signal})`
-        : undefined,
-    });
+    persistPid('bot', null);
+
+    if (code && code !== 0) {
+      broadcastStatus({
+        error: wasOnline
+          ? `Bot crashed (exit code ${code}). Check your credentials and try again.`
+          : `Bot failed to start (exit code ${code}). Verify your Discord token and other credentials.`,
+      });
+    } else {
+      broadcastStatus({
+        error: wasOnline
+          ? `Bot process exited (code: ${code}, signal: ${signal})`
+          : undefined,
+      });
+    }
   });
 
   botProcess.on('error', (err) => {
     botStatus = 'error';
+    botProcess = null;
+    persistPid('bot', null);
     broadcastStatus({ error: `Bot process error: ${err.message}` });
   });
 
-  // If no heartbeat within 30s, mark as online anyway (bot might not send IPC)
-  // The bot's startup sequence takes time — be patient
+  // If no heartbeat within 30s, mark as online anyway
   setTimeout(() => {
     if (botProcess && botStatus === 'starting') {
       botStatus = 'online';
@@ -215,10 +278,12 @@ function startDashboardProcess(envVars: Record<string, string>): void {
     silent: true,
   });
 
+  // Persist PID for stale-process cleanup
+  persistPid('dashboard', dashboardProcess.pid ?? null);
+
   dashboardProcess.stdout?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (line) {
-      // Detect when Next.js is ready
       if (line.includes('Ready') || line.includes('started server') || line.includes('localhost:3456')) {
         dashboardStatus = 'online';
         broadcastStatus();
@@ -245,6 +310,7 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   dashboardProcess.on('exit', (code, signal) => {
     dashboardStatus = 'offline';
     dashboardProcess = null;
+    persistPid('dashboard', null);
     broadcastStatus({
       error: code !== 0
         ? `Dashboard exited (code: ${code}, signal: ${signal})`
@@ -254,10 +320,11 @@ function startDashboardProcess(envVars: Record<string, string>): void {
 
   dashboardProcess.on('error', (err) => {
     dashboardStatus = 'error';
+    dashboardProcess = null;
+    persistPid('dashboard', null);
     broadcastStatus({ error: `Dashboard error: ${err.message}` });
   });
 
-  // Dashboard should be ready within 15s
   setTimeout(() => {
     if (dashboardProcess && dashboardStatus === 'starting') {
       dashboardStatus = 'online';
@@ -273,7 +340,6 @@ function startDashboardProcess(envVars: Record<string, string>): void {
 function startHeartbeatMonitor(): void {
   stopHeartbeatMonitor();
   heartbeatInterval = setInterval(() => {
-    // If bot was online but no heartbeat in 60s, mark as error
     if (botStatus === 'online' && lastHeartbeat > 0) {
       const elapsed = Date.now() - lastHeartbeat;
       if (elapsed > 60_000) {
@@ -289,6 +355,17 @@ function stopHeartbeatMonitor(): void {
     clearInterval(heartbeatInterval);
     heartbeatInterval = null;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  PID persistence (Phase 6: stale-process tracking)                  */
+/* ------------------------------------------------------------------ */
+
+function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
+  const cfg = getConfig();
+  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null };
+  pids[name] = pid;
+  saveConfig({ lastPids: pids });
 }
 
 /* ------------------------------------------------------------------ */
@@ -311,11 +388,10 @@ export function stopAll(): void {
   if (botProcess) {
     botProcess.removeAllListeners();
     botProcess.kill('SIGTERM');
-    // Force kill after 5s if graceful shutdown doesn't work
     const pid = botProcess.pid;
     setTimeout(() => {
       try {
-        if (pid) process.kill(pid, 0); // Check if still alive
+        if (pid) process.kill(pid, 0);
         if (pid) process.kill(pid, 'SIGKILL');
       } catch {
         // Already dead — good
@@ -342,6 +418,10 @@ export function stopAll(): void {
   botStatus = 'offline';
   dashboardStatus = 'offline';
   lastHeartbeat = 0;
+
+  // Clear stored PIDs
+  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null } });
+
   broadcastStatus();
 }
 
