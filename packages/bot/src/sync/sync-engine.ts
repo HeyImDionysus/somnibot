@@ -72,7 +72,27 @@ export async function runSyncCycle(
   const diff = computeStateDiff(desiredState, actualState, idMap);
 
   // 5. Classify drift
-  const driftItems = classifyDrift(diff);
+  const rawDriftItems = classifyDrift(diff);
+
+  // Filter out community-required channels and ticket channels.
+  // Community channels (rules, moderator-only, public-updates) are created by Discord
+  // itself when Community features are enabled — they're not user drift.
+  // Ticket channels are dynamically created/closed by the bot.
+  const communityNames = new Set<string>();
+  const rulesChannel = guild.rulesChannelId ? guild.channels.cache.get(guild.rulesChannelId) : null;
+  const updatesChannel = guild.publicUpdatesChannelId ? guild.channels.cache.get(guild.publicUpdatesChannelId) : null;
+  if (rulesChannel) communityNames.add(rulesChannel.name);
+  if (updatesChannel) communityNames.add(updatesChannel.name);
+  communityNames.add('moderator-only');
+
+  const driftItems = rawDriftItems.filter((item) => {
+    if (item.entityType !== 'channel') return true;
+    // Skip community-required channels
+    if (communityNames.has(item.entityName)) return false;
+    // Skip ticket channels (ticket-NNN-username pattern)
+    if (/^ticket-\d+/.test(item.entityName)) return false;
+    return true;
+  });
 
   let repaired = 0;
 
