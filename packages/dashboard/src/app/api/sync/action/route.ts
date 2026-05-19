@@ -91,7 +91,44 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true });
   }
 
-  // For 'repair' and 'accept' — write a sync action request for the bot to pick up
+  // For 'accept' — clear from drift list directly, then optionally queue for bot
+  if (body.action === 'accept') {
+    const { data: current } = await supabase
+      .from('guild_desired_state')
+      .select('drift_details')
+      .eq('guild_id', guildId)
+      .maybeSingle();
+
+    const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
+    const filtered = items.filter(
+      (i: Record<string, unknown>) =>
+        !(
+          i.entityType === body.driftItem!.entityType &&
+          i.entityName === body.driftItem!.entityName
+        ),
+    );
+
+    await supabase
+      .from('guild_desired_state')
+      .update({
+        drift_detected: filtered.length > 0,
+        drift_details: filtered,
+      })
+      .eq('guild_id', guildId);
+
+    // Also queue for bot to update its id_map (best-effort)
+    await supabase.from('sync_actions').insert({
+      guild_id: guildId,
+      action: body.action,
+      drift_item: body.driftItem,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    }).then(() => {}, () => {}); // Ignore insert errors
+
+    return NextResponse.json({ success: true });
+  }
+
+  // For 'repair' — queue action for the bot to execute via Realtime
   const { error } = await supabase.from('sync_actions').insert({
     guild_id: guildId,
     action: body.action,
@@ -101,45 +138,11 @@ export async function POST(req: NextRequest) {
   });
 
   if (error) {
-    // If sync_actions table doesn't exist yet, fall back to removing from drift list
-    // The bot will pick up the repair on next sync cycle
-    if (error.code === '42P01') {
-      // Table doesn't exist — handle inline
-      if (body.action === 'accept') {
-        const { data: current } = await supabase
-          .from('guild_desired_state')
-          .select('drift_details')
-          .eq('guild_id', guildId)
-          .maybeSingle();
-
-        const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
-        const filtered = items.filter(
-          (i: Record<string, unknown>) =>
-            !(
-              i.entityType === body.driftItem!.entityType &&
-              i.entityName === body.driftItem!.entityName
-            ),
-        );
-
-        await supabase
-          .from('guild_desired_state')
-          .update({
-            drift_detected: filtered.length > 0,
-            drift_details: filtered,
-          })
-          .eq('guild_id', guildId);
-
-        return NextResponse.json({ success: true });
-      }
-
-      return NextResponse.json({
-        success: false,
-        error: 'Repair requires the bot to be running. The bot will auto-repair on next sync cycle.',
-      }, { status: 503 });
-    }
-
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({
+      success: false,
+      error: 'Repair requires the bot to be running. The bot will auto-repair on next sync cycle.',
+    }, { status: 503 });
   }
 
-  return NextResponse.json({ success: true, message: 'Action queued for bot execution' });
+  return NextResponse.json({ success: true, message: 'Repair action queued for bot execution' });
 }
