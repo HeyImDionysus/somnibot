@@ -953,7 +953,7 @@ export interface DbGiveaway {
   required_entitlement_product_id: string | null;
   entries: string[];
   winners: string[];
-  status: 'active' | 'ended' | 'cancelled';
+  status: 'active' | 'ended' | 'cancelled' | 'paused';
   ended_at: string | null;
   created_by: string;
   created_at: string;
