@@ -514,7 +514,7 @@ export function registerEvents(client: SomniClient): void {
         // Context menus and warn user modals
         const guild = interaction.guild;
         if (guild) {
-          await handleModalSubmit(interaction, guild, client.supabase, client.eventBus);
+          await handleModalSubmit(interaction, guild, client.supabase, client.eventBus, client);
         }
         return;
       }

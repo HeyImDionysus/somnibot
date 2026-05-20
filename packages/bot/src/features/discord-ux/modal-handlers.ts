@@ -17,6 +17,14 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import type { SomniClient } from '../../client.js';
+import {
+  createInfraction,
+  getActiveWarningCount,
+  calculateExpiryDate,
+} from '../moderation/infraction-service.js';
+import { executeEscalation, getEscalationAction } from '../moderation/escalation.js';
+import type { EscalationStep } from '@somnibot/shared';
 
 const HOT_PINK = 0xFF1493;
 const RED = 0xFF4444;
@@ -27,12 +35,13 @@ export async function handleModalSubmit(
   guild: Guild,
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
+  client?: SomniClient,
 ): Promise<void> {
   const [action, ...params] = interaction.customId.split(':');
 
   switch (action) {
     case 'warn_modal':
-      await handleWarnModal(interaction, guild, supabase, eventBus, params[0]!);
+      await handleWarnModal(interaction, guild, supabase, eventBus, params[0]!, client);
       break;
     case 'ticket_from_msg':
       await handleTicketFromMessageModal(interaction, guild, supabase, eventBus, params[0]!, params[1]!);
@@ -56,6 +65,7 @@ async function handleWarnModal(
   supabase: SupabaseClient,
   eventBus: PlatformEventBus,
   targetUserId: string,
+  client?: SomniClient,
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
@@ -73,34 +83,32 @@ async function handleWarnModal(
   const target = await guild.members.fetch(targetUserId).catch(() => null);
   const targetName = target?.displayName ?? targetUserId;
 
-  // Count existing infractions
-  const { count: existingCount } = await supabase
-    .from('infractions')
-    .select('id', { count: 'exact', head: true })
+  // Load guild config for infraction expiry
+  const { data: config } = await supabase
+    .from('guild_config')
+    .select('infraction_expiry_days, escalation_chain, mod_log_channel_id')
     .eq('guild_id', guild.id)
-    .eq('member_id', targetUserId)
-    .eq('active', true);
+    .maybeSingle();
 
-  const totalInfractions = (existingCount ?? 0) + 1;
+  const expiryDays = config?.infraction_expiry_days ?? 30;
 
-  // Create infraction record
-  const { data: infraction, error } = await supabase
-    .from('infractions')
-    .insert({
-      guild_id: guild.id,
-      member_id: targetUserId,
-      moderator_id: moderator.id,
-      type: 'warn',
-      reason,
-      active: true,
-    })
-    .select('id')
-    .single();
+  // Create infraction via the service (sets expires_at correctly)
+  const infraction = await createInfraction(supabase, {
+    guildId: guild.id,
+    memberId: targetUserId,
+    moderatorId: moderator.id,
+    type: 'warn',
+    reason,
+    expiresAt: calculateExpiryDate(expiryDays),
+  });
 
-  if (error) {
-    await interaction.editReply({ content: `❌ Failed to create warning: ${error.message}` });
+  if (!infraction) {
+    await interaction.editReply({ content: '❌ Failed to create warning.' });
     return;
   }
+
+  // Get total active warnings (for display + escalation)
+  const totalInfractions = await getActiveWarningCount(supabase, guild.id, targetUserId);
 
   // Emit event
   eventBus.emit('infraction.created', guild.id, {
@@ -110,6 +118,24 @@ async function handleWarnModal(
     reason,
     totalInfractions,
   });
+
+  // Check escalation chain and auto-escalate if needed
+  if (target && client) {
+    const escalationChain = Array.isArray(config?.escalation_chain) ? config.escalation_chain : [];
+    const nextAction = getEscalationAction(escalationChain as EscalationStep[], totalInfractions);
+    if (nextAction && nextAction.action !== 'warn') {
+      await executeEscalation(
+        client,
+        target,
+        `Auto-escalation: ${totalInfractions} active warnings`,
+        {
+          escalationChain: escalationChain as EscalationStep[],
+          infractionExpiryDays: expiryDays,
+          modLogChannelId: config?.mod_log_channel_id ?? null,
+        },
+      );
+    }
+  }
 
   // Try to DM the user
   try {
@@ -167,7 +193,7 @@ async function handleTicketFromMessageModal(
   // Get the default ticket panel (or first one)
   const { data: panel } = await supabase
     .from('ticket_panels')
-    .select('id, category_id, staff_role_ids')
+    .select('id, open_category_id, manager_roles')
     .eq('guild_id', guild.id)
     .order('created_at', { ascending: true })
     .limit(1)
@@ -180,19 +206,25 @@ async function handleTicketFromMessageModal(
     return;
   }
 
-  // Generate ticket number
-  const { count } = await supabase
-    .from('tickets')
-    .select('id', { count: 'exact', head: true })
-    .eq('guild_id', guild.id);
-
-  const ticketNumber = (count ?? 0) + 1;
+  // Generate ticket number atomically via Postgres sequence
+  let ticketNumber: number;
+  const { data: seqVal, error: seqErr } = await supabase.rpc('nextval_ticket');
+  if (seqErr || seqVal == null) {
+    // Fallback: count + 1 (less safe under concurrency)
+    const { count } = await supabase
+      .from('tickets')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', guild.id);
+    ticketNumber = (count ?? 0) + 1;
+  } else {
+    ticketNumber = Number(seqVal);
+  }
 
   // Create the ticket channel
   const ticketChannel = await guild.channels.create({
     name: `ticket-${ticketNumber.toString().padStart(4, '0')}`,
     type: ChannelType.GuildText,
-    parent: panel.category_id || undefined,
+    parent: panel.open_category_id || undefined,
     topic: `Ticket #${ticketNumber} — ${subject}`,
     reason: 'Support ticket created from message context menu',
   });
@@ -207,7 +239,7 @@ async function handleTicketFromMessageModal(
   });
 
   // Add staff roles
-  const staffRoleIds = panel.staff_role_ids ?? [];
+  const staffRoleIds = panel.manager_roles ?? [];
   for (const roleId of staffRoleIds) {
     try {
       await ticketChannel.permissionOverwrites.create(roleId, {
