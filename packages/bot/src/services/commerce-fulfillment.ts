@@ -331,7 +331,7 @@ export class CommerceFulfillmentService {
     try {
       const user = await this.guild.client.users.fetch(payload.discord_id);
       await user.send({
-        content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *3-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
+        content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *${graceDays}-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
       });
     } catch {
       // DMs may be disabled — non-fatal
