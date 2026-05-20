@@ -12,26 +12,37 @@ import { Guild, AutoModerationRuleManager, AutoModerationActionType, AutoModerat
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 
+/**
+ * Matches the actual `automod_rules` DB schema.
+ * `type` maps to Discord trigger types; `config` is a JSONB with
+ * trigger-specific fields (keywords, regex_patterns, mention_limit, etc.).
+ */
 export interface AutoModRule {
   id: string;
   name: string;
   enabled: boolean;
-  trigger_type: 'keyword' | 'spam' | 'keyword_preset' | 'mention_spam';
-  keywords?: string[];
-  regex_patterns?: string[];
-  keyword_preset?: ('profanity' | 'sexual_content' | 'slurs')[];
-  mention_limit?: number;
-  action: 'block' | 'timeout' | 'alert';
-  alert_channel_id?: string;
-  timeout_seconds?: number;
-  exempt_role_ids?: string[];
-  exempt_channel_ids?: string[];
+  type: 'word_filter' | 'link_filter' | 'invite_filter' | 'spam_filter' | 'duplicate_filter' | 'caps_filter' | 'mention_spam' | 'newline_spam';
+  config: {
+    keywords?: string[];
+    regex_patterns?: string[];
+    keyword_preset?: ('profanity' | 'sexual_content' | 'slurs')[];
+    mention_limit?: number;
+    alert_channel_id?: string;
+    timeout_seconds?: number;
+  };
+  action: 'delete' | 'warn' | 'mute' | 'kick' | 'ban';
+  mute_duration_minutes?: number;
+  exempt_roles: string[];
+  exempt_channels: string[];
+  sync_to_discord: boolean;
 }
 
+/** Map DB rule `type` to Discord trigger types (only types that have a Discord equivalent). */
 const TRIGGER_TYPE_MAP: Record<string, AutoModerationRuleTriggerType> = {
-  keyword: AutoModerationRuleTriggerType.Keyword,
-  spam: AutoModerationRuleTriggerType.Spam,
-  keyword_preset: AutoModerationRuleTriggerType.KeywordPreset,
+  word_filter: AutoModerationRuleTriggerType.Keyword,
+  link_filter: AutoModerationRuleTriggerType.Keyword,
+  invite_filter: AutoModerationRuleTriggerType.Keyword,
+  spam_filter: AutoModerationRuleTriggerType.Spam,
   mention_spam: AutoModerationRuleTriggerType.MentionSpam,
 };
 
@@ -104,38 +115,40 @@ export class AutoModSync {
     // Map DB rules to Discord format and sync
     for (const rule of dbRules as AutoModRule[]) {
       try {
-        const triggerType = TRIGGER_TYPE_MAP[rule.trigger_type];
-        if (!triggerType) continue;
+        const triggerType = TRIGGER_TYPE_MAP[rule.type];
+        if (!triggerType) continue; // types like caps_filter, duplicate_filter, newline_spam have no Discord equivalent
+
+        const cfg = rule.config ?? {};
 
         // Build actions array
         const actions: Array<{ type: AutoModerationActionType; metadata?: Record<string, unknown> }> = [];
 
-        if (rule.action === 'block') {
+        if (rule.action === 'delete' || rule.action === 'warn') {
           actions.push({
             type: AutoModerationActionType.BlockMessage,
             metadata: { customMessage: `Blocked by ${rule.name}` },
           });
         }
 
-        if (rule.action === 'timeout' && rule.timeout_seconds) {
+        if (rule.action === 'mute' && rule.mute_duration_minutes) {
           actions.push({
             type: AutoModerationActionType.Timeout,
-            metadata: { durationSeconds: rule.timeout_seconds },
+            metadata: { durationSeconds: rule.mute_duration_minutes * 60 },
           });
         }
 
-        if (rule.alert_channel_id) {
+        if (cfg.alert_channel_id) {
           actions.push({
             type: AutoModerationActionType.SendAlertMessage,
-            metadata: { channelId: rule.alert_channel_id },
+            metadata: { channelId: cfg.alert_channel_id },
           });
         }
 
-        // Build trigger metadata
+        // Build trigger metadata from config JSONB
         const triggerMetadata: Record<string, unknown> = {};
-        if (rule.keywords?.length) triggerMetadata.keywordFilter = rule.keywords;
-        if (rule.regex_patterns?.length) triggerMetadata.regexPatterns = rule.regex_patterns;
-        if (rule.mention_limit) triggerMetadata.mentionTotalLimit = rule.mention_limit;
+        if (cfg.keywords?.length) triggerMetadata.keywordFilter = cfg.keywords;
+        if (cfg.regex_patterns?.length) triggerMetadata.regexPatterns = cfg.regex_patterns;
+        if (cfg.mention_limit) triggerMetadata.mentionTotalLimit = cfg.mention_limit;
 
         // Check if rule already exists in Discord (by name match)
         const existingRule = existingRules.find((r) => r.name === `SB: ${rule.name}`);
@@ -147,8 +160,8 @@ export class AutoModSync {
             enabled: rule.enabled,
             actions,
             triggerMetadata,
-            exemptRoles: rule.exempt_role_ids ?? [],
-            exemptChannels: rule.exempt_channel_ids ?? [],
+            exemptRoles: rule.exempt_roles ?? [],
+            exemptChannels: rule.exempt_channels ?? [],
           });
         } else if (rule.enabled) {
           // Create new rule
@@ -159,8 +172,8 @@ export class AutoModSync {
             triggerMetadata,
             actions,
             enabled: true,
-            exemptRoles: rule.exempt_role_ids ?? [],
-            exemptChannels: rule.exempt_channel_ids ?? [],
+            exemptRoles: rule.exempt_roles ?? [],
+            exemptChannels: rule.exempt_channels ?? [],
           });
         }
       } catch (err) {
