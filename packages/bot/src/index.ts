@@ -271,7 +271,7 @@ async function main(): Promise<void> {
 
         // Initialize voice XP tracking
         await initVoiceTracking(guild);
-        const voiceXpTimer = startVoiceXpTicker(
+        const voiceXpTimer = await startVoiceXpTicker(
           guild,
           client.supabase,
           client.valkey,
