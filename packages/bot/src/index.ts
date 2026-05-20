@@ -178,7 +178,7 @@ async function main(): Promise<void> {
 
           await client.supabase
             .from('discord_id_map')
-            .upsert(rows, { onConflict: 'guild_id,template_key' })
+            .upsert(rows, { onConflict: 'guild_id,entity_type,template_key' })
             .then(({ error }) => {
               if (error) console.warn('[Boot] Failed to register community channels:', error.message);
               else console.log(`[Boot] ✅ Registered ${communityIds.length} community channel(s) in id_map`);
@@ -626,7 +626,7 @@ async function main(): Promise<void> {
         await Promise.resolve(
           client.supabase
             .from('instance_settings')
-            .upsert({ key: 'first_boot_dm_sent', value: 'true' }),
+            .upsert({ key: 'first_boot_dm_sent', value: 'true', section: 'boot' }),
         ).catch(() => {});
       }
     } catch (err) {
