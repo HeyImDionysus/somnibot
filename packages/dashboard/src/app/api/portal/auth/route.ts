@@ -69,9 +69,9 @@ export async function POST(request: NextRequest) {
   // Rate limit: 10 attempts per 5 minutes per IP
   const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
   const rl = await rateLimits.portalAuth(clientIp);
-  if (!rl.allowed) {
+  if (rl.limited) {
     return NextResponse.json(
-      { error: 'Too many login attempts. Try again later.', retry_after: rl.retryAfter },
+      { error: 'Too many login attempts. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
       { status: 429 },
     );
   }
