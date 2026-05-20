@@ -8,7 +8,7 @@
  * - All roles (with managed/bot/booster tags, position, color, permissions)
  * - All channels (with type, parent category, position, topic, overrides)
  * - All categories
- * - Member count
+ * - Member count + member list (for dashboard MemberPicker / useDiscordNames)
  * - Bot role position
  * - Native onboarding status
  */
@@ -63,6 +63,17 @@ export interface LiveCategory {
   name: string;
   position: number;
   templateKey: string | null;
+}
+
+/** Lightweight member snapshot stored in guild_live_state.members JSONB. */
+export interface MemberSnapshot {
+  id: string;
+  username: string;
+  display_name: string | null;
+  avatar: string | null;
+  bot: boolean;
+  joined_at: string | null;
+  roles: string[];
 }
 
 // ============================================================
@@ -210,6 +221,34 @@ export async function writeGuildSnapshot(
     // Guild may not have onboarding configured — that's fine
   }
 
+  // ── Members (for MemberPicker and useDiscordNames in dashboard) ──
+  // Fetch all guild members so the dashboard can search/resolve them.
+  // Cap at 10 000 to keep JSONB size manageable; the member list is used
+  // for display-name resolution and member search, not as a full roster.
+  let memberSnapshots: MemberSnapshot[] | null = null;
+  try {
+    await guild.members.fetch();
+    const allMembers = guild.members.cache;
+    const snapshots: MemberSnapshot[] = [];
+    for (const [, member] of allMembers) {
+      snapshots.push({
+        id: member.id,
+        username: member.user.username,
+        display_name: member.displayName !== member.user.username ? member.displayName : null,
+        avatar: member.user.avatar,
+        bot: member.user.bot,
+        joined_at: member.joinedAt?.toISOString() ?? null,
+        roles: member.roles.cache
+          .filter((r) => r.id !== guild.id) // exclude @everyone
+          .map((r) => r.id),
+      });
+      if (snapshots.length >= 10_000) break;
+    }
+    memberSnapshots = snapshots;
+  } catch (err) {
+    console.warn('[Snapshot] Failed to fetch members for snapshot:', err);
+  }
+
   // ── Write to Supabase ──
   const { error } = await supabase.from('guild_live_state').upsert(
     {
@@ -218,6 +257,7 @@ export async function writeGuildSnapshot(
       channels: JSON.parse(JSON.stringify(channels)),
       categories: JSON.parse(JSON.stringify(categories)),
       member_count: guild.memberCount,
+      members: memberSnapshots ? JSON.parse(JSON.stringify(memberSnapshots)) : null,
       bot_role_id: botRole?.id ?? null,
       bot_role_position: botRole?.position ?? 0,
       onboarding_enabled: onboardingEnabled,
