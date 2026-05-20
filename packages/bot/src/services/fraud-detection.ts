@@ -216,6 +216,7 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
         await ctx.supabase.from('incident_events').insert({
           incident_id: incident.id,
           event_type: 'auto_created',
+          actor_id: 'system:fraud',
           message: `${count} critical fraud signals detected in the last hour. Automatic incident created.`,
           metadata: { signal_count: count },
         });

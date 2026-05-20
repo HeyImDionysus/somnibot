@@ -34,7 +34,7 @@ export async function GET() {
     .select('*')
     .eq('guild_id', guildId)
     .in('action', ['drift.detected', 'sync.completed', 'drift.repaired', 'drift.accepted'])
-    .order('created_at', { ascending: false })
+    .order('timestamp', { ascending: false })
     .limit(20);
 
   return NextResponse.json({
