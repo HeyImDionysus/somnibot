@@ -521,9 +521,7 @@ const syncConfig = z.object({
 
 const musicConfig = z.object({
   music_enabled: z.boolean().optional(),
-  default_volume: z.number().int().min(0).max(100).optional(),
-  max_queue_length: z.number().int().min(1).max(1000).optional(),
-  allow_duplicates: z.boolean().optional(),
+  music_default_volume: z.number().int().min(0).max(150).optional(),
   dj_role_id: snowflake.optional().nullable(),
 });
 
