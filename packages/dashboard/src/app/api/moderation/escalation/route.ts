@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { notifyBot } from '@/lib/notify-bot';
 
 
 export async function GET() {
@@ -104,6 +105,9 @@ export async function PUT(req: NextRequest) {
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
+
+  // Notify the bot so it hot-reloads moderation config (escalation chain, mod log, expiry).
+  await notifyBot('moderation', updates);
 
   return NextResponse.json({ success: true });
 }
