@@ -17,7 +17,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .select('music_enabled, music_default_volume, dj_role_id')
+    .select('music_enabled, music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes')
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -30,6 +30,8 @@ export async function GET() {
     music_enabled: data?.music_enabled ?? true,
     music_default_volume: data?.music_default_volume ?? 50,
     dj_role_id: data?.dj_role_id ?? null,
+    music_auto_leave_minutes: data?.music_auto_leave_minutes ?? 5,
+    music_auto_destroy_minutes: data?.music_auto_destroy_minutes ?? 30,
   };
 
   return NextResponse.json({ success: true, data: config });
@@ -47,6 +49,8 @@ export async function PUT(req: NextRequest) {
     music_enabled,
     music_default_volume,
     dj_role_id,
+    music_auto_leave_minutes,
+    music_auto_destroy_minutes,
   } = body;
 
   const updates: Record<string, unknown> = {};
@@ -56,6 +60,12 @@ export async function PUT(req: NextRequest) {
     updates.music_default_volume = Math.max(0, Math.min(150, music_default_volume));
   }
   if (dj_role_id !== undefined) updates.dj_role_id = dj_role_id || null;
+  if (typeof music_auto_leave_minutes === 'number') {
+    updates.music_auto_leave_minutes = Math.max(1, Math.min(60, music_auto_leave_minutes));
+  }
+  if (typeof music_auto_destroy_minutes === 'number') {
+    updates.music_auto_destroy_minutes = Math.max(1, Math.min(120, music_auto_destroy_minutes));
+  }
 
   if (Object.keys(updates).length === 0) {
     return NextResponse.json(

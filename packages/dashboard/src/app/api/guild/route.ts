@@ -42,6 +42,18 @@ const guildConfigPatchSchema = z.object({
   starboard_self_star: z.boolean().optional(),
   message_log_enabled: z.boolean().optional(),
   message_log_channel_id: z.string().nullable().optional(),
+  // V26: Commerce toggles
+  store_enabled: z.boolean().optional(),
+  paypal_enabled: z.boolean().optional(),
+  // V26: Bot presence
+  custom_bot_statuses: z.array(z.string().max(128)).max(20).optional(),
+  // V26: Onboarding
+  onboarding_config: z.record(z.unknown()).nullable().optional(),
+  // V26: Stats update interval
+  stats_update_interval_minutes: z.number().int().min(1).max(60).optional(),
+  // V26: Ticket defaults
+  ticket_transcript_enabled: z.boolean().optional(),
+  ticket_dm_transcript: z.boolean().optional(),
 }).strict();
 
 export async function GET() {
