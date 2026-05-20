@@ -59,14 +59,22 @@ export default function StatsChannelsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; label: string } | null>(null);
   const [form, setForm] = useState(emptyForm);
-
+  const [updateInterval, setUpdateInterval] = useState(10);
+  const [savingInterval, setSavingInterval] = useState(false);
 
   const fetchChannels = useCallback(async () => {
     try {
-      const res = await fetch('/api/stats-channels');
-      const json = await res.json();
-      if (json.success) setChannels(json.data);
-      else setError(json.error);
+      const [channelsRes, guildRes] = await Promise.all([
+        fetch('/api/stats-channels'),
+        fetch('/api/guild'),
+      ]);
+      const channelsJson = await channelsRes.json();
+      if (channelsJson.success) setChannels(channelsJson.data);
+      else setError(channelsJson.error);
+      const guildJson = await guildRes.json();
+      if (guildJson.config?.stats_update_interval_minutes) {
+        setUpdateInterval(guildJson.config.stats_update_interval_minutes);
+      }
     } catch {
       setError('Failed to load stats channels');
     } finally {
@@ -77,6 +85,29 @@ export default function StatsChannelsPage() {
   useEffect(() => {
     fetchChannels();
   }, [fetchChannels]);
+
+  const saveInterval = async (value: number) => {
+    setSavingInterval(true);
+    try {
+      const clamped = Math.max(1, Math.min(60, value));
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stats_update_interval_minutes: clamped }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        setUpdateInterval(clamped);
+        toast({ title: 'Update interval saved', variant: 'success' });
+      } else {
+        toast({ title: json.error ?? 'Failed to save', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to save', variant: 'error' });
+    } finally {
+      setSavingInterval(false);
+    }
+  };
 
   useAutoRefresh('stats_channels', undefined, fetchChannels);
 
@@ -188,7 +219,7 @@ export default function StatsChannelsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-discord-text-primary">Statistics Channels</h1>
-          <p className="text-sm text-discord-text-muted">Voice channels that display live server stats (updated every 10 minutes)</p>
+          <p className="text-sm text-discord-text-muted">Voice channels that display live server stats</p>
         </div>
         <button
           onClick={() => openEditor()}
@@ -196,6 +227,34 @@ export default function StatsChannelsPage() {
         >
           + Add Stats Channel
         </button>
+      </div>
+
+      {/* Update Interval Setting */}
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-4 flex items-center justify-between gap-4">
+        <div>
+          <span className="text-sm font-medium text-discord-text-primary">Update Interval</span>
+          <p className="text-xs text-discord-text-muted">
+            How often stats channels are refreshed (1–60 minutes). Lower values consume more Discord API rate limit budget.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <input
+            type="number"
+            min={1}
+            max={60}
+            value={updateInterval}
+            onChange={(e) => setUpdateInterval(Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 10)))}
+            className="w-20 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none text-center"
+          />
+          <span className="text-xs text-discord-text-muted">min</span>
+          <button
+            onClick={() => saveInterval(updateInterval)}
+            disabled={savingInterval}
+            className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-discord-accent/80 transition-standard disabled:opacity-50"
+          >
+            {savingInterval ? '...' : 'Save'}
+          </button>
+        </div>
       </div>
 
       {/* Alerts */}
