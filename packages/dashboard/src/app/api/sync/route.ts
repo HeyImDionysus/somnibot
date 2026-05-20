@@ -73,7 +73,7 @@ export async function POST(request: NextRequest) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
     // Notify bot so it hot-reloads sync config immediately
-    await notifyBot('sync');
+    await notifyBot('settings');
 
     return NextResponse.json({ success: true });
   }
