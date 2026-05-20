@@ -436,11 +436,12 @@ async function recreateResource(
   const arrayKey = mapping.entity_type === 'role' ? 'roles' : 'channels';
   const { data: state } = await supabase
     .from('guild_desired_state')
-    .select(`${arrayKey}`)
+    .select('roles, channels')
     .eq('guild_id', guild.id)
     .maybeSingle();
 
-  const arr = (state?.[arrayKey] as Record<string, unknown>[]) ?? [];
+  const stateRecord = state as Record<string, unknown> | null;
+  const arr = (stateRecord?.[arrayKey] as Record<string, unknown>[]) ?? [];
   const config = arr.find(
     (item) => (item.template_key ?? item.templateKey) === mapping.template_key,
   );
