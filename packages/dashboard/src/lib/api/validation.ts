@@ -444,7 +444,6 @@ const guildConfigUpdate = z.object({
   level_up_channel_id: snowflake.optional().nullable(),
   ticket_category_id: snowflake.optional().nullable(),
   music_channel_id: snowflake.optional().nullable(),
-  audit_log_channel_id: snowflake.optional().nullable(),
   features_enabled: z.record(z.boolean()).optional(),
 }).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
 

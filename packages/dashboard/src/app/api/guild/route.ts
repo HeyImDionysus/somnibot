@@ -62,7 +62,6 @@ export async function PATCH(request: NextRequest) {
     'level_up_channel_id',
     'ticket_category_id',
     'music_channel_id',
-    'audit_log_channel_id',
     'features_enabled',
   ]);
 
