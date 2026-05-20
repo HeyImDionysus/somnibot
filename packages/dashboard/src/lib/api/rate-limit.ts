@@ -80,6 +80,12 @@ function ensureValkey(): boolean {
               const val = buffer.slice(0, len);
               buffer = buffer.slice(len + 2);
               cb(val);
+            } else {
+              // Incomplete bulk string — put the $<len> line and callback back
+              // so they're re-processed when more TCP data arrives
+              buffer = `$${payload}\r\n${buffer}`;
+              pendingCallbacks.unshift(cb);
+              break; // wait for more data
             }
           }
         } else {
