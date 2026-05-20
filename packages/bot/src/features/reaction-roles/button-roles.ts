@@ -35,6 +35,10 @@ interface ButtonRoleEntry {
   role_id: string;
   style: 'primary' | 'secondary' | 'success' | 'danger';
   sort_order: number;
+  active: boolean;
+  exclusive_group: string | null;
+  require_role: string | null;
+  require_level: number | null;
 }
 
 const STYLE_MAP: Record<string, ButtonStyle> = {
@@ -55,9 +59,10 @@ export async function handleButtonRoleInteraction(
   if (!customId.startsWith('btnrole:')) return false;
 
   const parts = customId.split(':');
+  const panelId = parts[1];
   const roleId = parts[2];
 
-  if (!roleId) {
+  if (!roleId || !panelId) {
     await interaction.reply({ content: '❌ Invalid button configuration.', ephemeral: true });
     return true;
   }
@@ -65,7 +70,49 @@ export async function handleButtonRoleInteraction(
   const guild = interaction.guild as Guild;
   if (!guild) return true;
 
+  // Fetch the button role entry to check active, requirements, and exclusive group
+  const { data: btnRole } = await supabase
+    .from('button_roles')
+    .select('active, exclusive_group, require_role, require_level')
+    .eq('guild_id', guild.id)
+    .eq('panel_id', panelId)
+    .eq('role_id', roleId)
+    .maybeSingle();
+
+  // Respect the active flag — disabled button roles should not toggle
+  if (btnRole && btnRole.active === false) {
+    await interaction.reply({ content: '❌ This role button is currently disabled.', ephemeral: true });
+    return true;
+  }
+
   const member = await guild.members.fetch(interaction.user.id);
+
+  // Check require_role gate
+  if (btnRole?.require_role && !member.roles.cache.has(btnRole.require_role)) {
+    await interaction.reply({
+      content: `❌ You need the <@&${btnRole.require_role}> role to use this button.`,
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  // Check require_level gate
+  if (btnRole?.require_level && btnRole.require_level > 0) {
+    const { data: levelData } = await supabase
+      .from('member_levels')
+      .select('level')
+      .eq('guild_id', guild.id)
+      .eq('member_id', member.id)
+      .maybeSingle();
+    const memberLevel = levelData?.level ?? 0;
+    if (memberLevel < btnRole.require_level) {
+      await interaction.reply({
+        content: `❌ You need to be level ${btnRole.require_level} or higher (you are level ${memberLevel}).`,
+        ephemeral: true,
+      });
+      return true;
+    }
+  }
 
   // Toggle role
   const hasRole = member.roles.cache.has(roleId);
@@ -78,6 +125,25 @@ export async function handleButtonRoleInteraction(
         ephemeral: true,
       });
     } else {
+      // Exclusive group: remove other roles in the same group before adding
+      if (btnRole?.exclusive_group) {
+        const { data: groupEntries } = await supabase
+          .from('button_roles')
+          .select('role_id')
+          .eq('guild_id', guild.id)
+          .eq('exclusive_group', btnRole.exclusive_group)
+          .neq('role_id', roleId);
+
+        if (groupEntries) {
+          const rolesToRemove = groupEntries
+            .map((e) => e.role_id)
+            .filter((rid) => member.roles.cache.has(rid));
+          for (const rid of rolesToRemove) {
+            await member.roles.remove(rid, 'Button role exclusive group swap').catch(() => {});
+          }
+        }
+      }
+
       await member.roles.add(roleId, 'Button role toggle');
       await interaction.reply({
         content: `✅ Added <@&${roleId}>.`,
@@ -108,10 +174,11 @@ export async function deployButtonRolesPanel(
     .select('*')
     .eq('guild_id', guild.id)
     .eq('panel_id', panelId)
+    .eq('active', true)
     .order('sort_order', { ascending: true });
 
   if (!entries || entries.length === 0) {
-    return { success: false, error: 'No roles configured for this panel.' };
+    return { success: false, error: 'No active roles configured for this panel.' };
   }
 
   const roles = entries as ButtonRoleEntry[];
