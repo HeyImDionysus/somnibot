@@ -124,17 +124,73 @@ export default function StorePage() {
   const [filesProductName, setFilesProductName] = useState<string>('');
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [storeEnabled, setStoreEnabled] = useState(false);
+  const [paypalEnabled, setPaypalEnabled] = useState(false);
+  const [togglingStore, setTogglingStore] = useState(false);
+  const [togglingPaypal, setTogglingPaypal] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/store/products');
-      const json = await res.json();
-      if (json.success) setProducts(json.data);
+      const [productsRes, guildRes] = await Promise.all([
+        fetch('/api/store/products'),
+        fetch('/api/guild'),
+      ]);
+      const productsJson = await productsRes.json();
+      if (productsJson.success) setProducts(productsJson.data);
+      const guildJson = await guildRes.json();
+      if (guildJson.config) {
+        setStoreEnabled(guildJson.config.store_enabled ?? false);
+        setPaypalEnabled(guildJson.config.paypal_enabled ?? false);
+      }
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const toggleStoreEnabled = async (value: boolean) => {
+    setTogglingStore(true);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ store_enabled: value }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        setStoreEnabled(value);
+        toast({ title: value ? 'Store enabled' : 'Store disabled', variant: 'success' });
+      } else {
+        toast({ title: json.error ?? 'Failed to toggle store', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to toggle store', variant: 'error' });
+    } finally {
+      setTogglingStore(false);
+    }
+  };
+
+  const togglePaypalEnabled = async (value: boolean) => {
+    setTogglingPaypal(true);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paypal_enabled: value }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        setPaypalEnabled(value);
+        toast({ title: value ? 'PayPal enabled' : 'PayPal disabled', variant: 'success' });
+      } else {
+        toast({ title: json.error ?? 'Failed to toggle PayPal', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to toggle PayPal', variant: 'error' });
+    } finally {
+      setTogglingPaypal(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -284,6 +340,53 @@ export default function StorePage() {
             <p className="text-xs text-discord-text-muted">{s.label}</p>
           </div>
         ))}
+      </div>
+
+      {/* Commerce Toggles */}
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-4">
+        <h2 className="text-lg font-semibold text-discord-text-primary">Commerce Settings</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm font-medium text-discord-text-primary">Store</span>
+            <p className="text-xs text-discord-text-muted">
+              Enable or disable the store system. When disabled, /store commands and buy buttons are blocked.
+            </p>
+          </div>
+          <button
+            onClick={() => toggleStoreEnabled(!storeEnabled)}
+            disabled={togglingStore}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              storeEnabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                storeEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm font-medium text-discord-text-primary">PayPal Payments</span>
+            <p className="text-xs text-discord-text-muted">
+              Enable PayPal as a payment provider. Requires PayPal API credentials in Settings.
+            </p>
+          </div>
+          <button
+            onClick={() => togglePaypalEnabled(!paypalEnabled)}
+            disabled={togglingPaypal}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              paypalEnabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                paypalEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
       </div>
 
       {/* Product Form Modal */}

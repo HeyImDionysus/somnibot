@@ -19,6 +19,8 @@ interface MusicConfig {
   max_queue_length: number;
   allow_duplicates: boolean;
   dj_role_id: string | null;
+  music_auto_leave_minutes: number;
+  music_auto_destroy_minutes: number;
 }
 
 interface DiscordRole {
@@ -34,6 +36,8 @@ const DEFAULT_CONFIG: MusicConfig = {
   max_queue_length: 500,
   allow_duplicates: true,
   dj_role_id: null,
+  music_auto_leave_minutes: 5,
+  music_auto_destroy_minutes: 30,
 };
 
 // ── Component ─────────────────────────────────────────────
@@ -274,18 +278,61 @@ export default function MusicSettingsPage() {
             </div>
           </div>
 
-          {/* Auto Behaviors Info */}
-          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6">
-            <h2 className="text-lg font-semibold text-discord-text-primary">Auto Behaviors</h2>
-            <p className="mt-1 text-sm text-discord-text-muted">
-              These behaviors are always active and cannot be disabled.
-            </p>
-            <div className="mt-4 space-y-3">
+          {/* Auto Behaviors */}
+          <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-6 space-y-5">
+            <div>
+              <h2 className="text-lg font-semibold text-discord-text-primary">Auto Behaviors</h2>
+              <p className="mt-1 text-sm text-discord-text-muted">
+                Configure automatic voice channel management. Auto-pause, auto-resume, and queue persistence are always active.
+              </p>
+            </div>
+
+            {/* Auto-leave timeout */}
+            <div>
+              <label className="block text-sm font-medium text-discord-text-secondary">
+                Auto-Leave Timeout
+              </label>
+              <p className="mt-0.5 text-xs text-discord-text-muted">
+                Leave voice when the channel is empty for this many minutes (1–60).
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={config.music_auto_leave_minutes}
+                onChange={(e) =>
+                  updateField('music_auto_leave_minutes', Math.max(1, Math.min(60, parseInt(e.target.value, 10) || 5)))
+                }
+                className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+              />
+            </div>
+
+            {/* Auto-destroy timeout */}
+            <div>
+              <label className="block text-sm font-medium text-discord-text-secondary">
+                Inactivity Timeout
+              </label>
+              <p className="mt-0.5 text-xs text-discord-text-muted">
+                Destroy the player after this many minutes of inactivity (1–120).
+              </p>
+              <input
+                type="number"
+                min={1}
+                max={120}
+                value={config.music_auto_destroy_minutes}
+                onChange={(e) =>
+                  updateField('music_auto_destroy_minutes', Math.max(1, Math.min(120, parseInt(e.target.value, 10) || 30)))
+                }
+                className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+              />
+            </div>
+
+            {/* Always-on behaviors */}
+            <div className="space-y-3 pt-2 border-t border-discord-border-subtle">
+              <p className="text-xs font-medium text-discord-text-muted uppercase tracking-wide">Always Active</p>
               {[
-                { label: 'Auto-leave', desc: 'Leave voice when channel is empty (5 min timeout)' },
                 { label: 'Auto-pause', desc: 'Pause when bot is alone in voice' },
                 { label: 'Auto-resume', desc: 'Resume when someone joins while paused' },
-                { label: 'Auto-destroy', desc: 'Destroy player after 30 min of inactivity' },
                 { label: 'Queue persist', desc: 'Queue is saved to cache and survives track errors' },
               ].map((item) => (
                 <div key={item.label} className="flex items-start gap-3">

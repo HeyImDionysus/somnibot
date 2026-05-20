@@ -87,15 +87,19 @@ export class MusicPlayerManager {
   private async loadConfig(): Promise<void> {
     const { data } = await this.supabase
       .from('guild_config')
-      .select('music_default_volume, dj_role_id')
+      .select('music_default_volume, dj_role_id, music_auto_leave_minutes, music_auto_destroy_minutes')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
     if (data) {
+      const autoLeaveMin = data.music_auto_leave_minutes ?? 5;
+      const autoDestroyMin = data.music_auto_destroy_minutes ?? 30;
       this.config = {
         ...DEFAULT_CONFIG,
         defaultVolume: data.music_default_volume ?? DEFAULT_CONFIG.defaultVolume,
         djRoleId: data.dj_role_id ?? null,
+        autoLeaveTimeout: autoLeaveMin * 60 * 1000,
+        inactivityTimeout: autoDestroyMin * 60 * 1000,
       };
     }
   }

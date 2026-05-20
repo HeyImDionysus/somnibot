@@ -241,6 +241,7 @@ export interface DbGuildConfig {
   store_channel_id: string | null;
   grace_period_days: number;
   stats_enabled: boolean;
+  /** @deprecated Never used — per-channel category_id is in stat_config JSONB. Kept for schema compat. */
   stats_category_id: string | null;
   stats_update_interval_minutes: number;
   temp_channels_enabled: boolean;
