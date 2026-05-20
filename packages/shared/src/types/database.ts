@@ -1096,7 +1096,8 @@ export interface DbPortalSession {
   guild_id: string;
   customer_id: string | null;
   discord_id: string;
-  session_token: string;
+  /** @deprecated V22 — session_token is now nullable; all code uses token_hash. */
+  session_token: string | null;
   ip_address: string | null;
   user_agent: string | null;
   expires_at: string;
