@@ -62,8 +62,8 @@ export interface DbGuildConfig {
   levels_enabled: boolean;
   level_up_channel_id: string | null;
   level_up_message: string | null;
-  min_xp: number;
-  max_xp: number;
+  xp_min: number;
+  xp_max: number;
   xp_cooldown_seconds: number;
   voice_xp_enabled: boolean;
   voice_xp_per_interval: number;

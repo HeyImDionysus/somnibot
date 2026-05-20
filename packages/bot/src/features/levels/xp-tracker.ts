@@ -10,8 +10,8 @@ import { calculateLevel, randomXp, LEVEL_CONFIG } from '@somnibot/shared';
 
 export interface LevelConfig {
   levels_enabled: boolean;
-  min_xp: number;
-  max_xp: number;
+  xp_min: number;
+  xp_max: number;
   xp_cooldown_seconds: number;
   voice_xp_enabled: boolean;
   voice_xp_per_interval: number;
@@ -67,15 +67,15 @@ export async function loadLevelConfig(
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'levels_enabled, min_xp, max_xp, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message',
+      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
 
   _levelConfigCache = {
     levels_enabled: data?.levels_enabled ?? false,
-    min_xp: data?.min_xp ?? LEVEL_CONFIG.DEFAULT_MIN_XP,
-    max_xp: data?.max_xp ?? LEVEL_CONFIG.DEFAULT_MAX_XP,
+    xp_min: data?.xp_min ?? LEVEL_CONFIG.DEFAULT_MIN_XP,
+    xp_max: data?.xp_max ?? LEVEL_CONFIG.DEFAULT_MAX_XP,
     xp_cooldown_seconds: data?.xp_cooldown_seconds ?? LEVEL_CONFIG.DEFAULT_COOLDOWN_SECONDS,
     voice_xp_enabled: data?.voice_xp_enabled ?? false,
     voice_xp_per_interval: data?.voice_xp_per_interval ?? LEVEL_CONFIG.DEFAULT_VOICE_XP_PER_INTERVAL,
@@ -187,7 +187,7 @@ export async function processMessageXp(
   await valkey.set(cooldownKey, '1', 'EX', config.xp_cooldown_seconds);
 
   // Calculate XP
-  let xpAmount = randomXp(config.min_xp, config.max_xp);
+  let xpAmount = randomXp(config.xp_min, config.xp_max);
 
   // Apply multiplier
   const member = message.member;
