@@ -29,7 +29,7 @@ interface GiveawayRow {
   required_entitlement_product_id: string | null;
   entries: string[];
   winners: string[];
-  status: 'active' | 'ended' | 'cancelled';
+  status: 'active' | 'ended' | 'cancelled' | 'paused';
   created_by: string;
   created_at: string;
 }
@@ -242,6 +242,73 @@ export class GiveawayManager {
   }
 
   /**
+   * Pause an active giveaway — entries blocked, timer stops.
+   */
+  async pauseGiveaway(giveawayId: string): Promise<boolean> {
+    const { data } = await this.supabase
+      .from('giveaways')
+      .select('*')
+      .eq('id', giveawayId)
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+
+    if (!data) return false;
+    const giveaway = data as GiveawayRow;
+    if (giveaway.status !== 'active') return false;
+
+    await this.supabase
+      .from('giveaways')
+      .update({ status: 'paused' })
+      .eq('id', giveawayId);
+
+    // Update the giveaway message to show paused state
+    const pausedGiveaway = { ...giveaway, status: 'paused' as const };
+    await this.updateGiveawayMessage(pausedGiveaway);
+
+    console.log(`[Giveaways] Paused "${giveaway.prize}"`);
+    return true;
+  }
+
+  /**
+   * Resume a paused giveaway — recalculates end time based on remaining duration.
+   */
+  async resumeGiveaway(giveawayId: string): Promise<boolean> {
+    const { data } = await this.supabase
+      .from('giveaways')
+      .select('*')
+      .eq('id', giveawayId)
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+
+    if (!data) return false;
+    const giveaway = data as GiveawayRow;
+    if (giveaway.status !== 'paused') return false;
+
+    // Extend the end time by the amount of time it was paused
+    // (keep original end time if it hasn't passed, otherwise extend from now)
+    const originalEnd = new Date(giveaway.ends_at).getTime();
+    const newEnd = Math.max(originalEnd, Date.now() + 60_000); // At least 1 minute from now
+
+    await this.supabase
+      .from('giveaways')
+      .update({
+        status: 'active',
+        ends_at: new Date(newEnd).toISOString(),
+      })
+      .eq('id', giveawayId);
+
+    const resumedGiveaway = {
+      ...giveaway,
+      status: 'active' as const,
+      ends_at: new Date(newEnd).toISOString(),
+    };
+    await this.updateGiveawayMessage(resumedGiveaway);
+
+    console.log(`[Giveaways] Resumed "${giveaway.prize}"`);
+    return true;
+  }
+
+  /**
    * Reroll winners for an ended giveaway.
    */
   async reroll(giveawayId: string, count?: number): Promise<string[]> {
@@ -352,7 +419,7 @@ export class GiveawayManager {
       const msg = await channel.messages.fetch(giveaway.message_id);
       const embed = this.buildGiveawayEmbed(giveaway);
 
-      if (giveaway.status === 'ended') {
+      if (giveaway.status === 'ended' || giveaway.status === 'cancelled') {
         await msg.edit({ embeds: [embed], components: [] });
       } else {
         const row = this.buildEntryButton(giveaway);
@@ -365,10 +432,13 @@ export class GiveawayManager {
 
   private buildGiveawayEmbed(giveaway: GiveawayRow): EmbedBuilder {
     const isEnded = giveaway.status === 'ended';
+    const isPaused = giveaway.status === 'paused';
+    const title = isEnded ? '🎉 Giveaway Ended' : isPaused ? '⏸️ Giveaway Paused' : '🎉 Giveaway';
+    const color = isEnded ? 0x808080 : isPaused ? 0xFFA500 : 0x57F287;
     const embed = new EmbedBuilder()
-      .setTitle(isEnded ? '🎉 Giveaway Ended' : '🎉 Giveaway')
+      .setTitle(title)
       .setDescription(giveaway.prize)
-      .setColor(isEnded ? 0x808080 : 0x57F287)
+      .setColor(color)
       .setTimestamp(new Date(giveaway.ends_at));
 
     const fields: Array<{ name: string; value: string; inline: boolean }> = [];
@@ -404,18 +474,20 @@ export class GiveawayManager {
     }
 
     embed.addFields(fields);
-    embed.setFooter({ text: isEnded ? 'Giveaway ended' : `${giveaway.winner_count} winner(s) • Ends` });
+    embed.setFooter({ text: isEnded ? 'Giveaway ended' : isPaused ? 'Giveaway paused' : `${giveaway.winner_count} winner(s) • Ends` });
 
     return embed;
   }
 
   private buildEntryButton(giveaway: GiveawayRow): ActionRowBuilder<ButtonBuilder> {
+    const isPaused = giveaway.status === 'paused';
     return new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`giveaway_enter:${giveaway.id}`)
-        .setLabel(`Enter (${giveaway.entries.length})`)
-        .setEmoji('🎉')
-        .setStyle(ButtonStyle.Success),
+        .setLabel(isPaused ? `Paused (${giveaway.entries.length})` : `Enter (${giveaway.entries.length})`)
+        .setEmoji(isPaused ? '⏸️' : '🎉')
+        .setStyle(isPaused ? ButtonStyle.Secondary : ButtonStyle.Success)
+        .setDisabled(isPaused),
     );
   }
 

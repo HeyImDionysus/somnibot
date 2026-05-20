@@ -1,17 +1,23 @@
 /**
  * Help Command — /help
  *
+ * V17 Behavioral Audit — Item 13
+ *
  * Lists all available commands grouped by category with descriptions.
- * Adapts based on which features are enabled in guild config.
+ * Auto-syncs from the registered command registry instead of hardcoding.
+ *
+ * The categories and command descriptions are derived from the actual
+ * registered SlashCommandBuilder data stored on the client.
  */
 import {
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
+  type RESTPostAPIApplicationCommandsJSONBody,
   EmbedBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
   type StringSelectMenuInteraction,
-  type Interaction,
+  ApplicationCommandType,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { SOMNI_PALETTE } from '@somnibot/shared';
@@ -21,6 +27,109 @@ interface CommandCategory {
   emoji: string;
   description: string;
   commands: { name: string; description: string }[];
+}
+
+// ── Category classification ──────────────────────────────
+
+// Map command names to their category
+const COMMAND_CATEGORY_MAP: Record<string, { category: string; emoji: string; description: string }> = {
+  help: { category: 'General', emoji: '🤖', description: 'Basic bot commands' },
+  setup: { category: 'General', emoji: '🤖', description: 'Basic bot commands' },
+  warn: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  mute: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  kick: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  ban: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  pardon: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  infractions: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  purge: { category: 'Moderation', emoji: '🛡️', description: 'Server moderation tools' },
+  rank: { category: 'Levels', emoji: '📊', description: 'XP and level system' },
+  leaderboard: { category: 'Levels', emoji: '📊', description: 'XP and level system' },
+  xp: { category: 'Levels', emoji: '📊', description: 'XP and level system' },
+  play: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  skip: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  stop: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  pause: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  queue: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  np: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  volume: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  loop: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  shuffle: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  seek: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  remove: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  filter: { category: 'Music', emoji: '🎵', description: 'Music playback controls' },
+  store: { category: 'Store', emoji: '🛒', description: 'Server store and licensing' },
+  license: { category: 'Store', emoji: '🛒', description: 'Server store and licensing' },
+  giveaway: { category: 'Giveaways', emoji: '🎉', description: 'Giveaway management' },
+  voice: { category: 'Voice', emoji: '🔊', description: 'Temporary voice channel controls' },
+  ticket: { category: 'Tickets', emoji: '🎫', description: 'Support ticket management' },
+};
+
+const CATEGORY_ORDER = ['General', 'Moderation', 'Tickets', 'Levels', 'Music', 'Store', 'Giveaways', 'Voice'];
+
+/**
+ * Build categories from the actual registered command JSON bodies.
+ */
+function buildCategoriesFromRegistry(
+  commands: RESTPostAPIApplicationCommandsJSONBody[],
+): CommandCategory[] {
+  const categoryMap = new Map<string, CommandCategory>();
+
+  for (const cmd of commands) {
+    // Skip context menu commands (they have type 2 or 3)
+    if (cmd.type && cmd.type !== ApplicationCommandType.ChatInput) continue;
+
+    const name = cmd.name;
+    const mapping = COMMAND_CATEGORY_MAP[name];
+    const catName = mapping?.category ?? 'Other';
+    const emoji = mapping?.emoji ?? '📦';
+    const catDesc = mapping?.description ?? 'Other commands';
+
+    if (!categoryMap.has(catName)) {
+      categoryMap.set(catName, {
+        name: catName,
+        emoji,
+        description: catDesc,
+        commands: [],
+      });
+    }
+
+    const category = categoryMap.get(catName)!;
+
+    // If the command has subcommands, list each subcommand
+    const options = cmd.options ?? [];
+    const subcommands = options.filter(
+      (o) => o.type === 1, // SUB_COMMAND
+    );
+
+    if (subcommands.length > 0) {
+      for (const sub of subcommands) {
+        category.commands.push({
+          name: `/${name} ${sub.name}`,
+          description: sub.description,
+        });
+      }
+    } else {
+      category.commands.push({
+        name: `/${name}`,
+        description: cmd.description ?? 'No description',
+      });
+    }
+  }
+
+  // Sort categories by defined order
+  const sorted: CommandCategory[] = [];
+  for (const catName of CATEGORY_ORDER) {
+    const cat = categoryMap.get(catName);
+    if (cat) sorted.push(cat);
+  }
+  // Append any categories not in the predefined order
+  for (const [catName, cat] of categoryMap) {
+    if (!CATEGORY_ORDER.includes(catName)) {
+      sorted.push(cat);
+    }
+  }
+
+  return sorted;
 }
 
 export function buildHelpCommand() {
@@ -34,154 +143,17 @@ export function buildHelpCommand() {
     );
 }
 
-function getCategories(enabledFeatures: Record<string, boolean>): CommandCategory[] {
-  const categories: CommandCategory[] = [];
-
-  // General (always available)
-  categories.push({
-    name: 'General',
-    emoji: '🤖',
-    description: 'Basic bot commands',
-    commands: [
-      { name: '/help', description: 'View this help menu' },
-      { name: '/setup', description: 'Set up optional services (owner only)' },
-    ],
-  });
-
-  // Moderation
-  categories.push({
-    name: 'Moderation',
-    emoji: '🛡️',
-    description: 'Server moderation tools (requires Moderate Members or higher)',
-    commands: [
-      { name: '/warn', description: 'Issue a warning to a member' },
-      { name: '/mute', description: 'Timeout a member for a specified duration' },
-      { name: '/kick', description: 'Kick a member from the server' },
-      { name: '/ban', description: 'Ban a member from the server' },
-      { name: '/pardon', description: 'Pardon (remove) an active infraction' },
-      { name: '/infractions', description: 'View infractions for a member' },
-    ],
-  });
-
-  // Tickets
-  categories.push({
-    name: 'Tickets',
-    emoji: '🎫',
-    description: 'Support ticket management',
-    commands: [
-      { name: '/ticket close', description: 'Close the current ticket' },
-      { name: '/ticket add', description: 'Add a user to the current ticket' },
-      { name: '/ticket remove', description: 'Remove a user from the current ticket' },
-    ],
-  });
-
-  // Levels
-  if (enabledFeatures.levels !== false) {
-    categories.push({
-      name: 'Levels',
-      emoji: '📊',
-      description: 'XP and level system',
-      commands: [
-        { name: '/rank', description: 'View your or another member\'s rank card' },
-        { name: '/leaderboard', description: 'View the server XP leaderboard' },
-      ],
-    });
-  }
-
-  // Music
-  if (enabledFeatures.music !== false) {
-    categories.push({
-      name: 'Music',
-      emoji: '🎵',
-      description: 'Music playback controls',
-      commands: [
-        { name: '/play', description: 'Play a song or add to queue (search or URL)' },
-        { name: '/skip', description: 'Skip the current track' },
-        { name: '/stop', description: 'Stop playback and clear queue' },
-        { name: '/pause', description: 'Pause or resume playback' },
-        { name: '/queue', description: 'View the current queue' },
-        { name: '/np', description: 'Show the now playing track' },
-        { name: '/volume', description: 'Set playback volume (0-150)' },
-        { name: '/loop', description: 'Toggle loop mode (off/track/queue)' },
-        { name: '/shuffle', description: 'Shuffle the queue' },
-        { name: '/seek', description: 'Seek to a position in the track' },
-        { name: '/remove', description: 'Remove a track from the queue' },
-        { name: '/filter', description: 'Apply audio filters (bass, nightcore, etc.)' },
-      ],
-    });
-  }
-
-  // Commerce
-  if (enabledFeatures.commerce !== false) {
-    categories.push({
-      name: 'Store',
-      emoji: '🛒',
-      description: 'Server store and licensing',
-      commands: [
-        { name: '/store', description: 'Browse the server store' },
-        { name: '/license', description: 'Manage your license keys' },
-      ],
-    });
-  }
-
-  // Giveaways
-  if (enabledFeatures.giveaways !== false) {
-    categories.push({
-      name: 'Giveaways',
-      emoji: '🎉',
-      description: 'Giveaway management (requires Manage Server)',
-      commands: [
-        { name: '/giveaway start', description: 'Start a new giveaway' },
-        { name: '/giveaway end', description: 'End a giveaway early' },
-        { name: '/giveaway reroll', description: 'Reroll winners for a giveaway' },
-        { name: '/giveaway list', description: 'List active giveaways' },
-      ],
-    });
-  }
-
-  // Temp Channels
-  if (enabledFeatures.tempChannels !== false) {
-    categories.push({
-      name: 'Voice',
-      emoji: '🔊',
-      description: 'Temporary voice channel controls',
-      commands: [
-        { name: '/voice name', description: 'Rename your temp channel' },
-        { name: '/voice limit', description: 'Set user limit for your temp channel' },
-        { name: '/voice lock', description: 'Lock/unlock your temp channel' },
-        { name: '/voice permit', description: 'Allow a user into your locked channel' },
-        { name: '/voice reject', description: 'Remove a user from your channel' },
-        { name: '/voice transfer', description: 'Transfer ownership of your channel' },
-        { name: '/voice bitrate', description: 'Set the bitrate of your channel' },
-      ],
-    });
-  }
-
-  return categories;
-}
-
 export async function handleHelpCommand(
   interaction: ChatInputCommandInteraction,
   client: SomniClient,
 ): Promise<void> {
   const specificCommand = interaction.options.getString('command');
 
-  // Load feature flags
-  const { data: config } = await client.supabase
-    .from('guild_config')
-    .select('levels_enabled, music_enabled, paypal_enabled, giveaways_enabled, temp_channels_enabled')
-    .eq('guild_id', client.guildId)
-    .maybeSingle();
+  // Read command registry from client (set during boot)
+  const registeredCommands =
+    ((client as unknown as Record<string, unknown>)._registeredCommands as RESTPostAPIApplicationCommandsJSONBody[]) ?? [];
 
-  const enabledFeatures = {
-    levels: config?.levels_enabled ?? true,
-    music: config?.music_enabled ?? true,
-    commerce: config?.paypal_enabled ?? true,
-    giveaways: config?.giveaways_enabled ?? true,
-    tempChannels: config?.temp_channels_enabled ?? true,
-  };
-
-  const categories = getCategories(enabledFeatures);
+  const categories = buildCategoriesFromRegistry(registeredCommands);
 
   if (specificCommand) {
     // Find the specific command
@@ -253,21 +225,10 @@ export async function handleHelpCategorySelect(
 ): Promise<void> {
   const categoryName = interaction.values[0];
 
-  const { data: config } = await client.supabase
-    .from('guild_config')
-    .select('levels_enabled, music_enabled, paypal_enabled, giveaways_enabled, temp_channels_enabled')
-    .eq('guild_id', client.guildId)
-    .maybeSingle();
+  const registeredCommands =
+    ((client as unknown as Record<string, unknown>)._registeredCommands as RESTPostAPIApplicationCommandsJSONBody[]) ?? [];
 
-  const enabledFeatures = {
-    levels: config?.levels_enabled ?? true,
-    music: config?.music_enabled ?? true,
-    commerce: config?.paypal_enabled ?? true,
-    giveaways: config?.giveaways_enabled ?? true,
-    tempChannels: config?.temp_channels_enabled ?? true,
-  };
-
-  const categories = getCategories(enabledFeatures);
+  const categories = buildCategoriesFromRegistry(registeredCommands);
   const category = categories.find((c) => c.name === categoryName);
 
   if (!category) {

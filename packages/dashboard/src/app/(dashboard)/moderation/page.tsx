@@ -10,6 +10,7 @@ import Link from 'next/link';
 import { ChannelPicker } from '@/components/shared/channel-picker';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
+import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 interface EscalationStep {
   threshold: number;
@@ -123,9 +124,12 @@ export default function ModerationPage() {
     setConfig({ ...config, escalation_chain: chain });
   };
 
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
   const resetToDefaults = () => {
     if (!config) return;
     setConfig({ ...config, escalation_chain: [...DEFAULT_CHAIN] });
+    setShowResetConfirm(false);
   };
 
   if (loading) {
@@ -227,11 +231,20 @@ export default function ModerationPage() {
             </p>
           </div>
           <button
-            onClick={resetToDefaults}
+            onClick={() => setShowResetConfirm(true)}
             className="text-xs text-discord-text-muted hover:text-discord-text-primary"
           >
             Reset to Defaults
           </button>
+          <ConfirmDialog
+            open={showResetConfirm}
+            title="Reset Escalation Chain"
+            description="This will replace your current escalation chain with the default configuration. Any custom steps will be lost."
+            confirmLabel="Reset"
+            variant="warning"
+            onConfirm={resetToDefaults}
+            onCancel={() => setShowResetConfirm(false)}
+          />
         </div>
 
         <div className="mt-6 space-y-3">
