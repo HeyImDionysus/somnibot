@@ -119,7 +119,11 @@ export async function POST(req: NextRequest) {
     // Also queue for bot to update its id_map (best-effort)
     await supabase.from('sync_actions').insert({
       guild_id: guildId,
+      action_type: body.action,
       action: body.action,
+      target_type: body.driftItem?.entityType ?? 'unknown',
+      target_id: body.driftItem?.entityDiscordId ?? null,
+      details: body.driftItem,
       drift_item: body.driftItem,
       status: 'pending',
       created_at: new Date().toISOString(),
@@ -131,7 +135,11 @@ export async function POST(req: NextRequest) {
   // For 'repair' — queue action for the bot to execute via Realtime
   const { error } = await supabase.from('sync_actions').insert({
     guild_id: guildId,
+    action_type: body.action,
     action: body.action,
+    target_type: body.driftItem?.entityType ?? 'unknown',
+    target_id: body.driftItem?.entityDiscordId ?? null,
+    details: body.driftItem,
     drift_item: body.driftItem,
     status: 'pending',
     created_at: new Date().toISOString(),

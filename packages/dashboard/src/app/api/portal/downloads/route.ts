@@ -36,9 +36,31 @@ export async function GET(request: NextRequest) {
     // Get active entitlements with product info
     const { data: entitlements } = await admin
       .from('entitlements')
-      .select('*, products(id, name, description, type, files)')
+      .select('*, products(id, name, description, type)')
       .eq('customer_id', session.customer_id)
       .eq('status', 'active');
+
+    // Collect product IDs to fetch their files
+    const productIds = (entitlements || [])
+      .map((e) => ((e as Record<string, unknown>).products as { id: string } | null)?.id)
+      .filter(Boolean) as string[];
+
+    // Fetch product files for all entitled products
+    const { data: productFiles } = productIds.length > 0
+      ? await admin
+          .from('product_files')
+          .select('*')
+          .in('product_id', productIds)
+          .order('sort_order', { ascending: true })
+      : { data: [] };
+
+    // Group files by product_id
+    const filesByProduct = new Map<string, Record<string, unknown>[]>();
+    for (const f of productFiles || []) {
+      const pid = f.product_id as string;
+      if (!filesByProduct.has(pid)) filesByProduct.set(pid, []);
+      filesByProduct.get(pid)!.push(f as Record<string, unknown>);
+    }
 
     // Build download list from entitled products
     const downloads = (entitlements || []).map((e) => {
@@ -47,7 +69,6 @@ export async function GET(request: NextRequest) {
         name: string;
         description: string | null;
         type: string;
-        files: Record<string, unknown>[] | null;
       } | null;
 
       return {
@@ -56,7 +77,7 @@ export async function GET(request: NextRequest) {
         product_name: product?.name || 'Unknown',
         product_type: product?.type,
         description: product?.description,
-        files: product?.files || [],
+        files: product?.id ? filesByProduct.get(product.id) ?? [] : [],
         entitled_since: e.created_at,
       };
     });
