@@ -84,7 +84,7 @@ export class GuildOnboardingSync {
         options: prompt.options.map((opt) => ({
           title: opt.title,
           description: opt.description ?? null,
-          emoji: opt.emoji ? { name: opt.emoji } : undefined,
+          emoji: opt.emoji ?? undefined,
           roleIds: opt.role_ids ?? [],
           channelIds: opt.channel_ids ?? [],
         })),
@@ -94,7 +94,7 @@ export class GuildOnboardingSync {
       await this.guild.editOnboarding({
         enabled: onboardingConfig.enabled,
         prompts,
-        defaultChannelIds: onboardingConfig.default_channel_ids,
+        defaultChannels: onboardingConfig.default_channel_ids,
       });
 
       console.log(`[GuildOnboardingSync] Synced ${prompts.length} onboarding prompts to Discord`);

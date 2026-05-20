@@ -22,7 +22,7 @@ import { Guild } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
-import type { PlatformEvent } from '@somnibot/shared';
+import type { PlatformEvent, PlatformEventMap } from '@somnibot/shared';
 
 export class CrossFeatureBridge {
   private listeners: (() => void)[] = [];
@@ -99,22 +99,17 @@ export class CrossFeatureBridge {
       const orderId = event.data.orderId;
       if (!userId) return;
 
-      // Grant XP bonus for purchase
+      // Grant XP bonus for purchase (atomic — handles upsert, increment, and level recalc)
       const XP_BONUS = 500;
-      const { data: existing } = await this.supabase
-        .from('member_levels')
-        .select('xp')
-        .eq('guild_id', this.guild.id)
-        .eq('member_id', userId)
-        .maybeSingle();
+      const { error: xpError } = await this.supabase.rpc('increment_member_xp', {
+        p_guild_id: this.guild.id,
+        p_member_id: userId,
+        p_xp_amount: XP_BONUS,
+      });
 
-      if (existing) {
-        await this.supabase
-          .from('member_levels')
-          .update({ xp: existing.xp + XP_BONUS })
-          .eq('guild_id', this.guild.id)
-          .eq('member_id', userId);
-
+      if (xpError) {
+        console.error(`[CrossFeatureBridge] Failed to grant purchase XP to ${userId}:`, xpError.message);
+      } else {
         console.log(`[CrossFeatureBridge] Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
       }
     });
@@ -201,11 +196,11 @@ export class CrossFeatureBridge {
    * Register an event listener that correctly unwraps PlatformEvent.
    * The EventBus passes PlatformEvent<T, D> to handlers (with {type, guildId, timestamp, data}).
    */
-  private on<T extends string>(
+  private on<T extends keyof PlatformEventMap & string>(
     event: T,
-    handler: (event: PlatformEvent<T>) => Promise<void> | void,
+    handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => Promise<void> | void,
   ): void {
-    const wrapped = (evt: PlatformEvent<T>) => {
+    const wrapped = (evt: PlatformEvent<T, PlatformEventMap[T]>) => {
       // Only process events for our guild
       if (evt.guildId !== this.guild.id) return;
       Promise.resolve(handler(evt)).catch((err) => {
