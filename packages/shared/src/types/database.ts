@@ -251,9 +251,6 @@ export interface DbGuildConfig {
   sync_auto_repair: boolean;
   sync_auto_repair_everyone: boolean;
   updated_at: string;
-  default_volume: number;
-  max_queue_length: number;
-  allow_duplicates: boolean;
   paypal_enabled: boolean;
   custom_bot_statuses: string[];
   onboarding_config: Record<string, unknown> | null;
@@ -1019,13 +1016,11 @@ export interface DbDashboardRole {
 export interface DbDashboardUserRole {
   id: string;
   guild_id: string;
-  user_id: string;
+  discord_id: string;
   role_id: string;
-  granted_by: string | null;
-  created_at: string;
-  discord_id: string | null;
   assigned_at: string;
   assigned_by: string | null;
+  created_at: string;
 }
 
 // — Customer Portal —
@@ -1055,11 +1050,6 @@ export interface DbFraudSignal {
   discord_id: string | null;
   signal_type: string;
   severity: string;
-  details: Json | null;
-  action: string;
-  resolved: boolean;
-  resolved_at: string | null;
-  resolved_by: string | null;
   created_at: string;
   entity_type: string | null;
   entity_id: string | null;
@@ -1067,6 +1057,8 @@ export interface DbFraudSignal {
   evidence: Record<string, unknown>;
   status: string;
   auto_action: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
   resolution_note: string | null;
   updated_at: string;
 }
@@ -1130,18 +1122,8 @@ export interface DbIncidentEvent {
 export interface DbDeadLetterItem {
   id: string;
   guild_id: string;
-  source_type: string;
-  source_id: string | null;
-  action_type: string;
-  payload: Record<string, unknown>;
-  error: string | null;
-  failure_count: number;
-  first_failed_at: string;
-  last_failed_at: string;
-  reprocessed: boolean;
-  reprocessed_at: string | null;
-  created_at: string;
   event_type: string | null;
+  payload: Record<string, unknown>;
   error_message: string | null;
   error_stack: string | null;
   retry_count: number;
@@ -1149,6 +1131,7 @@ export interface DbDeadLetterItem {
   max_retries: number;
   source: string | null;
   status: string;
+  created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
   resolution_note: string | null;
@@ -1180,24 +1163,21 @@ export interface DbAdminChange {
   id: string;
   guild_id: string;
   actor_id: string;
-  change_type: string;
-  target_table: string;
+  action: string;
+  target_type: string;
   target_id: string;
   before_state: Record<string, unknown> | null;
   after_state: Record<string, unknown> | null;
   description: string | null;
-  undone: boolean;
-  undone_at: string | null;
-  undone_by: string | null;
-  created_at: string;
-  action: string | null;
-  target_type: string | null;
   is_undoable: boolean;
   is_undone: boolean;
+  undone_at: string | null;
+  undone_by: string | null;
   blast_radius: string;
   requires_confirmation: boolean;
   undo_payload: Record<string, unknown> | null;
   undo_change_id: string | null;
+  created_at: string;
 }
 
 // — Sync —
