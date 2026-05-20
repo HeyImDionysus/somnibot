@@ -577,8 +577,8 @@ export async function checkInactiveTickets(
     if (idleMs >= closeAfter) {
       // Auto-close
       const result = await closeTicket(
-        supabase,
         guild,
+        supabase,
         eventBus,
         ticket.ticket_number,
         guild.client.user!.id,
@@ -591,7 +591,7 @@ export async function checkInactiveTickets(
         await channel.send({
           embeds: [
             new EmbedBuilder()
-              .setColor(SOMNI_PALETTE.warning)
+              .setColor(SOMNI_PALETTE.ORANGE)
               .setTitle('⏰ Inactivity Warning')
               .setDescription(
                 `This ticket has been inactive for over ${Math.round(idleMs / 3600000)} hours. ` +
