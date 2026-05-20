@@ -5,6 +5,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { notifyBot } from '@/lib/notify-bot';
 
 
 export async function GET() {
@@ -70,6 +71,10 @@ export async function POST(request: NextRequest) {
        }, { onConflict: 'guild_id' });
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    // Notify bot so it hot-reloads sync config immediately
+    await notifyBot('settings');
+
     return NextResponse.json({ success: true });
   }
 
