@@ -108,7 +108,7 @@ export class DiagnosticsService {
           .from('scheduled_messages')
           .select('id', { count: 'exact', head: true })
           .eq('guild_id', this.client.guildId)
-          .eq('enabled', true);
+          .eq('active', true);
         scheduledMessageCount = count ?? 0;
       } catch {
         // ignore
