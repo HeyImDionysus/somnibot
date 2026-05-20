@@ -254,6 +254,21 @@ export interface DbGuildConfig {
   paypal_enabled: boolean;
   custom_bot_statuses: string[];
   onboarding_config: Record<string, unknown> | null;
+  // V17 Behavioral Audit additions
+  no_xp_role_id: string | null;
+  anti_raid_enabled: boolean;
+  anti_raid_join_threshold: number;
+  anti_raid_join_window_seconds: number;
+  anti_raid_account_age_days: number;
+  anti_raid_action: 'kick' | 'ban' | 'lockdown';
+  anti_raid_log_channel_id: string | null;
+  starboard_enabled: boolean;
+  starboard_channel_id: string | null;
+  starboard_threshold: number;
+  starboard_emoji: string;
+  starboard_self_star: boolean;
+  message_log_enabled: boolean;
+  message_log_channel_id: string | null;
 }
 
 export interface DbInstanceSettings {
