@@ -26,7 +26,7 @@ export async function handleRoleCreate(
   // Check if this role is tracked in our ID map (created by deployer)
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', role.id)
     .maybeSingle();
@@ -121,7 +121,7 @@ export async function handleRoleUpdate(
   // Check if this role is tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', newRole.id)
     .maybeSingle();
@@ -180,7 +180,7 @@ export async function handleRoleUpdate(
   // Auto-repair if configured
   const config = await getSyncConfig(client);
   if (config.autoRepair) {
-    await autoRepairRole(client, newRole, mapping.internal_id);
+    await autoRepairRole(client, newRole, mapping.template_key);
   }
 
   client.eventBus.emit('drift.detected', client.guildId, {
@@ -204,7 +204,7 @@ export async function handleRoleDelete(
   // Check if this role was tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', role.id)
     .maybeSingle();
@@ -239,7 +239,7 @@ export async function handleRoleDelete(
     action: 'drift.role_deleted',
     targetType: 'role',
     targetId: role.id,
-    details: { roleName: role.name, templateKey: mapping.internal_id },
+    details: { roleName: role.name, templateKey: mapping.template_key },
   });
 }
 
@@ -322,6 +322,7 @@ async function recordDrift(
 
 /**
  * Auto-repair a role to match the desired state.
+ * Looks up the role's desired config from the JSONB roles array.
  */
 async function autoRepairRole(
   client: SomniClient,
@@ -329,18 +330,22 @@ async function autoRepairRole(
   templateKey: string,
 ): Promise<void> {
   try {
-    // Look up desired state for this role
+    // Look up desired state — roles are stored as a JSONB array on the guild row
     const { data: desired } = await client.supabase
       .from('guild_desired_state')
-      .select('desired_config')
+      .select('roles')
       .eq('guild_id', client.guildId)
-      .eq('entity_type', 'role')
-      .eq('entity_id', templateKey)
       .maybeSingle();
 
-    if (!desired?.desired_config) return;
+    if (!desired?.roles) return;
 
-    const config = desired.desired_config as Record<string, unknown>;
+    // Find the role config in the JSONB array by template_key
+    const rolesArray = desired.roles as Record<string, unknown>[];
+    const config = rolesArray.find(
+      (r) => r.template_key === templateKey || r.templateKey === templateKey,
+    );
+
+    if (!config) return;
 
     await role.edit({
       name: (config.name as string) ?? role.name,

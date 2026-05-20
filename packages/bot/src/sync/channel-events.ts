@@ -49,7 +49,7 @@ export async function handleChannelCreate(
   // Check if this channel is tracked in our ID map
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', channel.id)
     .maybeSingle();
@@ -93,7 +93,7 @@ export async function handleChannelUpdate(
   // Check if this channel is tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', newChannel.id)
     .maybeSingle();
@@ -191,7 +191,7 @@ export async function handleChannelUpdate(
   // Auto-repair if configured
   const config = await getSyncConfig(client);
   if (config.autoRepair) {
-    await autoRepairChannel(client, newChannel as NonThreadGuildBasedChannel, mapping.internal_id);
+    await autoRepairChannel(client, newChannel as NonThreadGuildBasedChannel, mapping.template_key);
   }
 
   client.eventBus.emit('drift.detected', client.guildId, {
@@ -214,7 +214,7 @@ export async function handleChannelDelete(
   // Check if tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
-    .select('internal_id')
+    .select('template_key')
     .eq('guild_id', client.guildId)
     .eq('discord_id', channel.id)
     .maybeSingle();
@@ -251,7 +251,7 @@ export async function handleChannelDelete(
     action: `drift.${entityType}_deleted`,
     targetType: entityType,
     targetId: channel.id,
-    details: { channelName: channel.name, templateKey: mapping.internal_id },
+    details: { channelName: channel.name, templateKey: mapping.template_key },
   });
 }
 
@@ -332,6 +332,7 @@ async function recordChannelDrift(
 
 /**
  * Auto-repair a channel to match desired state.
+ * Looks up the channel's desired config from the JSONB channels array.
  */
 async function autoRepairChannel(
   client: SomniClient,
@@ -341,15 +342,19 @@ async function autoRepairChannel(
   try {
     const { data: desired } = await client.supabase
       .from('guild_desired_state')
-      .select('desired_config')
+      .select('channels')
       .eq('guild_id', client.guildId)
-      .eq('entity_type', 'channel')
-      .eq('entity_id', templateKey)
       .maybeSingle();
 
-    if (!desired?.desired_config) return;
+    if (!desired?.channels) return;
 
-    const config = desired.desired_config as Record<string, unknown>;
+    // Find the channel config in the JSONB array by template_key
+    const channelsArray = desired.channels as Record<string, unknown>[];
+    const config = channelsArray.find(
+      (c) => c.template_key === templateKey || c.templateKey === templateKey,
+    );
+
+    if (!config) return;
 
     const editOptions: Record<string, unknown> = {};
     if (config.name) editOptions.name = config.name;
