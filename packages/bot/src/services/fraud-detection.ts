@@ -194,16 +194,9 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
       .limit(1);
 
     if (!existing || existing.length === 0) {
-      // Get next incident number
-      const { data: maxNum } = await ctx.supabase
-        .from('incidents')
-        .select('incident_number')
-        .eq('guild_id', ctx.guildId)
-        .order('incident_number', { ascending: false })
-        .limit(1)
-        .single();
-
-      const nextNumber = (maxNum?.incident_number || 0) + 1;
+      // Get next incident number (atomic sequence — no race condition)
+      const { data: seqVal } = await ctx.supabase.rpc('nextval_incident');
+      const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
 
       const { data: incident } = await ctx.supabase
         .from('incidents')
