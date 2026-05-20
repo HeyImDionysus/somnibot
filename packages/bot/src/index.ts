@@ -233,6 +233,10 @@ async function main(): Promise<void> {
     // This is atomic, faster (1 API call instead of 20+), and auto-removes stale commands.
     const allCommands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [];
 
+    // REST client used by custom command registration and bulk slash command PUT.
+    // Declared here so it's accessible from all boot phases.
+    const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
+
     // Phase 7: Ticket command
     allCommands.push(ticketCommand.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
 
@@ -559,7 +563,6 @@ async function main(): Promise<void> {
     // Single PUT replaces all guild commands atomically and auto-removes stale ones.
     if (allCommands.length > 0) {
       try {
-        const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
         await rest.put(
           Routes.applicationGuildCommands(client.user!.id, client.guildId),
           { body: allCommands },
