@@ -192,12 +192,12 @@ export class GiveawayManager {
         p_user_id: userId,
       });
 
-      if (!updated) {
-        console.error('[Giveaways] giveaway_remove_entry RPC not found — run migrations');
+      if (!updated || !Array.isArray(updated) || updated.length === 0) {
+        console.error('[Giveaways] giveaway_remove_entry RPC not found or no match — run migrations');
         await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
         return true;
       }
-      const newEntries = updated.entries;
+      const newEntries: string[] = updated[0].entries ?? [];
 
       await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
       await interaction.reply({ content: '🚪 You have withdrawn from the giveaway.', ephemeral: true });
@@ -211,12 +211,12 @@ export class GiveawayManager {
       p_user_id: userId,
     });
 
-    if (!updated) {
-      console.error('[Giveaways] giveaway_add_entry RPC not found — run migrations');
+    if (!updated || !Array.isArray(updated) || updated.length === 0) {
+      console.error('[Giveaways] giveaway_add_entry RPC not found or no match — run migrations');
       await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
       return true;
     }
-    const newEntries = updated.entries;
+    const newEntries: string[] = updated[0].entries ?? [];
 
     await this.updateGiveawayMessage({ ...giveaway, entries: newEntries });
     await interaction.reply({ content: '🎉 You have entered the giveaway! Click again to withdraw.', ephemeral: true });

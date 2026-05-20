@@ -59,7 +59,7 @@ async function evaluateCondition(
         .from('member_levels')
         .select('level')
         .eq('guild_id', ctx.guildId)
-        .eq('user_discord_id', ctx.member.id)
+        .eq('member_id', ctx.member.id)
         .maybeSingle();
       return (data?.level ?? 0) >= minLevel;
     }
@@ -71,7 +71,7 @@ async function evaluateCondition(
         .from('member_levels')
         .select('level')
         .eq('guild_id', ctx.guildId)
-        .eq('user_discord_id', ctx.member.id)
+        .eq('member_id', ctx.member.id)
         .maybeSingle();
       return (data?.level ?? 0) < maxLevel;
     }

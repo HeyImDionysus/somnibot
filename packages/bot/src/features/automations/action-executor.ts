@@ -309,9 +309,9 @@ async function executeAction(
           guild_id: ctx.guildId,
           ticket_number: ticketNumber,
           channel_id: ticketChannel.id,
-          user_discord_id: ctx.member.id,
+          creator_id: ctx.member.id,
           panel_id: panel.id,
-          subject,
+          type: 'general',
           status: 'open',
         })
         .select('id')
