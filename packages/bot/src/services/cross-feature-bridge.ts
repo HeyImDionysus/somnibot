@@ -174,33 +174,12 @@ export class CrossFeatureBridge {
     });
 
     // ── 6. Giveaway Ended → Commerce fulfillment ───────────
-
-    this.on('giveaway.ended', async (event) => {
-      const winnerIds = event.data.winnerIds;
-      const prizeProductId = event.data.prizeProductId;
-      const giveawayId = event.data.giveawayId;
-      if (!winnerIds || winnerIds.length === 0 || !prizeProductId) return;
-
-      // Trigger license generation for each winner
-      for (const winnerId of winnerIds) {
-        // Use action queue instead of event emit to ensure fulfillment
-        await this.supabase.from('bot_action_queue').insert({
-          guild_id: this.guild.id,
-          action: 'fulfill_giveaway_prize',
-          payload: {
-            winner_id: winnerId,
-            product_id: prizeProductId,
-            giveaway_id: giveawayId,
-            source: 'giveaway',
-          },
-          status: 'pending',
-        }).catch((err) => {
-          console.error(`[CrossFeatureBridge] Failed to queue giveaway fulfillment for ${winnerId}:`, err);
-        });
-
-        console.log(`[CrossFeatureBridge] Queued fulfillment for giveaway winner ${winnerId} → product ${prizeProductId}`);
-      }
-    });
+    // NOTE: Giveaway prize fulfillment is handled by GiveawayFulfillmentService,
+    // which listens to the same event with proper product lookup, customer
+    // creation, and EntitlementService.grant() calls. Removed duplicate handler
+    // here that was queuing action-queue entries with an incompatible payload
+    // shape (missing required FulfillmentPayload fields), risking double
+    // fulfillment and error spam.
 
     console.log(`[CrossFeatureBridge] ✅ ${this.listeners.length} cross-feature event bridges active`);
   }

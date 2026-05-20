@@ -28,6 +28,7 @@ import type { Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
+import { invalidateLevelCaches } from '../features/levels/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -163,9 +164,11 @@ export class ConfigWatcher {
 
   private async reloadLevels(): Promise<void> {
     // Guild config already loaded by reloadAll() caller
-    // Clear cached level config
+    // Clear cached level config (Valkey)
     await this.valkey.del(`levels:config:${this.guild.id}`).catch(() => {});
     await this.valkey.del(`levels:rewards:${this.guild.id}`).catch(() => {});
+    // Clear in-memory caches in xp-tracker (config, multipliers, rewards)
+    invalidateLevelCaches();
     console.log('[ConfigWatcher] ✅ Levels config reloaded');
   }
 
@@ -182,8 +185,8 @@ export class ConfigWatcher {
     console.log('[ConfigWatcher] ✅ Commerce config reloaded');
   }
 
-  private async reloadMusic(): Promise<void> {
-    await this.reloadGuildConfig();
+  private async reloadMusic(skipGuildConfig = false): Promise<void> {
+    if (!skipGuildConfig) await this.reloadGuildConfig();
     await this.valkey.del(`music:config:${this.guild.id}`).catch(() => {});
     console.log('[ConfigWatcher] ✅ Music config reloaded');
   }
@@ -201,8 +204,8 @@ export class ConfigWatcher {
     console.log('[ConfigWatcher] ✅ Automations config reloaded');
   }
 
-  private async reloadOnboarding(): Promise<void> {
-    await this.reloadGuildConfig();
+  private async reloadOnboarding(skipGuildConfig = false): Promise<void> {
+    if (!skipGuildConfig) await this.reloadGuildConfig();
     await this.valkey.del(`onboarding:config:${this.guild.id}`).catch(() => {});
     console.log('[ConfigWatcher] ✅ Onboarding config reloaded');
   }
@@ -248,13 +251,14 @@ export class ConfigWatcher {
   }
 
   private async reloadAll(): Promise<void> {
+    // Load guild config once — sub-reloaders skip their own call
     await this.reloadGuildConfig();
     await this.reloadModeration();
     await this.reloadLevels();
     await this.reloadWelcome();
-    await this.reloadOnboarding();
+    await this.reloadOnboarding(true);
     await this.reloadCommerce();
-    await this.reloadMusic();
+    await this.reloadMusic(true);
     await this.reloadTickets();
     await this.reloadAutomations();
     await this.reloadReactionRoles();
