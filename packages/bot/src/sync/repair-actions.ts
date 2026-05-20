@@ -101,53 +101,93 @@ export async function acceptDriftItem(
     if (driftItem.type === 'EXTRA_RESOURCE' && driftItem.entityDiscordId) {
       // Accept an extra resource — add it to the ID map so it's tracked going forward
       const entityType = driftItem.entityType === 'category' ? 'category' : driftItem.entityType;
+      const templateKey = `accepted:${driftItem.entityDiscordId}`;
       await supabase.from('discord_id_map').upsert({
         guild_id: guild.id,
         entity_type: entityType,
-        internal_id: `accepted:${driftItem.entityDiscordId}`,
+        template_key: templateKey,
         discord_id: driftItem.entityDiscordId,
-      }, { onConflict: 'guild_id,discord_id' });
+      }, { onConflict: 'guild_id,entity_type,template_key' });
     }
 
     if ((driftItem.type === 'EXTERNAL_CHANGE' || driftItem.type === 'PERMISSION_DRIFT') && driftItem.entityDiscordId) {
-      // Update the desired state to match current reality
-      if (driftItem.entityType === 'role') {
-        const role = guild.roles.cache.get(driftItem.entityDiscordId);
-        if (role) {
-          await supabase
-            .from('guild_desired_state')
-            .update({
-              desired_config: {
+      // Update the desired state JSONB array to match current reality.
+      // guild_desired_state stores roles[] and channels[] as JSONB arrays per guild.
+      const { data: state } = await supabase
+        .from('guild_desired_state')
+        .select('roles, channels')
+        .eq('guild_id', guild.id)
+        .maybeSingle();
+
+      if (state) {
+        if (driftItem.entityType === 'role') {
+          const role = guild.roles.cache.get(driftItem.entityDiscordId);
+          if (role) {
+            // Find the template_key for this discord_id
+            const { data: mapping } = await supabase
+              .from('discord_id_map')
+              .select('template_key')
+              .eq('guild_id', guild.id)
+              .eq('discord_id', role.id)
+              .maybeSingle();
+
+            if (mapping) {
+              const rolesArr = (state.roles as Record<string, unknown>[]) ?? [];
+              const idx = rolesArr.findIndex(
+                (r) => (r.template_key ?? r.templateKey) === mapping.template_key,
+              );
+              const updated = {
+                ...(idx >= 0 ? rolesArr[idx] : {}),
+                template_key: mapping.template_key,
                 name: role.name,
                 permissions: role.permissions.bitfield.toString(),
                 color: role.color,
                 hoist: role.hoist,
                 mentionable: role.mentionable,
-              },
-              sync_status: 'synced',
-            })
-            .eq('guild_id', guild.id)
-            .eq('actual_discord_id', role.id);
-        }
-      } else if (driftItem.entityType === 'channel' || driftItem.entityType === 'category') {
-        const channel = guild.channels.cache.get(driftItem.entityDiscordId);
-        if (channel) {
-          const config: Record<string, unknown> = {
-            name: channel.name,
-            type: channel.type,
-          };
-          if ('topic' in channel) config.topic = channel.topic;
-          if ('nsfw' in channel) config.nsfw = channel.nsfw;
-          if ('rateLimitPerUser' in channel) config.slowmode = channel.rateLimitPerUser;
+              };
+              if (idx >= 0) rolesArr[idx] = updated;
+              else rolesArr.push(updated);
 
-          await supabase
-            .from('guild_desired_state')
-            .update({
-              desired_config: config,
-              sync_status: 'synced',
-            })
-            .eq('guild_id', guild.id)
-            .eq('actual_discord_id', channel.id);
+              await supabase
+                .from('guild_desired_state')
+                .update({ roles: rolesArr })
+                .eq('guild_id', guild.id);
+            }
+          }
+        } else if (driftItem.entityType === 'channel' || driftItem.entityType === 'category') {
+          const channel = guild.channels.cache.get(driftItem.entityDiscordId);
+          if (channel) {
+            const { data: mapping } = await supabase
+              .from('discord_id_map')
+              .select('template_key')
+              .eq('guild_id', guild.id)
+              .eq('discord_id', channel.id)
+              .maybeSingle();
+
+            if (mapping) {
+              const channelsArr = (state.channels as Record<string, unknown>[]) ?? [];
+              const idx = channelsArr.findIndex(
+                (c) => (c.template_key ?? c.templateKey) === mapping.template_key,
+              );
+              const config: Record<string, unknown> = {
+                ...(idx >= 0 ? channelsArr[idx] : {}),
+                template_key: mapping.template_key,
+                name: channel.name,
+                type: channel.type,
+              };
+              if ('topic' in channel) config.topic = channel.topic;
+              if ('nsfw' in channel) config.nsfw = channel.nsfw;
+              if ('rateLimitPerUser' in channel) config.slowmode = channel.rateLimitPerUser;
+
+              if (idx >= 0) channelsArr[idx] = config;
+              else channelsArr.push(config);
+
+              await supabase
+                .from('guild_desired_state')
+                .update({ channels: channelsArr })
+                .eq('guild_id', guild.id);
+            }
+          }
         }
       }
     }
@@ -258,19 +298,33 @@ async function repairRole(
   const role = guild.roles.cache.get(driftItem.entityDiscordId!);
   if (!role) return { success: false, error: 'Role not found in cache' };
 
-  // Look up desired config
-  const { data } = await supabase
-    .from('guild_desired_state')
-    .select('desired_config')
+  // Look up template_key for this role's discord_id
+  const { data: mapping } = await supabase
+    .from('discord_id_map')
+    .select('template_key')
     .eq('guild_id', guild.id)
-    .eq('actual_discord_id', role.id)
+    .eq('discord_id', role.id)
     .maybeSingle();
 
-  if (!data?.desired_config) {
-    return { success: false, error: 'No desired config found for this role' };
+  if (!mapping) {
+    return { success: false, error: 'No ID mapping found for this role' };
   }
 
-  const config = data.desired_config as Record<string, unknown>;
+  // Look up desired config from the JSONB roles array
+  const { data: state } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  const rolesArr = (state?.roles as Record<string, unknown>[]) ?? [];
+  const config = rolesArr.find(
+    (r) => (r.template_key ?? r.templateKey) === mapping.template_key,
+  );
+
+  if (!config) {
+    return { success: false, error: 'No desired config found for this role' };
+  }
 
   await role.edit({
     name: (config.name as string) ?? role.name,
@@ -304,18 +358,33 @@ async function repairChannel(
   const channel = guild.channels.cache.get(driftItem.entityDiscordId!);
   if (!channel) return { success: false, error: 'Channel not found in cache' };
 
-  const { data } = await supabase
-    .from('guild_desired_state')
-    .select('desired_config')
+  // Look up template_key for this channel's discord_id
+  const { data: mapping } = await supabase
+    .from('discord_id_map')
+    .select('template_key')
     .eq('guild_id', guild.id)
-    .eq('actual_discord_id', channel.id)
+    .eq('discord_id', channel.id)
     .maybeSingle();
 
-  if (!data?.desired_config) {
-    return { success: false, error: 'No desired config found for this channel' };
+  if (!mapping) {
+    return { success: false, error: 'No ID mapping found for this channel' };
   }
 
-  const config = data.desired_config as Record<string, unknown>;
+  // Look up desired config from the JSONB channels array
+  const { data: state } = await supabase
+    .from('guild_desired_state')
+    .select('channels')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  const channelsArr = (state?.channels as Record<string, unknown>[]) ?? [];
+  const config = channelsArr.find(
+    (c) => (c.template_key ?? c.templateKey) === mapping.template_key,
+  );
+
+  if (!config) {
+    return { success: false, error: 'No desired config found for this channel' };
+  }
   const editOptions: Record<string, unknown> = {};
 
   if (config.name && channel.name !== config.name) editOptions.name = config.name;
@@ -354,7 +423,7 @@ async function recreateResource(
   // Look up the template key from the old discord ID
   const { data: mapping } = await supabase
     .from('discord_id_map')
-    .select('internal_id, entity_type')
+    .select('template_key, entity_type')
     .eq('guild_id', guild.id)
     .eq('discord_id', driftItem.entityDiscordId ?? '')
     .maybeSingle();
@@ -363,18 +432,22 @@ async function recreateResource(
     return { success: false, error: 'No ID mapping found — cannot determine what to recreate' };
   }
 
-  const { data: desired } = await supabase
+  // Look up desired config from the JSONB array
+  const arrayKey = mapping.entity_type === 'role' ? 'roles' : 'channels';
+  const { data: state } = await supabase
     .from('guild_desired_state')
-    .select('desired_config')
+    .select(`${arrayKey}`)
     .eq('guild_id', guild.id)
-    .eq('entity_id', mapping.internal_id)
     .maybeSingle();
 
-  if (!desired?.desired_config) {
+  const arr = (state?.[arrayKey] as Record<string, unknown>[]) ?? [];
+  const config = arr.find(
+    (item) => (item.template_key ?? item.templateKey) === mapping.template_key,
+  );
+
+  if (!config) {
     return { success: false, error: 'No desired config found for recreating resource' };
   }
-
-  const config = desired.desired_config as Record<string, unknown>;
 
   if (mapping.entity_type === 'role') {
     const newRole = await guild.roles.create({
@@ -391,14 +464,8 @@ async function recreateResource(
       .from('discord_id_map')
       .update({ discord_id: newRole.id })
       .eq('guild_id', guild.id)
-      .eq('internal_id', mapping.internal_id);
-
-    // Update desired state with new Discord ID
-    await supabase
-      .from('guild_desired_state')
-      .update({ actual_discord_id: newRole.id, sync_status: 'synced' })
-      .eq('guild_id', guild.id)
-      .eq('entity_id', mapping.internal_id);
+      .eq('entity_type', 'role')
+      .eq('template_key', mapping.template_key);
 
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };
@@ -434,13 +501,8 @@ async function recreateResource(
       .from('discord_id_map')
       .update({ discord_id: newChannel.id })
       .eq('guild_id', guild.id)
-      .eq('internal_id', mapping.internal_id);
-
-    await supabase
-      .from('guild_desired_state')
-      .update({ actual_discord_id: newChannel.id, sync_status: 'synced' })
-      .eq('guild_id', guild.id)
-      .eq('entity_id', mapping.internal_id);
+      .eq('entity_type', mapping.entity_type)
+      .eq('template_key', mapping.template_key);
 
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };

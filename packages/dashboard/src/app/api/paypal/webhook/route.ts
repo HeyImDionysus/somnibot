@@ -293,35 +293,26 @@ async function handlePaymentCaptured(
     p_amount: amountCents,
   });
   if (rpcError) {
-    // Fallback: atomically increment total_spent_cents via raw SQL,
-    // and set first_purchase_at only if it hasn't been set yet.
-    await supabase.rpc('exec_sql', {
-      query: `UPDATE customers
-              SET total_spent_cents = COALESCE(total_spent_cents, 0) + $1,
-                  first_purchase_at = COALESCE(first_purchase_at, now()),
-                  updated_at = now()
-              WHERE id = $2`,
-      params: [amountCents, meta.customer_id],
-    }).then(async ({ error: sqlError }) => {
-      if (sqlError) {
-        // Last-resort fallback if exec_sql doesn't exist either:
-        // read current totals, add, and write back.
-        const { data: customer } = await supabase
-          .from('customers')
-          .select('total_spent_cents, first_purchase_at')
-          .eq('id', meta.customer_id)
-          .single();
+    // Fallback: read current totals, add, and write back.
+    // Note: increment_customer_totals RPC (V5) is the atomic path and should
+    // rarely fail. This non-atomic fallback is a safety net.
+    console.warn('[Webhook] increment_customer_totals RPC failed, using fallback:', rpcError.message);
+    {
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('total_spent_cents, first_purchase_at')
+        .eq('id', meta.customer_id)
+        .single();
 
-        await supabase
-          .from('customers')
-          .update({
-            total_spent_cents: (customer?.total_spent_cents ?? 0) + amountCents,
-            first_purchase_at: customer?.first_purchase_at ?? new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', meta.customer_id);
-      }
-    });
+      await supabase
+        .from('customers')
+        .update({
+          total_spent_cents: (customer?.total_spent_cents ?? 0) + amountCents,
+          first_purchase_at: customer?.first_purchase_at ?? new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', meta.customer_id);
+    }
   }
 
   // Get product info

@@ -143,6 +143,7 @@ export async function runSyncCycle(
     await supabase.from('audit_logs').insert({
       guild_id: guild.id,
       actor_type: 'system',
+      actor_id: 'sync-engine',
       action: 'drift.detected',
       target_type: 'guild',
       target_id: guild.id,

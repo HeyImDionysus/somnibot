@@ -32,10 +32,10 @@ export async function GET(request: NextRequest) {
 
   const admin = createAdminSupabase();
 
-  // Get members from guild_live_state
+  // Get members from guild_live_state (members stored as JSONB array)
   const { data: liveState } = await admin
     .from('guild_live_state')
-    .select('members, snapshot_at')
+    .select('members, member_count, snapshot_at')
     .eq('guild_id', guildId)
     .single();
 
