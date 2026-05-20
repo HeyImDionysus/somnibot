@@ -462,8 +462,18 @@ export function registerEvents(client: SomniClient): void {
           if (brHandled) return;
         }
 
-        // Phase 12: Commerce buy buttons
+        // Phase 12: Commerce buy buttons — gated by store_enabled
         if (interaction.isButton() && interaction.customId.startsWith('store:buy:')) {
+          // Check store_enabled before processing any purchase
+          const { data: storeCfg } = await client.supabase
+            .from('guild_config')
+            .select('store_enabled')
+            .eq('guild_id', client.guildId)
+            .maybeSingle();
+          if (storeCfg?.store_enabled === false) {
+            await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+            return;
+          }
           const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
           const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
           const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
@@ -662,18 +672,26 @@ export function registerEvents(client: SomniClient): void {
           return;
         }
 
-        // Phase 12: Commerce commands
-        if (interaction.commandName === 'store') {
-          await handleStoreCommand(
-            interaction,
-            client.supabase,
-            client.guildId,
-            process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com',
-          );
-          return;
-        }
-
-        if (interaction.commandName === 'license') {
+        // Phase 12: Commerce commands — gated by store_enabled (V18 fix)
+        if (interaction.commandName === 'store' || interaction.commandName === 'license') {
+          const { data: storeFlagCfg } = await client.supabase
+            .from('guild_config')
+            .select('store_enabled')
+            .eq('guild_id', client.guildId)
+            .maybeSingle();
+          if (storeFlagCfg?.store_enabled === false) {
+            await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+            return;
+          }
+          if (interaction.commandName === 'store') {
+            await handleStoreCommand(
+              interaction,
+              client.supabase,
+              client.guildId,
+              process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com',
+            );
+            return;
+          }
           await handleLicenseCommand(
             interaction,
             client.supabase,
