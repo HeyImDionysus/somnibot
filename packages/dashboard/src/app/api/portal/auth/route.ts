@@ -156,7 +156,7 @@ export async function GET(request: NextRequest) {
 
     const { data: session } = await admin
       .from('portal_sessions')
-      .select('*, customers(id, discord_id, email, username)')
+      .select('*, customers(id, discord_id, email, discord_username)')
       .eq('token_hash', tokenHash)
       .eq('revoked', false)
       .gt('expires_at', new Date().toISOString())

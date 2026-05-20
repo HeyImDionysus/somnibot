@@ -203,7 +203,7 @@ async function executeAction(
           .insert({
             guild_id: ctx.guildId,
             discord_id: ctx.member.id,
-            username: ctx.member.user.username,
+            discord_username: ctx.member.user.username,
           })
           .select('id')
           .single();

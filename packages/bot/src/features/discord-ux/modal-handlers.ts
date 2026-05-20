@@ -341,10 +341,9 @@ async function handleReportMessageModal(
     guild_id: guild.id,
     message_id: messageId,
     channel_id: channelId,
-    reported_user_id: authorId,
-    reporter_user_id: interaction.user.id,
+    message_author: authorId,
+    reporter_id: interaction.user.id,
     reason,
-    category,
     message_content: messageContent,
     status: 'pending',
   });
