@@ -78,7 +78,7 @@ async function handleWarnModal(
     .from('infractions')
     .select('id', { count: 'exact', head: true })
     .eq('guild_id', guild.id)
-    .eq('user_discord_id', targetUserId)
+    .eq('member_id', targetUserId)
     .eq('active', true);
 
   const totalInfractions = (existingCount ?? 0) + 1;
@@ -88,8 +88,8 @@ async function handleWarnModal(
     .from('infractions')
     .insert({
       guild_id: guild.id,
-      user_discord_id: targetUserId,
-      moderator_discord_id: moderator.id,
+      member_id: targetUserId,
+      moderator_id: moderator.id,
       type: 'warn',
       reason,
       active: true,
@@ -227,9 +227,9 @@ async function handleTicketFromMessageModal(
       guild_id: guild.id,
       ticket_number: ticketNumber,
       channel_id: ticketChannel.id,
-      user_discord_id: interaction.user.id,
+      creator_id: interaction.user.id,
       panel_id: panel.id,
-      subject,
+      type: 'general',
       status: 'open',
     })
     .select('id')

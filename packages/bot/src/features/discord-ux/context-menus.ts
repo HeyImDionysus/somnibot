@@ -72,15 +72,15 @@ export async function handleViewProfile(
   const [levelData, infractions, purchases] = await Promise.all([
     supabase
       .from('member_levels')
-      .select('level, total_xp, messages_count')
+      .select('level, xp, total_messages')
       .eq('guild_id', guildId)
-      .eq('discord_id', target.id)
+      .eq('member_id', target.id)
       .maybeSingle(),
     supabase
       .from('infractions')
       .select('id')
       .eq('guild_id', guildId)
-      .eq('user_discord_id', target.id)
+      .eq('member_id', target.id)
       .eq('active', true),
     supabase
       .from('customers')
@@ -91,8 +91,8 @@ export async function handleViewProfile(
   ]);
 
   const level = levelData.data?.level ?? 0;
-  const totalXp = levelData.data?.total_xp ?? 0;
-  const messages = levelData.data?.messages_count ?? 0;
+  const totalXp = levelData.data?.xp ?? 0;
+  const messages = levelData.data?.total_messages ?? 0;
   const activeInfractions = infractions.data?.length ?? 0;
   const totalSpent = purchases.data?.total_spent_cents ?? 0;
 

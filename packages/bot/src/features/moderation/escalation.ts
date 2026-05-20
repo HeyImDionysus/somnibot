@@ -276,11 +276,22 @@ async function suspendEntitlements(
   memberId: string,
 ): Promise<void> {
   try {
+    // Entitlements are linked via customer_id (UUID), not directly by Discord ID.
+    // Look up the customer first, then suspend their entitlements.
+    const { data: customer } = await client.supabase
+      .from('customers')
+      .select('id')
+      .eq('guild_id', client.guildId)
+      .eq('discord_id', memberId)
+      .maybeSingle();
+
+    if (!customer) return; // No customer record — nothing to suspend
+
     const { data, error } = await client.supabase
       .from('entitlements')
-      .update({ status: 'suspended' })
+      .update({ status: 'suspended', updated_at: new Date().toISOString() })
       .eq('guild_id', client.guildId)
-      .eq('user_discord_id', memberId)
+      .eq('customer_id', customer.id)
       .eq('status', 'active')
       .select('id');
 
