@@ -11,7 +11,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import type { InfractionType } from '@somnibot/shared';
+import type { InfractionType, EscalationStep } from '@somnibot/shared';
 import { SOMNI_PALETTE } from '@somnibot/shared';
 import {
   createInfraction,
@@ -209,25 +209,26 @@ export async function handleWarnCommand(
     moderator: interaction.user.tag,
     reason,
     activeWarnings: activeCount,
-    nextEscalation: nextAction ?? null,
+    nextEscalation: nextAction?.action ?? null,
     channelId: config?.mod_log_channel_id ?? null,
   });
 
   // Auto-escalate if needed
-  if (nextAction && nextAction !== 'warn') {
+  if (nextAction && nextAction.action !== 'warn') {
     await executeEscalation(
-      guild,
-      client.supabase,
-      client.eventBus,
+      client,
       member,
-      nextAction as InfractionType,
       `Auto-escalation: ${activeCount} active warnings`,
-      escalationChain,
+      {
+        escalationChain: escalationChain as EscalationStep[],
+        infractionExpiryDays: expiryDays,
+        modLogChannelId: config?.mod_log_channel_id ?? null,
+      },
     );
   }
 
   await interaction.editReply(
-    `✅ **${member.user.tag}** warned. Active warnings: **${activeCount}**.${nextAction && nextAction !== 'warn' ? ` Auto-escalated to **${nextAction}**.` : ''}`,
+    `✅ **${member.user.tag}** warned. Active warnings: **${activeCount}**.${nextAction && nextAction.action !== 'warn' ? ` Auto-escalated to **${nextAction.action}**.` : ''}`,
   );
 }
 
@@ -534,11 +535,18 @@ export async function handlePardonCommand(
   const infractionId = interaction.options.getString('infraction_id', true);
   const reason = interaction.options.getString('reason') ?? 'Pardoned by moderator';
 
+  // Look up the infraction first so we have the member_id for the mod log
+  const { data: infraction } = await client.supabase
+    .from('infractions')
+    .select('member_id')
+    .eq('id', infractionId)
+    .eq('guild_id', client.guildId)
+    .maybeSingle();
+
   const result = await pardonInfraction(
     client.supabase,
     infractionId,
     interaction.user.id,
-    reason,
   );
 
   if (!result) {
@@ -555,8 +563,8 @@ export async function handlePardonCommand(
 
   // Mod log
   const guild = interaction.guild;
-  if (guild) {
-    const member = await guild.members.fetch(result.member_id).catch(() => null);
+  if (guild && infraction?.member_id) {
+    const member = await guild.members.fetch(infraction.member_id).catch(() => null);
     if (member) {
       await postModLogEntry(client, {
         action: 'pardon',

@@ -44,15 +44,27 @@ export function onVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): 
 }
 
 /**
- * Start the voice XP ticker. Runs every `interval` minutes.
+ * Start the voice XP ticker. Reads the configured interval from DB
+ * at startup and ticks accordingly. Uses the config's
+ * `voice_xp_interval_minutes` instead of a hardcoded 5-minute default.
  */
-export function startVoiceXpTicker(
+export async function startVoiceXpTicker(
   guild: Guild,
   supabase: SupabaseClient,
   valkey: Valkey,
   eventBus: PlatformEventBus,
-): NodeJS.Timeout {
-  // Default 5 minutes, but we check config each tick
+): Promise<NodeJS.Timeout> {
+  // Read configured interval (falls back to 5 minutes)
+  let intervalMs = 5 * 60 * 1000;
+  try {
+    const config = await loadLevelConfig(supabase, guild.id);
+    if (config.voice_xp_interval_minutes && config.voice_xp_interval_minutes > 0) {
+      intervalMs = config.voice_xp_interval_minutes * 60 * 1000;
+    }
+  } catch { /* use default */ }
+
+  console.log(`[VoiceXP] Starting ticker (${intervalMs / 60_000}m interval)`);
+
   const tickInterval = setInterval(async () => {
     try {
       const config = await loadLevelConfig(supabase, guild.id);
@@ -90,7 +102,7 @@ export function startVoiceXpTicker(
     } catch (err) {
       console.error('[VoiceXP] Tick error:', err);
     }
-  }, 5 * 60 * 1000); // Check every 5 minutes
+  }, intervalMs);
 
   return tickInterval;
 }
