@@ -160,7 +160,7 @@ async function checkRule(
     case 'link_filter':
       return checkLinkFilter(message.content, rule.config as unknown as LinkFilterConfig);
     case 'invite_filter':
-      return checkInviteFilter(message.content, rule.config as unknown as InviteFilterConfig, message.guild?.id);
+      return await checkInviteFilter(client, message.content, rule.config as unknown as InviteFilterConfig, message.guild?.id);
     case 'spam_filter':
       return await checkSpamFilter(client, message, rule.config as unknown as SpamFilterConfig);
     case 'duplicate_filter':
@@ -218,8 +218,25 @@ function checkWordFilter(
       }
       case 'regex': {
         try {
+          // Reject patterns with known catastrophic-backtracking shapes:
+          // nested quantifiers like (a+)+, (.*)*, (\w+\s?)*, etc.
+          if (/(\(.*[+*].*\))[+*]/.test(word) || /(\.\*){2,}/.test(word)) {
+            console.warn(`[AutoMod] Rejected unsafe regex pattern: "${word}"`);
+            break;
+          }
+
           const regex = new RegExp(word, config.caseSensitive ? '' : 'i');
-          if (regex.test(content)) {
+
+          // Run the match with a timeout guard: if regex.test takes >50ms,
+          // treat it as a timeout and skip this pattern.
+          const start = Date.now();
+          const matched = regex.test(content);
+          if (Date.now() - start > 50) {
+            console.warn(`[AutoMod] Regex pattern "${word}" took >50ms — skipping for safety`);
+            break;
+          }
+
+          if (matched) {
             return `Matched regex filter: "${word}"`;
           }
         } catch {
@@ -276,24 +293,63 @@ function checkLinkFilter(
 /**
  * Invite Filter — block Discord invite links.
  */
-function checkInviteFilter(
+// Cache for resolved invite codes → guild IDs (avoids repeat API calls)
+const _inviteGuildCache = new Map<string, { guildId: string | null; expiresAt: number }>();
+const INVITE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function checkInviteFilter(
+  client: SomniClient,
   content: string,
   config: InviteFilterConfig,
   guildId?: string,
-): string | null {
+): Promise<string | null> {
   const inviteRegex = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord\.com\/invite|discordapp\.com\/invite)\/(\S+)/gi;
-  const matches = content.match(inviteRegex);
+  const matches = [...content.matchAll(inviteRegex)];
 
-  if (!matches || matches.length === 0) return null;
+  if (matches.length === 0) return null;
 
-  // If allowOwnServer is true, we'd need to resolve invites to check guild
-  // For now, flag all invite links (resolving would require API calls per message)
-  if (config.allowOwnServer) {
-    // We can't check without resolving — flag anyway, moderators can handle
+  if (!config.allowOwnServer || !guildId) {
+    // Block all invites
     return 'Discord invite link detected';
   }
 
-  return 'Discord invite link detected';
+  // allowOwnServer is enabled — resolve each invite to check its guild
+  for (const match of matches) {
+    const code = match[1]?.split(/[?\s]/)[0]; // strip query params / trailing spaces
+    if (!code) continue;
+
+    // Check cache first
+    const cached = _inviteGuildCache.get(code);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.guildId === guildId) continue; // own server — allow
+      return 'Discord invite link detected (external server)';
+    }
+
+    // Resolve the invite via Discord API
+    try {
+      const invite = await client.fetchInvite(code);
+      const inviteGuildId = invite.guild?.id ?? null;
+
+      // Cache the result
+      _inviteGuildCache.set(code, {
+        guildId: inviteGuildId,
+        expiresAt: Date.now() + INVITE_CACHE_TTL,
+      });
+
+      if (inviteGuildId === guildId) continue; // own server — allow
+      return 'Discord invite link detected (external server)';
+    } catch {
+      // Invalid or expired invite — flag it
+      _inviteGuildCache.set(code, {
+        guildId: null,
+        expiresAt: Date.now() + INVITE_CACHE_TTL,
+      });
+      return 'Discord invite link detected';
+    }
+  }
+
+  // All invites were for the current server
+  return null;
 }
 
 /**
