@@ -41,6 +41,7 @@ export async function runReconciliation(
   const { data: run } = await supabase
     .from('reconciliation_runs')
     .insert({
+      guild_id: guild.id,
       trigger,
       status: 'running',
     })

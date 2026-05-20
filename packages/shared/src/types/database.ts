@@ -971,6 +971,20 @@ export interface DbBotActionQueue {
   completed_at: string | null;
 }
 
+// — Reconciliation —
+
+export interface DbReconciliationRun {
+  id: string;
+  guild_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+  trigger: 'scheduled' | 'manual' | 'startup';
+  status: 'running' | 'completed' | 'failed';
+  findings: Record<string, unknown>;
+  fixes_applied: Record<string, unknown>;
+  error_message: string | null;
+}
+
 export interface DbAlert {
   id: string;
   guild_id: string;
