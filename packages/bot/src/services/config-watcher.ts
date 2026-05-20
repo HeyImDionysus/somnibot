@@ -29,6 +29,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
 import { invalidateLevelCaches } from '../features/levels/index.js';
+import { invalidateAntiRaidCache } from '../features/anti-raid/index.js';
+import { invalidateStarboardCache } from '../features/starboard/index.js';
+import { invalidateMessageLogCache } from '../features/message-log/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -270,6 +273,10 @@ export class ConfigWatcher {
     await this.reloadCustomCommands();
     await this.reloadStatsChannels();
     await this.reloadEmbeds();
+    // Invalidate V17 feature in-memory caches so they re-read from DB
+    invalidateAntiRaidCache();
+    invalidateStarboardCache();
+    invalidateMessageLogCache();
     console.log('[ConfigWatcher] ✅ Full config reload complete');
   }
 
