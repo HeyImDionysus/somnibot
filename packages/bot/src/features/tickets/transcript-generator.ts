@@ -308,6 +308,9 @@ export async function generateTranscript(
   ticket: DbTicket,
   supabase: SupabaseClient,
 ): Promise<{ success: boolean; html?: string; error?: string }> {
+  if (!ticket.channel_id) {
+    return { success: false, error: 'Ticket has no channel.' };
+  }
   const channel = guild.channels.cache.get(ticket.channel_id) as TextChannel | undefined;
   if (!channel) {
     return { success: false, error: 'Ticket channel not found.' };
