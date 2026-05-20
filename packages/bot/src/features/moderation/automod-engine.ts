@@ -56,7 +56,10 @@ async function loadRules(client: SomniClient): Promise<DbAutomodRule[]> {
     return [];
   }
 
-  const rules = (data ?? []) as DbAutomodRule[];
+  // Sort by priority descending — higher priority rules execute first
+  const rules = ((data ?? []) as DbAutomodRule[]).sort(
+    (a, b) => ((b as unknown as Record<string, number>).priority ?? 0) - ((a as unknown as Record<string, number>).priority ?? 0),
+  );
 
   try {
     await client.valkey.setex(

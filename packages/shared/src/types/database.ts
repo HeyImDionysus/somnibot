@@ -388,6 +388,7 @@ export interface DbAutomodRule {
   exempt_roles: string[];
   exempt_channels: string[];
   log_to_mod_channel: boolean;
+  priority: number;
   created_at: string;
   updated_at: string;
   sync_to_discord: boolean;

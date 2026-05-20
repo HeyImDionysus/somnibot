@@ -21,6 +21,7 @@ export interface LevelConfig {
   xp_channel_list: string[];
   level_up_channel_id: string | null;
   level_up_message: string | null;
+  no_xp_role_id: string | null;
 }
 
 interface XpMultiplier {
@@ -67,7 +68,7 @@ export async function loadLevelConfig(
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message',
+      'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, no_xp_role_id',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -85,6 +86,7 @@ export async function loadLevelConfig(
     xp_channel_list: data?.xp_channel_list ?? [],
     level_up_channel_id: data?.level_up_channel_id ?? null,
     level_up_message: data?.level_up_message ?? null,
+    no_xp_role_id: data?.no_xp_role_id ?? null,
   };
   _levelConfigCacheTime = now;
   return _levelConfigCache;
@@ -177,6 +179,11 @@ export async function processMessageXp(
 
   // Check channel eligibility
   if (!isChannelEligible(channelId, config)) return { granted: false };
+
+  // Check No-XP role
+  if (config.no_xp_role_id && message.member?.roles.cache.has(config.no_xp_role_id)) {
+    return { granted: false };
+  }
 
   // Check cooldown via Valkey
   const cooldownKey = `xp:cooldown:${guildId}:${userId}`;
@@ -271,6 +278,11 @@ export async function grantVoiceXp(
 ): Promise<XpResult> {
   const config = await loadLevelConfig(supabase, guildId);
   if (!config.levels_enabled || !config.voice_xp_enabled) return { granted: false };
+
+  // Check No-XP role
+  if (config.no_xp_role_id && memberRoles.includes(config.no_xp_role_id)) {
+    return { granted: false };
+  }
 
   // Apply multiplier
   const multipliers = await loadMultipliers(supabase, guildId);
