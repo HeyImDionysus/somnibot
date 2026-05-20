@@ -207,6 +207,8 @@ export class ConfigWatcher {
   private async reloadOnboarding(skipGuildConfig = false): Promise<void> {
     if (!skipGuildConfig) await this.reloadGuildConfig();
     await this.valkey.del(`onboarding:config:${this.guild.id}`).catch(() => {});
+    // Also invalidate the guild_config cache used by the onboarding handler
+    await this.valkey.del(`guild_config:${this.guild.id}`).catch(() => {});
     console.log('[ConfigWatcher] ✅ Onboarding config reloaded');
   }
 
