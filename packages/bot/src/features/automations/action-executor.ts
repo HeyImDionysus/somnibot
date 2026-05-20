@@ -264,7 +264,7 @@ async function executeAction(
       // Get ticket panel
       const panelQuery = ctx.supabase
         .from('ticket_panels')
-        .select('id, category_id, staff_role_ids')
+        .select('id, open_category_id, manager_roles')
         .eq('guild_id', ctx.guildId);
 
       if (panelId) panelQuery.eq('id', panelId);
@@ -273,20 +273,25 @@ async function executeAction(
       const { data: panel } = await panelQuery.single();
       if (!panel) return { success: false, error: 'No ticket panel configured' };
 
-      // Generate ticket number
-      const { count } = await ctx.supabase
-        .from('tickets')
-        .select('id', { count: 'exact', head: true })
-        .eq('guild_id', ctx.guildId);
-
-      const ticketNumber = (count ?? 0) + 1;
+      // Generate ticket number atomically via Postgres sequence
+      let ticketNumber: number;
+      const { data: seqVal, error: seqErr } = await ctx.supabase.rpc('nextval_ticket');
+      if (seqErr || seqVal == null) {
+        const { count } = await ctx.supabase
+          .from('tickets')
+          .select('id', { count: 'exact', head: true })
+          .eq('guild_id', ctx.guildId);
+        ticketNumber = (count ?? 0) + 1;
+      } else {
+        ticketNumber = Number(seqVal);
+      }
 
       // Create the channel
       const { ChannelType: CT } = await import('discord.js');
       const ticketChannel = await ctx.guild.channels.create({
         name: `ticket-${ticketNumber.toString().padStart(4, '0')}`,
         type: CT.GuildText,
-        parent: panel.category_id || undefined,
+        parent: panel.open_category_id || undefined,
         topic: `Ticket #${ticketNumber} — ${subject}`,
         reason: 'Automation: auto-created ticket',
       });
@@ -296,7 +301,7 @@ async function executeAction(
       await ticketChannel.permissionOverwrites.create(ctx.member.id, {
         ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true,
       });
-      for (const roleId of (panel.staff_role_ids ?? [])) {
+      for (const roleId of (panel.manager_roles ?? [])) {
         await ticketChannel.permissionOverwrites.create(roleId, {
           ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
         }).catch(() => {});

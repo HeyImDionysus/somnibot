@@ -89,11 +89,20 @@ async function evaluateCondition(
     case 'has_entitlement': {
       if (!ctx.member) return false;
       const productId = config.value as string;
+      // Entitlements link via customer_id, not discord_id.
+      // Look up the customer first, then check entitlements.
+      const { data: customer } = await ctx.supabase
+        .from('customers')
+        .select('id')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', ctx.member.id)
+        .maybeSingle();
+      if (!customer) return false;
       const { data } = await ctx.supabase
         .from('entitlements')
         .select('id')
         .eq('guild_id', ctx.guildId)
-        .eq('discord_id', ctx.member.id)
+        .eq('customer_id', customer.id)
         .eq('product_id', productId)
         .eq('status', 'active')
         .limit(1)
@@ -104,11 +113,19 @@ async function evaluateCondition(
     case 'missing_entitlement': {
       if (!ctx.member) return false;
       const productId = config.value as string;
+      // Entitlements link via customer_id, not discord_id.
+      const { data: customer } = await ctx.supabase
+        .from('customers')
+        .select('id')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', ctx.member.id)
+        .maybeSingle();
+      if (!customer) return true; // No customer record → no entitlements
       const { data } = await ctx.supabase
         .from('entitlements')
         .select('id')
         .eq('guild_id', ctx.guildId)
-        .eq('discord_id', ctx.member.id)
+        .eq('customer_id', customer.id)
         .eq('product_id', productId)
         .eq('status', 'active')
         .limit(1)
@@ -125,8 +142,12 @@ async function evaluateCondition(
     case 'message_matches_regex': {
       if (!ctx.messageContent) return false;
       try {
-        const pattern = new RegExp(config.value as string, 'i');
-        return pattern.test(ctx.messageContent);
+        const raw = config.value as string;
+        // Limit pattern length to prevent catastrophic backtracking
+        if (raw.length > 200) return false;
+        const pattern = new RegExp(raw, 'i');
+        // Run with a short input slice to bound execution time
+        return pattern.test(ctx.messageContent.slice(0, 2000));
       } catch {
         return false;
       }
