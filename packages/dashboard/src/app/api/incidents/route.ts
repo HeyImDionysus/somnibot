@@ -87,6 +87,7 @@ export async function POST(request: NextRequest) {
         source: body.source || 'manual',
         source_ref_id: body.source_ref_id || null,
         assigned_to: body.assigned_to || null,
+        created_by: ctx.discordId,
       })
       .select()
       .single();
