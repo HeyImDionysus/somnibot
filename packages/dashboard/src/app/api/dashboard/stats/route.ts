@@ -38,6 +38,7 @@ export async function GET() {
         .from('bot_diagnostics')
         .select('guild_member_count, uptime_seconds, discord_ws_ping, active_voice_connections, valkey_connected, memory_rss_mb, snapshot_at')
         .eq('guild_id', guildId)
+        .eq('type', 'health')
         .order('snapshot_at', { ascending: false })
         .limit(1)
         .maybeSingle(),

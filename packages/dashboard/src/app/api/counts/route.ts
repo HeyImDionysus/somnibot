@@ -37,7 +37,7 @@ export async function GET(req: NextRequest) {
     } else if (table === 'giveaways') {
       query = query.eq('status', 'active');
     } else if (table === 'incidents') {
-      query = query.in('status', ['open', 'investigating', 'mitigating']);
+      query = query.in('status', ['open', 'investigating', 'identified', 'monitoring']);
     }
 
     const { count, error } = await query;

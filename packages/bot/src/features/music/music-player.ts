@@ -87,16 +87,14 @@ export class MusicPlayerManager {
   private async loadConfig(): Promise<void> {
     const { data } = await this.supabase
       .from('guild_config')
-      .select('default_volume, max_queue_length, allow_duplicates, dj_role_id')
+      .select('music_default_volume, dj_role_id')
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
     if (data) {
       this.config = {
         ...DEFAULT_CONFIG,
-        defaultVolume: data.default_volume ?? DEFAULT_CONFIG.defaultVolume,
-        maxQueueLength: data.max_queue_length ?? DEFAULT_CONFIG.maxQueueLength,
-        allowDuplicates: data.allow_duplicates ?? DEFAULT_CONFIG.allowDuplicates,
+        defaultVolume: data.music_default_volume ?? DEFAULT_CONFIG.defaultVolume,
         djRoleId: data.dj_role_id ?? null,
       };
     }
