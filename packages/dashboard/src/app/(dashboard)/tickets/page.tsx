@@ -93,6 +93,9 @@ export default function TicketsPage() {
   const [confirmAction, setConfirmAction] = useState<{ type: string; id: string; label: string } | null>(null);
   const { toast } = useToast();
   const [ticketFilter, setTicketFilter] = useState<string>('all');
+  const [transcriptEnabled, setTranscriptEnabled] = useState(false);
+  const [dmTranscript, setDmTranscript] = useState(false);
+  const [togglingTranscript, setTogglingTranscript] = useState(false);
 
   const loadPanels = useCallback(async () => {
     try {
@@ -118,9 +121,45 @@ export default function TicketsPage() {
     }
   }, [ticketFilter]);
 
+  const loadGuildDefaults = useCallback(async () => {
+    try {
+      const res = await fetch('/api/guild');
+      const json = await res.json();
+      if (json.config) {
+        setTranscriptEnabled(json.config.ticket_transcript_enabled ?? false);
+        setDmTranscript(json.config.ticket_dm_transcript ?? false);
+      }
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
   useEffect(() => {
-    Promise.all([loadPanels(), loadTickets()]).finally(() => setLoading(false));
-  }, [loadPanels, loadTickets]);
+    Promise.all([loadPanels(), loadTickets(), loadGuildDefaults()]).finally(() => setLoading(false));
+  }, [loadPanels, loadTickets, loadGuildDefaults]);
+
+  const toggleTranscriptDefault = async (key: 'ticket_transcript_enabled' | 'ticket_dm_transcript', value: boolean) => {
+    setTogglingTranscript(true);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: value }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        if (key === 'ticket_transcript_enabled') setTranscriptEnabled(value);
+        else setDmTranscript(value);
+        toast({ title: 'Default updated', variant: 'success' });
+      } else {
+        toast({ title: json.error ?? 'Failed', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to update', variant: 'error' });
+    } finally {
+      setTogglingTranscript(false);
+    }
+  };
 
   useEffect(() => {
     if (!loading) loadTickets();
@@ -605,6 +644,46 @@ export default function TicketsPage() {
             className="rounded-md bg-somni-pink px-4 py-2 text-sm font-semibold text-white hover:bg-somni-pink/80"
           >
             + New Panel
+          </button>
+        </div>
+      </div>
+
+      {/* Guild-Level Transcript Defaults */}
+      <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-5 space-y-3">
+        <h3 className="text-sm font-semibold text-discord-text-primary">Transcript Defaults</h3>
+        <p className="text-xs text-discord-text-muted">
+          Guild-level defaults for ticket transcripts. Individual panels can override these with per-panel settings.
+        </p>
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-discord-text-secondary">Save transcripts on ticket close</span>
+          <button
+            onClick={() => toggleTranscriptDefault('ticket_transcript_enabled', !transcriptEnabled)}
+            disabled={togglingTranscript}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              transcriptEnabled ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                transcriptEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-discord-text-secondary">DM transcript to ticket creator</span>
+          <button
+            onClick={() => toggleTranscriptDefault('ticket_dm_transcript', !dmTranscript)}
+            disabled={togglingTranscript}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              dmTranscript ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                dmTranscript ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
           </button>
         </div>
       </div>

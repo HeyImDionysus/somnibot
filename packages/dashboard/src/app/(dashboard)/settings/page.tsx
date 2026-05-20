@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/shared/card';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/shared/button';
@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils/cn';
 import {
   Database, MessageSquare, CreditCard, Music, Server,
   CheckCircle2, XCircle, Loader2, Save, Lock, Pencil, ShieldCheck,
+  Plus, Trash2, Sparkles,
 } from 'lucide-react';
 
 // ============================================================
@@ -316,6 +317,68 @@ export default function SettingsPage() {
     return <ConfigSkeleton />;
   }
 
+  // ── Bot Presence (custom_bot_statuses) ────
+  const [customStatuses, setCustomStatuses] = useState<string[]>([]);
+  const [statusesLoading, setStatusesLoading] = useState(true);
+  const [statusesSaving, setStatusesSaving] = useState(false);
+  const [statusesDirty, setStatusesDirty] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/guild');
+        const json = await res.json();
+        if (json.config?.custom_bot_statuses) {
+          setCustomStatuses(json.config.custom_bot_statuses);
+        }
+      } catch {
+        // Non-fatal
+      } finally {
+        setStatusesLoading(false);
+      }
+    })();
+  }, []);
+
+  const addStatus = () => {
+    if (customStatuses.length >= 20) return;
+    setCustomStatuses((prev) => [...prev, '']);
+    setStatusesDirty(true);
+  };
+
+  const removeStatus = (index: number) => {
+    setCustomStatuses((prev) => prev.filter((_, i) => i !== index));
+    setStatusesDirty(true);
+  };
+
+  const updateStatus = (index: number, value: string) => {
+    setCustomStatuses((prev) => prev.map((s, i) => (i === index ? value : s)));
+    setStatusesDirty(true);
+  };
+
+  const saveCustomStatuses = async () => {
+    setStatusesSaving(true);
+    try {
+      const filtered = customStatuses.filter((s) => s.trim().length > 0);
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ custom_bot_statuses: filtered }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        setCustomStatuses(filtered);
+        toast({ title: 'Bot statuses saved', variant: 'success' });
+        setStatusesDirty(false);
+      } else {
+        toast({ title: json.error ?? 'Failed to save', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to save bot statuses', variant: 'error' });
+    } finally {
+      setStatusesSaving(false);
+    }
+  };
+
   // Count connected sections
   const connectedCount = Object.values(statuses).filter((s) => s === 'connected').length;
   const totalSections = SECTIONS.length;
@@ -474,6 +537,68 @@ export default function SettingsPage() {
           </Card>
         );
       })}
+
+      {/* Bot Presence — Custom Statuses */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-discord-bg-tertiary p-2 text-discord-accent">
+              <Sparkles size={20} />
+            </div>
+            <div>
+              <CardTitle className="text-base">Bot Presence</CardTitle>
+              <CardDescription>
+                Custom status messages that rotate in the bot&apos;s presence alongside built-in statuses (member count, uptime, now playing).
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <div className="space-y-3 px-6 pb-6">
+          {customStatuses.map((status, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <input
+                type="text"
+                value={status}
+                onChange={(e) => updateStatus(index, e.target.value)}
+                maxLength={128}
+                placeholder="Custom status text..."
+                className="flex-1 rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted/50 outline-none ring-1 ring-discord-border-subtle focus:ring-discord-accent transition-standard"
+              />
+              <button
+                type="button"
+                onClick={() => removeStatus(index)}
+                className="rounded-input p-2 text-discord-text-muted hover:text-discord-danger hover:bg-discord-danger/10 transition-standard"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+          {customStatuses.length < 20 && (
+            <button
+              type="button"
+              onClick={addStatus}
+              className="flex items-center gap-1.5 rounded-input px-3 py-2 text-xs font-medium text-discord-text-secondary hover:text-discord-text-primary hover:bg-discord-bg-primary/50 ring-1 ring-discord-border-subtle transition-standard"
+            >
+              <Plus size={12} />
+              Add Status
+            </button>
+          )}
+          <div className="flex justify-end pt-2">
+            <Button
+              onClick={saveCustomStatuses}
+              disabled={statusesSaving || !statusesDirty}
+              className="gap-2"
+            >
+              {statusesSaving ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Save size={14} />
+              )}
+              Save Statuses
+            </Button>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }

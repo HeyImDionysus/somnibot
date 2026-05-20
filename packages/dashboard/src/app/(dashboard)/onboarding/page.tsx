@@ -14,6 +14,28 @@ import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { useToast } from '@/components/shared/toast';
 import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
+interface OnboardingPromptOption {
+  title: string;
+  description?: string;
+  emoji?: string;
+  role_ids?: string[];
+  channel_ids?: string[];
+}
+
+interface OnboardingPrompt {
+  title: string;
+  type: 'multiple_choice' | 'dropdown';
+  required: boolean;
+  single_select: boolean;
+  options: OnboardingPromptOption[];
+}
+
+interface NativeOnboardingConfig {
+  enabled: boolean;
+  prompts: OnboardingPrompt[];
+  default_channel_ids: string[];
+}
+
 interface OnboardingConfig {
   member_role_id: string | null;
   onboarding_enabled: boolean;
@@ -21,6 +43,7 @@ interface OnboardingConfig {
   returning_member_skip_welcome_dm: boolean;
   returning_member_restore_entitlements: boolean;
   returning_member_restore_levels: boolean;
+  onboarding_config: NativeOnboardingConfig | null;
 }
 
 interface DiscordRole {
@@ -37,6 +60,7 @@ const DEFAULT_CONFIG: OnboardingConfig = {
   returning_member_skip_welcome_dm: true,
   returning_member_restore_entitlements: true,
   returning_member_restore_levels: true,
+  onboarding_config: null,
 };
 
 export default function OnboardingPage() {
@@ -291,6 +315,182 @@ export default function OnboardingPage() {
           </button>
         </div>
       </section>
+
+      {/* Native Onboarding Prompts (synced to Discord) */}
+      {config.onboarding_enabled && (
+        <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+          <h2 className="text-lg font-semibold text-discord-text-primary">
+            Onboarding Prompts
+          </h2>
+          <p className="mt-1 text-sm text-discord-text-muted">
+            These prompts are synced to Discord&apos;s native Guild Onboarding screen.
+            New members see these when they first join the server.
+          </p>
+
+          <div className="mt-4 space-y-3">
+            {(config.onboarding_config?.prompts ?? []).map((prompt, pIdx) => (
+              <div
+                key={pIdx}
+                className="rounded border border-discord-border bg-discord-bg-tertiary p-4 space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <input
+                    type="text"
+                    value={prompt.title}
+                    onChange={(e) => {
+                      const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                      prompts[pIdx] = { ...prompts[pIdx], title: e.target.value };
+                      setConfig((prev) => ({
+                        ...prev,
+                        onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                      }));
+                    }}
+                    placeholder="Prompt title..."
+                    className="flex-1 rounded-md border border-discord-border bg-discord-bg-primary px-3 py-1.5 text-sm text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      const prompts = (config.onboarding_config?.prompts ?? []).filter((_, i) => i !== pIdx);
+                      setConfig((prev) => ({
+                        ...prev,
+                        onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                      }));
+                    }}
+                    className="ml-2 text-xs text-red-400 hover:text-red-300"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-4 text-xs text-discord-text-muted">
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={prompt.required}
+                      onChange={(e) => {
+                        const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                        prompts[pIdx] = { ...prompts[pIdx], required: e.target.checked };
+                        setConfig((prev) => ({
+                          ...prev,
+                          onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                        }));
+                      }}
+                      className="h-3.5 w-3.5 rounded accent-somni-pink"
+                    />
+                    Required
+                  </label>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={prompt.single_select}
+                      onChange={(e) => {
+                        const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                        prompts[pIdx] = { ...prompts[pIdx], single_select: e.target.checked };
+                        setConfig((prev) => ({
+                          ...prev,
+                          onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                        }));
+                      }}
+                      className="h-3.5 w-3.5 rounded accent-somni-pink"
+                    />
+                    Single select
+                  </label>
+                  <select
+                    value={prompt.type}
+                    onChange={(e) => {
+                      const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                      prompts[pIdx] = { ...prompts[pIdx], type: e.target.value as 'multiple_choice' | 'dropdown' };
+                      setConfig((prev) => ({
+                        ...prev,
+                        onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                      }));
+                    }}
+                    className="rounded border border-discord-border bg-discord-bg-primary px-2 py-0.5 text-xs text-discord-text-primary"
+                  >
+                    <option value="multiple_choice">Multiple Choice</option>
+                    <option value="dropdown">Dropdown</option>
+                  </select>
+                </div>
+
+                {/* Options */}
+                <div className="space-y-1.5 pl-2">
+                  {prompt.options.map((opt, oIdx) => (
+                    <div key={oIdx} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={opt.title}
+                        onChange={(e) => {
+                          const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                          const options = [...prompts[pIdx].options];
+                          options[oIdx] = { ...options[oIdx], title: e.target.value };
+                          prompts[pIdx] = { ...prompts[pIdx], options };
+                          setConfig((prev) => ({
+                            ...prev,
+                            onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                          }));
+                        }}
+                        placeholder="Option title..."
+                        className="flex-1 rounded border border-discord-border bg-discord-bg-primary px-2 py-1 text-xs text-discord-text-primary placeholder:text-discord-text-muted focus:border-somni-pink focus:outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                          prompts[pIdx] = {
+                            ...prompts[pIdx],
+                            options: prompts[pIdx].options.filter((_, i) => i !== oIdx),
+                          };
+                          setConfig((prev) => ({
+                            ...prev,
+                            onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                          }));
+                        }}
+                        className="text-xs text-red-400 hover:text-red-300"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => {
+                      const prompts = [...(config.onboarding_config?.prompts ?? [])];
+                      prompts[pIdx] = {
+                        ...prompts[pIdx],
+                        options: [...prompts[pIdx].options, { title: '' }],
+                      };
+                      setConfig((prev) => ({
+                        ...prev,
+                        onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                      }));
+                    }}
+                    className="text-xs text-somni-cyan hover:text-somni-cyan/80"
+                  >
+                    + Add Option
+                  </button>
+                </div>
+              </div>
+            ))}
+
+            <button
+              onClick={() => {
+                const prompts = [...(config.onboarding_config?.prompts ?? []), {
+                  title: '',
+                  type: 'multiple_choice' as const,
+                  required: false,
+                  single_select: false,
+                  options: [],
+                }];
+                setConfig((prev) => ({
+                  ...prev,
+                  onboarding_config: { ...(prev.onboarding_config ?? { enabled: true, prompts: [], default_channel_ids: [] }), prompts },
+                }));
+              }}
+              className="rounded-md bg-somni-pink/10 px-4 py-2 text-sm font-medium text-somni-pink hover:bg-somni-pink/20"
+            >
+              + Add Prompt
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Returning Members */}
       <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
