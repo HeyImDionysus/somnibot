@@ -283,15 +283,15 @@ export class CommerceFulfillmentService {
       .eq('order_id', payload.order_id)
       .eq('status', 'active');
 
-    if (entitlements && entitlements.length > 0) {
-      // Read configurable grace period (default 3 days if not set)
-      const { data: guildCfg } = await this.supabase
-        .from('guild_config')
-        .select('grace_period_days')
-        .eq('guild_id', payload.guild_id)
-        .maybeSingle();
-      const graceDays = guildCfg?.grace_period_days ?? 3;
+    // Read configurable grace period (default 3 days if not set)
+    const { data: guildCfg } = await this.supabase
+      .from('guild_config')
+      .select('grace_period_days')
+      .eq('guild_id', payload.guild_id)
+      .maybeSingle();
+    const graceDays = guildCfg?.grace_period_days ?? 3;
 
+    if (entitlements && entitlements.length > 0) {
       for (const ent of entitlements) {
         const suspended = await this.entitlementService.suspend(ent.id, graceDays);
         if (!suspended) {
@@ -331,7 +331,7 @@ export class CommerceFulfillmentService {
     try {
       const user = await this.guild.client.users.fetch(payload.discord_id);
       await user.send({
-        content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *3-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
+        content: `⚠️ Your payment for **${payload.product_name}** failed. You have a *${graceDays}-day grace period* before your access is revoked. Please update your payment method on PayPal.`,
       });
     } catch {
       // DMs may be disabled — non-fatal
