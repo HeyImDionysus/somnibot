@@ -368,6 +368,9 @@ export interface DbGuildLiveState {
   onboarding_enabled: boolean;
   onboarding_prompts: Record<string, unknown>[];
   snapshot_at: string;
+  // V19 Audit: added missing schema fields
+  members: number | null;
+  updated_at: string;
 }
 
 // — Reaction Roles —
@@ -463,6 +466,9 @@ export interface DbTicketPanel {
   created_at: string;
   updated_at: string;
   forum_config: Record<string, unknown> | null;
+  // V19 Audit: added missing schema fields
+  intake_form_enabled: boolean;
+  intake_form_fields: Json[] | null;
 }
 
 export interface DbTicket {
@@ -488,6 +494,9 @@ export interface DbTicket {
   description: string | null;
   is_forum_ticket: boolean;
   forum_thread_id: string | null;
+  // V19 Audit: added missing schema fields
+  feedback_rating: number | null;
+  feedback_comment: string | null;
 }
 
 export interface DbTicketTranscript {
@@ -730,6 +739,14 @@ export interface DbProductFile {
   download_count: number;
   sort_order: number;
   created_at: string;
+  // V19 Audit: added missing schema fields
+  display_name: string | null;
+  file_name: string | null;
+  guild_id: string;
+  size_bytes: number | null;
+  storage_bucket: string | null;
+  storage_path: string | null;
+  version: string | null;
 }
 
 export interface DbPlan {
@@ -862,6 +879,8 @@ export interface DbProductLicenseConfig {
   require_discord_guild_membership: boolean;
   created_at: string;
   updated_at: string;
+  // V19 Audit: added missing schema fields
+  device_policy: string | null;
 }
 
 export interface DbLicenseSession {
@@ -902,6 +921,8 @@ export interface DbPayment {
   currency: string;
   status: 'completed' | 'refunded' | 'reversed' | 'pending' | 'failed';
   created_at: string;
+  // V19 Audit: added missing schema fields
+  provider: string | null;
 }
 
 // — Commerce — Giveaways —
@@ -943,6 +964,9 @@ export interface DbAuditLog {
   after_state: Record<string, unknown> | null;
   success: boolean;
   error_message: string | null;
+  // V19 Audit: added missing schema fields
+  category: string | null;
+  correlation_id: string | null;
 }
 
 export interface DbWebhookEvent {
@@ -952,6 +976,10 @@ export interface DbWebhookEvent {
   payload: Record<string, unknown>;
   result: 'success' | 'error' | 'duplicate' | null;
   error_details: string | null;
+  // V19 Audit: added missing schema fields
+  guild_id: string;
+  replay_count: number;
+  replayed_at: string | null;
 }
 
 export interface DbBotDiagnostics {
@@ -983,6 +1011,13 @@ export interface DbBotActionQueue {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  // V19 Audit: added missing schema fields
+  action_type: string | null;
+  attempts: number;
+  error: string | null;
+  max_attempts: number;
+  next_retry_at: string | null;
+  processed_at: string | null;
 }
 
 // — Reconciliation —
@@ -1013,6 +1048,10 @@ export interface DbAlert {
   auto_resolved: boolean;
   resolved_at: string | null;
   created_at: string;
+  // V19 Audit: added missing schema fields
+  metadata: Record<string, unknown> | null;
+  resolved: boolean;
+  updated_at: string;
 }
 
 // — Dashboard RBAC —
@@ -1037,6 +1076,9 @@ export interface DbDashboardUserRole {
   assigned_at: string;
   assigned_by: string | null;
   created_at: string;
+  // V19 Audit: added missing schema fields
+  granted_by: string | null;
+  user_id: string | null;
 }
 
 // — Customer Portal —
@@ -1077,6 +1119,10 @@ export interface DbFraudSignal {
   resolved_by: string | null;
   resolution_note: string | null;
   updated_at: string;
+  // V19 Audit: added missing schema fields
+  action: string | null;
+  details: Record<string, unknown> | null;
+  resolved: boolean;
 }
 
 export interface DbFraudRule {
@@ -1194,6 +1240,10 @@ export interface DbAdminChange {
   undo_payload: Record<string, unknown> | null;
   undo_change_id: string | null;
   created_at: string;
+  // V19 Audit: added missing schema fields
+  change_type: string | null;
+  target_table: string | null;
+  undone: boolean;
 }
 
 // — Sync —
@@ -1208,4 +1258,7 @@ export interface DbSyncAction {
   status: string;
   applied_at: string | null;
   created_at: string;
+  // V19 Audit: added missing schema fields
+  action: string | null;
+  drift_item: string | null;
 }
