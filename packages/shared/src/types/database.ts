@@ -11,7 +11,7 @@ export interface DbUser {
   id: string; // UUID (Supabase auth user)
   discord_id: string;
   discord_username: string;
-  discord_avatar: string | null;
+  avatar_url: string | null;
   email: string | null;
   is_owner: boolean;
   created_at: string;
@@ -21,7 +21,7 @@ export interface DbUser {
 export interface DbGuild {
   id: string; // Discord guild ID (snowflake)
   name: string;
-  icon: string | null;
+  icon_url: string | null;
   owner_discord_id: string;
   bot_role_id: string | null;    // Discord snowflake of the bot's managed role
   bot_role_position: number | null; // Position in role hierarchy
@@ -515,14 +515,18 @@ export interface DbStatsChannel {
 export interface DbScheduledMessage {
   id: string; // UUID
   guild_id: string;
+  name: string;
   channel_id: string;
   embed_config_id: string | null;
-  content: string | null;
+  message: string | null;
   cron_expression: string;
   timezone: string;
-  enabled: boolean;
+  start_date: string | null;
+  end_date: string | null;
+  max_sends: number | null;
+  current_sends: number;
+  active: boolean;
   last_sent_at: string | null;
-  next_send_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -532,14 +536,19 @@ export interface DbGiveaway {
   guild_id: string;
   channel_id: string;
   message_id: string | null;
-  title: string;
-  description: string | null;
-  winner_count: number;
-  required_role_ids: string[];
+  prize: string;
   prize_product_id: string | null;
+  prize_license_count: number;
+  winner_count: number;
   ends_at: string;
-  ended: boolean;
-  winner_discord_ids: string[];
+  required_role_id: string | null;
+  required_level: number | null;
+  required_entitlement_product_id: string | null;
+  entries: string[];
+  winners: string[];
+  status: 'active' | 'ended' | 'cancelled';
+  ended_at: string | null;
+  created_by: string;
   created_at: string;
 }
 

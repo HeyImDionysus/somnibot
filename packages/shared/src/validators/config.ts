@@ -12,7 +12,6 @@ const optionalSnowflake = snowflake.nullable().optional();
 export const GuildConfigSchema = z.object({
   // Moderation
   mod_log_channel_id: optionalSnowflake,
-  mute_role_id: optionalSnowflake,
 
   // Welcome
   welcome_enabled: z.boolean().default(false),
@@ -36,9 +35,8 @@ export const GuildConfigSchema = z.object({
   voice_xp_interval_minutes: z.number().int().min(1).max(60).default(5),
 
   // Music
-  default_volume: z.number().int().min(0).max(100).default(50),
-  max_queue_length: z.number().int().min(1).max(1000).default(200),
-  allow_duplicates: z.boolean().default(false),
+  music_enabled: z.boolean().default(true),
+  music_default_volume: z.number().int().min(0).max(150).default(50),
   dj_role_id: optionalSnowflake,
 
   // Commerce

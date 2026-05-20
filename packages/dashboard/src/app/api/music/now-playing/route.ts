@@ -25,7 +25,7 @@ export async function GET() {
     .select('data')
     .eq('guild_id', guildId)
     .eq('type', 'music_status')
-    .order('created_at', { ascending: false })
+    .order('snapshot_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
