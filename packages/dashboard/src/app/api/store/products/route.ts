@@ -223,6 +223,7 @@ export async function POST(req: NextRequest) {
         .from('plans')
         .insert({
           product_id: data.id,
+          guild_id: guildId,
           name: planDef.name ?? `${name} — ${planDef.interval_unit}`,
           paypal_plan_id: paypalPlanId,
           interval_unit: planDef.interval_unit ?? 'MONTH',
