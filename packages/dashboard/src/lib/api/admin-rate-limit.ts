@@ -8,7 +8,7 @@
  */
 
 import { NextResponse } from 'next/server';
-import { checkRateLimit } from './rate-limit.js';
+import { checkRateLimit } from './rate-limit';
 
 /**
  * Pre-configured admin rate limit presets.
