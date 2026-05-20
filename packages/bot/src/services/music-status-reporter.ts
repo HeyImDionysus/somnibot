@@ -35,7 +35,7 @@ export class MusicStatusReporter {
   }
 
   private async report(): Promise<void> {
-    const status = this.musicPlayer.getStatus();
+    const status = await this.musicPlayer.getStatus();
 
     await this.supabase
       .from('bot_diagnostics')

@@ -22,7 +22,7 @@ import { Guild } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
-import type { PlatformEvent } from '@somnibot/shared';
+import type { PlatformEvent, PlatformEventMap } from '@somnibot/shared';
 
 export class CrossFeatureBridge {
   private listeners: (() => void)[] = [];
@@ -196,11 +196,11 @@ export class CrossFeatureBridge {
    * Register an event listener that correctly unwraps PlatformEvent.
    * The EventBus passes PlatformEvent<T, D> to handlers (with {type, guildId, timestamp, data}).
    */
-  private on<T extends string>(
+  private on<T extends keyof PlatformEventMap & string>(
     event: T,
-    handler: (event: PlatformEvent<T>) => Promise<void> | void,
+    handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => Promise<void> | void,
   ): void {
-    const wrapped = (evt: PlatformEvent<T>) => {
+    const wrapped = (evt: PlatformEvent<T, PlatformEventMap[T]>) => {
       // Only process events for our guild
       if (evt.guildId !== this.guild.id) return;
       Promise.resolve(handler(evt)).catch((err) => {

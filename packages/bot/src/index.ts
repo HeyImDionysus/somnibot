@@ -36,7 +36,7 @@ import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
-import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody } from 'discord.js';
+import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
 
 /**
@@ -231,14 +231,14 @@ async function main(): Promise<void> {
     // ── Slash Command Collector ──
     // All commands are collected here and registered in one bulk PUT at the end.
     // This is atomic, faster (1 API call instead of 20+), and auto-removes stale commands.
-    const allCommands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [];
+    const allCommands: RESTPostAPIApplicationCommandsJSONBody[] = [];
 
     // REST client used by custom command registration and bulk slash command PUT.
     // Declared here so it's accessible from all boot phases.
     const rest = new REST({ version: '10' }).setToken(config.DISCORD_TOKEN);
 
     // Phase 7: Ticket command
-    allCommands.push(ticketCommand.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+    allCommands.push(ticketCommand);
 
     // Phase 8: Automation Engine
     if (guild) {
@@ -264,8 +264,8 @@ async function main(): Promise<void> {
         // Register /rank and /leaderboard slash commands
         const { rankCmd, leaderboardCmd } = buildLevelCommands();
         allCommands.push(
-          rankCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody,
-          leaderboardCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody,
+          rankCmd.toJSON(),
+          leaderboardCmd.toJSON(),
         );
         console.log('[Boot] ✅ Level commands queued (/rank, /leaderboard)');
 
@@ -310,7 +310,7 @@ async function main(): Promise<void> {
 
           // Queue /voice command for bulk registration
           const voiceCmd = buildTempChannelCommands();
-          allCommands.push(voiceCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          allCommands.push(voiceCmd.toJSON());
           console.log('[Boot] ✅ Temp channels started + /voice command queued');
         }
 
@@ -344,7 +344,7 @@ async function main(): Promise<void> {
 
           // Queue /giveaway command for bulk registration
           const giveawayCmd = buildGiveawayCommands();
-          allCommands.push(giveawayCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          allCommands.push(giveawayCmd.toJSON());
           console.log('[Boot] ✅ Giveaway manager started + /giveaway command queued');
 
           // Start giveaway prize fulfillment service
@@ -385,7 +385,7 @@ async function main(): Promise<void> {
           // Queue music slash commands for bulk registration
           const musicCmds = buildMusicCommands();
           for (const cmd of musicCmds) {
-            allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+            allCommands.push(cmd.toJSON());
           }
           console.log(`[Boot] ✅ Music system started + ${musicCmds.length} music commands queued`);
 
@@ -426,7 +426,7 @@ async function main(): Promise<void> {
           // Queue commerce slash commands for bulk registration
           const commerceCmds = [buildStoreCommand(), buildLicenseCommand()];
           for (const cmd of commerceCmds) {
-            allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+            allCommands.push(cmd.toJSON());
           }
           console.log('[Boot] ✅ Commerce system started + commands queued (/store, /license)');
         } else {
@@ -481,21 +481,21 @@ async function main(): Promise<void> {
         // 14a: Queue moderation slash commands
         const modCmds = buildModerationCommands();
         for (const cmd of Object.values(modCmds)) {
-          allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          allCommands.push(cmd.toJSON());
         }
         console.log('[Boot] ✅ Moderation commands queued (/warn, /mute, /kick, /ban, /pardon, /infractions)');
 
         // 14b: Queue /help and /setup commands
         const helpCmd = buildHelpCommand();
-        allCommands.push(helpCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+        allCommands.push(helpCmd.toJSON());
         const setupCmd = buildSetupCommand();
-        allCommands.push(setupCmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+        allCommands.push(setupCmd.toJSON());
         console.log('[Boot] ✅ /help and /setup commands queued');
 
         // 14c: Queue context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
         const contextMenuCmds = buildContextMenuCommands();
         for (const cmd of contextMenuCmds) {
-          allCommands.push(cmd.toJSON() as RESTPostAPIChatInputApplicationCommandsJSONBody);
+          allCommands.push(cmd.toJSON());
         }
         console.log(`[Boot] ✅ ${contextMenuCmds.length} context menu commands queued`);
 
@@ -623,11 +623,11 @@ async function main(): Promise<void> {
         }
 
         // Mark as sent regardless (so we don't retry on every restart)
-        await client.supabase
-          .from('instance_settings')
-          .upsert({ key: 'first_boot_dm_sent', value: 'true' })
-          .then(() => {})
-          .catch(() => {});
+        await Promise.resolve(
+          client.supabase
+            .from('instance_settings')
+            .upsert({ key: 'first_boot_dm_sent', value: 'true' }),
+        ).catch(() => {});
       }
     } catch (err) {
       // Non-fatal — skip if instance_settings doesn't exist yet

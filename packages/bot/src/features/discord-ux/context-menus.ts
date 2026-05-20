@@ -185,7 +185,8 @@ export async function handleViewPurchases(
     .limit(10);
 
   const orderLines = (orders ?? []).map((o) => {
-    const product = (o.products as { name: string } | null)?.name ?? 'Unknown';
+    const productData = o.products as unknown as { name: string } | { name: string }[] | null;
+    const product = Array.isArray(productData) ? (productData[0]?.name ?? 'Unknown') : (productData?.name ?? 'Unknown');
     const amount = `$${((o.amount_cents ?? 0) / 100).toFixed(2)}`;
     const status = o.status === 'completed' ? '✅' : o.status === 'pending' ? '⏳' : '❌';
     const date = new Date(o.created_at).toLocaleDateString();
