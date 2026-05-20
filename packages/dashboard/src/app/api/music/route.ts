@@ -17,7 +17,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .select('music_enabled, default_volume, max_queue_length, allow_duplicates, dj_role_id')
+    .select('music_enabled, music_default_volume, dj_role_id')
     .eq('guild_id', guildId)
     .maybeSingle();
 
@@ -28,9 +28,7 @@ export async function GET() {
   // Default values if no config exists yet
   const config = {
     music_enabled: data?.music_enabled ?? true,
-    default_volume: data?.default_volume ?? 50,
-    max_queue_length: data?.max_queue_length ?? 500,
-    allow_duplicates: data?.allow_duplicates ?? true,
+    music_default_volume: data?.music_default_volume ?? 50,
     dj_role_id: data?.dj_role_id ?? null,
   };
 
@@ -47,22 +45,16 @@ export async function PUT(req: NextRequest) {
 
   const {
     music_enabled,
-    default_volume,
-    max_queue_length,
-    allow_duplicates,
+    music_default_volume,
     dj_role_id,
   } = body;
 
   const updates: Record<string, unknown> = {};
 
   if (typeof music_enabled === 'boolean') updates.music_enabled = music_enabled;
-  if (typeof default_volume === 'number') {
-    updates.default_volume = Math.max(0, Math.min(150, default_volume));
+  if (typeof music_default_volume === 'number') {
+    updates.music_default_volume = Math.max(0, Math.min(150, music_default_volume));
   }
-  if (typeof max_queue_length === 'number') {
-    updates.max_queue_length = Math.max(1, Math.min(2000, max_queue_length));
-  }
-  if (typeof allow_duplicates === 'boolean') updates.allow_duplicates = allow_duplicates;
   if (dj_role_id !== undefined) updates.dj_role_id = dj_role_id || null;
 
   if (Object.keys(updates).length === 0) {
