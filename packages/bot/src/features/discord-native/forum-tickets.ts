@@ -121,6 +121,19 @@ export class ForumTicketService {
         appliedTags: appliedTags.slice(0, 5), // Discord limit
       });
 
+      // Generate ticket number (same RPC as ticket-service)
+      let ticketNumber = 1;
+      const { data: rpcNum } = await this.supabase.rpc('nextval_ticket', {});
+      if (rpcNum != null) {
+        ticketNumber = rpcNum as number;
+      } else {
+        const { count } = await this.supabase
+          .from('tickets')
+          .select('*', { count: 'exact', head: true })
+          .eq('guild_id', this.guild.id);
+        ticketNumber = (count ?? 0) + 1;
+      }
+
       // Store in DB
       const { data: ticket, error } = await this.supabase
         .from('tickets')
@@ -129,12 +142,13 @@ export class ForumTicketService {
           channel_id: thread.id,
           creator_id: options.userId,
           panel_id: options.panelId,
-          ticket_type: options.ticketType,
+          type: options.ticketType,
           subject: options.subject,
           description: options.description,
           status: 'open',
           is_forum_ticket: true,
           forum_thread_id: thread.id,
+          ticket_number: ticketNumber,
         })
         .select('id')
         .single();
