@@ -50,19 +50,20 @@ export async function PATCH(request: NextRequest) {
   const body = await request.json();
   const admin = createAdminSupabase();
 
-  // Allowlist of updatable guild_config fields
+  // Allowlist of updatable guild_config fields (must match actual schema)
   const allowedFields = new Set([
-    'prefix',
-    'locale',
-    'timezone',
-    'log_channel_id',
     'mod_log_channel_id',
     'welcome_channel_id',
     'goodbye_channel_id',
     'level_up_channel_id',
-    'ticket_category_id',
-    'music_channel_id',
-    'features_enabled',
+    'store_channel_id',
+    'music_enabled',
+    'music_default_volume',
+    'dj_role_id',
+    'stats_enabled',
+    'temp_channels_enabled',
+    'scheduled_messages_enabled',
+    'giveaways_enabled',
   ]);
 
   const updates: Record<string, unknown> = {};

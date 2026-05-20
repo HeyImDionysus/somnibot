@@ -49,7 +49,7 @@ export class MusicStatusReporter {
             listeners: status.listeners,
             updated_at: new Date().toISOString(),
           },
-          created_at: new Date().toISOString(),
+          snapshot_at: new Date().toISOString(),
         },
         { onConflict: 'guild_id,type' },
       )
