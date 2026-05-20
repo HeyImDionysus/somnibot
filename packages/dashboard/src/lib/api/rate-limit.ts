@@ -262,4 +262,8 @@ export const rateLimits = {
   /** Per-key rate limit: 60 requests per minute per key hash */
   licensePerKey: (keyHash: string) =>
     checkRateLimit(`license:key:${keyHash}`, 60, 60_000),
+
+  /** Portal auth: 10 login attempts per 5 minutes per IP */
+  portalAuth: (ip: string) =>
+    checkRateLimit(`portal:auth:${ip}`, 10, 300_000),
 } as const;
