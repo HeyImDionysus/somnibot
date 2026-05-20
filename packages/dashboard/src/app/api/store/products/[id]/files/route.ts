@@ -61,6 +61,7 @@ export async function POST(
     .from('product_files')
     .insert({
       product_id: productId,
+      guild_id: guildId,
       name,
       description: description ?? null,
       file_path: file_path ?? null,
@@ -96,10 +97,23 @@ export async function DELETE(
     return NextResponse.json({ success: false, error: 'Missing fileId' }, { status: 400 });
   }
 
+  // Verify ownership before deleting
+  const { data: fileRecord } = await supabase
+    .from('product_files')
+    .select('id, guild_id, storage_path, storage_bucket')
+    .eq('id', fileId)
+    .eq('guild_id', guildId)
+    .single();
+
+  if (!fileRecord) {
+    return NextResponse.json({ success: false, error: 'File not found' }, { status: 404 });
+  }
+
   const { error } = await supabase
     .from('product_files')
     .delete()
-    .eq('id', fileId);
+    .eq('id', fileId)
+    .eq('guild_id', guildId);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
