@@ -363,14 +363,24 @@ export interface DbGuildLiveState {
   channels: Record<string, unknown>[];
   categories: Record<string, unknown>[];
   member_count: number;
+  /** JSONB array of member snapshots for dashboard MemberPicker (V14). */
+  members: GuildMemberSnapshot[] | null;
   bot_role_id: string | null;
   bot_role_position: number;
   onboarding_enabled: boolean;
   onboarding_prompts: Record<string, unknown>[];
   snapshot_at: string;
-  // V19 Audit: added missing schema fields
-  members: number | null;
-  updated_at: string;
+}
+
+/** Shape of each member entry in guild_live_state.members JSONB. */
+export interface GuildMemberSnapshot {
+  id: string;
+  username: string;
+  display_name: string | null;
+  avatar: string | null;
+  bot: boolean;
+  joined_at: string | null;
+  roles: string[];
 }
 
 // — Reaction Roles —
@@ -1011,13 +1021,11 @@ export interface DbBotActionQueue {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
-  // V19 Audit: added missing schema fields
-  action_type: string | null;
-  attempts: number;
-  error: string | null;
-  max_attempts: number;
-  next_retry_at: string | null;
-  processed_at: string | null;
+  // Note: V19 incorrectly added 6 fields from missing_tables.sql (action_type,
+  // attempts, error, max_attempts, next_retry_at, processed_at). Those columns
+  // don't exist — bot_action_queue was created by guild_live_state.sql and
+  // missing_tables.sql was a no-op (IF NOT EXISTS). V10 missed this table.
+  // Stale fields removed in V20.
 }
 
 // — Reconciliation —
