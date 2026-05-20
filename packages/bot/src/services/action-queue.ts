@@ -24,6 +24,7 @@ import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
 import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
 import { eventBus } from './event-bus.js';
+import { runReconciliation } from './reconciliation.js';
 
 // ============================================================
 // Types
@@ -621,6 +622,24 @@ async function handleTestWelcome(
   return { success: true, data: { messageId: sent.id, channelId, type } };
 }
 
+/**
+ * Handle manual reconciliation trigger from the dashboard.
+ */
+async function handleRunReconciliation(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const trigger = (payload.trigger as string) || 'manual';
+  try {
+    await runReconciliation(guild, supabase, trigger as 'manual' | 'scheduled' | 'startup');
+    return { success: true, data: { trigger } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: `Reconciliation failed: ${msg}` };
+  }
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -641,6 +660,7 @@ const ACTION_HANDLERS: Record<
   send_embed: handleSendEmbed,
   test_welcome: handleTestWelcome,
   fulfill_giveaway_prize: handleFulfillment,
+  run_reconciliation: handleRunReconciliation,
 };
 
 async function processAction(

@@ -1,35 +1,118 @@
 /**
- * POST /api/portal/auth — Customer portal authentication.
- * Supports: magic-link token validation and session creation.
- * GET /api/portal/auth — Validate current session.
+ * POST /api/portal/auth — Customer portal authentication via Discord OAuth2.
+ * GET  /api/portal/auth — Validate current session.
+ *
+ * Flow:
+ *   1. Frontend redirects user to Discord authorize URL
+ *   2. Discord redirects back with ?code=…
+ *   3. Frontend POSTs { action: "login", code: "…" } here
+ *   4. We exchange the code for an access token with Discord
+ *   5. We call /users/@me to get the real Discord identity
+ *   6. We match that against our customers table
+ *   7. We issue a portal session token
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes, createHash } from 'crypto';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
+const DISCORD_API = 'https://discord.com/api/v10';
+
+/**
+ * Exchange a Discord OAuth2 authorization code for user identity.
+ * Returns the Discord user object ({ id, username, ... }) or null on failure.
+ */
+async function exchangeCodeForUser(
+  code: string,
+  redirectUri: string,
+): Promise<{ id: string; username: string } | null> {
+  const clientId = process.env.DISCORD_APPLICATION_ID;
+  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+
+  // Step 1: Exchange code for access token
+  const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  if (!tokenRes.ok) return null;
+
+  const tokenData = (await tokenRes.json()) as { access_token?: string };
+  if (!tokenData.access_token) return null;
+
+  // Step 2: Fetch the authenticated user's identity
+  const userRes = await fetch(`${DISCORD_API}/users/@me`, {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+
+  if (!userRes.ok) return null;
+
+  const user = (await userRes.json()) as { id: string; username: string };
+  if (!user.id) return null;
+
+  return user;
+}
+
 export async function POST(request: NextRequest) {
+  // Rate limit: 10 attempts per 5 minutes per IP
+  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  const rl = await rateLimits.portalAuth(clientIp);
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many login attempts. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
+      { status: 429 },
+    );
+  }
+
   try {
     const body = await request.json();
     const admin = createAdminSupabase();
 
     if (body.action === 'login') {
-      // Discord OAuth token exchange — validate discord_id + guild membership
-      const discordId = body.discord_id;
-      if (!discordId) return NextResponse.json({ error: 'Missing discord_id' }, { status: 400 });
+      const code = body.code;
+      if (!code || typeof code !== 'string') {
+        return NextResponse.json({ error: 'Missing authorization code' }, { status: 400 });
+      }
 
-      // Find customer
+      // Determine the redirect URI (must match what the frontend used)
+      const origin = request.headers.get('origin') || request.nextUrl.origin;
+      const redirectUri = body.redirect_uri || `${origin}/portal`;
+
+      // Exchange code for verified Discord identity
+      const discordUser = await exchangeCodeForUser(code, redirectUri);
+      if (!discordUser) {
+        return NextResponse.json(
+          { error: 'Discord authentication failed. Please try again.' },
+          { status: 401 },
+        );
+      }
+
+      // Find customer by verified Discord ID
       const { data: customer } = await admin
         .from('customers')
         .select('id, guild_id, discord_id')
-        .eq('discord_id', discordId)
+        .eq('discord_id', discordUser.id)
         .limit(1)
         .single();
 
-      if (!customer) return NextResponse.json({ error: 'Customer not found' }, { status: 404 });
+      if (!customer) {
+        return NextResponse.json(
+          { error: 'No account found for this Discord user.' },
+          { status: 404 },
+        );
+      }
 
       // Create session
       const token = randomBytes(32).toString('hex');
@@ -42,9 +125,9 @@ export async function POST(request: NextRequest) {
           guild_id: customer.guild_id,
           customer_id: customer.id,
           token_hash: tokenHash,
-          discord_id: discordId,
+          discord_id: discordUser.id,
           expires_at: expires.toISOString(),
-          ip_address: request.headers.get('x-forwarded-for') || null,
+          ip_address: clientIp,
           user_agent: request.headers.get('user-agent') || null,
         });
 
