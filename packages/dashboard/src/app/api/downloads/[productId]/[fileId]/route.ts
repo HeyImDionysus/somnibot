@@ -64,11 +64,16 @@ export async function GET(
     return NextResponse.json({ error: 'File not found' }, { status: 404 });
   }
 
-  // Increment download counter
-  await supabase
-    .from('product_files')
-    .update({ download_count: (file.download_count ?? 0) + 1 })
-    .eq('id', fileId);
+  // Atomically increment download counter via RPC (avoids race conditions)
+  await supabase.rpc('increment_download_count', { p_file_id: fileId }).then(async ({ error }) => {
+    if (error) {
+      // Fallback: non-atomic increment if RPC doesn't exist
+      await supabase
+        .from('product_files')
+        .update({ download_count: (file.download_count ?? 0) + 1 })
+        .eq('id', fileId);
+    }
+  });
 
   // If external URL, redirect
   if (file.external_url) {

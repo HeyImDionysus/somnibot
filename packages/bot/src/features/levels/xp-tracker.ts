@@ -198,32 +198,56 @@ export async function processMessageXp(
     xpAmount = Math.round(xpAmount * mult);
   }
 
-  // Upsert XP in database
-  const { data: existing } = await supabase
-    .from('member_levels')
-    .select('xp, level, total_messages')
-    .eq('guild_id', guildId)
-    .eq('member_id', userId)
-    .maybeSingle();
+  // Atomically increment XP in the database to avoid race conditions
+  // between concurrent message XP and voice XP grants.
+  const { data: result } = await supabase.rpc('increment_member_xp', {
+    p_guild_id: guildId,
+    p_member_id: userId,
+    p_xp_amount: xpAmount,
+    p_increment_messages: true,
+    p_voice_minutes: 0,
+  });
 
-  const oldXp = existing?.xp ?? 0;
-  const oldLevel = existing?.level ?? 0;
-  const oldMessages = existing?.total_messages ?? 0;
-  const newXp = oldXp + xpAmount;
-  const newLevel = calculateLevel(newXp);
+  // Fallback: if RPC doesn't exist, use the read-then-write approach
+  if (!result) {
+    const { data: existing } = await supabase
+      .from('member_levels')
+      .select('xp, level, total_messages')
+      .eq('guild_id', guildId)
+      .eq('member_id', userId)
+      .maybeSingle();
 
-  await supabase.from('member_levels').upsert(
-    {
-      guild_id: guildId,
-      member_id: userId,
-      xp: newXp,
-      level: newLevel,
-      total_messages: oldMessages + 1,
-      last_xp_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'guild_id,member_id' },
-  );
+    const oldXp = existing?.xp ?? 0;
+    const oldLevel = existing?.level ?? 0;
+    const oldMessages = existing?.total_messages ?? 0;
+    const newXp = oldXp + xpAmount;
+    const newLevel = calculateLevel(newXp);
+
+    await supabase.from('member_levels').upsert(
+      {
+        guild_id: guildId,
+        member_id: userId,
+        xp: newXp,
+        level: newLevel,
+        total_messages: oldMessages + 1,
+        last_xp_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'guild_id,member_id' },
+    );
+
+    return {
+      granted: true,
+      newXp,
+      oldLevel,
+      newLevel,
+      leveledUp: newLevel > oldLevel,
+    };
+  }
+
+  const newXp = result.new_xp;
+  const oldLevel = result.old_level;
+  const newLevel = result.new_level;
 
   return {
     granted: true,
@@ -253,31 +277,55 @@ export async function grantVoiceXp(
   const mult = computeMultiplier(memberRoles, multipliers, config.xp_multiplier_mode);
   const xpAmount = Math.round(amount * mult);
 
-  const { data: existing } = await supabase
-    .from('member_levels')
-    .select('xp, level, voice_minutes')
-    .eq('guild_id', guildId)
-    .eq('member_id', userId)
-    .maybeSingle();
+  // Atomically increment XP in the database to avoid race conditions
+  const { data: result } = await supabase.rpc('increment_member_xp', {
+    p_guild_id: guildId,
+    p_member_id: userId,
+    p_xp_amount: xpAmount,
+    p_increment_messages: false,
+    p_voice_minutes: config.voice_xp_interval_minutes,
+  });
 
-  const oldXp = existing?.xp ?? 0;
-  const oldLevel = existing?.level ?? 0;
-  const oldVoiceMinutes = existing?.voice_minutes ?? 0;
-  const newXp = oldXp + xpAmount;
-  const newLevel = calculateLevel(newXp);
+  // Fallback: if RPC doesn't exist, use read-then-write
+  if (!result) {
+    const { data: existing } = await supabase
+      .from('member_levels')
+      .select('xp, level, voice_minutes')
+      .eq('guild_id', guildId)
+      .eq('member_id', userId)
+      .maybeSingle();
 
-  await supabase.from('member_levels').upsert(
-    {
-      guild_id: guildId,
-      member_id: userId,
-      xp: newXp,
-      level: newLevel,
-      voice_minutes: oldVoiceMinutes + config.voice_xp_interval_minutes,
-      last_xp_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'guild_id,member_id' },
-  );
+    const oldXp = existing?.xp ?? 0;
+    const oldLevel = existing?.level ?? 0;
+    const oldVoiceMinutes = existing?.voice_minutes ?? 0;
+    const newXp = oldXp + xpAmount;
+    const newLevel = calculateLevel(newXp);
+
+    await supabase.from('member_levels').upsert(
+      {
+        guild_id: guildId,
+        member_id: userId,
+        xp: newXp,
+        level: newLevel,
+        voice_minutes: oldVoiceMinutes + config.voice_xp_interval_minutes,
+        last_xp_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'guild_id,member_id' },
+    );
+
+    return {
+      granted: true,
+      newXp,
+      oldLevel,
+      newLevel,
+      leveledUp: newLevel > oldLevel,
+    };
+  }
+
+  const newXp = result.new_xp;
+  const oldLevel = result.old_level;
+  const newLevel = result.new_level;
 
   return {
     granted: true,
