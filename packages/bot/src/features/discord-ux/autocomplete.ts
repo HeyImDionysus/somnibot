@@ -70,9 +70,9 @@ async function handlePlayAutocomplete(
       return;
     }
 
-    const choices = result.data.slice(0, 10).map((track: { info: { title: string; author: string; uri: string } }) => ({
+    const choices = result.data.slice(0, 10).map((track) => ({
       name: `${track.info.title} — ${track.info.author}`.slice(0, 100),
-      value: track.info.uri || `ytsearch:${track.info.title}`,
+      value: track.info.uri ?? `ytsearch:${track.info.title}`,
     }));
 
     await interaction.respond(choices);

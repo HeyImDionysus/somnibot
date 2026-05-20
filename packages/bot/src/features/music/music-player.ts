@@ -114,36 +114,47 @@ export class MusicPlayerManager {
   /**
    * Get current player status for dashboard display.
    */
-  getStatus(): {
+  async getStatus(): Promise<{
     nowPlaying: { title: string; author: string; url: string; duration: number; position: number; requester: string; thumbnail: string | null } | null;
     queue: { length: number; duration: number };
     listeners: number;
-  } {
+  }> {
     const guildId = this.guild.id;
-    const node = this.shoukaku.nodes.values().next().value;
-    const player = node?.players?.get(guildId);
+    const player = this.shoukaku.players.get(guildId);
 
     if (!player || !player.track) {
       return { nowPlaying: null, queue: { length: 0, duration: 0 }, listeners: 0 };
     }
 
     // Count listeners in the voice channel
-    const voiceChannel = this.guild.channels.cache.get(player.connection?.channelId ?? '');
+    const connection = this.shoukaku.connections.get(guildId);
+    const voiceChannel = connection?.channelId
+      ? this.guild.channels.cache.get(connection.channelId)
+      : null;
     const listeners = voiceChannel && 'members' in voiceChannel
       ? (voiceChannel.members as Map<string, unknown>).size - 1 // Subtract the bot
       : 0;
 
+    // Get track info from the queue (player.track is just a base64 string)
+    const queue = await this.queueManager.getQueue(guildId);
+    const currentEntry = queue && queue.currentIndex < queue.entries.length
+      ? queue.entries[queue.currentIndex]
+      : null;
+
     return {
       nowPlaying: {
-        title: (player.track as Record<string, unknown>).info ? ((player.track as Record<string, Record<string, string>>).info.title ?? 'Unknown') : 'Unknown',
-        author: (player.track as Record<string, Record<string, string>>).info?.author ?? 'Unknown',
-        url: (player.track as Record<string, Record<string, string>>).info?.uri ?? '',
-        duration: Number((player.track as Record<string, Record<string, number>>).info?.length ?? 0),
+        title: currentEntry?.title ?? 'Unknown',
+        author: currentEntry?.author ?? 'Unknown',
+        url: currentEntry?.uri ?? '',
+        duration: currentEntry?.duration ?? 0,
         position: player.position ?? 0,
-        requester: 'Unknown',
-        thumbnail: (player.track as Record<string, Record<string, string>>).info?.artworkUrl ?? null,
+        requester: currentEntry?.requestedBy ?? 'Unknown',
+        thumbnail: currentEntry?.artworkUrl ?? null,
       },
-      queue: { length: 0, duration: 0 },
+      queue: {
+        length: queue?.entries.length ?? 0,
+        duration: queue?.entries.reduce((sum, e) => sum + e.duration, 0) ?? 0,
+      },
       listeners: Math.max(0, listeners),
     };
   }
@@ -700,19 +711,21 @@ export class MusicPlayerManager {
 
       // Emit track.started event
       this.queueManager.getQueue(this.guild.id).then((queue) => {
-        if (queue?.nowPlaying) {
-          const np = queue.nowPlaying;
+        const np = queue && queue.currentIndex < queue.entries.length
+          ? queue.entries[queue.currentIndex]
+          : null;
+        if (np) {
           this.eventBus.emit('track.started', this.guild.id, {
-            title: np.info?.title ?? 'Unknown',
-            author: np.info?.author ?? 'Unknown',
-            uri: np.info?.uri ?? '',
-            duration: np.info?.length ?? 0,
+            title: np.title ?? 'Unknown',
+            author: np.author ?? 'Unknown',
+            uri: np.uri ?? '',
+            duration: np.duration ?? 0,
             requestedBy: np.requestedBy,
           });
           // Track music stats in Valkey
           this.trackMusicStats('track_played', {
-            title: np.info?.title ?? 'Unknown',
-            author: np.info?.author ?? 'Unknown',
+            title: np.title ?? 'Unknown',
+            author: np.author ?? 'Unknown',
             requestedBy: np.requestedBy,
           });
         }
@@ -724,12 +737,14 @@ export class MusicPlayerManager {
 
       // Emit track.ended event for the track that just finished
       const currentQueue = await this.queueManager.getQueue(this.guild.id);
-      if (currentQueue?.nowPlaying) {
-        const np = currentQueue.nowPlaying;
+      const np = currentQueue && currentQueue.currentIndex < currentQueue.entries.length
+        ? currentQueue.entries[currentQueue.currentIndex]
+        : null;
+      if (np) {
         this.eventBus.emit('track.ended', this.guild.id, {
-          title: np.info?.title ?? 'Unknown',
-          author: np.info?.author ?? 'Unknown',
-          uri: np.info?.uri ?? '',
+          title: np.title ?? 'Unknown',
+          author: np.author ?? 'Unknown',
+          uri: np.uri ?? '',
           reason: data.reason === 'finished' ? 'finished' : 'skipped',
         });
       }
@@ -819,25 +834,28 @@ export class MusicPlayerManager {
           this.setupPlayerEvents(newPlayer);
 
           // Resume playback — re-resolve via URI in case encoded track expired
-          if (queue.nowPlaying?.uri) {
+          const currentTrack = queue.currentIndex < queue.entries.length
+            ? queue.entries[queue.currentIndex]
+            : null;
+          if (currentTrack?.uri) {
             try {
-              const resolved = await newPlayer.node.rest.resolve(queue.nowPlaying.uri);
+              const resolved = await newPlayer.node.rest.resolve(currentTrack.uri);
               if (resolved?.data && !Array.isArray(resolved.data) && 'encoded' in resolved.data) {
                 await newPlayer.playTrack({ track: { encoded: resolved.data.encoded } });
               } else if (resolved?.data && Array.isArray(resolved.data) && resolved.data.length > 0) {
                 await newPlayer.playTrack({ track: { encoded: resolved.data[0].encoded } });
-              } else if (queue.nowPlaying.track) {
+              } else if (currentTrack.track) {
                 // Fallback to the original encoded track
-                await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+                await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
               }
             } catch {
               // Last resort: try the stale encoded track
-              if (queue.nowPlaying.track) {
-                await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+              if (currentTrack.track) {
+                await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
               }
             }
-          } else if (queue.nowPlaying?.track) {
-            await newPlayer.playTrack({ track: { encoded: queue.nowPlaying.track } });
+          } else if (currentTrack?.track) {
+            await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
           }
           console.log(`[Music] Reconnected after ${attempt} attempt(s)`);
           return;

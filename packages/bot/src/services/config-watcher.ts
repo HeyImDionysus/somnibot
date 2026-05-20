@@ -156,7 +156,7 @@ export class ConfigWatcher {
   private async reloadModeration(): Promise<void> {
     // Guild config already loaded by reloadAll() caller
     // Clear cached automod rules
-    await this.valkey.del(`automod:rules:${this.guild.id}`).catch(() => {});
+    await this.valkey.del('automod:rules').catch(() => {});
     // Clear cached infraction config
     await this.valkey.del(`infraction:config:${this.guild.id}`).catch(() => {});
     console.log('[ConfigWatcher] ✅ Moderation config reloaded');

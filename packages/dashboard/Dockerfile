@@ -27,7 +27,7 @@ COPY packages/dashboard/next.config.ts ./packages/dashboard/
 COPY packages/dashboard/public ./packages/dashboard/public
 
 # Install all dependencies
-RUN pnpm install --frozen-lockfile || pnpm install
+RUN pnpm install --frozen-lockfile
 
 # Build (shared first via turbo)
 ENV NEXT_TELEMETRY_DISABLED=1
