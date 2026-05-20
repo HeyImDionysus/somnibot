@@ -11,6 +11,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 
 const guildConfigPatchSchema = z.object({
@@ -117,6 +118,10 @@ export async function PATCH(request: NextRequest) {
     .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Notify the bot so it hot-reloads the changed config immediately.
+  // Fields in this schema span multiple feature areas — use 'all' to cover them.
+  await notifyBot('all', updates);
 
   return NextResponse.json({ success: true });
 }

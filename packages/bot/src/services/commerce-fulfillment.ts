@@ -284,8 +284,16 @@ export class CommerceFulfillmentService {
       .eq('status', 'active');
 
     if (entitlements && entitlements.length > 0) {
+      // Read configurable grace period (default 3 days if not set)
+      const { data: guildCfg } = await this.supabase
+        .from('guild_config')
+        .select('grace_period_days')
+        .eq('guild_id', payload.guild_id)
+        .maybeSingle();
+      const graceDays = guildCfg?.grace_period_days ?? 3;
+
       for (const ent of entitlements) {
-        const suspended = await this.entitlementService.suspend(ent.id, 3);
+        const suspended = await this.entitlementService.suspend(ent.id, graceDays);
         if (!suspended) {
           result.errors.push(`Failed to suspend entitlement ${ent.id}`);
         }
