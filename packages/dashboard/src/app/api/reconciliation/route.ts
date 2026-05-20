@@ -15,10 +15,11 @@ export async function GET() {
 
   const supabase = createAdminSupabase();
 
-  // Get the last 20 reconciliation runs
+  // Get the last 20 reconciliation runs for this guild
   const { data: runs } = await supabase
     .from('reconciliation_runs')
     .select('*')
+    .eq('guild_id', guildId)
     .order('started_at', { ascending: false })
     .limit(20);
 
@@ -45,10 +46,11 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  // Check if a run is already in progress
+  // Check if a run is already in progress for this guild
   const { data: running } = await supabase
     .from('reconciliation_runs')
     .select('id')
+    .eq('guild_id', guildId)
     .eq('status', 'running')
     .maybeSingle();
 
