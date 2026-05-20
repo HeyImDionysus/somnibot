@@ -467,6 +467,7 @@ export interface DbTicket {
   transcript_path: string | null;
   message_count: number;
   created_at: string;
+  updated_at: string;
   closed_at: string | null;
   deleted_at: string | null;
   inactivity_warned: boolean;

@@ -208,6 +208,7 @@ export async function checkCriticalThreshold(ctx: FraudContext): Promise<void> {
           severity: 'critical',
           status: 'open',
           source: 'fraud_auto',
+          created_by: 'system:fraud',
         })
         .select()
         .single();
