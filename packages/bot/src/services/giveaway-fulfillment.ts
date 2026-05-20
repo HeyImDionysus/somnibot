@@ -103,7 +103,6 @@ export class GiveawayFulfillmentService {
               discord_id: winnerId,
               discord_username: member?.user.tag ?? winnerId,
               total_spent_cents: 0,
-              order_count: 0,
             })
             .select('id')
             .single();
