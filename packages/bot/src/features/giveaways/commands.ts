@@ -47,6 +47,18 @@ export function buildGiveawayCommands() {
         .addIntegerOption((opt) =>
           opt.setName('count').setDescription('Number of new winners').setMinValue(1).setMaxValue(50)))
     .addSubcommand((sub) =>
+      sub
+        .setName('pause')
+        .setDescription('Pause an active giveaway')
+        .addStringOption((opt) =>
+          opt.setName('id').setDescription('Giveaway ID').setRequired(true)))
+    .addSubcommand((sub) =>
+      sub
+        .setName('resume')
+        .setDescription('Resume a paused giveaway')
+        .addStringOption((opt) =>
+          opt.setName('id').setDescription('Giveaway ID').setRequired(true)))
+    .addSubcommand((sub) =>
       sub.setName('list').setDescription('List active giveaways'));
 
   return cmd;
@@ -111,6 +123,30 @@ export async function handleGiveawayCommand(
             ? `🎊 Rerolled! New winners: ${winners.map((w) => `<@${w}>`).join(', ')}`
             : '❌ No eligible entries for reroll.',
         });
+        break;
+      }
+
+      case 'pause': {
+        const id = interaction.options.getString('id', true);
+        await interaction.deferReply({ ephemeral: true });
+        const paused = await manager.pauseGiveaway(id);
+        await interaction.editReply(
+          paused
+            ? '⏸️ Giveaway paused. Entries are blocked until resumed.'
+            : '❌ Could not pause giveaway (it may not be active).',
+        );
+        break;
+      }
+
+      case 'resume': {
+        const id = interaction.options.getString('id', true);
+        await interaction.deferReply({ ephemeral: true });
+        const resumed = await manager.resumeGiveaway(id);
+        await interaction.editReply(
+          resumed
+            ? '▶️ Giveaway resumed! Entries are open again.'
+            : '❌ Could not resume giveaway (it may not be paused).',
+        );
         break;
       }
 

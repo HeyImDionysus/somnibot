@@ -61,6 +61,12 @@ import {
   handleReconfigureSelect,
 } from '../features/setup-wizard/index.js';
 import type { EscalationStep } from '@somnibot/shared';
+import { processAntiRaid } from '../features/anti-raid/index.js';
+import { handleStarboardReaction } from '../features/starboard/index.js';
+import { logMessageEdit, logMessageDelete } from '../features/message-log/index.js';
+import { handleXpAdminCommand } from '../features/levels/admin-commands.js';
+import { handlePurgeCommand } from '../features/moderation/purge-command.js';
+import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -106,7 +112,11 @@ export function registerEvents(client: SomniClient): void {
   // ── Guild Member Events (Phase 4: Onboarding + Welcome + Goodbye) ──
   client.on('guildMemberAdd', async (member) => {
     try {
-      await handleMemberJoin(client, member);
+      // Anti-raid check first — if member is actioned, skip welcome flow
+      const blocked = await processAntiRaid(member.guild, member, client.supabase);
+      if (!blocked) {
+        await handleMemberJoin(client, member);
+      }
     } catch (err) {
       console.error('[Events] guildMemberAdd handler error:', err);
     }
@@ -303,6 +313,13 @@ export function registerEvents(client: SomniClient): void {
 
     // Also emit to event bus for non-message automations
     client.eventBus.emit('reaction.added', client.guildId, reactionEvent.data);
+
+    // Starboard check
+    try {
+      await handleStarboardReaction(reaction, user, client.supabase, client.guildId);
+    } catch (err) {
+      console.error('[Events] Starboard reaction error:', err);
+    }
   });
 
   // Phase 9: Reaction role remove
@@ -325,6 +342,23 @@ export function registerEvents(client: SomniClient): void {
       } catch (err) {
         console.error('[Events] Reaction role remove error:', err);
       }
+    }
+  });
+
+  // ── Message Edit/Delete Logging (V17 Behavioral Audit — Item 10) ──
+  client.on('messageUpdate', async (oldMessage, newMessage) => {
+    try {
+      await logMessageEdit(client, oldMessage, newMessage);
+    } catch (err) {
+      console.error('[Events] messageUpdate log error:', err);
+    }
+  });
+
+  client.on('messageDelete', async (message) => {
+    try {
+      await logMessageDelete(client, message);
+    } catch (err) {
+      console.error('[Events] messageDelete log error:', err);
     }
   });
 
@@ -420,6 +454,12 @@ export function registerEvents(client: SomniClient): void {
             const gHandled = await giveawayMgr.handleEntry(interaction);
             if (gHandled) return;
           }
+        }
+
+        // V17: Button role interactions
+        if (interaction.isButton() && interaction.customId.startsWith('btnrole:')) {
+          const brHandled = await handleButtonRoleInteraction(interaction, client.supabase);
+          if (brHandled) return;
         }
 
         // Phase 12: Commerce buy buttons
@@ -554,6 +594,12 @@ export function registerEvents(client: SomniClient): void {
             return;
           case 'infractions':
             await handleInfractionsCommand(interaction, client);
+            return;
+          case 'purge':
+            await handlePurgeCommand(interaction);
+            return;
+          case 'xp':
+            await handleXpAdminCommand(interaction, client);
             return;
           case 'help':
             await handleHelpCommand(interaction, client);

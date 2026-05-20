@@ -323,6 +323,34 @@ export async function closeTicket(
 
       await channel.send({ embeds: [closeEmbed], components: [reopenRow] });
 
+      // Send feedback prompt to the ticket creator via DM
+      try {
+        const creator = await guild.members.fetch(ticket.creator_id).catch(() => null);
+        if (creator) {
+          const feedbackEmbed = new EmbedBuilder()
+            .setColor(SOMNI_PALETTE.CYAN)
+            .setTitle('📋 How was your support experience?')
+            .setDescription(
+              `Your ticket #${ticketNumber} has been closed. Please rate your experience:`,
+            )
+            .setTimestamp();
+
+          const feedbackRow = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+            ...[1, 2, 3, 4, 5].map((n) =>
+              new ButtonBuilder()
+                .setCustomId(`ticket:feedback:${ticketNumber}:${n}`)
+                .setLabel('⭐'.repeat(n))
+                .setStyle(n >= 4 ? ButtonStyle.Success : n >= 2 ? ButtonStyle.Secondary : ButtonStyle.Danger),
+            ),
+          );
+
+          // Post feedback in-channel rather than DM to ensure it's visible
+          await channel.send({ embeds: [feedbackEmbed], components: [feedbackRow] });
+        }
+      } catch {
+        // Non-fatal — feedback is optional
+      }
+
       // Move to closed category if configured
       const { data: panel } = await supabase
         .from('ticket_panels')

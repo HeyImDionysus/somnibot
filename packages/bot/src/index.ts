@@ -24,6 +24,8 @@ import { runMigrations } from './services/migration-runner.js';
 import { startPeriodicSnapshots } from './services/guild-snapshot.js';
 import { startActionQueueListener } from './services/action-queue.js';
 import { buildModerationCommands } from './features/moderation/commands.js';
+import { buildPurgeCommand } from './features/moderation/purge-command.js';
+import { buildXpAdminCommands } from './features/levels/admin-commands.js';
 import { buildHelpCommand } from './features/help/index.js';
 import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
 import { ConfigWatcher } from './services/config-watcher.js';
@@ -267,7 +269,11 @@ async function main(): Promise<void> {
           rankCmd.toJSON(),
           leaderboardCmd.toJSON(),
         );
-        console.log('[Boot] ✅ Level commands queued (/rank, /leaderboard)');
+
+        // /xp admin commands
+        const xpAdminCmd = buildXpAdminCommands();
+        allCommands.push(xpAdminCmd.toJSON());
+        console.log('[Boot] ✅ Level commands queued (/rank, /leaderboard, /xp)');
 
         // Initialize voice XP tracking
         await initVoiceTracking(guild);
@@ -483,7 +489,10 @@ async function main(): Promise<void> {
         for (const cmd of Object.values(modCmds)) {
           allCommands.push(cmd.toJSON());
         }
-        console.log('[Boot] ✅ Moderation commands queued (/warn, /mute, /kick, /ban, /pardon, /infractions)');
+        // /purge command
+        const purgeCmd = buildPurgeCommand();
+        allCommands.push(purgeCmd.toJSON());
+        console.log('[Boot] ✅ Moderation commands queued (/warn, /mute, /kick, /ban, /pardon, /infractions, /purge)');
 
         // 14b: Queue /help and /setup commands
         const helpCmd = buildHelpCommand();
@@ -558,6 +567,9 @@ async function main(): Promise<void> {
         console.error('[Boot] ⚠️  Phase 14 initialization error:', err);
       }
     }
+
+    // Store the command registry on the client so /help can auto-sync
+    (client as unknown as Record<string, unknown>)._registeredCommands = allCommands;
 
     // ── Bulk Slash Command Registration ──
     // Single PUT replaces all guild commands atomically and auto-removes stale ones.
