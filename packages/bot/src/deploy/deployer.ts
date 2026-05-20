@@ -493,9 +493,10 @@ export async function deployServerState(
       await supabase.from('audit_logs').insert({
         guild_id: guild.id,
         actor_type: 'bot',
+        actor_id: 'deployer',
         action: 'server.deployed',
-        entity_type: 'guild',
-        entity_id: guild.id,
+        target_type: 'guild',
+        target_id: guild.id,
         details: {
           deployId,
           rolesCreated: actions.filter(a => a.entityType === 'role' && a.action === 'create' && a.success).length,

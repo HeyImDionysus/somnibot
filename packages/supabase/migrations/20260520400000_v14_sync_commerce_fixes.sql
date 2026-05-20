@@ -60,3 +60,14 @@ UPDATE sync_actions SET action = action_type WHERE action IS NULL AND action_typ
 -- ── C1-C3: sync module internal_id→template_key, desired_config→JSONB lookup ──
 -- Fixed in code (see TS changes). No schema change needed —
 -- the table structure is correct; the code was querying wrong columns.
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- V14 ADDITIONAL: automations missing exclude columns
+-- Code uses exclude_user_ids and exclude_channel_ids across bot loader,
+-- dashboard UI, API routes, and validation schemas — columns never created.
+-- ═══════════════════════════════════════════════════════════════════════
+ALTER TABLE automations ADD COLUMN IF NOT EXISTS exclude_user_ids TEXT[] DEFAULT '{}';
+ALTER TABLE automations ADD COLUMN IF NOT EXISTS exclude_channel_ids TEXT[] DEFAULT '{}';
+
+-- V14 ADDITIONAL: deployer + sync/route.ts audit_logs fixes are code-only
+-- (entity_type/entity_id → target_type/target_id, missing actor_id)

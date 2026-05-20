@@ -78,9 +78,10 @@ export async function POST(request: NextRequest) {
     await admin.from('audit_logs').insert({
       guild_id: guildId,
       actor_type: 'user',
+      actor_id: ctx.discordId ?? 'dashboard',
       action: `drift.${body.action}`,
-      entity_type: body.entityType ?? 'unknown',
-      entity_id: body.entityId ?? null,
+      target_type: body.entityType ?? 'unknown',
+      target_id: body.entityId ?? null,
       details: {
         driftType: body.driftType,
         entityName: body.entityName,
