@@ -109,6 +109,26 @@ const guildConfigPatchSchema = z.object({
   economy_market_fee_pct: z.number().int().min(0).max(50).optional(),
   economy_market_listing_days: z.number().int().min(1).max(30).optional(),
   economy_market_max_listings: z.number().int().min(1).max(50).optional(),
+  // PR #45 — Trivia
+  economy_trivia_enabled: z.boolean().optional(),
+  economy_trivia_cooldown_seconds: z.number().int().min(5).max(3600).optional(),
+  economy_trivia_base_payout: z.number().int().min(0).max(1000000).optional(),
+  economy_trivia_streak_multiplier_pct: z.number().int().min(0).max(100).optional(),
+  economy_trivia_hard_multiplier: z.number().min(1).max(10).optional(),
+  // PR #45 — Mini-Games
+  economy_games_enabled: z.boolean().optional(),
+  economy_daily_loss_limit: z.number().int().min(0).max(100000000).optional(),
+  economy_coinflip_max_bet: z.number().int().min(0).max(100000000).optional(),
+  economy_slots_max_bet: z.number().int().min(0).max(100000000).optional(),
+  economy_blackjack_max_bet: z.number().int().min(0).max(100000000).optional(),
+  // PR #45 — Lottery
+  economy_lottery_enabled: z.boolean().optional(),
+  economy_lottery_schedule: z.enum(['daily', 'weekly', 'biweekly', 'monthly']).optional(),
+  economy_lottery_ticket_price: z.number().int().min(1).max(1000000).optional(),
+  economy_lottery_max_tickets: z.number().int().min(1).max(100).optional(),
+  // PR #45 — Polls & Predictions
+  polls_enabled: z.boolean().optional(),
+  predictions_enabled: z.boolean().optional(),
 }).strict();
 
 export async function GET() {

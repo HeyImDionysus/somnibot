@@ -75,6 +75,14 @@ import { handleFarmingCommand } from '../features/farming/commands.js';
 import { handleFishingCommand } from '../features/fishing/commands.js';
 import { handleAdventureCommand } from '../features/adventures/commands.js';
 import { handleMarketCommand } from '../features/market/commands.js';
+import { handleTriviaCommand } from '../features/trivia/commands.js';
+import { handleGameCommand } from '../features/games/commands.js';
+import { handleLotteryCommand } from '../features/lottery/commands.js';
+import { handlePollCommand, handlePredictCommand } from '../features/polls/commands.js';
+import type { TriviaManager } from '../features/trivia/trivia-manager.js';
+import type { GamesManager } from '../features/games/games-manager.js';
+import type { LotteryManager } from '../features/lottery/lottery-manager.js';
+import type { PollsManager } from '../features/polls/polls-manager.js';
 import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 import type { GatheringManager } from '../features/gathering/gathering-manager.js';
 import type { CraftingManager } from '../features/crafting/crafting-manager.js';
@@ -547,6 +555,20 @@ export function registerEvents(client: SomniClient): void {
           return;
         }
 
+        // Phase 15h: Trivia answer buttons
+        if (interaction.isButton() && interaction.customId.startsWith('trivia:')) {
+          const trivMgr = (client as unknown as Record<string, unknown>)._triviaManager as TriviaManager | undefined;
+          if (trivMgr) await trivMgr.handleAnswer(interaction);
+          return;
+        }
+
+        // Phase 15k: Poll vote buttons
+        if (interaction.isButton() && interaction.customId.startsWith('poll:')) {
+          const pollMgr = (client as unknown as Record<string, unknown>)._pollsManager as PollsManager | undefined;
+          if (pollMgr) await pollMgr.handlePollVote(interaction);
+          return;
+        }
+
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
           client.eventBus.emit('button.clicked', client.guildId, {
@@ -811,6 +833,60 @@ export function registerEvents(client: SomniClient): void {
             await handleMarketCommand(interaction, mktMgr);
           } else {
             await interaction.reply({ content: '🚫 The market is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15h: Trivia commands — /trivia
+        if (interaction.commandName === 'trivia') {
+          const trivMgr = (client as unknown as Record<string, unknown>)._triviaManager as TriviaManager | undefined;
+          if (trivMgr) {
+            await handleTriviaCommand(interaction, trivMgr);
+          } else {
+            await interaction.reply({ content: '🚫 Trivia is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15i: Mini-game commands — /coinflip, /slots, /rps, /dice, /blackjack, /highlow, /scratch, /guess
+        const gameNames = ['coinflip', 'slots', 'rps', 'dice', 'blackjack', 'highlow', 'scratch', 'guess'];
+        if (gameNames.includes(interaction.commandName)) {
+          const gamesMgr = (client as unknown as Record<string, unknown>)._gamesManager as GamesManager | undefined;
+          if (gamesMgr) {
+            await handleGameCommand(interaction, gamesMgr);
+          } else {
+            await interaction.reply({ content: '🚫 Mini-games are not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15j: Lottery commands — /lottery
+        if (interaction.commandName === 'lottery') {
+          const lotMgr = (client as unknown as Record<string, unknown>)._lotteryManager as LotteryManager | undefined;
+          if (lotMgr) {
+            await handleLotteryCommand(interaction, lotMgr);
+          } else {
+            await interaction.reply({ content: '🚫 Lottery is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15k: Poll/Prediction commands — /poll, /predict
+        if (interaction.commandName === 'poll') {
+          const pollMgr = (client as unknown as Record<string, unknown>)._pollsManager as PollsManager | undefined;
+          if (pollMgr) {
+            await handlePollCommand(interaction, pollMgr);
+          } else {
+            await interaction.reply({ content: '🚫 Polls are not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+        if (interaction.commandName === 'predict') {
+          const pollMgr = (client as unknown as Record<string, unknown>)._pollsManager as PollsManager | undefined;
+          if (pollMgr) {
+            await handlePredictCommand(interaction, pollMgr);
+          } else {
+            await interaction.reply({ content: '🚫 Predictions are not enabled on this server.', ephemeral: true });
           }
           return;
         }

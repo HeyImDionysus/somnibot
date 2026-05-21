@@ -322,6 +322,26 @@ export interface DbGuildConfig {
   economy_market_fee_pct: number;
   economy_market_listing_days: number;
   economy_market_max_listings: number;
+  // PR #45 — Trivia
+  economy_trivia_enabled: boolean;
+  economy_trivia_cooldown_seconds: number;
+  economy_trivia_base_payout: number;
+  economy_trivia_streak_multiplier_pct: number;
+  economy_trivia_hard_multiplier: number;
+  // PR #45 — Mini-Games
+  economy_games_enabled: boolean;
+  economy_daily_loss_limit: number;
+  economy_coinflip_max_bet: number;
+  economy_slots_max_bet: number;
+  economy_blackjack_max_bet: number;
+  // PR #45 — Lottery
+  economy_lottery_enabled: boolean;
+  economy_lottery_schedule: string;
+  economy_lottery_ticket_price: number;
+  economy_lottery_max_tickets: number;
+  // PR #45 — Polls & Predictions
+  polls_enabled: boolean;
+  predictions_enabled: boolean;
 }
 
 export interface DbInstanceSettings {
@@ -1648,4 +1668,132 @@ export interface DbMarketListing {
   status: MarketListingStatus;
   expires_at: string;
   created_at: string;
+}
+
+// ── Trivia ────────────────────────────────────────────────
+
+export type TriviaDifficulty = 'easy' | 'medium' | 'hard';
+
+export interface DbTriviaQuestion {
+  id: string;
+  guild_id: string;
+  category: string;
+  difficulty: TriviaDifficulty;
+  question: string;
+  correct_answer: string;
+  wrong_answers: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export type TriviaSessionStatus = 'active' | 'finished' | 'cancelled';
+
+export interface DbTriviaSession {
+  id: string;
+  guild_id: string;
+  channel_id: string;
+  host_user_id: string;
+  category: string | null;
+  difficulty: TriviaDifficulty;
+  status: TriviaSessionStatus;
+  rounds_completed: number;
+  started_at: string;
+  ended_at: string | null;
+}
+
+// ── Lottery ───────────────────────────────────────────────
+
+export type LotteryDrawingStatus = 'active' | 'drawn' | 'cancelled';
+
+export interface DbLotteryDrawing {
+  id: string;
+  guild_id: string;
+  status: LotteryDrawingStatus;
+  jackpot: number;
+  winner_user_id: string | null;
+  winning_number: number | null;
+  drawn_at: string | null;
+  created_at: string;
+}
+
+export interface DbLotteryTicket {
+  id: string;
+  drawing_id: string;
+  guild_id: string;
+  user_id: string;
+  ticket_number: number;
+  purchased_at: string;
+}
+
+// ── Polls ─────────────────────────────────────────────────
+
+export type PollStatus = 'active' | 'closed';
+
+export interface DbPoll {
+  id: string;
+  guild_id: string;
+  channel_id: string;
+  message_id: string | null;
+  creator_user_id: string;
+  title: string;
+  description: string | null;
+  status: PollStatus;
+  allow_multiple: boolean;
+  ends_at: string | null;
+  created_at: string;
+  closed_at: string | null;
+}
+
+export interface DbPollOption {
+  id: string;
+  poll_id: string;
+  label: string;
+  emoji: string | null;
+  sort_order: number;
+}
+
+export interface DbPollVote {
+  id: string;
+  poll_id: string;
+  option_id: string;
+  user_id: string;
+  voted_at: string;
+}
+
+// ── Predictions ───────────────────────────────────────────
+
+export type PredictionStatus = 'open' | 'locked' | 'resolved' | 'cancelled';
+
+export interface DbPrediction {
+  id: string;
+  guild_id: string;
+  channel_id: string;
+  message_id: string | null;
+  creator_user_id: string;
+  title: string;
+  status: PredictionStatus;
+  winning_option_id: string | null;
+  total_pool: number;
+  created_at: string;
+  locked_at: string | null;
+  resolved_at: string | null;
+}
+
+export interface DbPredictionOption {
+  id: string;
+  prediction_id: string;
+  label: string;
+  emoji: string | null;
+  sort_order: number;
+}
+
+export interface DbPredictionBet {
+  id: string;
+  prediction_id: string;
+  option_id: string;
+  guild_id: string;
+  user_id: string;
+  amount: number;
+  placed_at: string;
+  payout: number | null;
 }
