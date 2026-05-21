@@ -41,6 +41,9 @@ import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
 import { EconomyManager, buildEconomyCommands, registerEconomyManager } from './features/economy/index.js';
+import { GatheringManager, buildGatheringCommands, registerGatheringManager } from './features/gathering/index.js';
+import { CraftingManager, buildCraftingCommands, registerCraftingManager } from './features/crafting/index.js';
+import { FarmingManager, buildFarmingCommands, registerFarmingManager } from './features/farming/index.js';
 
 /**
  * SomniBot entry point.
@@ -473,6 +476,87 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 15 (Economy) initialization error:', err);
+      }
+    }
+
+    // Phase 15b: Gathering System (V31 — gathering loot, part of fake economy)
+    if (guild) {
+      try {
+        const { data: gatherConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_gathering_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (gatherConfig?.economy_gathering_enabled) {
+          const gatheringManager = new GatheringManager(guild, client.supabase, client.valkey);
+          registerGatheringManager(gatheringManager);
+          (client as unknown as Record<string, unknown>)._gatheringManager = gatheringManager;
+
+          const gatherCmds = buildGatheringCommands();
+          for (const cmd of Object.values(gatherCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Gathering system started + ${Object.keys(gatherCmds).length} gathering commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Gathering system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15b (Gathering) initialization error:', err);
+      }
+    }
+
+    // Phase 15c: Crafting System (V31 — crafting recipes, part of fake economy)
+    if (guild) {
+      try {
+        const { data: craftConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_crafting_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (craftConfig?.economy_crafting_enabled) {
+          const craftingManager = new CraftingManager(guild, client.supabase, client.valkey);
+          registerCraftingManager(craftingManager);
+          (client as unknown as Record<string, unknown>)._craftingManager = craftingManager;
+
+          const craftCmds = buildCraftingCommands();
+          for (const cmd of Object.values(craftCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Crafting system started + ${Object.keys(craftCmds).length} crafting commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Crafting system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15c (Crafting) initialization error:', err);
+      }
+    }
+
+    // Phase 15d: Farming System (V31 — farm grid + crops, part of fake economy)
+    if (guild) {
+      try {
+        const { data: farmConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_farming_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (farmConfig?.economy_farming_enabled) {
+          const farmingManager = new FarmingManager(guild, client.supabase, client.valkey);
+          registerFarmingManager(farmingManager);
+          (client as unknown as Record<string, unknown>)._farmingManager = farmingManager;
+
+          const farmCmds = buildFarmingCommands();
+          for (const cmd of Object.values(farmCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Farming system started + ${Object.keys(farmCmds).length} farming commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Farming system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15d (Farming) initialization error:', err);
       }
     }
 

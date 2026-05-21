@@ -84,6 +84,16 @@ const guildConfigPatchSchema = z.object({
   economy_max_wallet: z.number().int().min(0).optional(),
   economy_max_bank: z.number().int().min(0).optional(),
   economy_log_channel_id: z.string().nullable().optional(),
+
+  // V31 PR #43 — Gathering, Crafting, Farming
+  economy_gathering_enabled: z.boolean().optional(),
+  economy_gathering_cooldown_seconds: z.number().int().min(10).max(86400).optional(),
+  economy_crafting_enabled: z.boolean().optional(),
+  economy_crafting_cooldown_seconds: z.number().int().min(0).max(86400).optional(),
+  economy_farming_enabled: z.boolean().optional(),
+  economy_farm_grid_size: z.number().int().min(1).max(25).optional(),
+  economy_farming_wilt_enabled: z.boolean().optional(),
+  economy_fertilizer_time_reduction_pct: z.number().int().min(0).max(90).optional(),
 }).strict();
 
 export async function GET() {

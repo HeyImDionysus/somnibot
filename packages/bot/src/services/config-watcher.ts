@@ -33,6 +33,9 @@ import { invalidateAntiRaidCache } from '../features/anti-raid/index.js';
 import { invalidateStarboardCache } from '../features/starboard/index.js';
 import { invalidateMessageLogCache } from '../features/message-log/index.js';
 import { invalidateEconomyCache } from '../features/economy/index.js';
+import { invalidateGatheringCache } from '../features/gathering/index.js';
+import { invalidateCraftingCache } from '../features/crafting/index.js';
+import { invalidateFarmingCache } from '../features/farming/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -121,7 +124,10 @@ export class ConfigWatcher {
             break;
           case 'economy':
             invalidateEconomyCache();
-            console.log('[ConfigWatcher] Economy config cache invalidated');
+            invalidateGatheringCache();
+            invalidateCraftingCache();
+            invalidateFarmingCache();
+            console.log('[ConfigWatcher] Economy/Gathering/Crafting/Farming config cache invalidated');
             break;
           case 'all':
             await this.reloadAll();
