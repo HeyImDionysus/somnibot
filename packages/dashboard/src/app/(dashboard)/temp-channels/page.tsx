@@ -61,14 +61,21 @@ export default function TempChannelsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
-
+  const [featureEnabled, setFeatureEnabled] = useState(true);
 
   const fetchHubs = useCallback(async () => {
     try {
-      const res = await fetch('/api/temp-channels');
-      const json = await res.json();
+      const [hubsRes, guildRes] = await Promise.all([
+        fetch('/api/temp-channels'),
+        fetch('/api/guild'),
+      ]);
+      const json = await hubsRes.json();
       if (json.success) setHubs(json.data);
       else setError(json.error);
+      const guildJson = await guildRes.json();
+      if (guildJson.success) {
+        setFeatureEnabled(guildJson.config?.temp_channels_enabled ?? true);
+      }
     } catch {
       setError('Failed to load temp channel hubs');
     } finally {
@@ -81,6 +88,27 @@ export default function TempChannelsPage() {
   }, [fetchHubs]);
 
   useAutoRefresh('temp_channel_hubs', undefined, fetchHubs);
+
+  const toggleFeature = async () => {
+    const newValue = !featureEnabled;
+    setFeatureEnabled(newValue);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ temp_channels_enabled: newValue }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setFeatureEnabled(!newValue);
+        toast({ title: 'Failed to toggle temp channels', variant: 'error' });
+      } else {
+        toast({ title: newValue ? 'Temp channels enabled' : 'Temp channels disabled', variant: 'success' });
+      }
+    } catch {
+      setFeatureEnabled(!newValue);
+    }
+  };
 
   const openEditor = (hub?: TempChannelHub) => {
     if (hub) {
@@ -183,9 +211,18 @@ export default function TempChannelsPage() {
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-discord-text-primary">Temporary Voice Channels</h1>
-          <p className="text-sm text-discord-text-muted">Members join a hub → bot creates a personal voice channel → deleted when empty</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-discord-text-primary">Temporary Voice Channels</h1>
+            <p className="text-sm text-discord-text-muted">Members join a hub → bot creates a personal voice channel → deleted when empty</p>
+          </div>
+          <button
+            onClick={toggleFeature}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${featureEnabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+            title={featureEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${featureEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
         </div>
         <button
           onClick={() => openEditor()}

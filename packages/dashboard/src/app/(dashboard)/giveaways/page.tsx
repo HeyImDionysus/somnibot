@@ -109,14 +109,21 @@ export default function GiveawaysPage() {
   const [form, setForm] = useState(emptyForm);
   const [filter, setFilter] = useState<'all' | 'active' | 'ended'>('all');
   const [confirmAction, setConfirmAction] = useState<{ type: 'end' | 'cancel' | 'delete'; id: string; prize: string } | null>(null);
-
+  const [featureEnabled, setFeatureEnabled] = useState(true);
 
   const fetchGiveaways = useCallback(async () => {
     try {
-      const res = await fetch('/api/giveaways');
-      const json = await res.json();
+      const [giveRes, guildRes] = await Promise.all([
+        fetch('/api/giveaways'),
+        fetch('/api/guild'),
+      ]);
+      const json = await giveRes.json();
       if (json.success) setGiveaways(json.data);
       else setError(json.error);
+      const guildJson = await guildRes.json();
+      if (guildJson.success) {
+        setFeatureEnabled(guildJson.config?.giveaways_enabled ?? true);
+      }
     } catch {
       setError('Failed to load giveaways');
     } finally {
@@ -127,6 +134,27 @@ export default function GiveawaysPage() {
   useEffect(() => {
     fetchGiveaways();
   }, [fetchGiveaways]);
+
+  const toggleFeature = async () => {
+    const newValue = !featureEnabled;
+    setFeatureEnabled(newValue);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ giveaways_enabled: newValue }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setFeatureEnabled(!newValue);
+        toast({ title: 'Failed to toggle giveaways', variant: 'error' });
+      } else {
+        toast({ title: newValue ? 'Giveaways enabled' : 'Giveaways disabled', variant: 'success' });
+      }
+    } catch {
+      setFeatureEnabled(!newValue);
+    }
+  };
 
   // GAP 2: Live updates — auto-refresh when giveaway data changes in DB
   useAutoRefresh('giveaways', undefined, fetchGiveaways);
@@ -250,9 +278,18 @@ export default function GiveawaysPage() {
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-discord-text-primary">Giveaways</h1>
-          <p className="text-sm text-discord-text-muted">Create and manage timed giveaways with button entry</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-discord-text-primary">Giveaways</h1>
+            <p className="text-sm text-discord-text-muted">Create and manage timed giveaways with button entry</p>
+          </div>
+          <button
+            onClick={toggleFeature}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${featureEnabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+            title={featureEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${featureEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
         </div>
         <button
           onClick={() => { setForm({ ...emptyForm }); setShowForm(true); }}

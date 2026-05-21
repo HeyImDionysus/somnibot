@@ -61,6 +61,7 @@ export default function StatsChannelsPage() {
   const [form, setForm] = useState(emptyForm);
   const [updateInterval, setUpdateInterval] = useState(10);
   const [savingInterval, setSavingInterval] = useState(false);
+  const [featureEnabled, setFeatureEnabled] = useState(true);
 
   const fetchChannels = useCallback(async () => {
     try {
@@ -74,6 +75,9 @@ export default function StatsChannelsPage() {
       const guildJson = await guildRes.json();
       if (guildJson.config?.stats_update_interval_minutes) {
         setUpdateInterval(guildJson.config.stats_update_interval_minutes);
+      }
+      if (guildJson.success) {
+        setFeatureEnabled(guildJson.config?.stats_enabled ?? true);
       }
     } catch {
       setError('Failed to load stats channels');
@@ -106,6 +110,27 @@ export default function StatsChannelsPage() {
       toast({ title: 'Failed to save', variant: 'error' });
     } finally {
       setSavingInterval(false);
+    }
+  };
+
+  const toggleFeature = async () => {
+    const newValue = !featureEnabled;
+    setFeatureEnabled(newValue);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stats_enabled: newValue }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setFeatureEnabled(!newValue);
+        toast({ title: 'Failed to toggle stats channels', variant: 'error' });
+      } else {
+        toast({ title: newValue ? 'Stats channels enabled' : 'Stats channels disabled', variant: 'success' });
+      }
+    } catch {
+      setFeatureEnabled(!newValue);
     }
   };
 
@@ -217,9 +242,18 @@ export default function StatsChannelsPage() {
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-discord-text-primary">Statistics Channels</h1>
-          <p className="text-sm text-discord-text-muted">Voice channels that display live server stats</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-discord-text-primary">Statistics Channels</h1>
+            <p className="text-sm text-discord-text-muted">Voice channels that display live server stats</p>
+          </div>
+          <button
+            onClick={toggleFeature}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${featureEnabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+            title={featureEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${featureEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
         </div>
         <button
           onClick={() => openEditor()}

@@ -113,13 +113,21 @@ export default function ScheduledMessagesPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [embedOptions, setEmbedOptions] = useState<EmbedOption[]>([]);
+  const [featureEnabled, setFeatureEnabled] = useState(true);
 
   const fetchMessages = useCallback(async () => {
     try {
-      const res = await fetch('/api/scheduled-messages');
-      const json = await res.json();
+      const [msgRes, guildRes] = await Promise.all([
+        fetch('/api/scheduled-messages'),
+        fetch('/api/guild'),
+      ]);
+      const json = await msgRes.json();
       if (json.success) setMessages(json.data);
       else setError(json.error);
+      const guildJson = await guildRes.json();
+      if (guildJson.success) {
+        setFeatureEnabled(guildJson.config?.scheduled_messages_enabled ?? true);
+      }
     } catch {
       setError('Failed to load scheduled messages');
     } finally {
@@ -150,6 +158,27 @@ export default function ScheduledMessagesPage() {
   }, [fetchMessages, fetchEmbeds]);
 
   useAutoRefresh('scheduled_messages', undefined, fetchMessages);
+
+  const toggleFeature = async () => {
+    const newValue = !featureEnabled;
+    setFeatureEnabled(newValue);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scheduled_messages_enabled: newValue }),
+      });
+      const json = await res.json();
+      if (!json.success) {
+        setFeatureEnabled(!newValue);
+        toast({ title: 'Failed to toggle scheduled messages', variant: 'error' });
+      } else {
+        toast({ title: newValue ? 'Scheduled messages enabled' : 'Scheduled messages disabled', variant: 'success' });
+      }
+    } catch {
+      setFeatureEnabled(!newValue);
+    }
+  };
 
   const openEditor = (sm?: ScheduledMessage) => {
     if (sm) {
@@ -275,9 +304,18 @@ export default function ScheduledMessagesPage() {
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-discord-text-primary">Scheduled Messages</h1>
-          <p className="text-sm text-discord-text-muted">Automatically send recurring messages on a schedule</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-discord-text-primary">Scheduled Messages</h1>
+            <p className="text-sm text-discord-text-muted">Automatically send recurring messages on a schedule</p>
+          </div>
+          <button
+            onClick={toggleFeature}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${featureEnabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+            title={featureEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${featureEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
         </div>
         <button
           onClick={() => openEditor()}
