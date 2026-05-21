@@ -535,12 +535,12 @@ export class AdventureManager {
     if (config.economy_adventure_ticket_cost > 0) {
       const { data: wallet } = await this.supabase
         .from('economy_wallets')
-        .select('id, cash')
+        .select('id, wallet')
         .eq('guild_id', this.guild.id)
         .eq('user_id', userId)
         .single();
 
-      if (!wallet || (wallet as any).cash < config.economy_adventure_ticket_cost) {
+      if (!wallet || (wallet as any).wallet < config.economy_adventure_ticket_cost) {
         return {
           embed: new EmbedBuilder()
             .setDescription(`💰 Adventures cost **${config.economy_adventure_ticket_cost}** coins. You don't have enough!`)
@@ -552,7 +552,7 @@ export class AdventureManager {
 
       await this.supabase
         .from('economy_wallets')
-        .update({ cash: (wallet as any).cash - config.economy_adventure_ticket_cost })
+        .update({ wallet: (wallet as any).wallet - config.economy_adventure_ticket_cost })
         .eq('id', (wallet as any).id);
     }
 
@@ -814,7 +814,7 @@ export class AdventureManager {
     if (currency > 0) {
       const { data: wallet } = await this.supabase
         .from('economy_wallets')
-        .select('id, cash')
+        .select('id, wallet')
         .eq('guild_id', this.guild.id)
         .eq('user_id', session.user_id)
         .single();
@@ -822,7 +822,7 @@ export class AdventureManager {
       if (wallet) {
         await this.supabase
           .from('economy_wallets')
-          .update({ cash: (wallet as any).cash + currency })
+          .update({ wallet: (wallet as any).wallet + currency })
           .eq('id', (wallet as any).id);
       }
     }
