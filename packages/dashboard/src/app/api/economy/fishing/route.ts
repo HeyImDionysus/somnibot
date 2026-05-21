@@ -1,0 +1,113 @@
+/**
+ * /api/economy/fishing — CRUD for fish species.
+ *
+ * GET    — List all species
+ * POST   — Create a new species
+ * PUT    — Update an existing species
+ * DELETE — Delete a species (by ?id= query param)
+ */
+import { NextResponse, type NextRequest } from 'next/server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
+import { requirePermission } from '@/lib/rbac';
+import { notifyBot } from '@/lib/notify-bot';
+import { z } from 'zod';
+
+const speciesSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(1).max(64),
+  emoji: z.string().min(1).max(64).optional(),
+  rarity: z.enum(['common', 'uncommon', 'rare', 'epic', 'legendary']).optional(),
+  min_weight: z.number().min(0.01).max(10000).optional(),
+  max_weight: z.number().min(0.01).max(10000).optional(),
+  base_price: z.number().int().min(1).max(1000000).optional(),
+  active: z.boolean().optional(),
+});
+
+export async function GET() {
+  const ctx = await requirePermission('/economy/fishing');
+  const supabase = createAdminSupabase();
+
+  const { data, error } = await supabase
+    .from('economy_fish_species')
+    .select('*')
+    .eq('guild_id', ctx.guildId)
+    .order('rarity')
+    .order('name');
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ data });
+}
+
+export async function POST(request: NextRequest) {
+  const ctx = await requirePermission('/economy/fishing');
+  const body = await request.json();
+  const parsed = speciesSchema.parse(body);
+
+  const supabase = createAdminSupabase();
+  const { data, error } = await supabase
+    .from('economy_fish_species')
+    .insert({
+      guild_id: ctx.guildId,
+      name: parsed.name,
+      emoji: parsed.emoji ?? '🐟',
+      rarity: parsed.rarity ?? 'common',
+      min_weight: parsed.min_weight ?? 0.5,
+      max_weight: parsed.max_weight ?? 5.0,
+      base_price: parsed.base_price ?? 10,
+      active: parsed.active ?? true,
+    })
+    .select('*')
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  await notifyBot('economy');
+  return NextResponse.json({ data }, { status: 201 });
+}
+
+export async function PUT(request: NextRequest) {
+  const ctx = await requirePermission('/economy/fishing');
+  const body = await request.json();
+  const parsed = speciesSchema.parse(body);
+
+  if (!parsed.id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+
+  const supabase = createAdminSupabase();
+  const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (parsed.name !== undefined) updateData.name = parsed.name;
+  if (parsed.emoji !== undefined) updateData.emoji = parsed.emoji;
+  if (parsed.rarity !== undefined) updateData.rarity = parsed.rarity;
+  if (parsed.min_weight !== undefined) updateData.min_weight = parsed.min_weight;
+  if (parsed.max_weight !== undefined) updateData.max_weight = parsed.max_weight;
+  if (parsed.base_price !== undefined) updateData.base_price = parsed.base_price;
+  if (parsed.active !== undefined) updateData.active = parsed.active;
+
+  const { data, error } = await supabase
+    .from('economy_fish_species')
+    .update(updateData)
+    .eq('id', parsed.id)
+    .eq('guild_id', ctx.guildId)
+    .select('*')
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  await notifyBot('economy');
+  return NextResponse.json({ data });
+}
+
+export async function DELETE(request: NextRequest) {
+  const ctx = await requirePermission('/economy/fishing');
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get('id');
+  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
+
+  const supabase = createAdminSupabase();
+  const { error } = await supabase
+    .from('economy_fish_species')
+    .delete()
+    .eq('id', id)
+    .eq('guild_id', ctx.guildId);
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  await notifyBot('economy');
+  return NextResponse.json({ success: true });
+}

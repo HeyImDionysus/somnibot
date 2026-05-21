@@ -307,6 +307,21 @@ export interface DbGuildConfig {
   economy_farm_grid_size: number;
   economy_farming_wilt_enabled: boolean;
   economy_fertilizer_time_reduction_pct: number;
+  // Fishing
+  economy_fishing_enabled: boolean;
+  economy_fishing_cooldown_seconds: number;
+  economy_fishing_junk_chance_pct: number;
+  economy_fishing_treasure_chance_pct: number;
+  // Adventures
+  economy_adventures_enabled: boolean;
+  economy_adventure_daily_limit: number;
+  economy_adventure_ticket_cost: number;
+  economy_adventure_max_scenes: number;
+  // Market
+  economy_market_enabled: boolean;
+  economy_market_fee_pct: number;
+  economy_market_listing_days: number;
+  economy_market_max_listings: number;
 }
 
 export interface DbInstanceSettings {
@@ -1517,5 +1532,120 @@ export interface DbFarmPlot {
   watered_at: string | null;
   fertilized: boolean;
   harvested: boolean;
+  created_at: string;
+}
+
+// ── Fishing ───────────────────────────────────────────────
+
+export type FishRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
+
+export interface DbFishSpecies {
+  id: string;
+  guild_id: string;
+  name: string;
+  emoji: string;
+  rarity: FishRarity;
+  min_weight: number;
+  max_weight: number;
+  base_price: number;
+  is_default: boolean;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbFishCatch {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  species_id: string;
+  weight: number;
+  price_earned: number;
+  caught_at: string;
+}
+
+// ── Adventures ────────────────────────────────────────────
+
+export type AdventureType = 'dungeon' | 'forest' | 'ocean' | 'space' | 'mountain';
+export type AdventureDifficulty = 'easy' | 'normal' | 'hard' | 'legendary';
+export type AdventureEndingType = 'success' | 'death' | 'partial';
+export type AdventureSessionStatus = 'active' | 'completed' | 'failed' | 'abandoned';
+
+export interface AdventureChoice {
+  label: string;
+  emoji: string;
+  next_scene_index: number | null;
+  loot: { item_name: string; qty: number; chance_pct: number }[];
+  currency: number;
+  damage_pct: number;
+  requires_item: string | null;
+}
+
+export interface AdventureSceneLoot {
+  item_name: string;
+  qty: number;
+  chance_pct: number;
+}
+
+export interface DbAdventure {
+  id: string;
+  guild_id: string;
+  name: string;
+  emoji: string;
+  description: string | null;
+  adventure_type: AdventureType;
+  difficulty: AdventureDifficulty;
+  min_scenes: number;
+  max_scenes: number;
+  is_default: boolean;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbAdventureScene {
+  id: string;
+  adventure_id: string;
+  scene_index: number;
+  text: string;
+  image_url: string | null;
+  choices: AdventureChoice[];
+  loot: AdventureSceneLoot[];
+  is_ending: boolean;
+  ending_type: AdventureEndingType | null;
+  created_at: string;
+}
+
+export interface DbAdventureSession {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  adventure_id: string;
+  current_scene_id: string | null;
+  status: AdventureSessionStatus;
+  loot_collected: { item_name: string; qty: number }[];
+  currency_collected: number;
+  items_brought: { item_name: string; qty: number }[];
+  message_id: string | null;
+  channel_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+// ── Market ────────────────────────────────────────────────
+
+export type MarketListingStatus = 'active' | 'sold' | 'cancelled' | 'expired';
+
+export interface DbMarketListing {
+  id: string;
+  guild_id: string;
+  seller_id: string;
+  item_id: string;
+  item_name: string;
+  quantity: number;
+  remaining: number;
+  price_per_unit: number;
+  status: MarketListingStatus;
+  expires_at: string;
   created_at: string;
 }
