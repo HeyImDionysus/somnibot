@@ -13,6 +13,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
 
@@ -294,6 +295,8 @@ export class HeistManager {
     const actualCount = crewCount ?? (heist.participants as string[]).length + 1;
 
     const displayChance = Math.min(95, (config.economy_heist_success_base_pct ?? 40) + (actualCount - 1) * 7 + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0));
+
+    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch(() => {});
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

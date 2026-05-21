@@ -1090,6 +1090,15 @@ async function main(): Promise<void> {
     // Reconciliation timer
     const reconTimer = (client as unknown as Record<string, unknown>)._reconciliationTimer as NodeJS.Timeout | undefined;
     if (reconTimer) clearInterval(reconTimer);
+    // Economy timers: lottery draws, pet decay, quest weekly reset, games daily reset
+    const lotteryMgr = (client as unknown as Record<string, unknown>)._lotteryManager as { stopDrawTimer?: () => void } | undefined;
+    if (lotteryMgr?.stopDrawTimer) lotteryMgr.stopDrawTimer();
+    const gamesMgr = (client as unknown as Record<string, unknown>)._gamesManager as { stopDailyResetTimer?: () => void } | undefined;
+    if (gamesMgr?.stopDailyResetTimer) gamesMgr.stopDailyResetTimer();
+    const petsMgr = (client as unknown as Record<string, unknown>)._petsManager as { stopDecayTimer?: () => void } | undefined;
+    if (petsMgr?.stopDecayTimer) petsMgr.stopDecayTimer();
+    const questsMgr = (client as unknown as Record<string, unknown>)._questsManager as { stopResetTimer?: () => void } | undefined;
+    if (questsMgr?.stopResetTimer) questsMgr.stopResetTimer();
     // Cross-feature bridge + Discord native services
     const crossBridge = (client as unknown as Record<string, unknown>)._crossFeatureBridge as { stop?: () => void } | undefined;
     if (crossBridge?.stop) crossBridge.stop();
