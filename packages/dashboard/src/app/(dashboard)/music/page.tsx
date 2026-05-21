@@ -15,9 +15,7 @@ import { ConfigSkeleton } from '@/components/shared/loading-skeleton';
 
 interface MusicConfig {
   music_enabled: boolean;
-  default_volume: number;
-  max_queue_length: number;
-  allow_duplicates: boolean;
+  music_default_volume: number;
   dj_role_id: string | null;
   music_auto_leave_minutes: number;
   music_auto_destroy_minutes: number;
@@ -32,9 +30,7 @@ interface DiscordRole {
 
 const DEFAULT_CONFIG: MusicConfig = {
   music_enabled: true,
-  default_volume: 50,
-  max_queue_length: 500,
-  allow_duplicates: true,
+  music_default_volume: 50,
   dj_role_id: null,
   music_auto_leave_minutes: 5,
   music_auto_destroy_minutes: 30,
@@ -223,59 +219,18 @@ export default function MusicSettingsPage() {
                   type="range"
                   min={0}
                   max={150}
-                  value={config.default_volume}
-                  onChange={(e) => updateField('default_volume', parseInt(e.target.value, 10))}
+                  value={config.music_default_volume}
+                  onChange={(e) => updateField('music_default_volume', parseInt(e.target.value, 10))}
                   className="flex-1 accent-discord-accent"
                 />
                 <span className="w-12 text-right text-sm font-mono text-discord-text-primary">
-                  {config.default_volume}%
+                  {config.music_default_volume}%
                 </span>
               </div>
             </div>
 
-            {/* Max Queue Length */}
-            <div>
-              <label className="block text-sm font-medium text-discord-text-secondary">
-                Max Queue Length
-              </label>
-              <p className="mt-0.5 text-xs text-discord-text-muted">
-                Maximum number of tracks allowed in the queue (1–2000).
-              </p>
-              <input
-                type="number"
-                min={1}
-                max={2000}
-                value={config.max_queue_length}
-                onChange={(e) =>
-                  updateField('max_queue_length', Math.max(1, Math.min(2000, parseInt(e.target.value, 10) || 500)))
-                }
-                className="mt-2 w-32 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
-              />
-            </div>
-
-            {/* Allow Duplicates */}
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="block text-sm font-medium text-discord-text-secondary">
-                  Allow Duplicate Tracks
-                </label>
-                <p className="mt-0.5 text-xs text-discord-text-muted">
-                  Whether the same track can be added to the queue multiple times.
-                </p>
-              </div>
-              <button
-                onClick={() => updateField('allow_duplicates', !config.allow_duplicates)}
-                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                  config.allow_duplicates ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'
-                }`}
-              >
-                <span
-                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                    config.allow_duplicates ? 'translate-x-6' : 'translate-x-1'
-                  }`}
-                />
-              </button>
-            </div>
+            {/* Ghost controls for max_queue_length and allow_duplicates removed in V29 —
+                these columns were dropped from the DB in V18 and the API doesn't read/write them. */}
           </div>
 
           {/* Auto Behaviors */}
