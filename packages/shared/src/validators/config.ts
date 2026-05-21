@@ -41,7 +41,6 @@ export const GuildConfigSchema = z.object({
 
   // Commerce
   store_enabled: z.boolean().default(false),
-  store_channel_id: optionalSnowflake,
 });
 
 export type GuildConfigInput = z.infer<typeof GuildConfigSchema>;
