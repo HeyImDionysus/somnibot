@@ -238,44 +238,29 @@ export class MarketManager {
     const buyQty = Math.min(quantity, listing.remaining);
     const totalCost = buyQty * listing.price_per_unit;
 
-    // Check buyer funds
-    const { data: buyerWallet } = await this.supabase
-      .from('economy_wallets')
-      .select('id, wallet')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .single();
+    // Calculate fee
+    const fee = Math.floor(totalCost * config.economy_market_fee_pct / 100);
+    const sellerEarnings = totalCost - fee;
 
-    if (!buyerWallet || (buyerWallet as any).wallet < totalCost) {
+    // Deduct buyer (atomic — prevents race conditions and negative balances)
+    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: totalCost,
+    });
+
+    if (debitErr) {
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
         .setColor(0xff0000);
     }
 
-    // Calculate fee
-    const fee = Math.floor(totalCost * config.economy_market_fee_pct / 100);
-    const sellerEarnings = totalCost - fee;
-
-    // Deduct buyer
-    await this.supabase
-      .from('economy_wallets')
-      .update({ wallet: (buyerWallet as any).wallet - totalCost })
-      .eq('id', (buyerWallet as any).id);
-
-    // Pay seller
-    const { data: sellerWallet } = await this.supabase
-      .from('economy_wallets')
-      .select('id, wallet')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', listing.seller_id)
-      .single();
-
-    if (sellerWallet) {
-      await this.supabase
-        .from('economy_wallets')
-        .update({ wallet: (sellerWallet as any).wallet + sellerEarnings })
-        .eq('id', (sellerWallet as any).id);
-    }
+    // Pay seller (atomic — upserts wallet if needed)
+    await this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: listing.seller_id,
+      p_amount: sellerEarnings,
+    });
 
     // Add item to buyer inventory
     const { data: existingInv } = await this.supabase

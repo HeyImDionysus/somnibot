@@ -531,16 +531,15 @@ export class AdventureManager {
       };
     }
 
-    // Charge ticket cost
+    // Charge ticket cost (atomic RPC prevents race conditions / negative balances)
     if (config.economy_adventure_ticket_cost > 0) {
-      const { data: wallet } = await this.supabase
-        .from('economy_wallets')
-        .select('id, wallet')
-        .eq('guild_id', this.guild.id)
-        .eq('user_id', userId)
-        .single();
+      const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_amount: config.economy_adventure_ticket_cost,
+      });
 
-      if (!wallet || (wallet as any).wallet < config.economy_adventure_ticket_cost) {
+      if (debitErr) {
         return {
           embed: new EmbedBuilder()
             .setDescription(`💰 Adventures cost **${config.economy_adventure_ticket_cost}** coins. You don't have enough!`)
@@ -549,11 +548,6 @@ export class AdventureManager {
           sessionId: null,
         };
       }
-
-      await this.supabase
-        .from('economy_wallets')
-        .update({ wallet: (wallet as any).wallet - config.economy_adventure_ticket_cost })
-        .eq('id', (wallet as any).id);
     }
 
     // Pick adventure
@@ -810,21 +804,13 @@ export class AdventureManager {
       })
       .eq('id', session.id);
 
-    // Pay currency
+    // Pay currency (atomic RPC — upserts wallet if needed)
     if (currency > 0) {
-      const { data: wallet } = await this.supabase
-        .from('economy_wallets')
-        .select('id, wallet')
-        .eq('guild_id', this.guild.id)
-        .eq('user_id', session.user_id)
-        .single();
-
-      if (wallet) {
-        await this.supabase
-          .from('economy_wallets')
-          .update({ wallet: (wallet as any).wallet + currency })
-          .eq('id', (wallet as any).id);
-      }
+      await this.supabase.rpc('economy_add_balance', {
+        p_guild_id: this.guild.id,
+        p_user_id: session.user_id,
+        p_amount: currency,
+      });
     }
 
     // Note: Loot items are recorded in session but not auto-added to inventory.
