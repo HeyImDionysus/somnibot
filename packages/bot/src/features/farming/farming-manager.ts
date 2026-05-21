@@ -27,6 +27,7 @@ interface Crop {
   wilt_seconds: number;
   sell_price: number;
   seeds_returned: number;
+  seed_item_id: string | null;
 }
 
 interface Plot {
