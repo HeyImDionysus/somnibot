@@ -371,26 +371,11 @@ export class GatheringManager {
   }
 
   private async addToWallet(userId: string, amount: number): Promise<void> {
-    const { data: wallet } = await this.supabase
-      .from('economy_wallets')
-      .select('wallet')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .maybeSingle();
-
-    if (wallet) {
-      await this.supabase.from('economy_wallets')
-        .update({ wallet: (wallet.wallet as number) + amount, updated_at: new Date().toISOString() })
-        .eq('guild_id', this.guild.id)
-        .eq('user_id', userId);
-    } else {
-      await this.supabase.from('economy_wallets').insert({
-        guild_id: this.guild.id,
-        user_id: userId,
-        wallet: amount,
-        bank: 0,
-      });
-    }
+    await this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: amount,
+    });
   }
 
   private weightedRandom(entries: LootEntry[]): LootEntry {
