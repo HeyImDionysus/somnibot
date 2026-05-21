@@ -150,7 +150,7 @@ export default function TriviaPage() {
         setQuestions(qJson.questions ?? []);
       }
     } catch {
-      toast({ title: 'Failed to load trivia data', variant: 'destructive' });
+      toast({ title: 'Failed to load trivia data', variant: 'error' });
     } finally {
       setLoading(false);
     }
@@ -170,9 +170,9 @@ export default function TriviaPage() {
         body: JSON.stringify(updated),
       });
       if (!res.ok) throw new Error();
-      toast({ title: 'Settings saved', variant: 'default' });
+      toast({ title: 'Settings saved', variant: 'success' });
     } catch {
-      toast({ title: 'Failed to save', variant: 'destructive' });
+      toast({ title: 'Failed to save', variant: 'error' });
     }
   };
 
@@ -189,11 +189,11 @@ export default function TriviaPage() {
         body: JSON.stringify(editing),
       });
       if (!res.ok) throw new Error();
-      toast({ title: editing.id ? 'Question updated' : 'Question created', variant: 'default' });
+      toast({ title: editing.id ? 'Question updated' : 'Question created', variant: 'success' });
       setEditing(null);
       await loadData();
     } catch {
-      toast({ title: 'Failed to save question', variant: 'destructive' });
+      toast({ title: 'Failed to save question', variant: 'error' });
     } finally {
       setSaving(false);
     }
@@ -203,11 +203,11 @@ export default function TriviaPage() {
     if (!deleteId) return;
     try {
       await fetch(`/api/economy/trivia?id=${deleteId}`, { method: 'DELETE' });
-      toast({ title: 'Question deleted', variant: 'default' });
+      toast({ title: 'Question deleted', variant: 'success' });
       setDeleteId(null);
       await loadData();
     } catch {
-      toast({ title: 'Failed to delete', variant: 'destructive' });
+      toast({ title: 'Failed to delete', variant: 'error' });
     }
   };
 
@@ -258,7 +258,7 @@ export default function TriviaPage() {
           imported++;
         }
       }
-      toast({ title: `Imported ${imported} questions`, variant: 'default' });
+      toast({ title: `Imported ${imported} questions`, variant: 'success' });
       await loadData();
     };
     input.click();

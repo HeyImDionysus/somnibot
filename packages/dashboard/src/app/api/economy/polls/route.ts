@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/rbac';
-import { createServerSupabase } from '@/lib/supabase-server';
+import { createAdminSupabase } from '@/lib/supabase/admin';
 
 export async function GET() {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const supabase = createServerSupabase();
+    const supabase = createAdminSupabase();
 
     const [pollsRes, predsRes] = await Promise.all([
       supabase

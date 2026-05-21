@@ -88,7 +88,7 @@ export default function PollsPage() {
         setPredictions(json.predictions ?? []);
       }
     } catch {
-      toast({ title: 'Failed to load', variant: 'destructive' });
+      toast({ title: 'Failed to load', variant: 'error' });
     } finally {
       setLoading(false);
     }
@@ -106,9 +106,9 @@ export default function PollsPage() {
         body: JSON.stringify(updated),
       });
       if (!res.ok) throw new Error();
-      toast({ title: 'Settings saved', variant: 'default' });
+      toast({ title: 'Settings saved', variant: 'success' });
     } catch {
-      toast({ title: 'Failed to save', variant: 'destructive' });
+      toast({ title: 'Failed to save', variant: 'error' });
     }
   };
 
