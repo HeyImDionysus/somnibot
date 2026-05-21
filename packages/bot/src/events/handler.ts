@@ -67,6 +67,8 @@ import { logMessageEdit, logMessageDelete } from '../features/message-log/index.
 import { handleXpAdminCommand } from '../features/levels/admin-commands.js';
 import { handlePurgeCommand } from '../features/moderation/purge-command.js';
 import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
+import type { EconomyManager } from '../features/economy/economy-manager.js';
+import { handleEconomyCommand } from '../features/economy/commands.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -254,6 +256,16 @@ export function registerEvents(client: SomniClient): void {
       }
     } catch (err) {
       console.error('[Events] XP processing error:', err);
+    }
+
+    // Phase 15: Economy chat income (runs alongside XP — separate cooldown)
+    try {
+      const econMgr = (client as unknown as Record<string, unknown>)._economyManager as EconomyManager | undefined;
+      if (econMgr) {
+        await econMgr.processChatIncome(message.author.id, message.channelId);
+      }
+    } catch (err) {
+      console.error('[Events] Economy chat income error:', err);
     }
   });
 
@@ -697,6 +709,22 @@ export function registerEvents(client: SomniClient): void {
             client.supabase,
             client.guildId,
           );
+          return;
+        }
+
+        // Phase 15: Economy commands — gated by economy_enabled
+        const economyCommands = new Set([
+          'balance', 'daily', 'weekly', 'monthly', 'work', 'crime', 'beg', 'search',
+          'deposit', 'withdraw', 'pay', 'rob', 'passive', 'shop', 'buy', 'sell',
+          'inventory', 'use', 'economy-leaderboard', 'collect-income',
+        ]);
+        if (economyCommands.has(interaction.commandName)) {
+          const econMgr = (client as unknown as Record<string, unknown>)._economyManager as EconomyManager | undefined;
+          if (econMgr) {
+            await handleEconomyCommand(interaction, econMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true });
+          }
           return;
         }
 

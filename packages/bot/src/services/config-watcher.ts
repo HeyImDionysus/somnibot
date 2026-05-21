@@ -118,6 +118,16 @@ export class ConfigWatcher {
           case 'settings':
             await this.reloadAll();
             break;
+          case 'economy':
+            // Invalidate economy config cache so next command picks up new values
+            {
+              const econMgr = (this.client as unknown as Record<string, unknown>)._economyManager;
+              if (econMgr && typeof (econMgr as Record<string, unknown>).invalidateConfig === 'function') {
+                (econMgr as { invalidateConfig: () => void }).invalidateConfig();
+              }
+            }
+            console.log('[ConfigWatcher] Economy config cache invalidated');
+            break;
           case 'all':
             await this.reloadAll();
             break;

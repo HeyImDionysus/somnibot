@@ -25,6 +25,7 @@ export type ConfigSection =
   | 'automations'
   | 'embeds'
   | 'commerce'
+  | 'economy'
   | 'settings'
   | 'all';
 

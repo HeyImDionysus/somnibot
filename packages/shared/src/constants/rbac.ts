@@ -51,6 +51,7 @@ export const SYSTEM_ROLES: Record<string, SystemRoleDefinition> = {
       'dashboard.view_workflows',
       'dashboard.manage_workflows',
       'dashboard.undo_changes',
+      'dashboard.manage_economy',
     ],
     priority: 80,
   },
@@ -129,6 +130,8 @@ export const ROUTE_PERMISSIONS: Record<string, DashboardPermission | null> = {
   '/customers': 'dashboard.manage_customers',
   '/licenses': 'dashboard.manage_licenses',
   '/store/promotions': 'dashboard.manage_store',
+  '/economy': 'dashboard.manage_economy',
+  '/economy/shop': 'dashboard.manage_economy',
   '/analytics': 'dashboard.view_analytics',
   '/audit': 'dashboard.view_audit',
   '/diagnostics': 'dashboard.view_diagnostics',
@@ -198,5 +201,6 @@ export const PERMISSION_DESCRIPTIONS: Record<DashboardPermission, string> = {
   'dashboard.manage_fraud': 'Manage fraud rules and resolve signals',
   'dashboard.view_workflows': 'View workflow events and dead-letter queue',
   'dashboard.manage_workflows': 'Retry, discard, and manage workflow items',
+  'dashboard.manage_economy': 'Configure virtual economy, shop items, and currency settings',
   'dashboard.undo_changes': 'Undo admin changes and view change history',
 };

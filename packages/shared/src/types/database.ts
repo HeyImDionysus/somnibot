@@ -130,7 +130,8 @@ export type DashboardPermission =
   | 'dashboard.manage_fraud'
   | 'dashboard.view_workflows'
   | 'dashboard.manage_workflows'
-  | 'dashboard.undo_changes';
+  | 'dashboard.undo_changes'
+  | 'dashboard.manage_economy';
 
 // Fraud Types
 export type FraudSignalType =
@@ -267,6 +268,35 @@ export interface DbGuildConfig {
   starboard_self_star: boolean;
   message_log_enabled: boolean;
   message_log_channel_id: string | null;
+  // V31: Economy Core
+  economy_enabled: boolean;
+  currency_name: string;
+  currency_emoji: string;
+  economy_starting_balance: number;
+  economy_daily_amount: number;
+  economy_weekly_amount: number;
+  economy_monthly_amount: number;
+  economy_streak_bonus_pct: number;
+  economy_work_cooldown_seconds: number;
+  economy_work_min: number;
+  economy_work_max: number;
+  economy_crime_success_pct: number;
+  economy_crime_fine_pct: number;
+  economy_crime_min: number;
+  economy_crime_max: number;
+  economy_chat_income_enabled: boolean;
+  economy_chat_income_min: number;
+  economy_chat_income_max: number;
+  economy_chat_income_cooldown_seconds: number;
+  economy_rob_enabled: boolean;
+  economy_rob_success_pct: number;
+  economy_rob_fine_pct: number;
+  economy_heist_enabled: boolean;
+  economy_passive_mode_allowed: boolean;
+  economy_pay_tax_pct: number;
+  economy_max_wallet: number;
+  economy_max_bank: number;
+  economy_log_channel_id: string | null;
 }
 
 export interface DbInstanceSettings {
@@ -1277,4 +1307,130 @@ export interface DbSyncAction {
   // V19 Audit: added missing schema fields
   action: string | null;
   drift_item: Record<string, unknown> | null;
+}
+
+// ── V31: Economy Core ───────────────────────────────────────
+
+export interface DbEconomyWallet {
+  guild_id: string;
+  user_id: string;
+  wallet: number;
+  bank: number;
+  bank_max: number;
+  passive: boolean;
+  total_earned: number;
+  total_spent: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type EconomyTransactionType =
+  | 'daily'
+  | 'weekly'
+  | 'monthly'
+  | 'work'
+  | 'crime'
+  | 'beg'
+  | 'search'
+  | 'chat_income'
+  | 'role_income'
+  | 'pay_send'
+  | 'pay_receive'
+  | 'rob_success'
+  | 'rob_fail'
+  | 'rob_victim'
+  | 'heist_win'
+  | 'heist_fail'
+  | 'shop_buy'
+  | 'shop_sell'
+  | 'deposit'
+  | 'withdraw'
+  | 'admin_add'
+  | 'admin_remove'
+  | 'admin_set';
+
+export interface DbEconomyTransaction {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  type: EconomyTransactionType;
+  amount: number;
+  balance_after: number;
+  description: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export type EconomyItemCategory =
+  | 'Tools'
+  | 'Bait'
+  | 'Seeds'
+  | 'Materials'
+  | 'Consumables'
+  | 'Roles'
+  | 'Cosmetics'
+  | 'Lootboxes';
+
+export interface EconomyItemUseEffect {
+  type: 'xp_boost' | 'coin_boost' | 'padlock' | 'alarm' | 'adventure_ticket' | 'role_grant' | 'custom';
+  duration_minutes?: number;
+  multiplier?: number;
+  role_id?: string;
+  custom_data?: Record<string, unknown>;
+}
+
+export interface DbEconomyItem {
+  id: string;
+  guild_id: string;
+  name: string;
+  description: string | null;
+  emoji: string;
+  category: EconomyItemCategory;
+  price: number;
+  sell_price: number;
+  stock: number | null;
+  max_per_user: number | null;
+  require_role_id: string | null;
+  grant_role_id: string | null;
+  usable: boolean;
+  use_effect: EconomyItemUseEffect | null;
+  durability: number | null;
+  tradeable: boolean;
+  active: boolean;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbEconomyInventory {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  item_id: string;
+  quantity: number;
+  durability_remaining: number | null;
+  acquired_at: string;
+  updated_at: string;
+}
+
+export interface DbEconomyRoleIncome {
+  id: string;
+  guild_id: string;
+  role_id: string;
+  amount: number;
+  interval_minutes: number;
+  created_at: string;
+}
+
+export type EconomyStreakType = 'daily' | 'weekly' | 'monthly';
+
+export interface DbEconomyStreak {
+  guild_id: string;
+  user_id: string;
+  streak_type: EconomyStreakType;
+  current_streak: number;
+  longest_streak: number;
+  last_claimed_at: string | null;
+  next_claim_at: string | null;
+  created_at: string;
 }

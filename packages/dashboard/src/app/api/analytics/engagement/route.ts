@@ -70,29 +70,59 @@ export async function GET(request: NextRequest) {
       avgResolutionHours = Math.round(totalMs / resolvedTickets.length / 3600000 * 10) / 10;
     }
 
-    // ── Levels ────────────────────────────────────────
-    const { data: levels } = await admin
-      .from('member_levels')
-      .select('level, xp, total_messages, voice_minutes')
-      .eq('guild_id', ctx.guildId);
+    // ── Levels (V31 perf fix: use Postgres aggregates instead of unbounded SELECT) ──
+    const { data: levelAgg } = await admin
+      .rpc('aggregate_member_levels', { p_guild_id: ctx.guildId })
+      .maybeSingle();
 
-    const totalTrackedMembers = levels?.length ?? 0;
-    const levelDistribution: Record<number, number> = {};
-    let totalMessages = 0;
-    let totalVoiceMinutes = 0;
-    let maxLevel = 0;
+    // Fallback: if the RPC doesn't exist yet, use a bounded count + minimal query
+    let totalTrackedMembers: number;
+    let totalMessages: number;
+    let totalVoiceMinutes: number;
+    let maxLevel: number;
+    let avgLevel: number;
+    let levelDistribution: Record<number, number>;
 
-    for (const l of levels ?? []) {
-      const bucket = Math.floor(l.level / 5) * 5; // 0-4, 5-9, 10-14, etc.
-      levelDistribution[bucket] = (levelDistribution[bucket] ?? 0) + 1;
-      totalMessages += l.total_messages ?? 0;
-      totalVoiceMinutes += l.voice_minutes ?? 0;
-      if (l.level > maxLevel) maxLevel = l.level;
+    if (levelAgg) {
+      totalTrackedMembers = levelAgg.total_members ?? 0;
+      totalMessages = levelAgg.total_messages ?? 0;
+      totalVoiceMinutes = levelAgg.total_voice_minutes ?? 0;
+      maxLevel = levelAgg.max_level ?? 0;
+      avgLevel = levelAgg.avg_level ?? 0;
+      levelDistribution = (levelAgg.level_distribution as Record<number, number>) ?? {};
+    } else {
+      // Graceful fallback: aggregate via count query + capped level fetch
+      const { count } = await admin
+        .from('member_levels')
+        .select('*', { count: 'exact', head: true })
+        .eq('guild_id', ctx.guildId);
+
+      totalTrackedMembers = count ?? 0;
+
+      const { data: aggRow } = await admin
+        .from('member_levels')
+        .select('level, total_messages, voice_minutes')
+        .eq('guild_id', ctx.guildId)
+        .limit(5000);
+
+      levelDistribution = {};
+      totalMessages = 0;
+      totalVoiceMinutes = 0;
+      maxLevel = 0;
+      let levelSum = 0;
+
+      for (const l of aggRow ?? []) {
+        const bucket = Math.floor(l.level / 5) * 5;
+        levelDistribution[bucket] = (levelDistribution[bucket] ?? 0) + 1;
+        totalMessages += l.total_messages ?? 0;
+        totalVoiceMinutes += l.voice_minutes ?? 0;
+        if (l.level > maxLevel) maxLevel = l.level;
+        levelSum += l.level;
+      }
+      avgLevel = totalTrackedMembers > 0
+        ? Math.round(levelSum / (aggRow?.length || 1) * 10) / 10
+        : 0;
     }
-
-    const avgLevel = totalTrackedMembers > 0
-      ? Math.round((levels?.reduce((s, l) => s + l.level, 0) ?? 0) / totalTrackedMembers * 10) / 10
-      : 0;
 
     // ── Members ───────────────────────────────────────
     const { data: members } = await admin
