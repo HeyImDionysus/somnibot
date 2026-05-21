@@ -119,18 +119,25 @@ export class GamesManager {
     return data?.wallet ?? 0;
   }
 
-  private async adjustBalance(guildId: string, userId: string, amount: number): Promise<void> {
+  /**
+   * Adjust a user's balance. Returns true on success, false on failure.
+   * Critical: never swallow errors — callers must handle failure.
+   */
+  private async adjustBalance(guildId: string, userId: string, amount: number): Promise<boolean> {
     if (amount >= 0) {
-      await (this.supabase as any).rpc('economy_add_balance', {
+      const { error } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: amount,
-      }).catch(() => {});
+      });
+      if (error) { console.error('[Games] economy_add_balance failed:', error.message); return false; }
     } else {
-      await (this.supabase as any).rpc('economy_subtract_balance', {
+      const { error } = await (this.supabase as any).rpc('economy_subtract_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: Math.abs(amount),
-      }).catch(() => {});
+      });
+      if (error) { console.error('[Games] economy_subtract_balance failed:', error.message); return false; }
     }
     // Track quest progress for any gamble action (win or loss)
     getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch(() => {});
+    return true;
   }
 
   private checkDailyLimit(guildId: string, userId: string, config: DbGuildConfig, amount: number): boolean {
@@ -192,15 +199,19 @@ export class GamesManager {
     const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
 
     if (win) {
-      await this.adjustBalance(guildId, userId, amount);
+      const ok = await this.adjustBalance(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle(`🪙 ${result}!`)
-          .setDescription(`You won **${amount.toLocaleString()}** coins! 🎉`)
-          .setColor(0x57F287)],
+          .setDescription(ok ? `You won **${amount.toLocaleString()}** coins! 🎉` : '⚠️ You won but the payout failed — contact an admin.')
+          .setColor(ok ? 0x57F287 : 0xFEE75C)],
       });
     } else {
-      await this.adjustBalance(guildId, userId, -amount);
+      const ok = await this.adjustBalance(guildId, userId, -amount);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       this.addDailyLoss(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder()
@@ -237,7 +248,11 @@ export class GamesManager {
 
     if (payout > 0) {
       const net = payout - amount;
-      await this.adjustBalance(guildId, userId, net);
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (!ok && net < 0) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
       await interaction.reply({
         embeds: [new EmbedBuilder()
@@ -246,7 +261,11 @@ export class GamesManager {
           .setColor(net >= 0 ? 0x57F287 : 0xFEE75C)],
       });
     } else {
-      await this.adjustBalance(guildId, userId, -amount);
+      const ok = await this.adjustBalance(guildId, userId, -amount);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       this.addDailyLoss(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder()
@@ -278,12 +297,16 @@ export class GamesManager {
     const desc = `${emojis[choice]} vs ${emojis[botChoice]}`;
 
     if (result === 'win') {
-      await this.adjustBalance(guildId, userId, amount);
+      const ok = await this.adjustBalance(guildId, userId, amount);
       await interaction.reply({
-        embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nYou win **${amount.toLocaleString()}** coins! 🎉`).setColor(0x57F287)],
+        embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\n${ok ? `You win **${amount.toLocaleString()}** coins! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
       });
     } else if (result === 'lose') {
-      await this.adjustBalance(guildId, userId, -amount);
+      const ok = await this.adjustBalance(guildId, userId, -amount);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       this.addDailyLoss(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nYou lost **${amount.toLocaleString()}** coins. 😢`).setColor(0xED4245)],
@@ -307,12 +330,16 @@ export class GamesManager {
     const botRoll = randomInt(1, 6) + randomInt(1, 6);
 
     if (playerRoll > botRoll) {
-      await this.adjustBalance(guildId, userId, amount);
+      const ok = await this.adjustBalance(guildId, userId, amount);
       await interaction.reply({
-        embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou win **${amount.toLocaleString()}** coins! 🎉`).setColor(0x57F287)],
+        embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\n${ok ? `You win **${amount.toLocaleString()}** coins! 🎉` : '⚠️ You won but the payout failed — contact an admin.'}`).setColor(ok ? 0x57F287 : 0xFEE75C)],
       });
     } else if (playerRoll < botRoll) {
-      await this.adjustBalance(guildId, userId, -amount);
+      const ok = await this.adjustBalance(guildId, userId, -amount);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       this.addDailyLoss(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou lost **${amount.toLocaleString()}** coins. 😢`).setColor(0xED4245)],
@@ -382,7 +409,11 @@ export class GamesManager {
     }
 
     if (net !== 0) {
-      await this.adjustBalance(guildId, userId, net);
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (!ok && net < 0) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
     }
 
@@ -455,7 +486,11 @@ export class GamesManager {
     if (multiplier > 0) {
       const payout = Math.floor(amount * multiplier);
       const net = payout - amount;
-      await this.adjustBalance(guildId, userId, net);
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (!ok && net < 0) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       await interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle('🎫 Scratch Card')
@@ -463,7 +498,11 @@ export class GamesManager {
           .setColor(0x57F287)],
       });
     } else {
-      await this.adjustBalance(guildId, userId, -amount);
+      const ok = await this.adjustBalance(guildId, userId, -amount);
+      if (!ok) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       this.addDailyLoss(guildId, userId, amount);
       await interaction.reply({
         embeds: [new EmbedBuilder()
@@ -498,7 +537,11 @@ export class GamesManager {
     const net = payout - amount;
 
     if (net !== 0) {
-      await this.adjustBalance(guildId, userId, net);
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (!ok && net < 0) {
+        await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
+        return;
+      }
       if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
     }
 

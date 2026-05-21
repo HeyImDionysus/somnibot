@@ -85,9 +85,10 @@ export class AchievementsManager {
       });
 
       if (def.reward_currency > 0) {
-        await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: rewardErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: userId, p_amount: def.reward_currency,
-        }).catch(() => {});
+        });
+        if (rewardErr) console.error(`[Achievements] Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
       }
 
       return def.name;
