@@ -246,8 +246,16 @@ async function handlePaymentCaptured(
   }
 
   if (!meta) {
-    console.log('[Webhook] Payment captured but no custom_id metadata');
-    return;
+    const captureId = resource.id as string | undefined;
+    console.error(
+      `[Webhook] Payment captured but custom_id is missing or malformed — ` +
+      `captureId=${captureId ?? 'unknown'}, raw custom_id=${JSON.stringify(customId)}. ` +
+      `Customer was charged but no order/entitlement was created. Manual reconciliation required.`,
+    );
+    // Throw so the webhook returns 500 and PayPal retries (up to ~3 days).
+    // This is preferable to silently losing the payment — the retry gives
+    // time for the root cause (e.g., frontend not setting custom_id) to be fixed.
+    throw new Error(`Payment captured without valid custom_id metadata (capture ${captureId})`);
   }
 
   // Find the pending order

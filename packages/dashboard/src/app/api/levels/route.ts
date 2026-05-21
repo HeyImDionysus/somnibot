@@ -107,7 +107,8 @@ export async function PUT(req: NextRequest) {
 
   const { data, error } = await supabase
     .from('guild_config')
-    .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' })
+    .update(updates)
+    .eq('guild_id', guildId)
     .select()
     .single();
 

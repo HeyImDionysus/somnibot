@@ -319,8 +319,9 @@ async function logValidation(
 }
 
 /**
- * Increment failed attempt counter on a license key.
- * If threshold exceeded (e.g., 50 failures), auto-suspend the key.
+ * Atomically increment failed attempt counter on a license key.
+ * If threshold exceeded (50 failures), auto-suspends the key in the same transaction.
+ * Uses an RPC to avoid read-modify-write TOCTOU under concurrent brute-force.
  */
 async function incrementFailedAttempts(
   supabase: ReturnType<typeof createAdminSupabase>,
@@ -329,30 +330,19 @@ async function incrementFailedAttempts(
   const SUSPEND_THRESHOLD = 50;
 
   try {
-    const { data: key } = await supabase
-      .from('license_keys')
-      .select('failed_attempts')
-      .eq('id', licenseKeyId)
-      .single();
+    const { data: newCount, error } = await supabase.rpc('license_increment_failed_attempts', {
+      p_license_key_id: licenseKeyId,
+      p_suspend_threshold: SUSPEND_THRESHOLD,
+    });
 
-    const newCount = (key?.failed_attempts ?? 0) + 1;
-
-    const update: Record<string, unknown> = {
-      failed_attempts: newCount,
-      last_failed_at: new Date().toISOString(),
-    };
-
-    // Auto-suspend if too many failures
-    if (newCount >= SUSPEND_THRESHOLD) {
-      update.status = 'suspended';
-      update.revocation_reason = 'auto_suspended_abuse';
-      console.warn(`[License] Key ${licenseKeyId} auto-suspended after ${newCount} failed attempts`);
+    if (error) {
+      console.error(`[License] license_increment_failed_attempts RPC failed:`, error.message);
+      return;
     }
 
-    await supabase
-      .from('license_keys')
-      .update(update)
-      .eq('id', licenseKeyId);
+    if (newCount >= SUSPEND_THRESHOLD) {
+      console.warn(`[License] Key ${licenseKeyId} auto-suspended after ${newCount} failed attempts`);
+    }
   } catch {
     // Non-critical
   }
