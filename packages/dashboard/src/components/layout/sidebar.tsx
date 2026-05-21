@@ -36,6 +36,8 @@ import {
   History,
   UserCog,
   ChevronDown,
+  Coins,
+  Store,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -91,6 +93,8 @@ const navigation: NavGroup[] = [
       { label: 'Reaction Roles', href: '/reaction-roles', icon: Palette, requires: 'discord' },
       { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord' },
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
+      { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
+      { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
     ],
   },
   {

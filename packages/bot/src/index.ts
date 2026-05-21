@@ -40,6 +40,7 @@ import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
+import { EconomyManager, buildEconomyCommands, registerEconomyManager } from './features/economy/index.js';
 
 /**
  * SomniBot entry point.
@@ -440,6 +441,38 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 12 (Commerce) initialization error:', err);
+      }
+    }
+
+    // Phase 15: Economy System (V31 — fake economy, NOT real money)
+    if (guild) {
+      try {
+        const { data: econConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (econConfig?.economy_enabled) {
+          const economyManager = new EconomyManager(
+            guild,
+            client.supabase,
+            client.valkey,
+          );
+          registerEconomyManager(economyManager);
+          (client as unknown as Record<string, unknown>)._economyManager = economyManager;
+
+          // Queue economy slash commands for bulk registration
+          const econCmds = buildEconomyCommands();
+          for (const cmd of Object.values(econCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Economy system started + ${Object.keys(econCmds).length} economy commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Economy system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15 (Economy) initialization error:', err);
       }
     }
 
