@@ -13,11 +13,14 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
 let _manager: PetsManager | null = null;
 export function registerPetsManager(mgr: PetsManager): void { _manager = mgr; }
 export function invalidatePetsCache(): void { _manager?.clearCache(); }
+
+const PET_PLAY_COOLDOWN_SECS = 30; // 30-second cooldown on /pet play
 
 const PET_TYPES: Record<string, { emoji: string; desc: string }> = {
   hunting: { emoji: '🐺', desc: 'Boosts hunt loot' },
@@ -36,12 +39,15 @@ const MAX_LEVEL = 50;
 export class PetsManager {
   private supabase: SupabaseClient;
   private client: Client | null = null;
+  private valkey: Redis;
   private configCache = new Map<string, DbGuildConfig>();
   private decayTimer: NodeJS.Timeout | null = null;
+  private initialDelayTimer: NodeJS.Timeout | null = null;
 
-  constructor(supabase: SupabaseClient, client?: Client) {
+  constructor(supabase: SupabaseClient, client?: Client, valkey?: Redis) {
     this.supabase = supabase as any;
     this.client = client ?? null;
+    this.valkey = valkey as Redis;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -55,8 +61,9 @@ export class PetsManager {
     const intervalHours = config?.economy_pet_decay_interval_hours ?? 1;
     const intervalMs = intervalHours * 60 * 60 * 1000;
 
-    // Initial decay after 5 minutes (let bot fully boot)
-    setTimeout(() => {
+    // Initial decay after 5 minutes (let bot fully boot) — tracked for cleanup
+    this.initialDelayTimer = setTimeout(() => {
+      this.initialDelayTimer = null;
       this.runDecayCycle(guildId).catch(console.error);
     }, 5 * 60 * 1000);
 
@@ -66,6 +73,7 @@ export class PetsManager {
   }
 
   stopDecayTimer(): void {
+    if (this.initialDelayTimer) { clearTimeout(this.initialDelayTimer); this.initialDelayTimer = null; }
     if (this.decayTimer) { clearInterval(this.decayTimer); this.decayTimer = null; }
   }
 
@@ -266,38 +274,60 @@ export class PetsManager {
       return;
     }
 
-    const newHunger = Math.min(100, pet.hunger + 30);
-    const newStatus = newHunger > 30 && pet.happiness > 30 ? 'happy' : 'sad';
-    await (this.supabase as any).from('economy_pets')
-      .update({ hunger: newHunger, status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id', pet.id);
+    // Atomic feed — prevents TOCTOU race with decay timer
+    const { data: feedResult } = await (this.supabase as any).rpc('economy_pet_feed', {
+      p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
+    });
+    const fr = feedResult as { success: boolean; old_hunger: number; new_hunger: number; status: string } | null;
+    if (!fr?.success) {
+      await interaction.reply({ content: '❌ Could not feed your pet — try again.', ephemeral: true });
+      return;
+    }
 
     getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch(() => {});
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🍖 Pet Fed!')
-        .setDescription(`${pet.name} ate happily! Hunger: ${pet.hunger} → ${newHunger}/100\nCost: **${cost}** coins`)
+        .setDescription(`${pet.name} ate happily! Hunger: ${fr.old_hunger} → ${fr.new_hunger}/100\nCost: **${cost}** coins`)
         .setColor(0x57F287)],
     });
   }
 
   async playWithPet(interaction: ChatInputCommandInteraction): Promise<void> {
     if (!(await this.ensureEnabled(interaction))) return;
-    const pet = await this.getPet(interaction.guildId!, interaction.user.id);
+    const guildId = interaction.guildId!;
+
+    // Cooldown check
+    const cdKey = `pet:play:${guildId}:${interaction.user.id}`;
+    const cdVal = await this.valkey.get(cdKey);
+    if (cdVal) {
+      const remaining = Math.ceil((parseInt(cdVal) - Date.now()) / 1000);
+      await interaction.reply({ content: `⏳ Your pet needs a break! Try again in **${remaining}s**.`, ephemeral: true });
+      return;
+    }
+
+    const pet = await this.getPet(guildId, interaction.user.id);
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
-    const newHappiness = Math.min(100, pet.happiness + 25);
-    const newEnergy = Math.max(0, pet.energy - 10);
-    const newStatus = pet.hunger > 30 && newHappiness > 30 ? 'happy' : 'sad';
-    await (this.supabase as any).from('economy_pets')
-      .update({ happiness: newHappiness, energy: newEnergy, status: newStatus, updated_at: new Date().toISOString() })
-      .eq('id', pet.id);
+    // Atomic play — prevents TOCTOU race with decay timer
+    const { data: playResult } = await (this.supabase as any).rpc('economy_pet_play', {
+      p_guild_id: guildId, p_user_id: interaction.user.id,
+      p_happiness_gain: 25, p_energy_cost: 10,
+    });
+    const pr = playResult as { success: boolean; old_happiness: number; new_happiness: number; new_energy: number; status: string } | null;
+    if (!pr?.success) {
+      await interaction.reply({ content: '❌ Could not play with your pet — try again.', ephemeral: true });
+      return;
+    }
+
+    // Set cooldown
+    await this.valkey.set(cdKey, String(Date.now() + PET_PLAY_COOLDOWN_SECS * 1000), 'EX', PET_PLAY_COOLDOWN_SECS);
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🎾 Playtime!')
-        .setDescription(`${pet.name} loved playing! Happiness: ${pet.happiness} → ${newHappiness}/100`)
+        .setDescription(`${pet.name} loved playing! Happiness: ${pr.old_happiness} → ${pr.new_happiness}/100`)
         .setColor(0x57F287)],
     });
   }
@@ -332,28 +362,25 @@ export class PetsManager {
     }
 
     const xpGain = 20 + Math.floor(Math.random() * 15);
-    const newXp = pet.xp + xpGain;
-    const newLevel = Math.min(MAX_LEVEL, Math.floor(newXp / XP_PER_LEVEL) + 1);
-    const leveledUp = newLevel > pet.level;
 
-    const updates: Record<string, any> = {
-      xp: newXp,
-      level: newLevel,
-      energy: Math.max(0, pet.energy - 20),
-      updated_at: new Date().toISOString(),
-    };
-
-    // Auto-assign stat point every 5 levels
-    if (leveledUp && newLevel % 5 === 0) {
-      const stats = ['attack', 'defense', 'speed', 'health'];
-      const stat = stats[Math.floor(Math.random() * stats.length)];
-      updates[stat] = pet[stat] + 1;
+    // Atomic train — prevents TOCTOU race with decay timer on energy/xp/level
+    const { data: trainResult } = await (this.supabase as any).rpc('economy_pet_train', {
+      p_guild_id: guildId, p_user_id: interaction.user.id,
+      p_xp_gain: xpGain, p_energy_cost: 20,
+    });
+    const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
+    if (!tr?.success) {
+      // Refund since training failed
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
+      }).catch(() => {});
+      await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
+      return;
     }
 
-    await (this.supabase as any).from('economy_pets').update(updates).eq('id', pet.id);
-
-    let desc = `${pet.name} trained hard! +${xpGain} XP (${newXp} total)\nCost: **${cost}** coins`;
-    if (leveledUp) desc += `\n🎉 *Level up! Now level ${newLevel}!*`;
+    let desc = `${pet.name} trained hard! +${xpGain} XP (${tr.new_xp} total)\nCost: **${cost}** coins`;
+    if (tr.leveled_up) desc += `\n🎉 *Level up! Now level ${tr.new_level}!*`;
+    if (tr.stat_bonus) desc += `\n⭐ +1 ${tr.stat_bonus}!`;
 
     getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch(() => {});
 

@@ -226,13 +226,15 @@ export class GatheringManager {
       await this.addToWallet(userId, totalValue);
     }
 
-    // Record transaction
+    // Record transaction (fetch real balance for accurate audit trail)
+    const { data: gatherWallet } = await this.supabase.from('economy_wallets')
+      .select('wallet').eq('guild_id', this.guild.id).eq('user_id', userId).maybeSingle();
     await this.supabase.from('economy_transactions').insert({
       guild_id: this.guild.id,
       user_id: userId,
       type: 'gather',
       amount: totalValue,
-      balance_after: 0, // approximate — economy-manager tracks exact balance
+      balance_after: (gatherWallet as any)?.wallet ?? 0,
       description: `${SOURCE_CONFIG[sourceType].pastVerb} ${quantity}x ${picked.item_name}`,
     });
 
@@ -341,11 +343,12 @@ export class GatheringManager {
   }
 
   private async addToWallet(userId: string, amount: number): Promise<void> {
-    await this.supabase.rpc('economy_add_balance', {
+    const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
+    if (error) console.error(`[Gathering] economy_add_balance failed for ${userId}:`, error.message);
   }
 
   private weightedRandom(entries: LootEntry[]): LootEntry {

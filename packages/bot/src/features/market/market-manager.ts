@@ -281,11 +281,12 @@ export class MarketManager {
     }
 
     // Pay seller (atomic — upserts wallet if needed)
-    await this.supabase.rpc('economy_add_balance', {
+    const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: listing.seller_id,
       p_amount: sellerEarnings,
     });
+    if (payErr) console.error(`[Market] economy_add_balance failed for seller ${listing.seller_id}:`, payErr.message);
 
     // Add item to buyer inventory atomically (prevents TOCTOU on quantity)
     await this.supabase.rpc('economy_upsert_inventory', {

@@ -12,6 +12,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
+import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
@@ -62,7 +63,6 @@ interface ActiveRound {
   answers: Map<string, number>; // userId → chosen index
   correctIndex: number;
   shuffled: string[];
-  streaks: Map<string, number>; // userId → current streak
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -70,13 +70,22 @@ interface ActiveRound {
 
 export class TriviaManager {
   private supabase: SupabaseClient;
+  private valkey: Redis;
   private configCache = new Map<string, DbGuildConfig>();
   private customQuestionCache = new Map<string, TriviaQuestion[]>();
   private activeRounds = new Map<string, ActiveRound>(); // channelId → round
-  private streaks = new Map<string, Map<string, number>>(); // guildId → (userId → streak)
 
-  constructor(supabase: SupabaseClient) {
+  constructor(supabase: SupabaseClient, valkey?: Redis) {
     this.supabase = supabase as any;
+    this.valkey = valkey as Redis;
+  }
+
+  /** Stop all active trivia rounds — called on shutdown */
+  stopAll(): void {
+    for (const [, round] of this.activeRounds) {
+      clearTimeout(round.timeout);
+    }
+    this.activeRounds.clear();
   }
 
   clearCache(): void {
@@ -110,13 +119,15 @@ export class TriviaManager {
     return questions;
   }
 
-  private getStreak(guildId: string, userId: string): number {
-    return this.streaks.get(guildId)?.get(userId) ?? 0;
+  /** Retrieve the trivia streak for a user (persisted in Valkey, survives restarts) */
+  private async getStreak(guildId: string, userId: string): Promise<number> {
+    const val = await this.valkey.get(`trivia:streak:${guildId}:${userId}`);
+    return val ? parseInt(val) : 0;
   }
 
-  private setStreak(guildId: string, userId: string, val: number): void {
-    if (!this.streaks.has(guildId)) this.streaks.set(guildId, new Map());
-    this.streaks.get(guildId)!.set(userId, val);
+  /** Persist the trivia streak (TTL: 24h — streaks expire after a day of inactivity) */
+  private async setStreak(guildId: string, userId: string, val: number): Promise<void> {
+    await this.valkey.set(`trivia:streak:${guildId}:${userId}`, String(val), 'EX', 86400);
   }
 
   async startRound(
@@ -187,7 +198,6 @@ export class TriviaManager {
       answers: new Map(),
       correctIndex,
       shuffled: allAnswers,
-      streaks: new Map(),
       timeout: setTimeout(() => this.endRound(channelId, interaction), 20_000),
     };
     this.activeRounds.set(channelId, round);
@@ -237,8 +247,8 @@ export class TriviaManager {
     for (const [userId, choice] of round.answers) {
       if (choice === round.correctIndex) {
         winners.push(userId);
-        const streak = this.getStreak(guildId, userId) + 1;
-        this.setStreak(guildId, userId, streak);
+        const streak = (await this.getStreak(guildId, userId)) + 1;
+        await this.setStreak(guildId, userId, streak);
         const streakBonus = 1 + (streak * streakMultPct) / 100;
         const payout = Math.floor(basePayout * hardMult * streakBonus);
 
@@ -252,7 +262,7 @@ export class TriviaManager {
         getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch(() => {});
       } else {
         losers.push(userId);
-        this.setStreak(guildId, userId, 0);
+        await this.setStreak(guildId, userId, 0);
       }
     }
 

@@ -316,13 +316,15 @@ export class FarmingManager {
     // Add earnings to wallet
     await this.addToWallet(userId, totalEarnings);
 
-    // Record transaction
+    // Record transaction (fetch real balance for accurate audit trail)
+    const { data: farmWallet } = await this.supabase.from('economy_wallets')
+      .select('wallet').eq('guild_id', this.guild.id).eq('user_id', userId).maybeSingle();
     await this.supabase.from('economy_transactions').insert({
       guild_id: this.guild.id,
       user_id: userId,
       type: 'farm_harvest',
       amount: totalEarnings,
-      balance_after: 0,
+      balance_after: (farmWallet as any)?.wallet ?? 0,
       description: `Harvested ${harvested.length} crops`,
     });
 
@@ -521,11 +523,12 @@ export class FarmingManager {
   }
 
   private async addToWallet(userId: string, amount: number): Promise<void> {
-    await this.supabase.rpc('economy_add_balance', {
+    const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
+    if (error) console.error(`[Farming] economy_add_balance failed for ${userId}:`, error.message);
   }
 
   private formatTime(seconds: number): string {
