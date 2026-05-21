@@ -184,7 +184,9 @@ export class MarketManager {
       .limit(15);
 
     if (searchTerm) {
-      query = query.ilike('item_name', `%${searchTerm}%`);
+      // Escape ILIKE special chars to prevent wildcard injection
+      const escaped = searchTerm.replace(/[%_\\]/g, (c) => `\\${c}`);
+      query = query.ilike('item_name', `%${escaped}%`);
     }
 
     const { data } = await query;
@@ -241,7 +243,19 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    const buyQty = Math.min(quantity, listing.remaining);
+    // Atomically decrement listing remaining (prevents TOCTOU — concurrent buys can't oversell)
+    const { data: actualBuyQty } = await this.supabase.rpc('economy_market_buy', {
+      p_listing_id: listing.id,
+      p_quantity: Math.min(quantity, listing.remaining),
+    });
+
+    if (!actualBuyQty || actualBuyQty <= 0) {
+      return new EmbedBuilder()
+        .setDescription('❌ This listing is no longer available.')
+        .setColor(0xff0000);
+    }
+
+    const buyQty = actualBuyQty as number;
     const totalCost = buyQty * listing.price_per_unit;
 
     // Calculate fee
@@ -256,6 +270,11 @@ export class MarketManager {
     });
 
     if (debitErr) {
+      // Refund listing remaining since we already decremented it
+      await this.supabase.rpc('economy_market_buy', {
+        p_listing_id: listing.id,
+        p_quantity: -buyQty,
+      }).catch(() => {});
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
         .setColor(0xff0000);
@@ -275,14 +294,6 @@ export class MarketManager {
       p_item_id: listing.item_id,
       p_quantity: buyQty,
     });
-
-    // Update listing
-    const newRemaining = listing.remaining - buyQty;
-    const newStatus = newRemaining <= 0 ? 'sold' : 'active';
-    await this.supabase
-      .from('economy_market_listings')
-      .update({ remaining: newRemaining, status: newStatus })
-      .eq('id', listing.id);
 
     // Quest progress — market trade (buyer counts as completing a trade)
     getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch(() => {});
