@@ -297,6 +297,16 @@ export interface DbGuildConfig {
   economy_max_wallet: number;
   economy_max_bank: number;
   economy_log_channel_id: string | null;
+
+  // V31 PR #43 — Gathering, Crafting, Farming
+  economy_gathering_enabled: boolean;
+  economy_gathering_cooldown_seconds: number;
+  economy_crafting_enabled: boolean;
+  economy_crafting_cooldown_seconds: number;
+  economy_farming_enabled: boolean;
+  economy_farm_grid_size: number;
+  economy_farming_wilt_enabled: boolean;
+  economy_fertilizer_time_reduction_pct: number;
 }
 
 export interface DbInstanceSettings {
@@ -1432,5 +1442,80 @@ export interface DbEconomyStreak {
   longest_streak: number;
   last_claimed_at: string | null;
   next_claim_at: string | null;
+  created_at: string;
+}
+
+// ── V31 PR #43: Gathering, Crafting, Farming ──────────────
+
+export type LootRarity = 'common' | 'uncommon' | 'rare' | 'epic' | 'legendary';
+export type LootSourceType = 'hunt' | 'dig' | 'mine';
+
+export interface DbLootTable {
+  id: string;
+  guild_id: string;
+  source_type: LootSourceType;
+  item_name: string;
+  emoji: string;
+  rarity: LootRarity;
+  min_qty: number;
+  max_qty: number;
+  weight: number;
+  tool_tier: number;
+  sell_value: number;
+  gives_item_id: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface RecipeInput {
+  item_name: string;
+  qty: number;
+}
+
+export interface DbRecipe {
+  id: string;
+  guild_id: string;
+  name: string;
+  emoji: string;
+  description: string | null;
+  inputs: RecipeInput[];
+  output_item_id: string | null;
+  output_qty: number;
+  cooldown_seconds: number;
+  category: string;
+  is_default: boolean;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbCrop {
+  id: string;
+  guild_id: string;
+  name: string;
+  emoji: string;
+  grow_seconds: number;
+  wilt_seconds: number;
+  sell_price: number;
+  seeds_returned: number;
+  seed_item_id: string | null;
+  category: string;
+  sort_order: number;
+  is_default: boolean;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbFarmPlot {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  plot_index: number;
+  crop_id: string | null;
+  planted_at: string | null;
+  watered_at: string | null;
+  fertilized: boolean;
+  harvested: boolean;
   created_at: string;
 }

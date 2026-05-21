@@ -1,0 +1,416 @@
+/**
+ * GatheringManager — /hunt, /dig, /mine commands.
+ *
+ * Uses loot tables with weighted random selection. Tool durability is consumed
+ * per use; better tool tiers unlock rarer drops. Cooldowns are enforced via Valkey.
+ *
+ * IMPORTANT: This is the "fake economy" — virtual items only.
+ */
+import { type Guild, EmbedBuilder } from 'discord.js';
+import type Valkey from 'iovalkey';
+import type { LootSourceType, LootRarity } from '@somnibot/shared';
+
+// ── Types ─────────────────────────────────────────────────
+
+export interface GatheringConfig {
+  economy_gathering_enabled: boolean;
+  economy_gathering_cooldown_seconds: number;
+}
+
+interface LootEntry {
+  id: string;
+  item_name: string;
+  emoji: string;
+  rarity: LootRarity;
+  min_qty: number;
+  max_qty: number;
+  weight: number;
+  tool_tier: number;
+  sell_value: number;
+  gives_item_id: string | null;
+}
+
+interface GatherResult {
+  item_name: string;
+  emoji: string;
+  rarity: LootRarity;
+  quantity: number;
+  sell_value: number;
+  gives_item_id: string | null;
+}
+
+const RARITY_COLORS: Record<LootRarity, number> = {
+  common: 0x9e9e9e,
+  uncommon: 0x4caf50,
+  rare: 0x2196f3,
+  epic: 0x9c27b0,
+  legendary: 0xff9800,
+};
+
+const RARITY_LABELS: Record<LootRarity, string> = {
+  common: '⬜ Common',
+  uncommon: '🟩 Uncommon',
+  rare: '🟦 Rare',
+  epic: '🟪 Epic',
+  legendary: '🟧 Legendary',
+};
+
+const SOURCE_CONFIG: Record<LootSourceType, { verb: string; pastVerb: string; toolEffect: string; emoji: string }> = {
+  hunt: { verb: 'hunting', pastVerb: 'hunted', toolEffect: 'hunting_rifle', emoji: '🏹' },
+  dig:  { verb: 'digging', pastVerb: 'dug up', toolEffect: 'shovel', emoji: '⛏️' },
+  mine: { verb: 'mining', pastVerb: 'mined', toolEffect: 'pickaxe', emoji: '⛏️' },
+};
+
+const FLAVOR_TEXT: Record<LootSourceType, string[]> = {
+  hunt: [
+    'You ventured deep into the wilderness…',
+    'You stalked your prey through the underbrush…',
+    'You set up camp and waited patiently…',
+    'You tracked footprints through the forest…',
+  ],
+  dig: [
+    'You started digging at a promising site…',
+    'Your shovel struck something buried…',
+    'You excavated carefully through layers of soil…',
+    'You noticed disturbed earth and began digging…',
+  ],
+  mine: [
+    'You descended into the mineshaft…',
+    'Your pickaxe rang against the rock face…',
+    'You followed a glittering vein deeper…',
+    'You cleared rubble to reveal fresh ore…',
+  ],
+};
+
+// Default loot tables seeded when gathering is first enabled
+const DEFAULT_LOOT: Record<LootSourceType, Array<Omit<LootEntry, 'id'>>> = {
+  hunt: [
+    { item_name: 'Rabbit Meat', emoji: '🥩', rarity: 'common', min_qty: 1, max_qty: 3, weight: 40, tool_tier: 0, sell_value: 15, gives_item_id: null },
+    { item_name: 'Deer Hide', emoji: '🦌', rarity: 'common', min_qty: 1, max_qty: 2, weight: 30, tool_tier: 0, sell_value: 25, gives_item_id: null },
+    { item_name: 'Bone Fragment', emoji: '🦴', rarity: 'uncommon', min_qty: 1, max_qty: 2, weight: 20, tool_tier: 0, sell_value: 40, gives_item_id: null },
+    { item_name: 'Wolf Fang', emoji: '🐺', rarity: 'rare', min_qty: 1, max_qty: 1, weight: 8, tool_tier: 1, sell_value: 120, gives_item_id: null },
+    { item_name: 'Phoenix Feather', emoji: '🔥', rarity: 'epic', min_qty: 1, max_qty: 1, weight: 2, tool_tier: 2, sell_value: 500, gives_item_id: null },
+  ],
+  dig: [
+    { item_name: 'Clay', emoji: '🧱', rarity: 'common', min_qty: 1, max_qty: 5, weight: 35, tool_tier: 0, sell_value: 8, gives_item_id: null },
+    { item_name: 'Fossil Fragment', emoji: '🦕', rarity: 'common', min_qty: 1, max_qty: 2, weight: 25, tool_tier: 0, sell_value: 20, gives_item_id: null },
+    { item_name: 'Old Coin', emoji: '🪙', rarity: 'uncommon', min_qty: 1, max_qty: 3, weight: 20, tool_tier: 0, sell_value: 35, gives_item_id: null },
+    { item_name: 'Amethyst Shard', emoji: '💎', rarity: 'rare', min_qty: 1, max_qty: 1, weight: 12, tool_tier: 1, sell_value: 100, gives_item_id: null },
+    { item_name: 'Ancient Artifact', emoji: '🏺', rarity: 'epic', min_qty: 1, max_qty: 1, weight: 5, tool_tier: 2, sell_value: 400, gives_item_id: null },
+    { item_name: 'Dragon Scale', emoji: '🐉', rarity: 'legendary', min_qty: 1, max_qty: 1, weight: 1, tool_tier: 3, sell_value: 2000, gives_item_id: null },
+  ],
+  mine: [
+    { item_name: 'Stone', emoji: '🪨', rarity: 'common', min_qty: 2, max_qty: 6, weight: 35, tool_tier: 0, sell_value: 5, gives_item_id: null },
+    { item_name: 'Iron Ore', emoji: '⛓️', rarity: 'common', min_qty: 1, max_qty: 3, weight: 25, tool_tier: 0, sell_value: 18, gives_item_id: null },
+    { item_name: 'Gold Nugget', emoji: '✨', rarity: 'uncommon', min_qty: 1, max_qty: 2, weight: 20, tool_tier: 0, sell_value: 50, gives_item_id: null },
+    { item_name: 'Emerald', emoji: '💚', rarity: 'rare', min_qty: 1, max_qty: 1, weight: 10, tool_tier: 1, sell_value: 150, gives_item_id: null },
+    { item_name: 'Diamond', emoji: '💎', rarity: 'epic', min_qty: 1, max_qty: 1, weight: 5, tool_tier: 2, sell_value: 600, gives_item_id: null },
+    { item_name: 'Void Crystal', emoji: '🔮', rarity: 'legendary', min_qty: 1, max_qty: 1, weight: 1, tool_tier: 3, sell_value: 2500, gives_item_id: null },
+  ],
+};
+
+export class GatheringManager {
+  private configCache: GatheringConfig | null = null;
+  private configCacheTTL = 30_000;
+  private configCacheTime = 0;
+
+  constructor(
+    private guild: Guild,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
+    private supabase: any,
+    private valkey: Valkey,
+  ) {}
+
+  // ── Config ──────────────────────────────────────────────
+
+  invalidateConfig(): void {
+    this.configCache = null;
+    this.configCacheTime = 0;
+  }
+
+  async getConfig(): Promise<GatheringConfig> {
+    const now = Date.now();
+    if (this.configCache && now - this.configCacheTime < this.configCacheTTL) {
+      return this.configCache;
+    }
+
+    const { data } = await this.supabase
+      .from('guild_config')
+      .select('economy_gathering_enabled, economy_gathering_cooldown_seconds')
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+
+    this.configCache = {
+      economy_gathering_enabled: data?.economy_gathering_enabled ?? false,
+      economy_gathering_cooldown_seconds: data?.economy_gathering_cooldown_seconds ?? 300,
+    };
+    this.configCacheTime = now;
+    return this.configCache;
+  }
+
+  // ── Gather ──────────────────────────────────────────────
+
+  async gather(
+    userId: string,
+    sourceType: LootSourceType,
+  ): Promise<{ embed: EmbedBuilder; result: GatherResult | null; error?: string }> {
+    const config = await this.getConfig();
+    if (!config.economy_gathering_enabled) {
+      return {
+        embed: new EmbedBuilder().setDescription('❌ Gathering is not enabled on this server.').setColor(0xff0000),
+        result: null,
+        error: 'disabled',
+      };
+    }
+
+    // Cooldown check
+    const cdKey = `economy:gather:${this.guild.id}:${userId}:${sourceType}`;
+    const lastGather = await this.valkey.get(cdKey);
+    if (lastGather) {
+      const remaining = Math.ceil((config.economy_gathering_cooldown_seconds * 1000 - (Date.now() - parseInt(lastGather, 10))) / 1000);
+      if (remaining > 0) {
+        return {
+          embed: new EmbedBuilder()
+            .setDescription(`⏳ You need to wait **${this.formatCooldown(remaining)}** before ${SOURCE_CONFIG[sourceType].verb} again.`)
+            .setColor(0xffa500),
+          result: null,
+          error: 'cooldown',
+        };
+      }
+    }
+
+    // Tool check — find required tool in inventory
+    const toolEffect = SOURCE_CONFIG[sourceType].toolEffect;
+    const toolResult = await this.checkTool(userId, toolEffect);
+    const toolTier = toolResult.tier;
+
+    // Get loot table for this source type
+    let lootTable = await this.getLootTable(sourceType);
+    if (lootTable.length === 0) {
+      // Seed defaults
+      await this.seedDefaultLoot(sourceType);
+      lootTable = await this.getLootTable(sourceType);
+    }
+
+    // Filter by tool tier
+    const available = lootTable.filter((e: LootEntry) => e.tool_tier <= toolTier);
+    if (available.length === 0) {
+      return {
+        embed: new EmbedBuilder()
+          .setDescription(`❌ No loot available for your current tool tier. Try upgrading your ${toolEffect.replace('_', ' ')}!`)
+          .setColor(0xff0000),
+        result: null,
+        error: 'no_loot',
+      };
+    }
+
+    // Weighted random selection
+    const picked = this.weightedRandom(available);
+    const quantity = this.randomInt(picked.min_qty, picked.max_qty);
+    const totalValue = picked.sell_value * quantity;
+
+    // Consume tool durability
+    if (toolResult.inventoryId) {
+      await this.consumeDurability(toolResult.inventoryId);
+    }
+
+    // Set cooldown
+    await this.valkey.set(cdKey, Date.now().toString(), 'EX', config.economy_gathering_cooldown_seconds);
+
+    // Give loot to inventory or add currency
+    if (picked.gives_item_id) {
+      await this.addToInventory(userId, picked.gives_item_id, quantity);
+    } else {
+      // Store as a "material" — add value to wallet
+      await this.addToWallet(userId, totalValue);
+    }
+
+    // Record transaction
+    await this.supabase.from('economy_transactions').insert({
+      guild_id: this.guild.id,
+      user_id: userId,
+      type: 'gather',
+      amount: totalValue,
+      balance_after: 0, // approximate — economy-manager tracks exact balance
+      description: `${SOURCE_CONFIG[sourceType].pastVerb} ${quantity}x ${picked.item_name}`,
+    });
+
+    const flavor = FLAVOR_TEXT[sourceType][Math.floor(Math.random() * FLAVOR_TEXT[sourceType].length)];
+    const embed = new EmbedBuilder()
+      .setTitle(`${SOURCE_CONFIG[sourceType].emoji} ${sourceType.charAt(0).toUpperCase() + sourceType.slice(1)} Results`)
+      .setDescription(
+        `${flavor}\n\n` +
+        `${picked.emoji} **${picked.item_name}** × ${quantity}\n` +
+        `${RARITY_LABELS[picked.rarity]}\n\n` +
+        (picked.gives_item_id
+          ? `Added to your inventory!`
+          : `💰 Sold for **${totalValue.toLocaleString()}** coins`) +
+        (toolResult.durabilityLeft !== null
+          ? `\n🔧 Tool durability: **${Math.max(0, toolResult.durabilityLeft - 1)}** uses left`
+          : ''),
+      )
+      .setColor(RARITY_COLORS[picked.rarity])
+      .setTimestamp();
+
+    return {
+      embed,
+      result: { item_name: picked.item_name, emoji: picked.emoji, rarity: picked.rarity, quantity, sell_value: totalValue, gives_item_id: picked.gives_item_id },
+    };
+  }
+
+  // ── Internal helpers ────────────────────────────────────
+
+  private async getLootTable(sourceType: LootSourceType): Promise<LootEntry[]> {
+    const { data } = await this.supabase
+      .from('economy_loot_tables')
+      .select('id, item_name, emoji, rarity, min_qty, max_qty, weight, tool_tier, sell_value, gives_item_id')
+      .eq('guild_id', this.guild.id)
+      .eq('source_type', sourceType)
+      .eq('active', true);
+
+    return (data as LootEntry[] | null) ?? [];
+  }
+
+  private async seedDefaultLoot(sourceType: LootSourceType): Promise<void> {
+    const defaults = DEFAULT_LOOT[sourceType];
+    if (!defaults) return;
+
+    const rows = defaults.map((d) => ({
+      guild_id: this.guild.id,
+      source_type: sourceType,
+      ...d,
+    }));
+
+    await this.supabase.from('economy_loot_tables').insert(rows);
+  }
+
+  private async checkTool(userId: string, toolEffect: string): Promise<{ tier: number; inventoryId: string | null; durabilityLeft: number | null }> {
+    // Find items in inventory that have this tool effect
+    const { data: items } = await this.supabase
+      .from('economy_inventory')
+      .select('id, quantity, durability_remaining, item_id, economy_items!inner(use_effect, category)')
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', userId)
+      .gt('quantity', 0);
+
+    if (!items || items.length === 0) {
+      return { tier: 0, inventoryId: null, durabilityLeft: null }; // bare hands
+    }
+
+    // Find items with matching tool effect
+    let bestTier = 0;
+    let bestInvId: string | null = null;
+    let bestDurability: number | null = null;
+
+    for (const inv of items as any[]) {
+      const effect = inv.economy_items?.use_effect;
+      if (!effect || typeof effect !== 'object') continue;
+      if ((effect as Record<string, unknown>).type !== toolEffect) continue;
+
+      const tier = ((effect as Record<string, unknown>).tier as number) ?? 1;
+      if (tier > bestTier) {
+        bestTier = tier;
+        bestInvId = inv.id as string;
+        bestDurability = inv.durability_remaining as number | null;
+      }
+    }
+
+    return { tier: bestTier, inventoryId: bestInvId, durabilityLeft: bestDurability };
+  }
+
+  private async consumeDurability(inventoryId: string): Promise<void> {
+    // Decrement durability; if it hits 0, remove the item
+    const { data } = await this.supabase
+      .from('economy_inventory')
+      .select('durability_remaining, quantity')
+      .eq('id', inventoryId)
+      .single();
+
+    if (!data) return;
+
+    if (data.durability_remaining !== null) {
+      const newDur = (data.durability_remaining as number) - 1;
+      if (newDur <= 0) {
+        // Tool broke — reduce quantity or delete
+        if ((data.quantity as number) <= 1) {
+          await this.supabase.from('economy_inventory').delete().eq('id', inventoryId);
+        } else {
+          await this.supabase.from('economy_inventory')
+            .update({ quantity: (data.quantity as number) - 1 })
+            .eq('id', inventoryId);
+        }
+      } else {
+        await this.supabase.from('economy_inventory')
+          .update({ durability_remaining: newDur, updated_at: new Date().toISOString() })
+          .eq('id', inventoryId);
+      }
+    }
+  }
+
+  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
+    const { data: existing } = await this.supabase
+      .from('economy_inventory')
+      .select('id, quantity')
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', userId)
+      .eq('item_id', itemId)
+      .maybeSingle();
+
+    if (existing) {
+      await this.supabase.from('economy_inventory')
+        .update({ quantity: (existing.quantity as number) + quantity, updated_at: new Date().toISOString() })
+        .eq('id', existing.id);
+    } else {
+      await this.supabase.from('economy_inventory').insert({
+        guild_id: this.guild.id,
+        user_id: userId,
+        item_id: itemId,
+        quantity,
+      });
+    }
+  }
+
+  private async addToWallet(userId: string, amount: number): Promise<void> {
+    const { data: wallet } = await this.supabase
+      .from('economy_wallets')
+      .select('wallet')
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (wallet) {
+      await this.supabase.from('economy_wallets')
+        .update({ wallet: (wallet.wallet as number) + amount, updated_at: new Date().toISOString() })
+        .eq('guild_id', this.guild.id)
+        .eq('user_id', userId);
+    } else {
+      await this.supabase.from('economy_wallets').insert({
+        guild_id: this.guild.id,
+        user_id: userId,
+        wallet: amount,
+        bank: 0,
+      });
+    }
+  }
+
+  private weightedRandom(entries: LootEntry[]): LootEntry {
+    const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
+    let roll = Math.random() * totalWeight;
+    for (const entry of entries) {
+      roll -= entry.weight;
+      if (roll <= 0) return entry;
+    }
+    return entries[entries.length - 1];
+  }
+
+  private randomInt(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  private formatCooldown(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
+}
