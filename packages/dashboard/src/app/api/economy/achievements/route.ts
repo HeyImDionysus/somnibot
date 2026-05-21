@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
     .select()
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  await notifyBot(auth.guildId);
+  await notifyBot('economy');
   return NextResponse.json({ data });
 }
 
@@ -64,7 +64,7 @@ export async function PUT(req: NextRequest) {
     .select()
     .single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  await notifyBot(auth.guildId);
+  await notifyBot('economy');
   return NextResponse.json({ data });
 }
 
@@ -80,6 +80,6 @@ export async function DELETE(req: NextRequest) {
     .eq('id', id)
     .eq('guild_id', auth.guildId);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  await notifyBot(auth.guildId);
+  await notifyBot('economy');
   return NextResponse.json({ success: true });
 }
