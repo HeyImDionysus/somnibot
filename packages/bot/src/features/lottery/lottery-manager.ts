@@ -20,6 +20,8 @@ const SCHEDULE_MS: Record<string, number> = {
   '12h': 12 * 60 * 60 * 1000,
   'daily': 24 * 60 * 60 * 1000,
   'weekly': 7 * 24 * 60 * 60 * 1000,
+  'biweekly': 14 * 24 * 60 * 60 * 1000,
+  'monthly': 30 * 24 * 60 * 60 * 1000,
 };
 
 // ── Manager ───────────────────────────────────────────────
@@ -237,18 +239,17 @@ export class LotteryManager {
 
     await (this.supabase as any).from('economy_lottery_tickets').insert(tickets);
 
-    // Update jackpot
-    await (this.supabase as any)
-      .from('economy_lottery_drawings')
-      .update({ jackpot: drawing.jackpot + totalCost })
-      .eq('id', drawing.id);
+    // Atomically increment jackpot to prevent TOCTOU race
+    const { data: newJackpot } = await (this.supabase as any).rpc('lottery_increment_jackpot', {
+      p_drawing_id: drawing.id, p_amount: totalCost,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🎟️ Lottery Tickets Purchased!')
         .setDescription(
           `You bought **${count}** ticket(s) for **${totalCost.toLocaleString()}** coins.\n` +
-          `Current jackpot: **${(drawing.jackpot + totalCost).toLocaleString()}** coins 💰`
+          `Current jackpot: **${(newJackpot ?? drawing.jackpot + totalCost).toLocaleString()}** coins 💰`
         )
         .setColor(0x5865F2)],
     });
