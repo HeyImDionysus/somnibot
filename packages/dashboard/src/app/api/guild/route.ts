@@ -82,6 +82,7 @@ export async function GET() {
     .single();
 
   return NextResponse.json({
+    success: true,
     guild,
     config: guild.guild_config?.[0] ?? null,
     desiredState,
