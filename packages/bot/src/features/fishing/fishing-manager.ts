@@ -426,25 +426,10 @@ export class FishingManager {
   // ── Helpers ───────────────────────────────────────────
 
   private async addCurrency(userId: string, amount: number): Promise<void> {
-    const { data } = await this.supabase
-      .from('economy_wallets')
-      .select('id, wallet')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .single();
-
-    if (data) {
-      await this.supabase
-        .from('economy_wallets')
-        .update({ wallet: (data as any).wallet + amount })
-        .eq('id', (data as any).id);
-    } else {
-      await this.supabase.from('economy_wallets').insert({
-        guild_id: this.guild.id,
-        user_id: userId,
-        wallet: amount,
-        bank: 0,
-      });
-    }
+    await this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: amount,
+    });
   }
 }
