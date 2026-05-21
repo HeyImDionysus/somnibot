@@ -81,7 +81,7 @@ export default function GamesPage() {
       const res = await fetch('/api/guild');
       if (res.ok) {
         const json = await res.json();
-        const gc = json.guild_config ?? json;
+        const gc = json.config ?? {};
         setConfig({
           economy_games_enabled: gc.economy_games_enabled ?? false,
           economy_daily_loss_limit: gc.economy_daily_loss_limit ?? 0,

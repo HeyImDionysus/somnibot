@@ -136,7 +136,7 @@ export default function TriviaPage() {
       ]);
       if (cfgRes.ok) {
         const cfgJson = await cfgRes.json();
-        const gc = cfgJson.guild_config ?? cfgJson;
+        const gc = cfgJson.config ?? {};
         setConfig({
           economy_trivia_enabled: gc.economy_trivia_enabled ?? false,
           economy_trivia_cooldown_seconds: gc.economy_trivia_cooldown_seconds ?? 30,
