@@ -8,6 +8,7 @@
  */
 
 import { type Guild, EmbedBuilder } from 'discord.js';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -292,6 +293,9 @@ export class MarketManager {
       .from('economy_market_listings')
       .update({ remaining: newRemaining, status: newStatus })
       .eq('id', listing.id);
+
+    // Quest progress — market trade (buyer counts as completing a trade)
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch(() => {});
 
     return new EmbedBuilder()
       .setTitle('✅ Purchase Complete!')

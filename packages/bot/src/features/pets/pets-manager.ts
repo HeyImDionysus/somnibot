@@ -1,10 +1,15 @@
 /**
  * PetsManager — virtual pet system with care, training, battles, and prestige.
+ *
+ * V36: Added schedulePetDecay() — periodic stat reduction based on
+ * economy_pet_decay_rate. Pets become 'sick'/'sad' at low stats.
+ * Optional DM notifications to owners.
  */
 import {
   EmbedBuilder,
   type ChatInputCommandInteraction,
   type User,
+  type Client,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
@@ -29,13 +34,107 @@ const MAX_LEVEL = 50;
 
 export class PetsManager {
   private supabase: SupabaseClient;
+  private client: Client | null = null;
   private configCache = new Map<string, DbGuildConfig>();
+  private decayTimer: NodeJS.Timeout | null = null;
 
-  constructor(supabase: SupabaseClient) {
+  constructor(supabase: SupabaseClient, client?: Client) {
     this.supabase = supabase as any;
+    this.client = client ?? null;
   }
 
   clearCache(): void { this.configCache.clear(); }
+
+  /** Start the pet decay timer. Call once at boot. */
+  schedulePetDecay(guildId: string): void {
+    if (this.decayTimer) { clearInterval(this.decayTimer); this.decayTimer = null; }
+
+    // Run decay every hour (the rate is per-interval, configurable)
+    const ONE_HOUR = 60 * 60 * 1000;
+
+    // Initial decay after 5 minutes (let bot fully boot)
+    setTimeout(() => {
+      this.runDecayCycle(guildId).catch(console.error);
+    }, 5 * 60 * 1000);
+
+    this.decayTimer = setInterval(() => {
+      this.runDecayCycle(guildId).catch(console.error);
+    }, ONE_HOUR);
+  }
+
+  stopDecayTimer(): void {
+    if (this.decayTimer) { clearInterval(this.decayTimer); this.decayTimer = null; }
+  }
+
+  private async runDecayCycle(guildId: string): Promise<void> {
+    try {
+      const config = await this.getConfig(guildId);
+      if (!config?.economy_pets_enabled) return;
+
+      const decayRate = config.economy_pet_decay_rate ?? 5;
+      const threshold = (config as any).economy_pet_low_stat_threshold ?? 20;
+      const shouldNotify = (config as any).economy_pet_notify_owner ?? true;
+
+      // Get all pets for this guild
+      const { data: pets } = await (this.supabase as any)
+        .from('economy_pets')
+        .select('id, guild_id, user_id, name, hunger, happiness, energy, status')
+        .eq('guild_id', guildId);
+
+      if (!pets || pets.length === 0) return;
+
+      for (const pet of pets) {
+        const newHunger = Math.max(0, pet.hunger - decayRate);
+        const newHappiness = Math.max(0, pet.happiness - Math.floor(decayRate * 0.8));
+        const newEnergy = Math.min(100, pet.energy + Math.floor(decayRate * 0.5)); // Energy recovers slowly
+
+        // Determine status
+        let newStatus: string;
+        if (newHunger === 0 || newHappiness === 0) {
+          newStatus = 'sick';
+        } else if (newHunger <= threshold || newHappiness <= threshold) {
+          newStatus = 'sad';
+        } else {
+          newStatus = 'happy';
+        }
+
+        await (this.supabase as any).from('economy_pets').update({
+          hunger: newHunger,
+          happiness: newHappiness,
+          energy: newEnergy,
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+        }).eq('id', pet.id);
+
+        // Notify owner if pet is getting low and wasn't already sad/sick
+        if (shouldNotify && this.client && pet.status === 'happy' && (newStatus === 'sad' || newStatus === 'sick')) {
+          try {
+            const user = await this.client.users.fetch(pet.user_id).catch(() => null);
+            if (user) {
+              const emoji = newStatus === 'sick' ? '🤒' : '😢';
+              await user.send({
+                embeds: [new EmbedBuilder()
+                  .setTitle(`${emoji} ${pet.name} needs attention!`)
+                  .setDescription(
+                    `Your pet is feeling **${newStatus}**!\n\n` +
+                    `🍖 Hunger: **${newHunger}/100**\n` +
+                    `😄 Happiness: **${newHappiness}/100**\n\n` +
+                    `Use \`/pet feed\` and \`/pet play\` to cheer them up!`
+                  )
+                  .setColor(newStatus === 'sick' ? 0xED4245 : 0xFEE75C)],
+              }).catch(() => {}); // Ignore DM failures (user may have DMs disabled)
+            }
+          } catch {
+            // Ignore notification failures
+          }
+        }
+      }
+
+      console.log(`[PetDecay] Processed ${pets.length} pets (decay=${decayRate}, guild=${guildId})`);
+    } catch (err) {
+      console.error('[PetDecay] Decay cycle error:', err);
+    }
+  }
 
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);

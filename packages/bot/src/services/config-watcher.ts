@@ -47,6 +47,7 @@ import { invalidatePetsCache } from '../features/pets/index.js';
 import { invalidateQuestsCache } from '../features/quests/index.js';
 import { invalidateAchievementsCache } from '../features/achievements/index.js';
 import { invalidateProfilesCache } from '../features/profiles/index.js';
+import { invalidateHeistCache } from '../features/heist/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -149,6 +150,7 @@ export class ConfigWatcher {
             invalidateQuestsCache();
             invalidateAchievementsCache();
             invalidateProfilesCache();
+            invalidateHeistCache();
             console.log('[ConfigWatcher] Economy/Gathering/Crafting/Farming config cache invalidated');
             break;
           case 'all':
@@ -326,6 +328,7 @@ export class ConfigWatcher {
     invalidateQuestsCache();
     invalidateAchievementsCache();
     invalidateProfilesCache();
+    invalidateHeistCache();
     console.log('[ConfigWatcher] ✅ Full config reload complete (incl. economy caches)');
   }
 
