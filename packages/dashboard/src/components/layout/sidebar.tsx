@@ -42,6 +42,8 @@ import {
   Sprout,
   Fish,
   Swords,
+  Brain,
+  Gamepad2,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -104,12 +106,15 @@ const navigation: NavGroup[] = [
       { label: 'Fishing', href: '/economy/fishing', icon: Fish, requires: 'discord' },
       { label: 'Adventures', href: '/economy/adventures', icon: Swords, requires: 'discord' },
       { label: 'Market', href: '/economy/market', icon: Store, requires: 'discord' },
+      { label: 'Trivia', href: '/economy/trivia', icon: Brain, requires: 'discord' },
+      { label: 'Games & Lottery', href: '/economy/games', icon: Gamepad2, requires: 'discord' },
     ],
   },
   {
     id: 'features',
     title: 'Features',
     items: [
+      { label: 'Polls & Predictions', href: '/polls', icon: BarChart3, requires: 'discord' },
       { label: 'Music', href: '/music', icon: Music, requires: 'lavalink' },
       { label: 'Temp Channels', href: '/temp-channels', icon: Mic2, requires: 'discord' },
       { label: 'Stats Channels', href: '/stats-channels', icon: BarChart3, requires: 'discord' },
