@@ -354,12 +354,12 @@ export class PollsManager {
     // Check balance
     const { data: wallet } = await (this.supabase as any)
       .from('economy_wallets')
-      .select('balance')
+      .select('wallet')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .single();
 
-    if (!wallet || wallet.balance < amount) {
+    if (!wallet || wallet.wallet < amount) {
       await interaction.reply({ content: '❌ Insufficient balance.', ephemeral: true });
       return;
     }

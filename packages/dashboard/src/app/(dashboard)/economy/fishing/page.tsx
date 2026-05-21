@@ -83,7 +83,7 @@ export default function FishingPage() {
       ]);
       if (cfgRes.ok) {
         const cfgJson = await cfgRes.json();
-        const gc = cfgJson.data?.guild_config ?? cfgJson.guild_config ?? {};
+        const gc = cfgJson.config ?? {};
         setConfig({ ...DEFAULT_CONFIG, ...gc });
       }
       if (speciesRes.ok) {

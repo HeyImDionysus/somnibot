@@ -278,9 +278,10 @@ export default function CraftingPage() {
       }
       if (settingsRes.ok) {
         const data = await settingsRes.json();
+        const gc = data.config ?? {};
         setSettings({
-          economy_crafting_enabled: data.economy_crafting_enabled ?? false,
-          economy_crafting_cooldown_seconds: data.economy_crafting_cooldown_seconds ?? 60,
+          economy_crafting_enabled: gc.economy_crafting_enabled ?? false,
+          economy_crafting_cooldown_seconds: gc.economy_crafting_cooldown_seconds ?? 60,
         });
       }
     } catch {

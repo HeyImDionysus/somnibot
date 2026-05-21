@@ -38,7 +38,7 @@ export default function PetsPage() {
       const res = await fetch('/api/guild');
       if (res.ok) {
         const json = await res.json();
-        const gc = json.data?.guild_config ?? json.guild_config ?? {};
+        const gc = json.config ?? {};
         setConfig({ ...DEFAULT_CONFIG, ...gc });
       }
     } catch {

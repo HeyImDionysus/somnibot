@@ -40,7 +40,7 @@ export class ProfilesManager {
 
     // Fetch wallet
     const { data: wallet } = await (this.supabase as any)
-      .from('economy_wallets').select('balance, bank').eq('guild_id', guildId).eq('user_id', target.id).single();
+      .from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', target.id).single();
 
     // Fetch pet
     const { data: pet } = await (this.supabase as any)
@@ -55,7 +55,7 @@ export class ProfilesManager {
       .from('economy_user_achievements').select('*', { count: 'exact', head: true })
       .eq('guild_id', guildId).eq('user_id', target.id);
 
-    const balance = wallet?.balance ?? 0;
+    const balance = wallet?.wallet ?? 0;
     const bank = wallet?.bank ?? 0;
     const netWorth = balance + bank;
 
