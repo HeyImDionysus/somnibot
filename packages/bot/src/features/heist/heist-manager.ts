@@ -143,10 +143,14 @@ export class HeistManager {
       return;
     }
 
-    // Deduct entry fee
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    // Deduct entry fee (atomic — raises on insufficient balance)
+    const { error: feeErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
+    if (feeErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${entryFee.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     // Pick random target
     const target = HEIST_TARGETS[Math.floor(Math.random() * HEIST_TARGETS.length)];
@@ -262,10 +266,14 @@ export class HeistManager {
       return;
     }
 
-    // Deduct fee
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    // Deduct fee (atomic — raises on insufficient balance)
+    const { error: joinFeeErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
+    if (joinFeeErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${entryFee.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     // Add participant
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];

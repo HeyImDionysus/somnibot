@@ -663,7 +663,7 @@ async function main(): Promise<void> {
           .maybeSingle();
 
         if (trivConfig?.economy_enabled && trivConfig?.economy_trivia_enabled) {
-          const triviaManager = new TriviaManager(client.supabase);
+          const triviaManager = new TriviaManager(client.supabase, client.valkey);
           registerTriviaManager(triviaManager);
           (client as unknown as Record<string, unknown>)._triviaManager = triviaManager;
 
@@ -770,7 +770,7 @@ async function main(): Promise<void> {
         const { data: petsCfg } = await client.supabase
           .from('guild_config').select('economy_enabled, economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
         if (petsCfg?.economy_enabled && petsCfg?.economy_pets_enabled) {
-          const petsManager = new PetsManager(client.supabase, client);
+          const petsManager = new PetsManager(client.supabase, client, client.valkey);
           registerPetsManager(petsManager);
           (client as unknown as Record<string, unknown>)._petsManager = petsManager;
 
@@ -1101,6 +1101,9 @@ async function main(): Promise<void> {
     if (petsMgr?.stopDecayTimer) petsMgr.stopDecayTimer();
     const questsMgr = (client as unknown as Record<string, unknown>)._questsManager as { stopResetTimer?: () => void } | undefined;
     if (questsMgr?.stopResetTimer) questsMgr.stopResetTimer();
+    // Trivia: cancel active round timeouts
+    const triviaMgr = (client as unknown as Record<string, unknown>)._triviaManager as { stopAll?: () => void } | undefined;
+    if (triviaMgr?.stopAll) triviaMgr.stopAll();
     // Cross-feature bridge + Discord native services
     const crossBridge = (client as unknown as Record<string, unknown>)._crossFeatureBridge as { stop?: () => void } | undefined;
     if (crossBridge?.stop) crossBridge.stop();

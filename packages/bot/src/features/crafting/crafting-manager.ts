@@ -223,21 +223,28 @@ export class CraftingManager {
       consumed.push({ itemName: input.item_name, qty: input.qty, itemId: result.itemId });
     }
 
-    // Give output
-    if (recipe.output_item_id) {
-      await this.addToInventory(userId, recipe.output_item_id, recipe.output_qty);
+    // Give output — guard against misconfigured recipes with no output
+    if (!recipe.output_item_id) {
+      return {
+        embed: new EmbedBuilder()
+          .setDescription('❌ This recipe has no output item configured. Contact an admin to fix it.')
+          .setColor(0xff0000),
+      };
     }
+    await this.addToInventory(userId, recipe.output_item_id, recipe.output_qty);
 
     // Set cooldown
     await this.valkey.set(cdKey, Date.now().toString(), 'EX', recipe.cooldown_seconds || config.economy_crafting_cooldown_seconds);
 
-    // Record transaction
+    // Record transaction (fetch real balance for accurate audit trail)
+    const { data: craftWallet } = await this.supabase.from('economy_wallets')
+      .select('wallet').eq('guild_id', this.guild.id).eq('user_id', userId).maybeSingle();
     await this.supabase.from('economy_transactions').insert({
       guild_id: this.guild.id,
       user_id: userId,
       type: 'craft',
       amount: 0,
-      balance_after: 0,
+      balance_after: (craftWallet as any)?.wallet ?? 0,
       description: `Crafted ${recipe.output_qty}x ${recipe.name}`,
     });
 
