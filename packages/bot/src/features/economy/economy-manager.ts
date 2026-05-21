@@ -9,7 +9,6 @@
  */
 import type { Guild, TextChannel } from 'discord.js';
 import { EmbedBuilder } from 'discord.js';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 
 // ── Types ─────────────────────────────────────────────────
@@ -160,7 +159,8 @@ export class EconomyManager {
 
   constructor(
     private guild: Guild,
-    private supabase: SupabaseClient,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client (economy tables not in generated schema yet)
+    private supabase: any,
     private valkey: Valkey,
   ) {}
 

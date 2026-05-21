@@ -32,6 +32,7 @@ import { invalidateLevelCaches } from '../features/levels/index.js';
 import { invalidateAntiRaidCache } from '../features/anti-raid/index.js';
 import { invalidateStarboardCache } from '../features/starboard/index.js';
 import { invalidateMessageLogCache } from '../features/message-log/index.js';
+import { invalidateEconomyCache } from '../features/economy/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -119,13 +120,7 @@ export class ConfigWatcher {
             await this.reloadAll();
             break;
           case 'economy':
-            // Invalidate economy config cache so next command picks up new values
-            {
-              const econMgr = (this.client as unknown as Record<string, unknown>)._economyManager;
-              if (econMgr && typeof (econMgr as Record<string, unknown>).invalidateConfig === 'function') {
-                (econMgr as { invalidateConfig: () => void }).invalidateConfig();
-              }
-            }
+            invalidateEconomyCache();
             console.log('[ConfigWatcher] Economy config cache invalidated');
             break;
           case 'all':
