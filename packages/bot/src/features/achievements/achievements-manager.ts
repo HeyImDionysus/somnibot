@@ -110,7 +110,7 @@ export class AchievementsManager {
     const { data: wallet } = await (this.supabase as any)
       .from('economy_wallets').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
 
-    const netWorth = (wallet?.balance ?? 0) + (wallet?.bank ?? 0);
+    const netWorth = (wallet?.wallet ?? 0) + (wallet?.bank ?? 0);
     const minLevel = config.economy_prestige_min_level ?? 50;
     const minNetWorth = config.economy_prestige_min_net_worth ?? 1000000;
 
@@ -133,7 +133,7 @@ export class AchievementsManager {
 
     // Reset wallet and bank
     await (this.supabase as any).from('economy_wallets')
-      .update({ balance: 0, bank: 0 }).eq('guild_id', guildId).eq('user_id', userId);
+      .update({ wallet: 0, bank: 0 }).eq('guild_id', guildId).eq('user_id', userId);
 
     // Upsert prestige record
     if (existing) {

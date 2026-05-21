@@ -246,12 +246,7 @@ export class TriviaManager {
           p_guild_id: guildId,
           p_user_id: userId,
           p_amount: payout,
-        }).catch(() => {
-          // Fallback: direct wallet update
-          return (this.supabase as any)
-            .from('economy_wallets')
-            .upsert({ guild_id: guildId, user_id: userId, balance: payout }, { onConflict: 'guild_id,user_id' });
-        });
+        }).catch(() => {});
       } else {
         losers.push(userId);
         this.setStreak(guildId, userId, 0);

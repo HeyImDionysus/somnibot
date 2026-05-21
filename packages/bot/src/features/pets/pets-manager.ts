@@ -51,7 +51,17 @@ export class PetsManager {
     return data;
   }
 
+  private async ensureEnabled(interaction: ChatInputCommandInteraction): Promise<boolean> {
+    const config = await this.getConfig(interaction.guildId!);
+    if (!config?.economy_pets_enabled) {
+      await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true });
+      return false;
+    }
+    return true;
+  }
+
   async viewPet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const target = interaction.options.getUser('user') ?? interaction.user;
     const pet = await this.getPet(interaction.guildId!, target.id);
 
@@ -85,6 +95,7 @@ export class PetsManager {
   }
 
   async buyPet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
     const petType = interaction.options.getString('type') ?? 'hunting';
@@ -97,9 +108,9 @@ export class PetsManager {
 
     const price = PET_PRICES[petType] ?? 5000;
     const { data: wallet } = await (this.supabase as any)
-      .from('economy_wallets').select('balance').eq('guild_id', guildId).eq('user_id', userId).single();
+      .from('economy_wallets').select('wallet').eq('guild_id', guildId).eq('user_id', userId).single();
 
-    if (!wallet || wallet.balance < price) {
+    if (!wallet || wallet.wallet < price) {
       await interaction.reply({ content: `❌ You need **${price.toLocaleString()}** coins. Check your /balance.`, ephemeral: true });
       return;
     }
@@ -122,6 +133,7 @@ export class PetsManager {
   }
 
   async feedPet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_feed_cost ?? 50;
@@ -149,6 +161,7 @@ export class PetsManager {
   }
 
   async playWithPet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const pet = await this.getPet(interaction.guildId!, interaction.user.id);
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
@@ -168,6 +181,7 @@ export class PetsManager {
   }
 
   async trainPet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
     const cost = config?.economy_pet_train_cost ?? 100;
@@ -211,6 +225,7 @@ export class PetsManager {
   }
 
   async renamePet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const name = interaction.options.getString('name')!;
     const pet = await this.getPet(interaction.guildId!, interaction.user.id);
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
@@ -222,7 +237,13 @@ export class PetsManager {
   }
 
   async battlePet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
+    const config = await this.getConfig(guildId);
+    if (!config?.economy_pet_battle_enabled) {
+      await interaction.reply({ content: '🚫 Pet battles are not enabled.', ephemeral: true });
+      return;
+    }
     const opponent = interaction.options.getUser('user')!;
     if (opponent.id === interaction.user.id) {
       await interaction.reply({ content: '❌ You can\'t battle yourself!', ephemeral: true }); return;

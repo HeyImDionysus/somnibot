@@ -67,7 +67,7 @@ export default function AchievementsPage() {
       ]);
       if (cfgRes.ok) {
         const json = await cfgRes.json();
-        const gc = json.data?.guild_config ?? json.guild_config ?? {};
+        const gc = json.config ?? {};
         setConfig({ ...DEFAULT_CONFIG, ...gc });
       }
       if (achRes.ok) {
