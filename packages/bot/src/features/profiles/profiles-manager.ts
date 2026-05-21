@@ -1,0 +1,126 @@
+/**
+ * ProfilesManager — user profile cards, titles, bio.
+ */
+import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+let _manager: ProfilesManager | null = null;
+export function registerProfilesManager(mgr: ProfilesManager): void { _manager = mgr; }
+export function invalidateProfilesCache(): void { _manager?.clearCache(); }
+
+export class ProfilesManager {
+  private supabase: SupabaseClient;
+  private cache = new Map<string, any>();
+
+  constructor(supabase: SupabaseClient) {
+    this.supabase = supabase as any;
+  }
+
+  clearCache(): void { this.cache.clear(); }
+
+  private async getOrCreateProfile(guildId: string, userId: string): Promise<any> {
+    const { data } = await (this.supabase as any)
+      .from('economy_profiles').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
+    if (data) return data;
+
+    const { data: created } = await (this.supabase as any)
+      .from('economy_profiles').insert({ guild_id: guildId, user_id: userId }).select().single();
+    return created;
+  }
+
+  async viewProfile(interaction: ChatInputCommandInteraction): Promise<void> {
+    const target = interaction.options.getUser('user') ?? interaction.user;
+    const guildId = interaction.guildId!;
+    const profile = await this.getOrCreateProfile(guildId, target.id);
+
+    // Increment views (don't await)
+    void (this.supabase as any).from('economy_profiles')
+      .update({ profile_views: (profile?.profile_views ?? 0) + 1 })
+      .eq('guild_id', guildId).eq('user_id', target.id);
+
+    // Fetch wallet
+    const { data: wallet } = await (this.supabase as any)
+      .from('economy_wallets').select('balance, bank').eq('guild_id', guildId).eq('user_id', target.id).single();
+
+    // Fetch pet
+    const { data: pet } = await (this.supabase as any)
+      .from('economy_pets').select('name, pet_type, level, prestige').eq('guild_id', guildId).eq('user_id', target.id).single();
+
+    // Fetch prestige
+    const { data: prestige } = await (this.supabase as any)
+      .from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single();
+
+    // Fetch achievements count
+    const { count: achCount } = await (this.supabase as any)
+      .from('economy_user_achievements').select('*', { count: 'exact', head: true })
+      .eq('guild_id', guildId).eq('user_id', target.id);
+
+    const balance = wallet?.balance ?? 0;
+    const bank = wallet?.bank ?? 0;
+    const netWorth = balance + bank;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${profile?.title ? `${profile.title} ` : ''}${target.username}`)
+      .setThumbnail(target.displayAvatarURL())
+      .setColor(0x5865F2);
+
+    if (profile?.bio) embed.setDescription(profile.bio);
+
+    embed.addFields(
+      { name: '💰 Net Worth', value: netWorth.toLocaleString(), inline: true },
+      { name: '👛 Wallet', value: balance.toLocaleString(), inline: true },
+      { name: '🏦 Bank', value: bank.toLocaleString(), inline: true },
+    );
+
+    if (pet) {
+      embed.addFields({
+        name: '🐾 Pet',
+        value: `${pet.name} (${pet.pet_type} Lv.${pet.level}${pet.prestige > 0 ? ` ⭐${pet.prestige}` : ''})`,
+        inline: true,
+      });
+    }
+
+    if (prestige && prestige.prestige_level > 0) {
+      embed.addFields({
+        name: '⭐ Prestige',
+        value: `Level ${prestige.prestige_level} (+${prestige.multiplier_pct}% earnings)`,
+        inline: true,
+      });
+    }
+
+    embed.addFields(
+      { name: '🏆 Achievements', value: `${achCount ?? 0} unlocked`, inline: true },
+      { name: '👁️ Profile Views', value: `${(profile?.profile_views ?? 0) + 1}`, inline: true },
+    );
+
+    if (profile?.badge_slots && profile.badge_slots.length > 0) {
+      embed.addFields({ name: 'Badges', value: profile.badge_slots.join(' '), inline: false });
+    }
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {
+    const title = interaction.options.getString('title')!;
+    const guildId = interaction.guildId!;
+    await this.getOrCreateProfile(guildId, interaction.user.id);
+
+    await (this.supabase as any).from('economy_profiles')
+      .update({ title, updated_at: new Date().toISOString() })
+      .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+
+    await interaction.reply({ content: `✅ Title set to: **${title}**` });
+  }
+
+  async setBio(interaction: ChatInputCommandInteraction): Promise<void> {
+    const bio = interaction.options.getString('bio')!;
+    const guildId = interaction.guildId!;
+    await this.getOrCreateProfile(guildId, interaction.user.id);
+
+    await (this.supabase as any).from('economy_profiles')
+      .update({ bio, updated_at: new Date().toISOString() })
+      .eq('guild_id', guildId).eq('user_id', interaction.user.id);
+
+    await interaction.reply({ content: '✅ Bio updated!' });
+  }
+}

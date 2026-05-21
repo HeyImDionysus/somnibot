@@ -51,6 +51,10 @@ import { TriviaManager, buildTriviaCommands, registerTriviaManager } from './fea
 import { GamesManager, buildGameCommands, registerGamesManager } from './features/games/index.js';
 import { LotteryManager, buildLotteryCommands, registerLotteryManager } from './features/lottery/index.js';
 import { PollsManager, buildPollCommands, registerPollsManager } from './features/polls/index.js';
+import { PetsManager, buildPetCommands, registerPetsManager } from './features/pets/index.js';
+import { QuestsManager, buildQuestCommands, registerQuestsManager } from './features/quests/index.js';
+import { AchievementsManager, buildAchievementCommands, registerAchievementsManager } from './features/achievements/index.js';
+import { ProfilesManager, buildProfileCommands, registerProfilesManager } from './features/profiles/index.js';
 
 /**
  * SomniBot entry point.
@@ -754,6 +758,66 @@ async function main(): Promise<void> {
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 15k (Polls/Predictions) initialization error:', err);
       }
+    }
+
+    // Phase 15l: Pets System (V31 — virtual pets with care, battles, prestige)
+    if (guild) {
+      try {
+        const { data: petsCfg } = await client.supabase
+          .from('guild_config').select('economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (petsCfg?.economy_pets_enabled) {
+          const petsManager = new PetsManager(client.supabase);
+          registerPetsManager(petsManager);
+          (client as unknown as Record<string, unknown>)._petsManager = petsManager;
+          const petCmds = buildPetCommands();
+          for (const cmd of Object.values(petCmds)) allCommands.push(cmd.toJSON());
+          console.log(`[Boot] ✅ Pets system started + ${Object.keys(petCmds).length} pet commands queued`);
+        } else { console.log('[Boot] ⏸️  Pets system disabled'); }
+      } catch (err) { console.error('[Boot] ⚠️  Phase 15l (Pets) error:', err); }
+    }
+
+    // Phase 15m: Quests System (V31 — daily/weekly quests with progress tracking)
+    if (guild) {
+      try {
+        const { data: questsCfg } = await client.supabase
+          .from('guild_config').select('economy_quests_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (questsCfg?.economy_quests_enabled) {
+          const questsManager = new QuestsManager(client.supabase);
+          registerQuestsManager(questsManager);
+          (client as unknown as Record<string, unknown>)._questsManager = questsManager;
+          const qCmds = buildQuestCommands();
+          for (const cmd of Object.values(qCmds)) allCommands.push(cmd.toJSON());
+          console.log(`[Boot] ✅ Quests system started + ${Object.keys(qCmds).length} quest commands queued`);
+        } else { console.log('[Boot] ⏸️  Quests system disabled'); }
+      } catch (err) { console.error('[Boot] ⚠️  Phase 15m (Quests) error:', err); }
+    }
+
+    // Phase 15n: Achievements + Prestige (V31 — milestone badges + prestige resets)
+    if (guild) {
+      try {
+        const { data: achCfg } = await client.supabase
+          .from('guild_config').select('economy_achievements_enabled, economy_prestige_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (achCfg?.economy_achievements_enabled || achCfg?.economy_prestige_enabled) {
+          const achManager = new AchievementsManager(client.supabase);
+          registerAchievementsManager(achManager);
+          (client as unknown as Record<string, unknown>)._achievementsManager = achManager;
+          const achCmds = buildAchievementCommands();
+          for (const cmd of Object.values(achCmds)) allCommands.push(cmd.toJSON());
+          console.log(`[Boot] ✅ Achievements/Prestige started + ${Object.keys(achCmds).length} commands queued`);
+        } else { console.log('[Boot] ⏸️  Achievements/Prestige disabled'); }
+      } catch (err) { console.error('[Boot] ⚠️  Phase 15n (Achievements) error:', err); }
+    }
+
+    // Phase 15o: Profiles (V31 — profile cards, titles, bios)
+    if (guild) {
+      try {
+        const profilesManager = new ProfilesManager(client.supabase);
+        registerProfilesManager(profilesManager);
+        (client as unknown as Record<string, unknown>)._profilesManager = profilesManager;
+        const profCmds = buildProfileCommands();
+        for (const cmd of Object.values(profCmds)) allCommands.push(cmd.toJSON());
+        console.log(`[Boot] ✅ Profiles system started + ${Object.keys(profCmds).length} profile commands queued`);
+      } catch (err) { console.error('[Boot] ⚠️  Phase 15o (Profiles) error:', err); }
     }
 
     // Phase 12b: Entitlement Reconciliation (periodic entitlement↔role sync)

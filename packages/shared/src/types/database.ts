@@ -342,6 +342,23 @@ export interface DbGuildConfig {
   // PR #45 — Polls & Predictions
   polls_enabled: boolean;
   predictions_enabled: boolean;
+
+  // PR #46 — Pets, Quests, Achievements, Prestige
+  economy_pets_enabled: boolean;
+  economy_pet_decay_rate: number;
+  economy_pet_battle_enabled: boolean;
+  economy_pet_prestige_enabled: boolean;
+  economy_pet_feed_cost: number;
+  economy_pet_train_cost: number;
+  economy_quests_enabled: boolean;
+  economy_daily_quest_count: number;
+  economy_weekly_quest_count: number;
+  economy_quest_reward_base: number;
+  economy_achievements_enabled: boolean;
+  economy_prestige_enabled: boolean;
+  economy_prestige_multiplier_pct: number;
+  economy_prestige_min_level: number;
+  economy_prestige_min_net_worth: number;
 }
 
 export interface DbInstanceSettings {
@@ -1796,4 +1813,113 @@ export interface DbPredictionBet {
   amount: number;
   placed_at: string;
   payout: number | null;
+}
+
+// ── PR #46: Pets, Quests, Achievements, Prestige, Profiles ──
+
+export interface DbPet {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  name: string;
+  pet_type: string;
+  level: number;
+  xp: number;
+  hunger: number;
+  happiness: number;
+  energy: number;
+  attack: number;
+  defense: number;
+  speed: number;
+  health: number;
+  prestige: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbPetBattle {
+  id: string;
+  guild_id: string;
+  challenger_id: string;
+  defender_id: string;
+  winner_id: string | null;
+  challenger_dmg: number;
+  defender_dmg: number;
+  reward: number;
+  created_at: string;
+}
+
+export interface DbQuestTemplate {
+  id: string;
+  guild_id: string;
+  quest_type: string;
+  title: string;
+  description: string;
+  action_type: string;
+  target_count: number;
+  reward_currency: number;
+  reward_xp: number;
+  required_module: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface DbQuestProgress {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  template_id: string;
+  progress: number;
+  completed: boolean;
+  claimed: boolean;
+  assigned_at: string;
+  completed_at: string | null;
+}
+
+export interface DbAchievementDef {
+  id: string;
+  guild_id: string;
+  name: string;
+  description: string;
+  badge_emoji: string;
+  condition_type: string;
+  condition_value: number;
+  reward_currency: number;
+  reward_xp: number;
+  hidden: boolean;
+  created_at: string;
+}
+
+export interface DbUserAchievement {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  achievement_id: string;
+  unlocked_at: string;
+}
+
+export interface DbPrestige {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  prestige_level: number;
+  total_resets: number;
+  multiplier_pct: number;
+  title: string | null;
+  last_prestige: string | null;
+  created_at: string;
+}
+
+export interface DbProfile {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  bio: string;
+  title: string;
+  badge_slots: string[];
+  favorite_pet: string | null;
+  profile_views: number;
+  created_at: string;
+  updated_at: string;
 }

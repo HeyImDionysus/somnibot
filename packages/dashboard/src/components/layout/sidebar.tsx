@@ -44,6 +44,8 @@ import {
   Swords,
   Brain,
   Gamepad2,
+  PawPrint,
+  Award,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -108,6 +110,9 @@ const navigation: NavGroup[] = [
       { label: 'Market', href: '/economy/market', icon: Store, requires: 'discord' },
       { label: 'Trivia', href: '/economy/trivia', icon: Brain, requires: 'discord' },
       { label: 'Games & Lottery', href: '/economy/games', icon: Gamepad2, requires: 'discord' },
+      { label: 'Pets', href: '/economy/pets', icon: PawPrint, requires: 'discord' },
+      { label: 'Quests', href: '/economy/quests', icon: ScrollText, requires: 'discord' },
+      { label: 'Achievements', href: '/economy/achievements', icon: Award, requires: 'discord' },
     ],
   },
   {
