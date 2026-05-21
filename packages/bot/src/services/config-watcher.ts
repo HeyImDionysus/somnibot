@@ -32,6 +32,7 @@ import { invalidateLevelCaches } from '../features/levels/index.js';
 import { invalidateAntiRaidCache } from '../features/anti-raid/index.js';
 import { invalidateStarboardCache } from '../features/starboard/index.js';
 import { invalidateMessageLogCache } from '../features/message-log/index.js';
+import { invalidateEconomyCache } from '../features/economy/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -117,6 +118,10 @@ export class ConfigWatcher {
             break;
           case 'settings':
             await this.reloadAll();
+            break;
+          case 'economy':
+            invalidateEconomyCache();
+            console.log('[ConfigWatcher] Economy config cache invalidated');
             break;
           case 'all':
             await this.reloadAll();
