@@ -47,6 +47,10 @@ import { FarmingManager, buildFarmingCommands, registerFarmingManager } from './
 import { FishingManager, buildFishingCommands, registerFishingManager } from './features/fishing/index.js';
 import { AdventureManager, buildAdventureCommands, registerAdventureManager } from './features/adventures/index.js';
 import { MarketManager, buildMarketCommands, registerMarketManager } from './features/market/index.js';
+import { TriviaManager, buildTriviaCommands, registerTriviaManager } from './features/trivia/index.js';
+import { GamesManager, buildGameCommands, registerGamesManager } from './features/games/index.js';
+import { LotteryManager, buildLotteryCommands, registerLotteryManager } from './features/lottery/index.js';
+import { PollsManager, buildPollCommands, registerPollsManager } from './features/polls/index.js';
 
 /**
  * SomniBot entry point.
@@ -641,6 +645,114 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 15g (Market) initialization error:', err);
+      }
+    }
+
+    // Phase 15h: Trivia System (V31 — trivia rounds with streaks + custom questions)
+    if (guild) {
+      try {
+        const { data: trivConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_trivia_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (trivConfig?.economy_trivia_enabled) {
+          const triviaManager = new TriviaManager(client.supabase);
+          registerTriviaManager(triviaManager);
+          (client as unknown as Record<string, unknown>)._triviaManager = triviaManager;
+
+          const trivCmds = buildTriviaCommands();
+          for (const cmd of Object.values(trivCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Trivia system started + ${Object.keys(trivCmds).length} trivia commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Trivia system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15h (Trivia) initialization error:', err);
+      }
+    }
+
+    // Phase 15i: Mini-Games System (V31 — coinflip, slots, rps, dice, blackjack, etc.)
+    if (guild) {
+      try {
+        const { data: gamesConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_games_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (gamesConfig?.economy_games_enabled) {
+          const gamesManager = new GamesManager(client.supabase);
+          registerGamesManager(gamesManager);
+          (client as unknown as Record<string, unknown>)._gamesManager = gamesManager;
+
+          const gameCmds = buildGameCommands();
+          for (const cmd of Object.values(gameCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Mini-games system started + ${Object.keys(gameCmds).length} game commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Mini-games system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15i (Games) initialization error:', err);
+      }
+    }
+
+    // Phase 15j: Lottery System (V31 — ticket purchases + drawings)
+    if (guild) {
+      try {
+        const { data: lotConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_lottery_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (lotConfig?.economy_lottery_enabled) {
+          const lotteryManager = new LotteryManager(client.supabase);
+          registerLotteryManager(lotteryManager);
+          (client as unknown as Record<string, unknown>)._lotteryManager = lotteryManager;
+
+          const lotCmds = buildLotteryCommands();
+          for (const cmd of Object.values(lotCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Lottery system started + ${Object.keys(lotCmds).length} lottery commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Lottery system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15j (Lottery) initialization error:', err);
+      }
+    }
+
+    // Phase 15k: Polls & Predictions System (V31 — free polls + prediction markets)
+    if (guild) {
+      try {
+        const { data: pollConfig } = await client.supabase
+          .from('guild_config')
+          .select('polls_enabled, predictions_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (pollConfig?.polls_enabled || pollConfig?.predictions_enabled) {
+          const pollsManager = new PollsManager(client.supabase);
+          registerPollsManager(pollsManager);
+          (client as unknown as Record<string, unknown>)._pollsManager = pollsManager;
+
+          const pollCmds = buildPollCommands();
+          for (const cmd of Object.values(pollCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Polls/Predictions system started + ${Object.keys(pollCmds).length} poll commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Polls/Predictions system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15k (Polls/Predictions) initialization error:', err);
       }
     }
 
