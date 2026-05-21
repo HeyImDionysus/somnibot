@@ -10,12 +10,12 @@ export function buildProfileCommands(): Record<string, SlashCommandBuilder> {
   const title = new SlashCommandBuilder()
     .setName('title')
     .setDescription('Set your display title')
-    .addStringOption((o) => o.setName('title').setDescription('Your title').setRequired(true)) as SlashCommandBuilder;
+    .addStringOption((o) => o.setName('title').setDescription('Your title').setRequired(true).setMaxLength(64)) as SlashCommandBuilder;
 
   const bio = new SlashCommandBuilder()
     .setName('bio')
     .setDescription('Set your profile bio')
-    .addStringOption((o) => o.setName('bio').setDescription('Your bio text').setRequired(true)) as SlashCommandBuilder;
+    .addStringOption((o) => o.setName('bio').setDescription('Your bio text').setRequired(true).setMaxLength(256)) as SlashCommandBuilder;
 
   return { profile, title, bio };
 }
