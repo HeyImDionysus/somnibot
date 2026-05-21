@@ -46,7 +46,7 @@ export async function GET(req: NextRequest) {
     supabase
       .from('guild_config')
       .select(
-        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background',
+        'levels_enabled, xp_min, xp_max, xp_cooldown_seconds, voice_xp_enabled, voice_xp_per_interval, voice_xp_interval_minutes, xp_multiplier_mode, xp_channel_mode, xp_channel_list, level_up_channel_id, level_up_message, rank_card_accent_color, rank_card_background, no_xp_role_id',
       )
       .eq('guild_id', guildId)
       .maybeSingle(),
@@ -93,6 +93,7 @@ export async function PUT(req: NextRequest) {
     'level_up_message',
     'rank_card_accent_color',
     'rank_card_background',
+    'no_xp_role_id',
   ];
 
   const updates: Record<string, unknown> = {};
