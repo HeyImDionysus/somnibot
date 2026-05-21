@@ -8,6 +8,7 @@
  */
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -221,6 +222,9 @@ export class CraftingManager {
       balance_after: 0,
       description: `Crafted ${recipe.output_qty}x ${recipe.name}`,
     });
+
+    // Quest progress
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch(() => {});
 
     return {
       embed: new EmbedBuilder()

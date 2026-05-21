@@ -15,6 +15,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
 } from 'discord.js';
+import { getQuestsManager } from '../quests/quests-manager.js';
 import type {
   AdventureChoice,
   AdventureEndingType,
@@ -815,5 +816,8 @@ export class AdventureManager {
 
     // Note: Loot items are recorded in session but not auto-added to inventory.
     // Adventure loot is tracked for achievement/quest systems (PR #46).
+
+    // Quest progress — count completed adventures
+    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch(() => {});
   }
 }

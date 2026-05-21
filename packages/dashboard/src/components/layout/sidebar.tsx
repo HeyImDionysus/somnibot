@@ -111,6 +111,7 @@ const navigation: NavGroup[] = [
       { label: 'Adventures', href: '/economy/adventures', icon: Swords, requires: 'discord' },
       { label: 'Market', href: '/economy/market', icon: Store, requires: 'discord' },
       { label: 'Trivia', href: '/economy/trivia', icon: Brain, requires: 'discord' },
+      { label: 'Heists', href: '/economy/heist', icon: Swords, requires: 'discord' },
       { label: 'Games & Lottery', href: '/economy/games', icon: Gamepad2, requires: 'discord' },
       { label: 'Pets', href: '/economy/pets', icon: PawPrint, requires: 'discord' },
       { label: 'Quests', href: '/economy/quests', icon: ScrollText, requires: 'discord' },
