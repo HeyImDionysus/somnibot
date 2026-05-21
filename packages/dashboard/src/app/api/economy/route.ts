@@ -8,6 +8,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
+import { z } from 'zod';
 
 const ECONOMY_COLUMNS = [
   'economy_enabled',
@@ -39,6 +40,38 @@ const ECONOMY_COLUMNS = [
   'economy_max_bank',
   'economy_log_channel_id',
 ] as const;
+
+/** Zod schema for PATCH validation — matches column types + sane ranges */
+const economyPatchSchema = z.object({
+  economy_enabled: z.boolean().optional(),
+  currency_name: z.string().min(1).max(32).optional(),
+  currency_emoji: z.string().min(1).max(64).optional(),
+  economy_starting_balance: z.number().int().min(0).max(1_000_000).optional(),
+  economy_daily_amount: z.number().int().min(0).max(1_000_000).optional(),
+  economy_weekly_amount: z.number().int().min(0).max(10_000_000).optional(),
+  economy_monthly_amount: z.number().int().min(0).max(100_000_000).optional(),
+  economy_streak_bonus_pct: z.number().int().min(0).max(100).optional(),
+  economy_work_cooldown_seconds: z.number().int().min(60).max(86400).optional(),
+  economy_work_min: z.number().int().min(0).max(1_000_000).optional(),
+  economy_work_max: z.number().int().min(0).max(10_000_000).optional(),
+  economy_crime_success_pct: z.number().int().min(1).max(100).optional(),
+  economy_crime_fine_pct: z.number().int().min(0).max(100).optional(),
+  economy_crime_min: z.number().int().min(0).max(1_000_000).optional(),
+  economy_crime_max: z.number().int().min(0).max(10_000_000).optional(),
+  economy_chat_income_enabled: z.boolean().optional(),
+  economy_chat_income_min: z.number().int().min(0).max(10_000).optional(),
+  economy_chat_income_max: z.number().int().min(0).max(100_000).optional(),
+  economy_chat_income_cooldown_seconds: z.number().int().min(1).max(3600).optional(),
+  economy_rob_enabled: z.boolean().optional(),
+  economy_rob_success_pct: z.number().int().min(1).max(100).optional(),
+  economy_rob_fine_pct: z.number().int().min(0).max(100).optional(),
+  economy_heist_enabled: z.boolean().optional(),
+  economy_passive_mode_allowed: z.boolean().optional(),
+  economy_pay_tax_pct: z.number().int().min(0).max(50).optional(),
+  economy_max_wallet: z.number().int().min(0).optional(),
+  economy_max_bank: z.number().int().min(0).optional(),
+  economy_log_channel_id: z.string().nullable().optional(),
+}).strict();
 
 export async function GET() {
   try {
@@ -107,20 +140,35 @@ export async function GET() {
 export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const admin = createAdminSupabase();
 
-    // Only allow known economy columns
-    const updates: Record<string, unknown> = {};
-    for (const col of ECONOMY_COLUMNS) {
-      if (col in body) {
-        updates[col] = body[col];
-      }
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
+      return NextResponse.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
     }
 
+    const parsed = economyPatchSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Validation failed',
+          issues: parsed.error.issues.map((i) => ({
+            path: i.path.join('.'),
+            message: i.message,
+          })),
+        },
+        { status: 400 },
+      );
+    }
+
+    const updates = parsed.data;
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ success: false, error: 'No valid fields to update' }, { status: 400 });
     }
+
+    const admin = createAdminSupabase();
 
     const { error } = await admin
       .from('guild_config')

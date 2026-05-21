@@ -107,12 +107,25 @@ export class AchievementsManager {
     }
 
     // Check level + net worth requirements
-    const { data: wallet } = await (this.supabase as any)
-      .from('economy_wallets').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
+    const [{ data: wallet }, { data: memberLevel }] = await Promise.all([
+      (this.supabase as any)
+        .from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', userId).single(),
+      (this.supabase as any)
+        .from('member_levels').select('level').eq('guild_id', guildId).eq('member_id', userId).single(),
+    ]);
 
     const netWorth = (wallet?.wallet ?? 0) + (wallet?.bank ?? 0);
+    const userLevel = memberLevel?.level ?? 0;
     const minLevel = config.economy_prestige_min_level ?? 50;
     const minNetWorth = config.economy_prestige_min_net_worth ?? 1000000;
+
+    if (userLevel < minLevel) {
+      await interaction.reply({
+        content: `❌ You need to be at least **level ${minLevel}** to prestige. You're level **${userLevel}**.`,
+        ephemeral: true,
+      });
+      return;
+    }
 
     if (netWorth < minNetWorth) {
       await interaction.reply({

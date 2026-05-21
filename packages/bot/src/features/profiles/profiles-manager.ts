@@ -33,10 +33,16 @@ export class ProfilesManager {
     const guildId = interaction.guildId!;
     const profile = await this.getOrCreateProfile(guildId, target.id);
 
-    // Increment views (don't await)
-    void (this.supabase as any).from('economy_profiles')
-      .update({ profile_views: (profile?.profile_views ?? 0) + 1 })
-      .eq('guild_id', guildId).eq('user_id', target.id);
+    // Increment views atomically (don't await)
+    void (this.supabase as any).rpc('increment_profile_views', {
+      p_guild_id: guildId,
+      p_user_id: target.id,
+    }).catch(() => {
+      // Fallback to non-atomic if RPC doesn't exist yet
+      (this.supabase as any).from('economy_profiles')
+        .update({ profile_views: (profile?.profile_views ?? 0) + 1 })
+        .eq('guild_id', guildId).eq('user_id', target.id);
+    });
 
     // Fetch wallet
     const { data: wallet } = await (this.supabase as any)
