@@ -5,6 +5,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 
 
@@ -33,9 +34,12 @@ export async function GET(req: NextRequest) {
 
   if (search) {
     // Search by order number, customer username, or discord ID
-    query = query.or(
-      `order_number.ilike.%${search}%,customers.discord_username.ilike.%${search}%,customers.discord_id.eq.${search}`,
-    );
+    const s = sanitizeSearch(search);
+    if (s) {
+      query = query.or(
+        `order_number.ilike.%${s}%,customers.discord_username.ilike.%${s}%,customers.discord_id.eq.${s}`,
+      );
+    }
   }
 
   const { data, error, count } = await query;

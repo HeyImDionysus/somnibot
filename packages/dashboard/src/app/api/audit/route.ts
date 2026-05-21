@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_EXPORT_ROWS = 10_000;
@@ -55,7 +56,10 @@ export async function GET(req: NextRequest) {
     query = query.lte('timestamp', dateTo);
   }
   if (search) {
-    query = query.or(`action.ilike.%${search}%,actor_id.ilike.%${search}%,target_id.ilike.%${search}%`);
+    const s = sanitizeSearch(search);
+    if (s) {
+      query = query.or(`action.ilike.%${s}%,actor_id.ilike.%${s}%,target_id.ilike.%${s}%`);
+    }
   }
 
   if (isExport) {
