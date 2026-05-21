@@ -129,6 +129,23 @@ const guildConfigPatchSchema = z.object({
   // PR #45 — Polls & Predictions
   polls_enabled: z.boolean().optional(),
   predictions_enabled: z.boolean().optional(),
+
+  // PR #46 — Pets, Quests, Achievements, Prestige
+  economy_pets_enabled: z.boolean().optional(),
+  economy_pet_decay_rate: z.number().int().min(0).max(100).optional(),
+  economy_pet_battle_enabled: z.boolean().optional(),
+  economy_pet_prestige_enabled: z.boolean().optional(),
+  economy_pet_feed_cost: z.number().int().min(0).optional(),
+  economy_pet_train_cost: z.number().int().min(0).optional(),
+  economy_quests_enabled: z.boolean().optional(),
+  economy_daily_quest_count: z.number().int().min(1).max(10).optional(),
+  economy_weekly_quest_count: z.number().int().min(1).max(5).optional(),
+  economy_quest_reward_base: z.number().int().min(0).optional(),
+  economy_achievements_enabled: z.boolean().optional(),
+  economy_prestige_enabled: z.boolean().optional(),
+  economy_prestige_multiplier_pct: z.number().int().min(1).max(100).optional(),
+  economy_prestige_min_level: z.number().int().min(1).optional(),
+  economy_prestige_min_net_worth: z.number().int().min(0).optional(),
 }).strict();
 
 export async function GET() {
