@@ -9,6 +9,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 
 const itemSchema = z.object({
@@ -87,6 +88,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -122,6 +124,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -154,6 +157,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
+    await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to delete item';

@@ -241,12 +241,12 @@ export class MarketManager {
     // Check buyer funds
     const { data: buyerWallet } = await this.supabase
       .from('economy_wallets')
-      .select('id, cash')
+      .select('id, wallet')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .single();
 
-    if (!buyerWallet || (buyerWallet as any).cash < totalCost) {
+    if (!buyerWallet || (buyerWallet as any).wallet < totalCost) {
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
         .setColor(0xff0000);
@@ -259,13 +259,13 @@ export class MarketManager {
     // Deduct buyer
     await this.supabase
       .from('economy_wallets')
-      .update({ cash: (buyerWallet as any).cash - totalCost })
+      .update({ wallet: (buyerWallet as any).wallet - totalCost })
       .eq('id', (buyerWallet as any).id);
 
     // Pay seller
     const { data: sellerWallet } = await this.supabase
       .from('economy_wallets')
-      .select('id, cash')
+      .select('id, wallet')
       .eq('guild_id', this.guild.id)
       .eq('user_id', listing.seller_id)
       .single();
@@ -273,7 +273,7 @@ export class MarketManager {
     if (sellerWallet) {
       await this.supabase
         .from('economy_wallets')
-        .update({ cash: (sellerWallet as any).cash + sellerEarnings })
+        .update({ wallet: (sellerWallet as any).wallet + sellerEarnings })
         .eq('id', (sellerWallet as any).id);
     }
 

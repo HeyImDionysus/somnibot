@@ -76,7 +76,7 @@ export default function PollsPage() {
       ]);
       if (cfgRes.ok) {
         const json = await cfgRes.json();
-        const gc = json.guild_config ?? json;
+        const gc = json.config ?? {};
         setConfig({
           polls_enabled: gc.polls_enabled ?? false,
           predictions_enabled: gc.predictions_enabled ?? false,

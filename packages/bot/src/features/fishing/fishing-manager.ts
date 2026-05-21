@@ -428,7 +428,7 @@ export class FishingManager {
   private async addCurrency(userId: string, amount: number): Promise<void> {
     const { data } = await this.supabase
       .from('economy_wallets')
-      .select('id, cash')
+      .select('id, wallet')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .single();
@@ -436,13 +436,13 @@ export class FishingManager {
     if (data) {
       await this.supabase
         .from('economy_wallets')
-        .update({ cash: (data as any).cash + amount })
+        .update({ wallet: (data as any).wallet + amount })
         .eq('id', (data as any).id);
     } else {
       await this.supabase.from('economy_wallets').insert({
         guild_id: this.guild.id,
         user_id: userId,
-        cash: amount,
+        wallet: amount,
         bank: 0,
       });
     }
