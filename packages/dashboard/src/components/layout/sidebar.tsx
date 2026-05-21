@@ -38,6 +38,8 @@ import {
   ChevronDown,
   Coins,
   Store,
+  Hammer,
+  Sprout,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -95,6 +97,8 @@ const navigation: NavGroup[] = [
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
       { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
       { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
+      { label: 'Crafting', href: '/economy/crafting', icon: Hammer, requires: 'discord' },
+      { label: 'Farming', href: '/economy/farming', icon: Sprout, requires: 'discord' },
     ],
   },
   {
