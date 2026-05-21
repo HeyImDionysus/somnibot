@@ -474,33 +474,21 @@ export class FarmingManager {
   }
 
   private async checkAndConsumeSeed(userId: string, seedItemId: string): Promise<boolean> {
-    const { data } = await this.supabase
-      .from('economy_inventory')
-      .select('id, quantity')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .eq('item_id', seedItemId)
-      .gt('quantity', 0)
-      .maybeSingle();
-
-    if (!data) return false;
-
-    const newQty = (data.quantity as number) - 1;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', data.id);
-    } else {
-      await this.supabase.from('economy_inventory')
-        .update({ quantity: newQty })
-        .eq('id', data.id);
-    }
-    return true;
+    // Atomic decrement — prevents TOCTOU race on inventory quantity
+    const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: seedItemId,
+      p_quantity: 1,
+    });
+    return success === true;
   }
 
   private async checkAndConsumeFertilizer(userId: string): Promise<boolean> {
-    // Find fertilizer item by name
+    // Resolve fertilizer item_id by name, then use atomic RPC
     const { data: items } = await this.supabase
       .from('economy_inventory')
-      .select('id, quantity, economy_items!inner(name)')
+      .select('item_id, economy_items!inner(name)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .gt('quantity', 0);
@@ -512,15 +500,14 @@ export class FarmingManager {
     );
     if (!fert) return false;
 
-    const newQty = (fert.quantity as number) - 1;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', fert.id);
-    } else {
-      await this.supabase.from('economy_inventory')
-        .update({ quantity: newQty })
-        .eq('id', fert.id);
-    }
-    return true;
+    // Atomic decrement — prevents TOCTOU race on inventory quantity
+    const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: fert.item_id,
+      p_quantity: 1,
+    });
+    return success === true;
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
