@@ -380,18 +380,18 @@ export class PollsManager {
       amount,
     });
 
-    // Update pool
-    await (this.supabase as any)
-      .from('predictions')
-      .update({ total_pool: prediction.total_pool + amount })
-      .eq('id', predictionId);
+    // Update pool atomically (prevents TOCTOU — concurrent bets racing)
+    const { data: newPool } = await (this.supabase as any).rpc('economy_increment_prediction_pool', {
+      p_prediction_id: predictionId,
+      p_amount: amount,
+    });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🔮 Bet Placed!')
         .setDescription(
           `You bet **${amount.toLocaleString()}** coins on **${options[optionIndex].label}**.\n` +
-          `New pool total: **${(prediction.total_pool + amount).toLocaleString()}** coins`
+          `New pool total: **${(newPool ?? prediction.total_pool + amount).toLocaleString()}** coins`
         )
         .setColor(0x9B59B6)],
     });
