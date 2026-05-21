@@ -85,24 +85,14 @@ export async function GET() {
       .eq('guild_id', ctx.guildId)
       .maybeSingle();
 
-    // Summary stats
-    const { count: totalWallets } = await admin
-      .from('economy_wallets')
-      .select('*', { count: 'exact', head: true })
-      .eq('guild_id', ctx.guildId);
+    // Summary stats — use RPC for efficient DB-side aggregation (no row limit)
+    const { data: walletStats } = await admin.rpc('economy_wallet_stats', {
+      p_guild_id: ctx.guildId,
+    });
 
-    const { data: econStats } = await admin
-      .from('economy_wallets')
-      .select('wallet, bank')
-      .eq('guild_id', ctx.guildId)
-      .limit(10000);
-
-    let totalCirculation = 0;
-    let totalBanked = 0;
-    for (const w of econStats ?? []) {
-      totalCirculation += w.wallet ?? 0;
-      totalBanked += w.bank ?? 0;
-    }
+    const totalWallets = walletStats?.[0]?.total_wallets ?? walletStats?.total_wallets ?? 0;
+    const totalCirculation = walletStats?.[0]?.total_circulation ?? walletStats?.total_circulation ?? 0;
+    const totalBanked = walletStats?.[0]?.total_banked ?? walletStats?.total_banked ?? 0;
 
     const { count: shopItems } = await admin
       .from('economy_items')

@@ -524,26 +524,13 @@ export class FarmingManager {
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
-    const { data: existing } = await this.supabase
-      .from('economy_inventory')
-      .select('id, quantity')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .eq('item_id', itemId)
-      .maybeSingle();
-
-    if (existing) {
-      await this.supabase.from('economy_inventory')
-        .update({ quantity: (existing.quantity as number) + quantity, updated_at: new Date().toISOString() })
-        .eq('id', existing.id);
-    } else {
-      await this.supabase.from('economy_inventory').insert({
-        guild_id: this.guild.id,
-        user_id: userId,
-        item_id: itemId,
-        quantity,
-      });
-    }
+    // Atomic upsert — prevents TOCTOU race on inventory quantity
+    await this.supabase.rpc('economy_upsert_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_quantity: quantity,
+    });
   }
 
   private async addToWallet(userId: string, amount: number): Promise<void> {
