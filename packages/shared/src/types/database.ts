@@ -292,6 +292,13 @@ export interface DbGuildConfig {
   economy_rob_success_pct: number;
   economy_rob_fine_pct: number;
   economy_heist_enabled: boolean;
+  economy_heist_min_participants: number;
+  economy_heist_max_participants: number;
+  economy_heist_join_window_secs: number;
+  economy_heist_cooldown_seconds: number;
+  economy_heist_base_payout: number;
+  economy_heist_success_base_pct: number;
+  economy_heist_entry_fee: number;
   economy_passive_mode_allowed: boolean;
   economy_pay_tax_pct: number;
   economy_max_wallet: number;
@@ -346,6 +353,9 @@ export interface DbGuildConfig {
   // PR #46 — Pets, Quests, Achievements, Prestige
   economy_pets_enabled: boolean;
   economy_pet_decay_rate: number;
+  economy_pet_decay_interval_hours: number;
+  economy_pet_low_stat_threshold: number;
+  economy_pet_notify_owner: boolean;
   economy_pet_battle_enabled: boolean;
   economy_pet_prestige_enabled: boolean;
   economy_pet_feed_cost: number;

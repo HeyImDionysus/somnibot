@@ -55,6 +55,7 @@ import { PetsManager, buildPetCommands, registerPetsManager } from './features/p
 import { QuestsManager, buildQuestCommands, registerQuestsManager } from './features/quests/index.js';
 import { AchievementsManager, buildAchievementCommands, registerAchievementsManager } from './features/achievements/index.js';
 import { ProfilesManager, buildProfileCommands, registerProfilesManager } from './features/profiles/index.js';
+import { HeistManager, buildHeistCommands, registerHeistManager } from './features/heist/index.js';
 
 /**
  * SomniBot entry point.
@@ -716,15 +717,18 @@ async function main(): Promise<void> {
           .maybeSingle();
 
         if (lotConfig?.economy_enabled && lotConfig?.economy_lottery_enabled) {
-          const lotteryManager = new LotteryManager(client.supabase);
+          const lotteryManager = new LotteryManager(client.supabase, client);
           registerLotteryManager(lotteryManager);
           (client as unknown as Record<string, unknown>)._lotteryManager = lotteryManager;
+
+          // V36: Start lottery draw cron timer
+          lotteryManager.scheduleLotteryDraws(client.guildId);
 
           const lotCmds = buildLotteryCommands();
           for (const cmd of Object.values(lotCmds)) {
             allCommands.push(cmd.toJSON());
           }
-          console.log(`[Boot] ✅ Lottery system started + ${Object.keys(lotCmds).length} lottery commands queued`);
+          console.log(`[Boot] ✅ Lottery system started + draw timer active + ${Object.keys(lotCmds).length} lottery commands queued`);
         } else {
           console.log('[Boot] ⏸️  Lottery system disabled in config');
         }
@@ -766,12 +770,16 @@ async function main(): Promise<void> {
         const { data: petsCfg } = await client.supabase
           .from('guild_config').select('economy_enabled, economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
         if (petsCfg?.economy_enabled && petsCfg?.economy_pets_enabled) {
-          const petsManager = new PetsManager(client.supabase);
+          const petsManager = new PetsManager(client.supabase, client);
           registerPetsManager(petsManager);
           (client as unknown as Record<string, unknown>)._petsManager = petsManager;
+
+          // V36: Start pet decay timer
+          petsManager.schedulePetDecay(client.guildId);
+
           const petCmds = buildPetCommands();
           for (const cmd of Object.values(petCmds)) allCommands.push(cmd.toJSON());
-          console.log(`[Boot] ✅ Pets system started + ${Object.keys(petCmds).length} pet commands queued`);
+          console.log(`[Boot] ✅ Pets system started + decay timer active + ${Object.keys(petCmds).length} pet commands queued`);
         } else { console.log('[Boot] ⏸️  Pets system disabled'); }
       } catch (err) { console.error('[Boot] ⚠️  Phase 15l (Pets) error:', err); }
     }
@@ -785,9 +793,13 @@ async function main(): Promise<void> {
           const questsManager = new QuestsManager(client.supabase);
           registerQuestsManager(questsManager);
           (client as unknown as Record<string, unknown>)._questsManager = questsManager;
+
+          // V36: Start weekly quest reset timer
+          questsManager.scheduleWeeklyReset(client.guildId);
+
           const qCmds = buildQuestCommands();
           for (const cmd of Object.values(qCmds)) allCommands.push(cmd.toJSON());
-          console.log(`[Boot] ✅ Quests system started + ${Object.keys(qCmds).length} quest commands queued`);
+          console.log(`[Boot] ✅ Quests system started + weekly reset timer active + ${Object.keys(qCmds).length} quest commands queued`);
         } else { console.log('[Boot] ⏸️  Quests system disabled'); }
       } catch (err) { console.error('[Boot] ⚠️  Phase 15m (Quests) error:', err); }
     }
@@ -818,6 +830,26 @@ async function main(): Promise<void> {
         for (const cmd of Object.values(profCmds)) allCommands.push(cmd.toJSON());
         console.log(`[Boot] ✅ Profiles system started + ${Object.keys(profCmds).length} profile commands queued`);
       } catch (err) { console.error('[Boot] ⚠️  Phase 15o (Profiles) error:', err); }
+    }
+
+    // Phase 15p: Heist System (V36 — multi-user cooperative heists)
+    if (guild) {
+      try {
+        const { data: heistCfg } = await client.supabase
+          .from('guild_config').select('economy_enabled, economy_heist_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (heistCfg?.economy_enabled && heistCfg?.economy_heist_enabled) {
+          const heistManager = new HeistManager(client.supabase, client);
+          registerHeistManager(heistManager);
+          (client as unknown as Record<string, unknown>)._heistManager = heistManager;
+
+          // Resume any pending heists from before restart
+          await heistManager.resumePendingHeists(client.guildId);
+
+          const heistCmds = buildHeistCommands();
+          for (const cmd of Object.values(heistCmds)) allCommands.push(cmd.toJSON());
+          console.log(`[Boot] ✅ Heist system started + ${Object.keys(heistCmds).length} heist commands queued`);
+        } else { console.log('[Boot] ⏸️  Heist system disabled'); }
+      } catch (err) { console.error('[Boot] ⚠️  Phase 15p (Heist) error:', err); }
     }
 
     // Phase 12b: Entitlement Reconciliation (periodic entitlement↔role sync)

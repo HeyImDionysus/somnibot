@@ -9,6 +9,7 @@
  */
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -324,6 +325,9 @@ export class FarmingManager {
       balance_after: 0,
       description: `Harvested ${harvested.length} crops`,
     });
+
+    // Quest progress — count each harvested crop
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch(() => {});
 
     return {
       embed: new EmbedBuilder()

@@ -85,6 +85,8 @@ import type { LotteryManager } from '../features/lottery/lottery-manager.js';
 import type { PollsManager } from '../features/polls/polls-manager.js';
 import { handlePetCommand } from '../features/pets/commands.js';
 import { handleQuestCommand } from '../features/quests/commands.js';
+import type { HeistManager } from '../features/heist/heist-manager.js';
+import { handleHeistCommand } from '../features/heist/commands.js';
 import { handleAchievementCommand } from '../features/achievements/commands.js';
 import { handleProfileCommand } from '../features/profiles/commands.js';
 import type { PetsManager } from '../features/pets/pets-manager.js';
@@ -295,6 +297,16 @@ export function registerEvents(client: SomniClient): void {
       }
     } catch (err) {
       console.error('[Events] Economy chat income error:', err);
+    }
+
+    // Quest progress: 'chat' activity tracking
+    try {
+      const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
+      if (qMgr) {
+        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch(() => {});
+      }
+    } catch {
+      // Ignore quest tracking errors
     }
   });
 
@@ -912,6 +924,14 @@ export function registerEvents(client: SomniClient): void {
           const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
           if (qMgr) { await handleQuestCommand(interaction, qMgr); }
           else { await interaction.reply({ content: '🚫 Quests are not enabled on this server.', ephemeral: true }); }
+          return;
+        }
+
+        // Phase 15p: Heist commands — /heist
+        if (interaction.commandName === 'heist') {
+          const heistMgr = (client as unknown as Record<string, unknown>)._heistManager as HeistManager | undefined;
+          if (heistMgr) { await handleHeistCommand(interaction, heistMgr); }
+          else { await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true }); }
           return;
         }
 

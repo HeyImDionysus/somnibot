@@ -10,6 +10,7 @@
 
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -297,6 +298,9 @@ export class FishingManager {
 
     // Set cooldown
     await this.valkey.set(cdKey, '1', 'EX', config.economy_fishing_cooldown_seconds);
+
+    // Quest progress
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch(() => {});
 
     return { embed, cooldownKey: cdKey };
   }

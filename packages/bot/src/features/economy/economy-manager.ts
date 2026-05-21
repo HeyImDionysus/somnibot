@@ -8,6 +8,7 @@
  * It has ZERO connection to the real-money store/commerce system.
  */
 import type { Guild, TextChannel } from 'discord.js';
+import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 
@@ -572,6 +573,7 @@ export class EconomyManager {
 
     await this.recordTransaction(userId, 'work', amount, updated.wallet, `Worked: ${job}`);
     await this.logEconomyEvent(userId, 'work', amount);
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'work').catch(() => {});
 
     return {
       success: true,
@@ -607,6 +609,7 @@ export class EconomyManager {
       await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
       await this.logEconomyEvent(userId, 'crime (success)', amount);
+      getQuestsManager()?.trackProgress(this.guild.id, userId, 'crime').catch(() => {});
 
       return {
         success: true,
@@ -1019,6 +1022,7 @@ export class EconomyManager {
 
     await this.recordTransaction(userId, 'shop_buy', -totalCost, wallet.wallet, `Bought ${quantity}x ${item.name}`);
     await this.logEconomyEvent(userId, `bought ${quantity}x ${item.name}`, -totalCost);
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch(() => {});
 
     return {
       success: true,

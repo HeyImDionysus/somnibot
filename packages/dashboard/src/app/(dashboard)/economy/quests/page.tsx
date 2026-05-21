@@ -34,7 +34,7 @@ interface QuestsConfig {
 const DEFAULT_CONFIG: QuestsConfig = {
   economy_quests_enabled: false,
   economy_daily_quest_count: 3,
-  economy_weekly_quest_count: 1,
+  economy_weekly_quest_count: 5,
   economy_quest_reward_base: 200,
 };
 
@@ -232,9 +232,21 @@ export default function QuestsPage() {
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Action Type</label>
-                <input value={editing.action_type}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditing({ ...editing, action_type: e.target.value })}
-                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+                <select value={editing.action_type}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setEditing({ ...editing, action_type: e.target.value })}
+                  className="w-full bg-discord-tertiary text-discord-text-primary rounded px-3 py-2">
+                  <option value="generic">Generic</option>
+                  <option value="work">Work (/work)</option>
+                  <option value="crime">Crime (/crime)</option>
+                  <option value="fish">Fish (/fish)</option>
+                  <option value="gather">Gather (/gather)</option>
+                  <option value="craft">Craft (/craft)</option>
+                  <option value="farm">Farm (harvest)</option>
+                  <option value="adventure">Adventure</option>
+                  <option value="market_trade">Market Trade</option>
+                  <option value="shop_buy">Shop Purchase</option>
+                  <option value="chat">Chat Messages</option>
+                </select>
               </div>
               <div>
                 <label className="text-xs text-discord-text-secondary">Target Count</label>
