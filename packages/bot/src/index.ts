@@ -495,11 +495,11 @@ async function main(): Promise<void> {
       try {
         const { data: gatherConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_gathering_enabled')
+          .select('economy_enabled, economy_gathering_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (gatherConfig?.economy_gathering_enabled) {
+        if (gatherConfig?.economy_enabled && gatherConfig?.economy_gathering_enabled) {
           const gatheringManager = new GatheringManager(guild, client.supabase, client.valkey);
           registerGatheringManager(gatheringManager);
           (client as unknown as Record<string, unknown>)._gatheringManager = gatheringManager;
@@ -522,11 +522,11 @@ async function main(): Promise<void> {
       try {
         const { data: craftConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_crafting_enabled')
+          .select('economy_enabled, economy_crafting_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (craftConfig?.economy_crafting_enabled) {
+        if (craftConfig?.economy_enabled && craftConfig?.economy_crafting_enabled) {
           const craftingManager = new CraftingManager(guild, client.supabase, client.valkey);
           registerCraftingManager(craftingManager);
           (client as unknown as Record<string, unknown>)._craftingManager = craftingManager;
@@ -549,11 +549,11 @@ async function main(): Promise<void> {
       try {
         const { data: farmConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_farming_enabled')
+          .select('economy_enabled, economy_farming_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (farmConfig?.economy_farming_enabled) {
+        if (farmConfig?.economy_enabled && farmConfig?.economy_farming_enabled) {
           const farmingManager = new FarmingManager(guild, client.supabase, client.valkey);
           registerFarmingManager(farmingManager);
           (client as unknown as Record<string, unknown>)._farmingManager = farmingManager;
@@ -576,11 +576,11 @@ async function main(): Promise<void> {
       try {
         const { data: fishConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_fishing_enabled')
+          .select('economy_enabled, economy_fishing_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (fishConfig?.economy_fishing_enabled) {
+        if (fishConfig?.economy_enabled && fishConfig?.economy_fishing_enabled) {
           const fishingManager = new FishingManager(guild, client.supabase, client.valkey);
           registerFishingManager(fishingManager);
           (client as unknown as Record<string, unknown>)._fishingManager = fishingManager;
@@ -603,11 +603,11 @@ async function main(): Promise<void> {
       try {
         const { data: advConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_adventures_enabled')
+          .select('economy_enabled, economy_adventures_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (advConfig?.economy_adventures_enabled) {
+        if (advConfig?.economy_enabled && advConfig?.economy_adventures_enabled) {
           const adventureManager = new AdventureManager(guild, client.supabase, client.valkey);
           registerAdventureManager(adventureManager);
           (client as unknown as Record<string, unknown>)._adventureManager = adventureManager;
@@ -630,11 +630,11 @@ async function main(): Promise<void> {
       try {
         const { data: mktConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_market_enabled')
+          .select('economy_enabled, economy_market_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (mktConfig?.economy_market_enabled) {
+        if (mktConfig?.economy_enabled && mktConfig?.economy_market_enabled) {
           const marketManager = new MarketManager(guild, client.supabase, client.valkey);
           registerMarketManager(marketManager);
           (client as unknown as Record<string, unknown>)._marketManager = marketManager;
@@ -657,11 +657,11 @@ async function main(): Promise<void> {
       try {
         const { data: trivConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_trivia_enabled')
+          .select('economy_enabled, economy_trivia_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (trivConfig?.economy_trivia_enabled) {
+        if (trivConfig?.economy_enabled && trivConfig?.economy_trivia_enabled) {
           const triviaManager = new TriviaManager(client.supabase);
           registerTriviaManager(triviaManager);
           (client as unknown as Record<string, unknown>)._triviaManager = triviaManager;
@@ -684,11 +684,11 @@ async function main(): Promise<void> {
       try {
         const { data: gamesConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_games_enabled')
+          .select('economy_enabled, economy_games_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (gamesConfig?.economy_games_enabled) {
+        if (gamesConfig?.economy_enabled && gamesConfig?.economy_games_enabled) {
           const gamesManager = new GamesManager(client.supabase);
           registerGamesManager(gamesManager);
           (client as unknown as Record<string, unknown>)._gamesManager = gamesManager;
@@ -711,11 +711,11 @@ async function main(): Promise<void> {
       try {
         const { data: lotConfig } = await client.supabase
           .from('guild_config')
-          .select('economy_lottery_enabled')
+          .select('economy_enabled, economy_lottery_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (lotConfig?.economy_lottery_enabled) {
+        if (lotConfig?.economy_enabled && lotConfig?.economy_lottery_enabled) {
           const lotteryManager = new LotteryManager(client.supabase);
           registerLotteryManager(lotteryManager);
           (client as unknown as Record<string, unknown>)._lotteryManager = lotteryManager;
@@ -738,11 +738,11 @@ async function main(): Promise<void> {
       try {
         const { data: pollConfig } = await client.supabase
           .from('guild_config')
-          .select('polls_enabled, predictions_enabled')
+          .select('economy_enabled, polls_enabled, predictions_enabled')
           .eq('guild_id', client.guildId)
           .maybeSingle();
 
-        if (pollConfig?.polls_enabled || pollConfig?.predictions_enabled) {
+        if (pollConfig?.economy_enabled && (pollConfig?.polls_enabled || pollConfig?.predictions_enabled)) {
           const pollsManager = new PollsManager(client.supabase);
           registerPollsManager(pollsManager);
           (client as unknown as Record<string, unknown>)._pollsManager = pollsManager;
@@ -764,8 +764,8 @@ async function main(): Promise<void> {
     if (guild) {
       try {
         const { data: petsCfg } = await client.supabase
-          .from('guild_config').select('economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
-        if (petsCfg?.economy_pets_enabled) {
+          .from('guild_config').select('economy_enabled, economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (petsCfg?.economy_enabled && petsCfg?.economy_pets_enabled) {
           const petsManager = new PetsManager(client.supabase);
           registerPetsManager(petsManager);
           (client as unknown as Record<string, unknown>)._petsManager = petsManager;
@@ -780,8 +780,8 @@ async function main(): Promise<void> {
     if (guild) {
       try {
         const { data: questsCfg } = await client.supabase
-          .from('guild_config').select('economy_quests_enabled').eq('guild_id', client.guildId).maybeSingle();
-        if (questsCfg?.economy_quests_enabled) {
+          .from('guild_config').select('economy_enabled, economy_quests_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (questsCfg?.economy_enabled && questsCfg?.economy_quests_enabled) {
           const questsManager = new QuestsManager(client.supabase);
           registerQuestsManager(questsManager);
           (client as unknown as Record<string, unknown>)._questsManager = questsManager;
@@ -796,8 +796,8 @@ async function main(): Promise<void> {
     if (guild) {
       try {
         const { data: achCfg } = await client.supabase
-          .from('guild_config').select('economy_achievements_enabled, economy_prestige_enabled').eq('guild_id', client.guildId).maybeSingle();
-        if (achCfg?.economy_achievements_enabled || achCfg?.economy_prestige_enabled) {
+          .from('guild_config').select('economy_enabled, economy_achievements_enabled, economy_prestige_enabled').eq('guild_id', client.guildId).maybeSingle();
+        if (achCfg?.economy_enabled && (achCfg?.economy_achievements_enabled || achCfg?.economy_prestige_enabled)) {
           const achManager = new AchievementsManager(client.supabase);
           registerAchievementsManager(achManager);
           (client as unknown as Record<string, unknown>)._achievementsManager = achManager;
