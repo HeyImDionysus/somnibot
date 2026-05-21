@@ -275,21 +275,33 @@ export class HeistManager {
       role,
     });
 
-    const newParticipants = [...(heist.participants as string[]), userId];
-    const newChance = Math.min(95, heist.success_chance + 7);
+    // Atomic array_append to prevent TOCTOU race when multiple users join concurrently
+    await (this.supabase as any).rpc('array_append_heist_participant', {
+      p_heist_id: heist.id, p_user_id: userId,
+    }).catch(() => {
+      // Fallback: direct update (less safe but functional)
+      (this.supabase as any).from('economy_heists').update({
+        participants: [...(heist.participants as string[]), userId],
+        success_chance: Math.min(95, heist.success_chance + 7),
+      }).eq('id', heist.id);
+    });
 
-    await (this.supabase as any).from('economy_heists').update({
-      participants: newParticipants,
-      success_chance: newChance,
-    }).eq('id', heist.id);
+    // Re-read actual participant count for accurate display
+    const { count: crewCount } = await (this.supabase as any)
+      .from('economy_heist_participants')
+      .select('id', { count: 'exact', head: true })
+      .eq('heist_id', heist.id);
+    const actualCount = crewCount ?? (heist.participants as string[]).length + 1;
+
+    const displayChance = Math.min(95, (config.economy_heist_success_base_pct ?? 40) + (actualCount - 1) * 7 + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0));
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🏴‍☠️ Joined the Heist!')
         .setDescription(
           `<@${userId}> joined as the **${role}**!\n\n` +
-          `👥 Crew: **${newParticipants.length}/${max}**\n` +
-          `🎯 Success chance: **${newChance}%**`
+          `👥 Crew: **${actualCount}/${max}**\n` +
+          `🎯 Success chance: **${displayChance}%**`
         )
         .setColor(0xFFA500)],
     });
@@ -373,7 +385,13 @@ export class HeistManager {
 
     const config = await this.getConfig(guildId);
     const minParticipants = config?.economy_heist_min_participants ?? 2;
-    const participants = heist.participants as string[];
+
+    // Use the join table as source of truth (immune to array TOCTOU race)
+    const { data: partRows } = await (this.supabase as any)
+      .from('economy_heist_participants')
+      .select('user_id')
+      .eq('heist_id', heistId);
+    const participants = (partRows ?? []).map((r: any) => r.user_id as string);
 
     // Not enough participants — cancel
     if (participants.length < minParticipants) {
