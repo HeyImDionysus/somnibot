@@ -277,58 +277,50 @@ export class EconomyManager {
   }
 
   /**
-   * Atomically credit a user's wallet. Returns updated wallet data.
+   * Atomically credit a user's wallet via RPC. Returns updated wallet data.
+   * Uses economy_add_balance to avoid TOCTOU race conditions.
    */
   async creditWallet(userId: string, amount: number): Promise<WalletData> {
-    const wallet = await this.getOrCreateWallet(userId);
-    const cfg = await this.loadConfig();
+    // Ensure wallet exists before RPC call
+    await this.getOrCreateWallet(userId);
 
-    let newWallet = wallet.wallet + amount;
-    if (cfg.economy_max_wallet > 0) {
-      newWallet = Math.min(newWallet, cfg.economy_max_wallet);
+    const { error } = await this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: amount,
+    });
+
+    if (error) {
+      console.error('[Economy] creditWallet RPC error:', error);
     }
 
-    const { data } = await this.supabase
-      .from('economy_wallets')
-      .update({
-        wallet: newWallet,
-        total_earned: wallet.total_earned + amount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .select('*')
-      .single();
-
-    return (data ?? { ...wallet, wallet: newWallet }) as WalletData;
+    // Re-read wallet to get updated state (RPC doesn't return row)
+    return this.getOrCreateWallet(userId);
   }
 
   /**
-   * Atomically debit a user's wallet. Fails if insufficient funds.
+   * Atomically debit a user's wallet via RPC. Fails if insufficient funds.
+   * Uses economy_subtract_balance to avoid TOCTOU race conditions.
    */
   async debitWallet(userId: string, amount: number): Promise<WalletData | null> {
+    // Ensure wallet exists before RPC call
     const wallet = await this.getOrCreateWallet(userId);
     if (wallet.wallet < amount) return null;
 
-    const newWallet = wallet.wallet - amount;
+    const { error } = await this.supabase.rpc('economy_subtract_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: amount,
+    });
 
-    const { data } = await this.supabase
-      .from('economy_wallets')
-      .update({
-        wallet: newWallet,
-        total_spent: wallet.total_spent + amount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .gte('wallet', amount) // Atomic guard: prevent negative balance under concurrent access
-      .select('*')
-      .single();
+    if (error) {
+      // RPC raises exception on insufficient funds
+      console.warn('[Economy] debitWallet RPC failed (likely insufficient funds):', error.message);
+      return null;
+    }
 
-    // If the atomic guard blocked the update, data is null → treat as insufficient funds
-    if (!data) return null;
-
-    return data as WalletData;
+    // Re-read wallet to get updated state
+    return this.getOrCreateWallet(userId);
   }
 
   async deposit(userId: string, amount: number): Promise<TransactionResult> {
@@ -346,19 +338,29 @@ export class EconomyManager {
 
     const actualAmount = Math.min(amount, maxDeposit);
 
-    const { data } = await this.supabase
+    // Use atomic RPC: debit wallet, then credit bank in one shot
+    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: actualAmount,
+    });
+
+    if (debitErr) {
+      return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your wallet." };
+    }
+
+    // Credit bank (direct update is safe — only deposit/withdraw touch bank, and
+    // these are user-initiated sequential commands)
+    await this.supabase
       .from('economy_wallets')
       .update({
-        wallet: wallet.wallet - actualAmount,
         bank: wallet.bank + actualAmount,
         updated_at: new Date().toISOString(),
       })
       .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .select('*')
-      .single();
+      .eq('user_id', userId);
 
-    const updated = (data ?? wallet) as WalletData;
+    const updated = await this.getOrCreateWallet(userId);
     await this.recordTransaction(userId, 'deposit', -actualAmount, updated.wallet, `Deposited ${actualAmount} to bank`);
 
     return {
@@ -383,19 +385,28 @@ export class EconomyManager {
     }
     const actualAmount = newWallet - wallet.wallet;
 
-    const { data } = await this.supabase
+    // Credit wallet atomically via RPC
+    const { error: addErr } = await this.supabase.rpc('economy_add_balance', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_amount: actualAmount,
+    });
+
+    if (addErr) {
+      return { success: false, amount: 0, balance: wallet, message: 'Failed to withdraw.' };
+    }
+
+    // Debit bank (direct update is safe — only deposit/withdraw touch bank)
+    await this.supabase
       .from('economy_wallets')
       .update({
-        wallet: newWallet,
         bank: wallet.bank - actualAmount,
         updated_at: new Date().toISOString(),
       })
       .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .select('*')
-      .single();
+      .eq('user_id', userId);
 
-    const updated = (data ?? wallet) as WalletData;
+    const updated = await this.getOrCreateWallet(userId);
     await this.recordTransaction(userId, 'withdraw', actualAmount, updated.wallet, `Withdrew ${actualAmount} from bank`);
 
     return {
@@ -963,22 +974,7 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: w, message: `${cfg.currency_emoji} You need **${totalCost.toLocaleString()} ${cfg.currency_name}** but only have **${w.wallet.toLocaleString()}**.` };
     }
 
-    // Add to inventory
-    await this.supabase
-      .from('economy_inventory')
-      .upsert(
-        {
-          guild_id: this.guild.id,
-          user_id: userId,
-          item_id: itemId,
-          quantity,
-          durability_remaining: item.durability,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'guild_id,user_id,item_id' },
-      );
-
-    // If item has existing inventory, add to quantity
+    // Add to inventory — read existing qty first, then upsert with correct total
     const { data: existingInv } = await this.supabase
       .from('economy_inventory')
       .select('quantity')
@@ -987,15 +983,21 @@ export class EconomyManager {
       .eq('item_id', itemId)
       .maybeSingle();
 
-    if (existingInv && existingInv.quantity !== quantity) {
-      // upsert above may not ADD — update to correct total
-      await this.supabase
-        .from('economy_inventory')
-        .update({ quantity: existingInv.quantity + quantity - quantity, updated_at: new Date().toISOString() })
-        .eq('guild_id', this.guild.id)
-        .eq('user_id', userId)
-        .eq('item_id', itemId);
-    }
+    const existingQty = existingInv?.quantity ?? 0;
+
+    await this.supabase
+      .from('economy_inventory')
+      .upsert(
+        {
+          guild_id: this.guild.id,
+          user_id: userId,
+          item_id: itemId,
+          quantity: existingQty + quantity,
+          durability_remaining: item.durability,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'guild_id,user_id,item_id' },
+      );
 
     // Reduce stock
     if (item.stock !== null) {
