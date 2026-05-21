@@ -422,6 +422,7 @@ export class PetsManager {
   }
 
   async prestigePet(interaction: ChatInputCommandInteraction): Promise<void> {
+    if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
     const config = await this.getConfig(guildId);
     if (!config?.economy_pet_prestige_enabled) {
