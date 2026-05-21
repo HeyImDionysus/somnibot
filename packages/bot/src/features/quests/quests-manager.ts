@@ -101,9 +101,23 @@ export class QuestsManager {
     }
 
     if (totalCurrency > 0) {
-      await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCurrency,
-      }).catch(() => {});
+      });
+      if (payoutErr) {
+        console.error('[Quests] claimQuests payout failed — reverting claimed status:', payoutErr.message);
+        // Revert: un-claim the quests so the user can retry
+        for (const p of claimable) {
+          await (this.supabase as any).from('economy_quest_progress')
+            .update({ claimed: false }).eq('id', p.id).catch(() => {});
+        }
+        await interaction.reply({
+          embeds: [new EmbedBuilder()
+            .setDescription('❌ Failed to pay out quest rewards. Please try again.')
+            .setColor(0xFF0000)],
+        });
+        return;
+      }
     }
 
     await interaction.reply({

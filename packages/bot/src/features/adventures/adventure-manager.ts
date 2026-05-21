@@ -807,15 +807,32 @@ export class AdventureManager {
 
     // Pay currency (atomic RPC — upserts wallet if needed)
     if (currency > 0) {
-      await this.supabase.rpc('economy_add_balance', {
+      const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: this.guild.id,
         p_user_id: session.user_id,
         p_amount: currency,
       });
+      if (payErr) console.error('[Adventures] endSession payout failed:', payErr.message);
     }
 
-    // Note: Loot items are recorded in session but not auto-added to inventory.
-    // Adventure loot is tracked for achievement/quest systems (PR #46).
+    // Add loot items to inventory — resolve item names to IDs and upsert
+    for (const item of loot) {
+      const { data: found } = await this.supabase
+        .from('economy_items')
+        .select('id')
+        .eq('guild_id', this.guild.id)
+        .ilike('name', item.item_name)
+        .limit(1);
+
+      if (found && found.length > 0) {
+        await this.supabase.rpc('economy_upsert_inventory', {
+          p_guild_id: this.guild.id,
+          p_user_id: session.user_id,
+          p_item_id: (found[0] as any).id,
+          p_quantity: item.qty,
+        }).catch((err: Error) => console.error('[Adventures] loot upsert failed:', err.message));
+      }
+    }
 
     // Quest progress — count completed adventures
     getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch(() => {});
