@@ -29,6 +29,7 @@ export class ProfilesManager {
   }
 
   async viewProfile(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.deferReply();
     const target = interaction.options.getUser('user') ?? interaction.user;
     const guildId = interaction.guildId!;
     const profile = await this.getOrCreateProfile(guildId, target.id);
@@ -44,22 +45,17 @@ export class ProfilesManager {
         .eq('guild_id', guildId).eq('user_id', target.id);
     });
 
-    // Fetch wallet
-    const { data: wallet } = await (this.supabase as any)
-      .from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', target.id).single();
-
-    // Fetch pet
-    const { data: pet } = await (this.supabase as any)
-      .from('economy_pets').select('name, pet_type, level, prestige').eq('guild_id', guildId).eq('user_id', target.id).single();
-
-    // Fetch prestige
-    const { data: prestige } = await (this.supabase as any)
-      .from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single();
-
-    // Fetch achievements count
-    const { count: achCount } = await (this.supabase as any)
-      .from('economy_user_achievements').select('*', { count: 'exact', head: true })
-      .eq('guild_id', guildId).eq('user_id', target.id);
+    // Fetch wallet, pet, prestige, achievements in parallel
+    const [walletRes, petRes, prestigeRes, achRes] = await Promise.all([
+      (this.supabase as any).from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      (this.supabase as any).from('economy_pets').select('name, pet_type, level, prestige').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      (this.supabase as any).from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      (this.supabase as any).from('economy_user_achievements').select('*', { count: 'exact', head: true }).eq('guild_id', guildId).eq('user_id', target.id),
+    ]);
+    const wallet = walletRes.data;
+    const pet = petRes.data;
+    const prestige = prestigeRes.data;
+    const achCount = achRes.count;
 
     const balance = wallet?.wallet ?? 0;
     const bank = wallet?.bank ?? 0;
@@ -103,7 +99,7 @@ export class ProfilesManager {
       embed.addFields({ name: 'Badges', value: profile.badge_slots.join(' '), inline: false });
     }
 
-    await interaction.reply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] });
   }
 
   async setTitle(interaction: ChatInputCommandInteraction): Promise<void> {

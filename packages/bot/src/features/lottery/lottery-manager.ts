@@ -321,11 +321,12 @@ export class LotteryManager {
     const winnerTicket = tickets[Math.floor(Math.random() * tickets.length)];
 
     // Award jackpot
-    await (this.supabase as any).rpc('economy_add_balance', {
+    const { error: jackpotErr } = await (this.supabase as any).rpc('economy_add_balance', {
       p_guild_id: guildId,
       p_user_id: winnerTicket.user_id,
       p_amount: drawing.jackpot,
-    }).catch(() => {});
+    });
+    if (jackpotErr) console.error(`[Lottery] Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
 
     // Close drawing
     await (this.supabase as any)

@@ -368,9 +368,13 @@ export class PollsManager {
     }
 
     // Deduct balance + place bet
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: amount,
-    }).catch(() => {});
+    });
+    if (debitErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${amount.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     await (this.supabase as any).from('prediction_bets').insert({
       prediction_id: predictionId,
@@ -447,9 +451,10 @@ export class PollsManager {
       const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
       const payout = Math.floor(prediction.total_pool * share);
 
-      await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
-      }).catch(() => {});
+      });
+      if (payoutErr) console.error(`[Polls] Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
 
       await (this.supabase as any)
         .from('prediction_bets')
