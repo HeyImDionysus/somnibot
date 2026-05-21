@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
       .from('economy_recipes')
       .insert({
         ...parsed,
-        inputs: JSON.stringify(parsed.inputs),
+        inputs: parsed.inputs,
         guild_id: ctx.guildId,
       })
       .select('*')
@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -113,7 +113,7 @@ export async function PUT(request: NextRequest) {
       updated_at: new Date().toISOString(),
     };
     if (parsed.inputs) {
-      updateData.inputs = JSON.stringify(parsed.inputs);
+      updateData.inputs = parsed.inputs;
     }
 
     const { data, error } = await admin
@@ -128,7 +128,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -161,7 +161,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to delete recipe';

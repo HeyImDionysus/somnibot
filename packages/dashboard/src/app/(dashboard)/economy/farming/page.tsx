@@ -415,7 +415,7 @@ export default function FarmingPage() {
       {/* Crop List */}
       {crops.length === 0 ? (
         <EmptyState
-          icon={<Sprout className="h-12 w-12" />}
+          icon={Sprout}
           title="No crops yet"
           description="Create your first crop to get the farm growing."
         />
@@ -472,15 +472,15 @@ export default function FarmingPage() {
           saving={saving}
         />
       )}
-      {deleteId && (
-        <ConfirmDialog
-          title="Delete Crop"
-          description="Are you sure you want to delete this crop? Players with this crop planted will lose their plants."
-          variant="danger"
-          onConfirm={deleteCrop}
-          onCancel={() => setDeleteId(null)}
-        />
-      )}
+      <ConfirmDialog
+        open={!!deleteId}
+        title="Delete Crop"
+        description="Are you sure you want to delete this crop? Players with this crop planted will lose their plants."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={deleteCrop}
+        onCancel={() => setDeleteId(null)}
+      />
     </div>
   );
 }

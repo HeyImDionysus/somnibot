@@ -414,7 +414,7 @@ export default function CraftingPage() {
       {/* Recipe List */}
       {recipes.length === 0 ? (
         <EmptyState
-          icon={<Hammer className="h-12 w-12" />}
+          icon={Hammer}
           title="No recipes yet"
           description="Create your first crafting recipe to get started."
         />
@@ -471,15 +471,15 @@ export default function CraftingPage() {
           saving={saving}
         />
       )}
-      {deleteId && (
-        <ConfirmDialog
-          title="Delete Recipe"
-          description="Are you sure you want to delete this recipe? This cannot be undone."
-          variant="danger"
-          onConfirm={deleteRecipe}
-          onCancel={() => setDeleteId(null)}
-        />
-      )}
+      <ConfirmDialog
+        open={!!deleteId}
+        title="Delete Recipe"
+        description="Are you sure you want to delete this recipe? This cannot be undone."
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={deleteRecipe}
+        onCancel={() => setDeleteId(null)}
+      />
     </div>
   );
 }

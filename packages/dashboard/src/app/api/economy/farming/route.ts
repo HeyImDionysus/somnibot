@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -112,7 +112,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
     if (err instanceof z.ZodError) {
@@ -145,7 +145,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    await notifyBot('economy', ctx.guildId);
+    await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to delete crop';
