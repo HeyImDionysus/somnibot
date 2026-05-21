@@ -44,6 +44,9 @@ import { EconomyManager, buildEconomyCommands, registerEconomyManager } from './
 import { GatheringManager, buildGatheringCommands, registerGatheringManager } from './features/gathering/index.js';
 import { CraftingManager, buildCraftingCommands, registerCraftingManager } from './features/crafting/index.js';
 import { FarmingManager, buildFarmingCommands, registerFarmingManager } from './features/farming/index.js';
+import { FishingManager, buildFishingCommands, registerFishingManager } from './features/fishing/index.js';
+import { AdventureManager, buildAdventureCommands, registerAdventureManager } from './features/adventures/index.js';
+import { MarketManager, buildMarketCommands, registerMarketManager } from './features/market/index.js';
 
 /**
  * SomniBot entry point.
@@ -557,6 +560,87 @@ async function main(): Promise<void> {
         }
       } catch (err) {
         console.error('[Boot] ⚠️  Phase 15d (Farming) initialization error:', err);
+      }
+    }
+
+    // Phase 15e: Fishing System (V31 — fishing mechanics, part of fake economy)
+    if (guild) {
+      try {
+        const { data: fishConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_fishing_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (fishConfig?.economy_fishing_enabled) {
+          const fishingManager = new FishingManager(guild, client.supabase, client.valkey);
+          registerFishingManager(fishingManager);
+          (client as unknown as Record<string, unknown>)._fishingManager = fishingManager;
+
+          const fishCmds = buildFishingCommands();
+          for (const cmd of Object.values(fishCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Fishing system started + ${Object.keys(fishCmds).length} fishing commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Fishing system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15e (Fishing) initialization error:', err);
+      }
+    }
+
+    // Phase 15f: Adventures System (V31 — interactive story adventures, part of fake economy)
+    if (guild) {
+      try {
+        const { data: advConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_adventures_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (advConfig?.economy_adventures_enabled) {
+          const adventureManager = new AdventureManager(guild, client.supabase, client.valkey);
+          registerAdventureManager(adventureManager);
+          (client as unknown as Record<string, unknown>)._adventureManager = adventureManager;
+
+          const advCmds = buildAdventureCommands();
+          for (const cmd of Object.values(advCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Adventures system started + ${Object.keys(advCmds).length} adventure commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Adventures system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15f (Adventures) initialization error:', err);
+      }
+    }
+
+    // Phase 15g: Market System (V31 — peer-to-peer item trading, part of fake economy)
+    if (guild) {
+      try {
+        const { data: mktConfig } = await client.supabase
+          .from('guild_config')
+          .select('economy_market_enabled')
+          .eq('guild_id', client.guildId)
+          .maybeSingle();
+
+        if (mktConfig?.economy_market_enabled) {
+          const marketManager = new MarketManager(guild, client.supabase, client.valkey);
+          registerMarketManager(marketManager);
+          (client as unknown as Record<string, unknown>)._marketManager = marketManager;
+
+          const mktCmds = buildMarketCommands();
+          for (const cmd of Object.values(mktCmds)) {
+            allCommands.push(cmd.toJSON());
+          }
+          console.log(`[Boot] ✅ Market system started + ${Object.keys(mktCmds).length} market commands queued`);
+        } else {
+          console.log('[Boot] ⏸️  Market system disabled in config');
+        }
+      } catch (err) {
+        console.error('[Boot] ⚠️  Phase 15g (Market) initialization error:', err);
       }
     }
 

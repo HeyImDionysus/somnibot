@@ -72,9 +72,16 @@ import { handleEconomyCommand } from '../features/economy/commands.js';
 import { handleGatheringCommand } from '../features/gathering/commands.js';
 import { handleCraftingCommand } from '../features/crafting/commands.js';
 import { handleFarmingCommand } from '../features/farming/commands.js';
+import { handleFishingCommand } from '../features/fishing/commands.js';
+import { handleAdventureCommand } from '../features/adventures/commands.js';
+import { handleMarketCommand } from '../features/market/commands.js';
+import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 import type { GatheringManager } from '../features/gathering/gathering-manager.js';
 import type { CraftingManager } from '../features/crafting/crafting-manager.js';
 import type { FarmingManager } from '../features/farming/farming-manager.js';
+import type { FishingManager } from '../features/fishing/fishing-manager.js';
+import type { AdventureManager } from '../features/adventures/adventure-manager.js';
+import type { MarketManager } from '../features/market/market-manager.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -534,6 +541,12 @@ export function registerEvents(client: SomniClient): void {
           }
         }
 
+        // Phase 15f: Adventure button interactions
+        if (interaction.isButton() && interaction.customId.startsWith('adventure:')) {
+          await handleAdventureButton(interaction);
+          return;
+        }
+
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
           client.eventBus.emit('button.clicked', client.guildId, {
@@ -765,6 +778,39 @@ export function registerEvents(client: SomniClient): void {
             await handleFarmingCommand(interaction, farmMgr);
           } else {
             await interaction.reply({ content: '🚫 The farming system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15e: Fishing commands — /fish
+        if (interaction.commandName === 'fish') {
+          const fishMgr = (client as unknown as Record<string, unknown>)._fishingManager as FishingManager | undefined;
+          if (fishMgr) {
+            await handleFishingCommand(interaction, fishMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The fishing system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15f: Adventure commands — /adventure
+        if (interaction.commandName === 'adventure') {
+          const advMgr = (client as unknown as Record<string, unknown>)._adventureManager as AdventureManager | undefined;
+          if (advMgr) {
+            await handleAdventureCommand(interaction, advMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The adventure system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15g: Market commands — /market
+        if (interaction.commandName === 'market') {
+          const mktMgr = (client as unknown as Record<string, unknown>)._marketManager as MarketManager | undefined;
+          if (mktMgr) {
+            await handleMarketCommand(interaction, mktMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The market is not enabled on this server.', ephemeral: true });
           }
           return;
         }
