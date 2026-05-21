@@ -405,9 +405,10 @@ export class HeistManager {
       // Refund entry fees
       const entryFee = config?.economy_heist_entry_fee ?? 100;
       for (const uid of participants) {
-        await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
-        }).catch(() => {});
+        });
+        if (refundErr) console.error(`[Heist] Failed to refund ${uid}:`, refundErr.message);
       }
 
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
@@ -440,9 +441,10 @@ export class HeistManager {
       const perPerson = Math.floor(totalPayout / participants.length);
 
       for (const uid of participants) {
-        await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: payErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
-        }).catch(() => {});
+        });
+        if (payErr) console.error(`[Heist] Failed to pay ${uid}:`, payErr.message);
 
         await (this.supabase as any).from('economy_heist_participants')
           .update({ payout: perPerson })
