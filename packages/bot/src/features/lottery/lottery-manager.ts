@@ -79,12 +79,12 @@ export class LotteryManager {
     // Check balance
     const { data: wallet } = await (this.supabase as any)
       .from('economy_wallets')
-      .select('balance')
+      .select('wallet')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .single();
 
-    if (!wallet || wallet.balance < totalCost) {
+    if (!wallet || wallet.wallet < totalCost) {
       await interaction.reply({ content: `❌ You need **${totalCost.toLocaleString()}** coins (${count} × ${ticketPrice.toLocaleString()}).`, ephemeral: true });
       return;
     }

@@ -83,11 +83,11 @@ export class GamesManager {
   private async getBalance(guildId: string, userId: string): Promise<number> {
     const { data } = await (this.supabase as any)
       .from('economy_wallets')
-      .select('balance')
+      .select('wallet')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .single();
-    return data?.balance ?? 0;
+    return data?.wallet ?? 0;
   }
 
   private async adjustBalance(guildId: string, userId: string, amount: number): Promise<void> {

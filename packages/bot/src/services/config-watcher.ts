@@ -310,7 +310,23 @@ export class ConfigWatcher {
     invalidateAntiRaidCache();
     invalidateStarboardCache();
     invalidateMessageLogCache();
-    console.log('[ConfigWatcher] ✅ Full config reload complete');
+    // Invalidate V31 economy in-memory caches
+    invalidateEconomyCache();
+    invalidateGatheringCache();
+    invalidateCraftingCache();
+    invalidateFarmingCache();
+    invalidateFishingCache();
+    invalidateAdventureCache();
+    invalidateMarketCache();
+    invalidateTriviaCache();
+    invalidateGamesCache();
+    invalidateLotteryCache();
+    invalidatePollsCache();
+    invalidatePetsCache();
+    invalidateQuestsCache();
+    invalidateAchievementsCache();
+    invalidateProfilesCache();
+    console.log('[ConfigWatcher] ✅ Full config reload complete (incl. economy caches)');
   }
 
   /**

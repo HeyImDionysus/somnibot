@@ -321,10 +321,14 @@ export class EconomyManager {
       })
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
+      .gte('wallet', amount) // Atomic guard: prevent negative balance under concurrent access
       .select('*')
       .single();
 
-    return (data ?? { ...wallet, wallet: newWallet }) as WalletData;
+    // If the atomic guard blocked the update, data is null → treat as insufficient funds
+    if (!data) return null;
+
+    return data as WalletData;
   }
 
   async deposit(userId: string, amount: number): Promise<TransactionResult> {
