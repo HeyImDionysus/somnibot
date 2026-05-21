@@ -196,7 +196,7 @@ export class FishingManager {
   private async consumeBait(userId: string): Promise<string | null> {
     const { data } = await this.supabase
       .from('economy_inventory')
-      .select('id, quantity, economy_items!inner(name, category)')
+      .select('id, quantity, item_id, economy_items!inner(name, category)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .eq('economy_items.category', 'Bait')
@@ -206,12 +206,14 @@ export class FishingManager {
 
     if (!data || data.length === 0) return null;
     const inv = data[0] as any;
-    const newQty = inv.quantity - 1;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', inv.id);
-    } else {
-      await this.supabase.from('economy_inventory').update({ quantity: newQty }).eq('id', inv.id);
-    }
+
+    // Atomic decrement — prevents TOCTOU on bait quantity
+    await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: inv.item_id,
+      p_quantity: 1,
+    });
     return inv.economy_items.name;
   }
 

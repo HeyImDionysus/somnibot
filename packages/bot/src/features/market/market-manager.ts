@@ -126,12 +126,17 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    // Remove from inventory
-    const newQty = invEntry.quantity - quantity;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', invEntry.id);
-    } else {
-      await this.supabase.from('economy_inventory').update({ quantity: newQty }).eq('id', invEntry.id);
+    // Remove from inventory atomically (prevents TOCTOU — listing same item twice)
+    const { data: decremented } = await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: invEntry.item_id,
+      p_quantity: quantity,
+    });
+    if (!decremented) {
+      return new EmbedBuilder()
+        .setDescription(`❌ You don't have enough **${itemName}** in your inventory.`)
+        .setColor(0xff0000);
     }
 
     // Create listing
@@ -263,28 +268,13 @@ export class MarketManager {
       p_amount: sellerEarnings,
     });
 
-    // Add item to buyer inventory
-    const { data: existingInv } = await this.supabase
-      .from('economy_inventory')
-      .select('id, quantity')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .eq('item_id', listing.item_id)
-      .limit(1);
-
-    if (existingInv && existingInv.length > 0) {
-      await this.supabase
-        .from('economy_inventory')
-        .update({ quantity: (existingInv[0] as any).quantity + buyQty })
-        .eq('id', (existingInv[0] as any).id);
-    } else {
-      await this.supabase.from('economy_inventory').insert({
-        guild_id: this.guild.id,
-        user_id: userId,
-        item_id: listing.item_id,
-        quantity: buyQty,
-      });
-    }
+    // Add item to buyer inventory atomically (prevents TOCTOU on quantity)
+    await this.supabase.rpc('economy_upsert_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: listing.item_id,
+      p_quantity: buyQty,
+    });
 
     // Update listing
     const newRemaining = listing.remaining - buyQty;
@@ -359,28 +349,13 @@ export class MarketManager {
 
     const listing = listings[0] as MarketListing;
 
-    // Return items to seller inventory
-    const { data: existingInv } = await this.supabase
-      .from('economy_inventory')
-      .select('id, quantity')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .eq('item_id', listing.item_id)
-      .limit(1);
-
-    if (existingInv && existingInv.length > 0) {
-      await this.supabase
-        .from('economy_inventory')
-        .update({ quantity: (existingInv[0] as any).quantity + listing.remaining })
-        .eq('id', (existingInv[0] as any).id);
-    } else {
-      await this.supabase.from('economy_inventory').insert({
-        guild_id: this.guild.id,
-        user_id: userId,
-        item_id: listing.item_id,
-        quantity: listing.remaining,
-      });
-    }
+    // Return items to seller inventory atomically (prevents TOCTOU on quantity)
+    await this.supabase.rpc('economy_upsert_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: listing.item_id,
+      p_quantity: listing.remaining,
+    });
 
     // Cancel listing
     await this.supabase
