@@ -94,6 +94,21 @@ const guildConfigPatchSchema = z.object({
   economy_farm_grid_size: z.number().int().min(1).max(25).optional(),
   economy_farming_wilt_enabled: z.boolean().optional(),
   economy_fertilizer_time_reduction_pct: z.number().int().min(0).max(90).optional(),
+  // Fishing
+  economy_fishing_enabled: z.boolean().optional(),
+  economy_fishing_cooldown_seconds: z.number().int().min(5).max(3600).optional(),
+  economy_fishing_junk_chance_pct: z.number().int().min(0).max(100).optional(),
+  economy_fishing_treasure_chance_pct: z.number().int().min(0).max(100).optional(),
+  // Adventures
+  economy_adventures_enabled: z.boolean().optional(),
+  economy_adventure_daily_limit: z.number().int().min(1).max(50).optional(),
+  economy_adventure_ticket_cost: z.number().int().min(0).max(1000000).optional(),
+  economy_adventure_max_scenes: z.number().int().min(3).max(30).optional(),
+  // Market
+  economy_market_enabled: z.boolean().optional(),
+  economy_market_fee_pct: z.number().int().min(0).max(50).optional(),
+  economy_market_listing_days: z.number().int().min(1).max(30).optional(),
+  economy_market_max_listings: z.number().int().min(1).max(50).optional(),
 }).strict();
 
 export async function GET() {

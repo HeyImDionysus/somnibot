@@ -40,6 +40,8 @@ import {
   Store,
   Hammer,
   Sprout,
+  Fish,
+  Swords,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -99,6 +101,9 @@ const navigation: NavGroup[] = [
       { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
       { label: 'Crafting', href: '/economy/crafting', icon: Hammer, requires: 'discord' },
       { label: 'Farming', href: '/economy/farming', icon: Sprout, requires: 'discord' },
+      { label: 'Fishing', href: '/economy/fishing', icon: Fish, requires: 'discord' },
+      { label: 'Adventures', href: '/economy/adventures', icon: Swords, requires: 'discord' },
+      { label: 'Market', href: '/economy/market', icon: Store, requires: 'discord' },
     ],
   },
   {

@@ -36,6 +36,9 @@ import { invalidateEconomyCache } from '../features/economy/index.js';
 import { invalidateGatheringCache } from '../features/gathering/index.js';
 import { invalidateCraftingCache } from '../features/crafting/index.js';
 import { invalidateFarmingCache } from '../features/farming/index.js';
+import { invalidateFishingCache } from '../features/fishing/index.js';
+import { invalidateAdventureCache } from '../features/adventures/index.js';
+import { invalidateMarketCache } from '../features/market/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -127,6 +130,9 @@ export class ConfigWatcher {
             invalidateGatheringCache();
             invalidateCraftingCache();
             invalidateFarmingCache();
+            invalidateFishingCache();
+            invalidateAdventureCache();
+            invalidateMarketCache();
             console.log('[ConfigWatcher] Economy/Gathering/Crafting/Farming config cache invalidated');
             break;
           case 'all':
