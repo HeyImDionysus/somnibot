@@ -25,6 +25,50 @@ interface ModerationConfig {
   infraction_expiry_days: number;
 }
 
+interface AntiRaidConfig {
+  anti_raid_enabled: boolean;
+  anti_raid_join_threshold: number;
+  anti_raid_join_window_seconds: number;
+  anti_raid_account_age_days: number;
+  anti_raid_action: 'kick' | 'ban' | 'lockdown';
+  anti_raid_log_channel_id: string | null;
+}
+
+interface MessageLogConfig {
+  message_log_enabled: boolean;
+  message_log_channel_id: string | null;
+}
+
+interface StarboardConfig {
+  starboard_enabled: boolean;
+  starboard_channel_id: string | null;
+  starboard_threshold: number;
+  starboard_emoji: string;
+  starboard_self_star: boolean;
+}
+
+const DEFAULT_ANTI_RAID: AntiRaidConfig = {
+  anti_raid_enabled: false,
+  anti_raid_join_threshold: 10,
+  anti_raid_join_window_seconds: 10,
+  anti_raid_account_age_days: 7,
+  anti_raid_action: 'kick',
+  anti_raid_log_channel_id: null,
+};
+
+const DEFAULT_MESSAGE_LOG: MessageLogConfig = {
+  message_log_enabled: false,
+  message_log_channel_id: null,
+};
+
+const DEFAULT_STARBOARD: StarboardConfig = {
+  starboard_enabled: false,
+  starboard_channel_id: null,
+  starboard_threshold: 3,
+  starboard_emoji: '⭐',
+  starboard_self_star: false,
+};
+
 const ACTION_ICONS: Record<string, string> = {
   warn: '⚠️',
   mute: '🔇',
@@ -52,16 +96,46 @@ export default function ModerationPage() {
   const { toast } = useToast();
 
   const [config, setConfig] = useState<ModerationConfig | null>(null);
+  const [antiRaid, setAntiRaid] = useState<AntiRaidConfig>(DEFAULT_ANTI_RAID);
+  const [messageLog, setMessageLog] = useState<MessageLogConfig>(DEFAULT_MESSAGE_LOG);
+  const [starboard, setStarboard] = useState<StarboardConfig>(DEFAULT_STARBOARD);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingGuild, setSavingGuild] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadConfig = useCallback(async () => {
     try {
-      const res = await fetch('/api/moderation/escalation');
-      const json = await res.json();
-      if (json.success) {
-        setConfig(json.data);
+      const [escRes, guildRes] = await Promise.all([
+        fetch('/api/moderation/escalation'),
+        fetch('/api/guild'),
+      ]);
+      const escJson = await escRes.json();
+      if (escJson.success) {
+        setConfig(escJson.data);
+      }
+      const guildJson = await guildRes.json();
+      if (guildJson.success && guildJson.config) {
+        const gc = guildJson.config;
+        setAntiRaid({
+          anti_raid_enabled: gc.anti_raid_enabled ?? false,
+          anti_raid_join_threshold: gc.anti_raid_join_threshold ?? 10,
+          anti_raid_join_window_seconds: gc.anti_raid_join_window_seconds ?? 10,
+          anti_raid_account_age_days: gc.anti_raid_account_age_days ?? 7,
+          anti_raid_action: gc.anti_raid_action ?? 'kick',
+          anti_raid_log_channel_id: gc.anti_raid_log_channel_id ?? null,
+        });
+        setMessageLog({
+          message_log_enabled: gc.message_log_enabled ?? false,
+          message_log_channel_id: gc.message_log_channel_id ?? null,
+        });
+        setStarboard({
+          starboard_enabled: gc.starboard_enabled ?? false,
+          starboard_channel_id: gc.starboard_channel_id ?? null,
+          starboard_threshold: gc.starboard_threshold ?? 3,
+          starboard_emoji: gc.starboard_emoji ?? '⭐',
+          starboard_self_star: gc.starboard_self_star ?? false,
+        });
       }
     } catch {
       setError('Failed to load moderation config');
@@ -92,6 +166,28 @@ export default function ModerationPage() {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveGuildConfig = async () => {
+    setSavingGuild(true);
+    try {
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...antiRaid,
+          ...messageLog,
+          ...starboard,
+        }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      toast({ title: 'Settings saved', variant: 'success' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setSavingGuild(false);
     }
   };
 
@@ -388,6 +484,195 @@ export default function ModerationPage() {
         </div>
       </section>
 
+      {/* Anti-Raid Protection */}
+      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-discord-text-primary">Anti-Raid Protection</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Detects join floods and takes automatic action against suspicious accounts.
+            </p>
+          </div>
+          <button
+            onClick={() => setAntiRaid({ ...antiRaid, anti_raid_enabled: !antiRaid.anti_raid_enabled })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${antiRaid.anti_raid_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${antiRaid.anti_raid_enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        {antiRaid.anti_raid_enabled && (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Join Threshold</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Number of joins to trigger raid mode.</p>
+                <input
+                  type="number"
+                  min={2}
+                  max={100}
+                  value={antiRaid.anti_raid_join_threshold}
+                  onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_join_threshold: parseInt(e.target.value) || 10 })}
+                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Window (seconds)</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Time window for counting joins.</p>
+                <input
+                  type="number"
+                  min={5}
+                  max={300}
+                  value={antiRaid.anti_raid_join_window_seconds}
+                  onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_join_window_seconds: parseInt(e.target.value) || 10 })}
+                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Min Account Age (days)</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Accounts newer than this are suspicious.</p>
+                <input
+                  type="number"
+                  min={0}
+                  max={365}
+                  value={antiRaid.anti_raid_account_age_days}
+                  onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_account_age_days: parseInt(e.target.value) || 7 })}
+                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Raid Action</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">What to do when a raid is detected.</p>
+                <select
+                  value={antiRaid.anti_raid_action}
+                  onChange={(e) => setAntiRaid({ ...antiRaid, anti_raid_action: e.target.value as AntiRaidConfig['anti_raid_action'] })}
+                  className="mt-2 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                >
+                  <option value="kick">Kick suspicious accounts</option>
+                  <option value="ban">Ban suspicious accounts</option>
+                  <option value="lockdown">Lockdown server (pause invites)</option>
+                </select>
+              </div>
+              <div>
+                <ChannelPicker
+                  label="Anti-Raid Log Channel"
+                  hint="Channel where raid alerts are posted."
+                  value={antiRaid.anti_raid_log_channel_id}
+                  onChange={(v) => setAntiRaid({ ...antiRaid, anti_raid_log_channel_id: (v as string) || null })}
+                  placeholder="Select log channel…"
+                  allowNone
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Message Logging */}
+      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-discord-text-primary">Message Logging</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Log message edits and deletions to a designated channel.
+            </p>
+          </div>
+          <button
+            onClick={() => setMessageLog({ ...messageLog, message_log_enabled: !messageLog.message_log_enabled })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${messageLog.message_log_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${messageLog.message_log_enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        {messageLog.message_log_enabled && (
+          <div className="max-w-md">
+            <ChannelPicker
+              label="Log Channel"
+              hint="Channel where edited and deleted messages are logged."
+              value={messageLog.message_log_channel_id}
+              onChange={(v) => setMessageLog({ ...messageLog, message_log_channel_id: (v as string) || null })}
+              placeholder="Select log channel…"
+              allowNone
+            />
+          </div>
+        )}
+      </section>
+
+      {/* Starboard */}
+      <section className="rounded-lg border border-discord-border bg-discord-bg-secondary p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-discord-text-primary">Starboard</h2>
+            <p className="mt-1 text-sm text-discord-text-muted">
+              Highlight popular messages that receive enough reactions in a starboard channel.
+            </p>
+          </div>
+          <button
+            onClick={() => setStarboard({ ...starboard, starboard_enabled: !starboard.starboard_enabled })}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${starboard.starboard_enabled ? 'bg-discord-success' : 'bg-discord-bg-tertiary'}`}
+          >
+            <span className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${starboard.starboard_enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+
+        {starboard.starboard_enabled && (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <ChannelPicker
+                  label="Starboard Channel"
+                  hint="Channel where starred messages are posted."
+                  value={starboard.starboard_channel_id}
+                  onChange={(v) => setStarboard({ ...starboard, starboard_channel_id: (v as string) || null })}
+                  placeholder="Select starboard channel…"
+                  allowNone
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Reaction Threshold</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Reactions needed to be posted to starboard.</p>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={starboard.starboard_threshold}
+                  onChange={(e) => setStarboard({ ...starboard, starboard_threshold: parseInt(e.target.value) || 3 })}
+                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-discord-text-secondary">Emoji</label>
+                <p className="mt-0.5 text-xs text-discord-text-muted">Reaction emoji that counts toward the starboard.</p>
+                <input
+                  type="text"
+                  value={starboard.starboard_emoji}
+                  onChange={(e) => setStarboard({ ...starboard, starboard_emoji: e.target.value || '⭐' })}
+                  placeholder="⭐"
+                  className="mt-2 w-24 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary focus:border-somni-pink focus:outline-none"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="block text-sm font-medium text-discord-text-secondary">Allow Self-Star</label>
+                  <p className="mt-0.5 text-xs text-discord-text-muted">Allow message authors to star their own messages.</p>
+                </div>
+                <button
+                  onClick={() => setStarboard({ ...starboard, starboard_self_star: !starboard.starboard_self_star })}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${starboard.starboard_self_star ? 'bg-discord-accent' : 'bg-discord-bg-tertiary'}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${starboard.starboard_self_star ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Save */}
       <div className="flex items-center gap-4">
         <button
@@ -395,7 +680,14 @@ export default function ModerationPage() {
           disabled={saving}
           className="rounded-md bg-somni-pink px-6 py-2.5 text-sm font-semibold text-white hover:bg-somni-pink/80 disabled:opacity-50"
         >
-          {saving ? 'Saving...' : 'Save Settings'}
+          {saving ? 'Saving...' : 'Save Escalation'}
+        </button>
+        <button
+          onClick={handleSaveGuildConfig}
+          disabled={savingGuild}
+          className="rounded-md bg-discord-accent px-6 py-2.5 text-sm font-semibold text-white hover:bg-discord-accent/80 disabled:opacity-50"
+        >
+          {savingGuild ? 'Saving...' : 'Save Anti-Raid / Logging / Starboard'}
         </button>
         {error && <span className="text-sm text-red-400">{error}</span>}
       </div>
