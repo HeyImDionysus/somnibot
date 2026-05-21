@@ -1,0 +1,543 @@
+/**
+ * Economy slash commands — all fake-economy interactions.
+ *
+ * Commands: /balance, /daily, /weekly, /monthly, /work, /crime, /beg, /search,
+ * /deposit, /withdraw, /pay, /rob, /passive, /shop, /buy, /sell, /inventory,
+ * /use, /economy-leaderboard
+ */
+import {
+  SlashCommandBuilder,
+  ChatInputCommandInteraction,
+  EmbedBuilder,
+  type SlashCommandSubcommandBuilder,
+} from 'discord.js';
+import type { SomniClient } from '../../client.js';
+import type { EconomyManager } from './economy-manager.js';
+
+// ── Command builders ──────────────────────────────────────
+
+export function buildEconomyCommands() {
+  const balanceCmd = new SlashCommandBuilder()
+    .setName('balance')
+    .setDescription('Check your wallet and bank balance')
+    .addUserOption((opt) =>
+      opt.setName('user').setDescription('User to check (leave empty for yourself)').setRequired(false),
+    );
+
+  const dailyCmd = new SlashCommandBuilder()
+    .setName('daily')
+    .setDescription('Claim your daily reward');
+
+  const weeklyCmd = new SlashCommandBuilder()
+    .setName('weekly')
+    .setDescription('Claim your weekly reward');
+
+  const monthlyCmd = new SlashCommandBuilder()
+    .setName('monthly')
+    .setDescription('Claim your monthly reward');
+
+  const workCmd = new SlashCommandBuilder()
+    .setName('work')
+    .setDescription('Work a job to earn some coins');
+
+  const crimeCmd = new SlashCommandBuilder()
+    .setName('crime')
+    .setDescription('Attempt a crime for big rewards — but risk a fine');
+
+  const begCmd = new SlashCommandBuilder()
+    .setName('beg')
+    .setDescription('Beg for spare change');
+
+  const searchCmd = new SlashCommandBuilder()
+    .setName('search')
+    .setDescription('Search random places for coins');
+
+  const depositCmd = new SlashCommandBuilder()
+    .setName('deposit')
+    .setDescription('Deposit coins into your bank')
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('Amount to deposit (or "all")').setRequired(true).setMinValue(1),
+    );
+
+  const withdrawCmd = new SlashCommandBuilder()
+    .setName('withdraw')
+    .setDescription('Withdraw coins from your bank')
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('Amount to withdraw').setRequired(true).setMinValue(1),
+    );
+
+  const payCmd = new SlashCommandBuilder()
+    .setName('pay')
+    .setDescription('Send coins to another user')
+    .addUserOption((opt) =>
+      opt.setName('user').setDescription('User to pay').setRequired(true),
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('amount').setDescription('Amount to send').setRequired(true).setMinValue(1),
+    );
+
+  const robCmd = new SlashCommandBuilder()
+    .setName('rob')
+    .setDescription('Attempt to rob another user')
+    .addUserOption((opt) =>
+      opt.setName('user').setDescription('User to rob').setRequired(true),
+    );
+
+  const passiveCmd = new SlashCommandBuilder()
+    .setName('passive')
+    .setDescription('Toggle passive mode (protection from robbery)');
+
+  const shopCmd = new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('Browse the server shop')
+    .addStringOption((opt) =>
+      opt.setName('category').setDescription('Filter by category').setRequired(false)
+        .addChoices(
+          { name: 'Tools', value: 'Tools' },
+          { name: 'Bait', value: 'Bait' },
+          { name: 'Seeds', value: 'Seeds' },
+          { name: 'Materials', value: 'Materials' },
+          { name: 'Consumables', value: 'Consumables' },
+          { name: 'Roles', value: 'Roles' },
+          { name: 'Cosmetics', value: 'Cosmetics' },
+          { name: 'Lootboxes', value: 'Lootboxes' },
+        ),
+    );
+
+  const buyCmd = new SlashCommandBuilder()
+    .setName('buy')
+    .setDescription('Buy an item from the shop')
+    .addStringOption((opt) =>
+      opt.setName('item').setDescription('Item name or ID').setRequired(true),
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('quantity').setDescription('How many to buy').setRequired(false).setMinValue(1).setMaxValue(99),
+    );
+
+  const sellCmd = new SlashCommandBuilder()
+    .setName('sell')
+    .setDescription('Sell an item from your inventory')
+    .addStringOption((opt) =>
+      opt.setName('item').setDescription('Item name or ID').setRequired(true),
+    )
+    .addIntegerOption((opt) =>
+      opt.setName('quantity').setDescription('How many to sell').setRequired(false).setMinValue(1).setMaxValue(99),
+    );
+
+  const inventoryCmd = new SlashCommandBuilder()
+    .setName('inventory')
+    .setDescription('View your item inventory')
+    .addUserOption((opt) =>
+      opt.setName('user').setDescription('User to check (leave empty for yourself)').setRequired(false),
+    );
+
+  const useCmd = new SlashCommandBuilder()
+    .setName('use')
+    .setDescription('Use an item from your inventory')
+    .addStringOption((opt) =>
+      opt.setName('item').setDescription('Item name or ID').setRequired(true),
+    );
+
+  const econLeaderboardCmd = new SlashCommandBuilder()
+    .setName('economy-leaderboard')
+    .setDescription('View the richest members');
+
+  const collectCmd = new SlashCommandBuilder()
+    .setName('collect-income')
+    .setDescription('Collect your role-based passive income');
+
+  return {
+    balanceCmd,
+    dailyCmd,
+    weeklyCmd,
+    monthlyCmd,
+    workCmd,
+    crimeCmd,
+    begCmd,
+    searchCmd,
+    depositCmd,
+    withdrawCmd,
+    payCmd,
+    robCmd,
+    passiveCmd,
+    shopCmd,
+    buyCmd,
+    sellCmd,
+    inventoryCmd,
+    useCmd,
+    econLeaderboardCmd,
+    collectCmd,
+  };
+}
+
+// ── Command handlers ──────────────────────────────────────
+
+export async function handleEconomyCommand(
+  interaction: ChatInputCommandInteraction,
+  economyManager: EconomyManager,
+): Promise<void> {
+  const cfg = await economyManager.loadConfig();
+  if (!cfg.economy_enabled) {
+    await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true });
+    return;
+  }
+
+  const cmd = interaction.commandName;
+
+  switch (cmd) {
+    case 'balance': return handleBalance(interaction, economyManager);
+    case 'daily': return handleTimedReward(interaction, economyManager, 'daily');
+    case 'weekly': return handleTimedReward(interaction, economyManager, 'weekly');
+    case 'monthly': return handleTimedReward(interaction, economyManager, 'monthly');
+    case 'work': return handleWork(interaction, economyManager);
+    case 'crime': return handleCrime(interaction, economyManager);
+    case 'beg': return handleBeg(interaction, economyManager);
+    case 'search': return handleSearch(interaction, economyManager);
+    case 'deposit': return handleDeposit(interaction, economyManager);
+    case 'withdraw': return handleWithdraw(interaction, economyManager);
+    case 'pay': return handlePay(interaction, economyManager);
+    case 'rob': return handleRob(interaction, economyManager);
+    case 'passive': return handlePassive(interaction, economyManager);
+    case 'shop': return handleShop(interaction, economyManager);
+    case 'buy': return handleBuy(interaction, economyManager);
+    case 'sell': return handleSell(interaction, economyManager);
+    case 'inventory': return handleInventory(interaction, economyManager);
+    case 'use': return handleUse(interaction, economyManager);
+    case 'economy-leaderboard': return handleEconLeaderboard(interaction, economyManager);
+    case 'collect-income': return handleCollectIncome(interaction, economyManager);
+    default:
+      await interaction.reply({ content: '❌ Unknown economy command.', ephemeral: true });
+  }
+}
+
+// ── Individual handlers ───────────────────────────────────
+
+async function handleBalance(
+  interaction: ChatInputCommandInteraction,
+  mgr: EconomyManager,
+): Promise<void> {
+  const user = interaction.options.getUser('user') ?? interaction.user;
+  const cfg = await mgr.loadConfig();
+  const wallet = await mgr.getOrCreateWallet(user.id);
+  const netWorth = wallet.wallet + wallet.bank;
+
+  const embed = new EmbedBuilder()
+    .setAuthor({ name: `${user.displayName}'s Balance`, iconURL: user.displayAvatarURL() })
+    .setColor(0x5865F2)
+    .addFields(
+      { name: '💰 Wallet', value: `${cfg.currency_emoji} ${wallet.wallet.toLocaleString()}`, inline: true },
+      { name: '🏦 Bank', value: `${cfg.currency_emoji} ${wallet.bank.toLocaleString()} / ${wallet.bank_max.toLocaleString()}`, inline: true },
+      { name: '📊 Net Worth', value: `${cfg.currency_emoji} ${netWorth.toLocaleString()}`, inline: true },
+    )
+    .setFooter({ text: wallet.passive ? '🛡️ Passive mode enabled' : '⚔️ Passive mode disabled' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleTimedReward(
+  interaction: ChatInputCommandInteraction,
+  mgr: EconomyManager,
+  type: 'daily' | 'weekly' | 'monthly',
+): Promise<void> {
+  await interaction.deferReply();
+  const result = await mgr.claimTimedReward(interaction.user.id, type);
+
+  const cfg = await mgr.loadConfig();
+  if (result.success) {
+    const embed = new EmbedBuilder()
+      .setColor(0x2ecc71)
+      .setTitle(`${cfg.currency_emoji} ${type.charAt(0).toUpperCase() + type.slice(1)} Reward`)
+      .setDescription(result.message)
+      .addFields(
+        { name: '💰 New Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true },
+      )
+      .setTimestamp();
+
+    if (result.streak) {
+      embed.addFields(
+        { name: '🔥 Streak', value: `${result.streak.current_streak}`, inline: true },
+        { name: '🏆 Best Streak', value: `${result.streak.longest_streak}`, inline: true },
+      );
+    }
+
+    await interaction.editReply({ embeds: [embed] });
+  } else {
+    await interaction.editReply({ content: result.message });
+  }
+}
+
+async function handleWork(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
+  const result = await mgr.work(interaction.user.id);
+
+  if (result.success) {
+    const cfg = await mgr.loadConfig();
+    const embed = new EmbedBuilder()
+      .setColor(0x3498db)
+      .setTitle('💼 Work')
+      .setDescription(result.message)
+      .addFields({ name: '💰 Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
+      .setTimestamp();
+    await interaction.editReply({ embeds: [embed] });
+  } else {
+    await interaction.editReply({ content: result.message });
+  }
+}
+
+async function handleCrime(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
+  const result = await mgr.crime(interaction.user.id);
+  const cfg = await mgr.loadConfig();
+
+  const embed = new EmbedBuilder()
+    .setColor(result.success ? 0x2ecc71 : 0xe74c3c)
+    .setTitle(result.success ? '🎭 Crime — Success!' : '🚨 Crime — Busted!')
+    .setDescription(result.message)
+    .addFields({ name: '💰 Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+async function handleBeg(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const result = await mgr.beg(interaction.user.id);
+  await interaction.reply({ content: result.message });
+}
+
+async function handleSearch(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const result = await mgr.search(interaction.user.id);
+  await interaction.reply({ content: result.message });
+}
+
+async function handleDeposit(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const amount = interaction.options.getInteger('amount', true);
+  const result = await mgr.deposit(interaction.user.id, amount);
+  await interaction.reply({ content: result.message, ephemeral: !result.success });
+}
+
+async function handleWithdraw(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const amount = interaction.options.getInteger('amount', true);
+  const result = await mgr.withdraw(interaction.user.id, amount);
+  await interaction.reply({ content: result.message, ephemeral: !result.success });
+}
+
+async function handlePay(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const target = interaction.options.getUser('user', true);
+  const amount = interaction.options.getInteger('amount', true);
+
+  if (target.bot) {
+    await interaction.reply({ content: "❌ You can't pay a bot.", ephemeral: true });
+    return;
+  }
+
+  const result = await mgr.pay(interaction.user.id, target.id, amount);
+  await interaction.reply({ content: result.message, ephemeral: !result.success });
+}
+
+async function handleRob(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const target = interaction.options.getUser('user', true);
+
+  if (target.bot) {
+    await interaction.reply({ content: "❌ You can't rob a bot.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply();
+  const result = await mgr.rob(interaction.user.id, target.id);
+  const cfg = await mgr.loadConfig();
+
+  const embed = new EmbedBuilder()
+    .setColor(result.success ? 0x2ecc71 : 0xe74c3c)
+    .setTitle(result.success ? '💰 Robbery — Success!' : '🚨 Robbery — Failed!')
+    .setDescription(result.message)
+    .addFields({ name: '💰 Your Balance', value: `${cfg.currency_emoji} ${result.balance.wallet.toLocaleString()}`, inline: true })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
+}
+
+async function handlePassive(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const result = await mgr.togglePassive(interaction.user.id);
+  await interaction.reply({ content: result.message, ephemeral: true });
+}
+
+async function handleShop(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const category = interaction.options.getString('category') ?? undefined;
+  const cfg = await mgr.loadConfig();
+  const items = await mgr.getShopItems(category);
+
+  if (items.length === 0) {
+    await interaction.reply({ content: '🏪 The shop is empty!', ephemeral: true });
+    return;
+  }
+
+  const lines = items.map((item, i) => {
+    const stockStr = item.stock !== null ? ` (${item.stock} left)` : '';
+    return `${item.emoji} **${item.name}** — ${cfg.currency_emoji} ${item.price.toLocaleString()}${stockStr}\n> ${item.description ?? 'No description'}`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0xf39c12)
+    .setTitle(`🏪 Shop${category ? ` — ${category}` : ''}`)
+    .setDescription(lines.join('\n\n'))
+    .setFooter({ text: `Use /buy <item> to purchase • ${items.length} items` })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleBuy(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const itemName = interaction.options.getString('item', true);
+  const quantity = interaction.options.getInteger('quantity') ?? 1;
+
+  // Resolve item by name or ID
+  const itemId = await resolveItemId(mgr, interaction.guildId!, itemName);
+  if (!itemId) {
+    await interaction.reply({ content: `❌ Item "${itemName}" not found. Use \`/shop\` to browse available items.`, ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply();
+  const result = await mgr.buyItem(interaction.user.id, itemId, quantity);
+  await interaction.editReply({ content: result.message });
+}
+
+async function handleSell(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const itemName = interaction.options.getString('item', true);
+  const quantity = interaction.options.getInteger('quantity') ?? 1;
+
+  const itemId = await resolveItemId(mgr, interaction.guildId!, itemName);
+  if (!itemId) {
+    await interaction.reply({ content: `❌ Item "${itemName}" not found.`, ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply();
+  const result = await mgr.sellItem(interaction.user.id, itemId, quantity);
+  await interaction.editReply({ content: result.message });
+}
+
+async function handleInventory(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const user = interaction.options.getUser('user') ?? interaction.user;
+  const items = await mgr.getInventory(user.id);
+
+  if (items.length === 0) {
+    await interaction.reply({ content: `📦 ${user.id === interaction.user.id ? 'Your' : `${user.displayName}'s`} inventory is empty.`, ephemeral: true });
+    return;
+  }
+
+  const lines = items.map((item) => {
+    const durStr = item.durability_remaining !== null ? ` [${item.durability_remaining} uses]` : '';
+    return `${item.item_emoji} **${item.item_name}** ×${item.quantity}${durStr}`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0x9b59b6)
+    .setAuthor({ name: `${user.displayName}'s Inventory`, iconURL: user.displayAvatarURL() })
+    .setDescription(lines.join('\n'))
+    .setFooter({ text: `${items.length} items • Use /use <item> to use an item` })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleUse(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.reply({ content: '🔧 Item usage will be implemented with specific item effects in PR #43+.', ephemeral: true });
+}
+
+async function handleEconLeaderboard(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  const cfg = await mgr.loadConfig();
+  const leaders = await mgr.getLeaderboard(10);
+
+  if (leaders.length === 0) {
+    await interaction.reply({ content: '📊 No one has earned any coins yet!', ephemeral: true });
+    return;
+  }
+
+  const lines = leaders.map((entry, i) => {
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**#${i + 1}**`;
+    return `${medal} <@${entry.user_id}> — ${cfg.currency_emoji} ${entry.net_worth.toLocaleString()}`;
+  });
+
+  const embed = new EmbedBuilder()
+    .setColor(0xf1c40f)
+    .setTitle(`${cfg.currency_emoji} Economy Leaderboard`)
+    .setDescription(lines.join('\n'))
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  // Check role-based income
+  const client = interaction.client as unknown as SomniClient;
+  const cfg = await mgr.loadConfig();
+
+  const { data: roleIncomes } = await (client as unknown as Record<string, unknown>).supabase
+    ? await (async () => {
+        // Access supabase from the client
+        const supabase = (interaction.client as unknown as { supabase: import('@supabase/supabase-js').SupabaseClient }).supabase;
+        return supabase
+          .from('economy_role_income')
+          .select('role_id, amount, interval_minutes')
+          .eq('guild_id', interaction.guildId!);
+      })()
+    : { data: [] };
+
+  if (!roleIncomes || roleIncomes.length === 0) {
+    await interaction.reply({ content: '❌ No role income is configured on this server.', ephemeral: true });
+    return;
+  }
+
+  const member = interaction.member;
+  if (!member || !('roles' in member)) {
+    await interaction.reply({ content: '❌ Could not check your roles.', ephemeral: true });
+    return;
+  }
+
+  const memberRoles = member.roles;
+  const roleCache = 'cache' in memberRoles ? (memberRoles as { cache: Map<string, unknown> }).cache : new Map();
+  let totalIncome = 0;
+  let collected = 0;
+
+  for (const ri of roleIncomes) {
+    if (!roleCache.has(ri.role_id)) continue;
+
+    // Check cooldown per role
+    const cooldownKey = `economy:${interaction.guildId}:${interaction.user.id}:role_income:${ri.role_id}`;
+    const lastCollect = await mgr['valkey'].get(cooldownKey);
+    if (lastCollect) continue; // Still on cooldown
+
+    totalIncome += ri.amount;
+    collected++;
+
+    // Set cooldown
+    const cooldownMs = ri.interval_minutes * 60 * 1000;
+    await mgr['valkey'].set(cooldownKey, '1', 'PX', cooldownMs);
+  }
+
+  if (collected === 0) {
+    await interaction.reply({ content: '⏰ No role income available to collect right now.', ephemeral: true });
+    return;
+  }
+
+  const updated = await mgr.creditWallet(interaction.user.id, totalIncome);
+  await interaction.reply({
+    content: `${cfg.currency_emoji} Collected **${totalIncome.toLocaleString()} ${cfg.currency_name}** from ${collected} role${collected > 1 ? 's' : ''}!\n💰 Balance: **${updated.wallet.toLocaleString()}**`,
+  });
+}
+
+// ── Helpers ───────────────────────────────────────────────
+
+async function resolveItemId(mgr: EconomyManager, guildId: string, nameOrId: string): Promise<string | null> {
+  // Try UUID first
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nameOrId)) {
+    return nameOrId;
+  }
+
+  // Search by name (case-insensitive)
+  const items = await mgr.getShopItems();
+  const match = items.find((item) => item.name.toLowerCase() === nameOrId.toLowerCase());
+  return match?.id ?? null;
+}
