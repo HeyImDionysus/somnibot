@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { notifyBot } from '@/lib/notify-bot';
 
 export async function GET() {
   try {
@@ -36,6 +37,7 @@ export async function POST(request: Request) {
       .select()
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 401 });
@@ -62,6 +64,7 @@ export async function PUT(request: Request) {
       .select()
       .single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 401 });
@@ -81,6 +84,7 @@ export async function DELETE(request: Request) {
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 401 });
