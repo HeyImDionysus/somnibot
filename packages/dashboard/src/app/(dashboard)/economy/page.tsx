@@ -238,7 +238,7 @@ export default function EconomyPage() {
       });
       const json = await res.json();
       if (json.success) {
-        toast({ title: 'Economy settings saved!' });
+        toast({ title: 'Economy settings saved!', variant: 'success' });
         setDirty(false);
         originalRef(JSON.stringify(config));
       } else {
@@ -467,7 +467,7 @@ export default function EconomyPage() {
             <ChannelPicker
               label="Economy Log Channel"
               value={config.economy_log_channel_id}
-              onChange={(v) => updateField('economy_log_channel_id', v)}
+              onChange={(v) => updateField('economy_log_channel_id', typeof v === 'string' ? v : null)}
               allowNone
             />
           </div>

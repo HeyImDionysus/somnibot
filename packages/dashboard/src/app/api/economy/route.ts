@@ -132,7 +132,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     // Notify bot to reload economy config
-    await notifyBot(ctx.guildId, 'economy', ctx.userId);
+    await notifyBot('economy');
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

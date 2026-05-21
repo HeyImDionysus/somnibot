@@ -83,13 +83,15 @@ export async function GET(request: NextRequest) {
     let avgLevel: number;
     let levelDistribution: Record<number, number>;
 
-    if (levelAgg) {
-      totalTrackedMembers = levelAgg.total_members ?? 0;
-      totalMessages = levelAgg.total_messages ?? 0;
-      totalVoiceMinutes = levelAgg.total_voice_minutes ?? 0;
-      maxLevel = levelAgg.max_level ?? 0;
-      avgLevel = levelAgg.avg_level ?? 0;
-      levelDistribution = (levelAgg.level_distribution as Record<number, number>) ?? {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC return type not in generated schema
+    const agg = levelAgg as any;
+    if (agg) {
+      totalTrackedMembers = agg.total_members ?? 0;
+      totalMessages = agg.total_messages ?? 0;
+      totalVoiceMinutes = agg.total_voice_minutes ?? 0;
+      maxLevel = agg.max_level ?? 0;
+      avgLevel = agg.avg_level ?? 0;
+      levelDistribution = (agg.level_distribution as Record<number, number>) ?? {};
     } else {
       // Graceful fallback: aggregate via count query + capped level fetch
       const { count } = await admin

@@ -266,7 +266,7 @@ export default function ShopPage() {
       });
       const json = await res.json();
       if (json.success) {
-        toast({ title: isEdit ? 'Item updated!' : 'Item created!' });
+        toast({ title: isEdit ? 'Item updated!' : 'Item created!', variant: 'success' });
         setEditingItem(null);
         await loadItems();
       } else {
@@ -287,7 +287,7 @@ export default function ShopPage() {
       const res = await fetch(`/api/economy/shop?id=${deletingId}`, { method: 'DELETE' });
       const json = await res.json();
       if (json.success) {
-        toast({ title: 'Item deleted' });
+        toast({ title: 'Item deleted', variant: 'success' });
         setDeletingId(null);
         await loadItems();
       } else {
@@ -404,7 +404,7 @@ export default function ShopPage() {
         title="Delete Item"
         description="This will permanently delete this item and remove it from all inventories. This cannot be undone."
         confirmLabel="Delete"
-        variant="destructive"
+        variant="danger"
         onConfirm={handleDeleteItem}
         onCancel={() => setDeletingId(null)}
       />
