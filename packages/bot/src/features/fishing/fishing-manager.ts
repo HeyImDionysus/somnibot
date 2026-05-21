@@ -432,10 +432,11 @@ export class FishingManager {
   // ── Helpers ───────────────────────────────────────────
 
   private async addCurrency(userId: string, amount: number): Promise<void> {
-    await this.supabase.rpc('economy_add_balance', {
+    const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
+    if (error) console.error(`[Fishing] economy_add_balance failed for ${userId}:`, error.message);
   }
 }
