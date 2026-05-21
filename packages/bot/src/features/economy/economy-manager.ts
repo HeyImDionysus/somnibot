@@ -822,12 +822,15 @@ export class EconomyManager {
       .maybeSingle();
 
     if (padlock && padlock.quantity > 0) {
-      // Consume padlock
-      const newQty = padlock.quantity - 1;
-      if (newQty <= 0) {
-        await this.supabase.from('economy_inventory').delete().eq('id', padlock.id);
-      } else {
-        await this.supabase.from('economy_inventory').update({ quantity: newQty }).eq('id', padlock.id);
+      // Consume padlock atomically
+      const padlockItemId = (await this.findItemByEffect('padlock'))?.id;
+      if (padlockItemId) {
+        await this.supabase.rpc('economy_decrement_inventory', {
+          p_guild_id: this.guild.id,
+          p_user_id: victimId,
+          p_item_id: padlockItemId,
+          p_quantity: 1,
+        });
       }
 
       const cooldownMs = 600_000;
@@ -938,7 +941,7 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: '❌ Item not found.' };
     }
 
-    // Stock check
+    // Stock check (preliminary — final atomic check happens after payment)
     if (item.stock !== null && item.stock < quantity) {
       const wallet = await this.getOrCreateWallet(userId);
       return { success: false, amount: 0, balance: wallet, message: `❌ Only **${item.stock}** left in stock.` };
@@ -977,38 +980,28 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: w, message: `${cfg.currency_emoji} You need **${totalCost.toLocaleString()} ${cfg.currency_name}** but only have **${w.wallet.toLocaleString()}**.` };
     }
 
-    // Add to inventory — read existing qty first, then upsert with correct total
-    const { data: existingInv } = await this.supabase
-      .from('economy_inventory')
-      .select('quantity')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId)
-      .eq('item_id', itemId)
-      .maybeSingle();
-
-    const existingQty = existingInv?.quantity ?? 0;
-
-    await this.supabase
-      .from('economy_inventory')
-      .upsert(
-        {
-          guild_id: this.guild.id,
-          user_id: userId,
-          item_id: itemId,
-          quantity: existingQty + quantity,
-          durability_remaining: item.durability,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'guild_id,user_id,item_id' },
-      );
-
-    // Reduce stock
+    // Reduce stock atomically (prevents overselling via TOCTOU)
     if (item.stock !== null) {
-      await this.supabase
-        .from('economy_items')
-        .update({ stock: item.stock - quantity })
-        .eq('id', itemId);
+      const { data: stockOk } = await this.supabase.rpc('economy_decrement_stock', {
+        p_item_id: itemId,
+        p_quantity: quantity,
+      });
+      if (!stockOk) {
+        // Refund the wallet debit
+        await this.creditWallet(userId, totalCost);
+        const w = await this.getOrCreateWallet(userId);
+        return { success: false, amount: 0, balance: w, message: `❌ Item went out of stock.` };
+      }
     }
+
+    // Add to inventory atomically (prevents TOCTOU on quantity)
+    await this.supabase.rpc('economy_upsert_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_quantity: quantity,
+      p_durability: item.durability,
+    });
 
     // Grant role if applicable
     if (item.grant_role_id) {
@@ -1052,7 +1045,7 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: '❌ This item cannot be sold.' };
     }
 
-    // Check inventory
+    // Check inventory quantity (for error message)
     const { data: inv } = await this.supabase
       .from('economy_inventory')
       .select('id, quantity')
@@ -1068,12 +1061,16 @@ export class EconomyManager {
 
     const totalValue = item.sell_price * quantity;
 
-    // Remove from inventory
-    const newQty = inv.quantity - quantity;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', inv.id);
-    } else {
-      await this.supabase.from('economy_inventory').update({ quantity: newQty, updated_at: new Date().toISOString() }).eq('id', inv.id);
+    // Remove from inventory atomically (prevents TOCTOU)
+    const { data: decremented } = await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: itemId,
+      p_quantity: quantity,
+    });
+    if (!decremented) {
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: `❌ You don't have enough of this item.` };
     }
 
     // Credit wallet
