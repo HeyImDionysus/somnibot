@@ -54,6 +54,8 @@ const guildConfigPatchSchema = z.object({
   // V26: Ticket defaults
   ticket_transcript_enabled: z.boolean().optional(),
   ticket_dm_transcript: z.boolean().optional(),
+  // V28: Commerce grace period (was in schema + bot but never exposed in dashboard)
+  grace_period_days: z.number().int().min(0).max(90).optional(),
 }).strict();
 
 export async function GET() {

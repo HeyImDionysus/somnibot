@@ -753,7 +753,7 @@ export interface DbProductFile {
   // V19 Audit: added missing schema fields
   display_name: string | null;
   file_name: string | null;
-  guild_id: string;
+  guild_id: string | null;
   size_bytes: number | null;
   storage_bucket: string | null;
   storage_path: string | null;
@@ -1279,5 +1279,5 @@ export interface DbSyncAction {
   created_at: string;
   // V19 Audit: added missing schema fields
   action: string | null;
-  drift_item: string | null;
+  drift_item: Record<string, unknown> | null;
 }
