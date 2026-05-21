@@ -1136,7 +1136,7 @@ export class EconomyManager {
       net_worth: (row.wallet as number) + (row.bank as number),
       wallet: row.wallet as number,
       bank: row.bank as number,
-    })).sort((a, b) => b.net_worth - a.net_worth);
+    })).sort((a: { net_worth: number }, b: { net_worth: number }) => b.net_worth - a.net_worth);
   }
 
   // ── Internal helpers ────────────────────────────────────
