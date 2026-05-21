@@ -83,6 +83,14 @@ import type { TriviaManager } from '../features/trivia/trivia-manager.js';
 import type { GamesManager } from '../features/games/games-manager.js';
 import type { LotteryManager } from '../features/lottery/lottery-manager.js';
 import type { PollsManager } from '../features/polls/polls-manager.js';
+import { handlePetCommand } from '../features/pets/commands.js';
+import { handleQuestCommand } from '../features/quests/commands.js';
+import { handleAchievementCommand } from '../features/achievements/commands.js';
+import { handleProfileCommand } from '../features/profiles/commands.js';
+import type { PetsManager } from '../features/pets/pets-manager.js';
+import type { QuestsManager } from '../features/quests/quests-manager.js';
+import type { AchievementsManager } from '../features/achievements/achievements-manager.js';
+import type { ProfilesManager } from '../features/profiles/profiles-manager.js';
 import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
 import type { GatheringManager } from '../features/gathering/gathering-manager.js';
 import type { CraftingManager } from '../features/crafting/crafting-manager.js';
@@ -888,6 +896,38 @@ export function registerEvents(client: SomniClient): void {
           } else {
             await interaction.reply({ content: '🚫 Predictions are not enabled on this server.', ephemeral: true });
           }
+          return;
+        }
+
+        // Phase 15l: Pet commands — /pet
+        if (interaction.commandName === 'pet') {
+          const petMgr = (client as unknown as Record<string, unknown>)._petsManager as PetsManager | undefined;
+          if (petMgr) { await handlePetCommand(interaction, petMgr); }
+          else { await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true }); }
+          return;
+        }
+
+        // Phase 15m: Quest commands — /quests
+        if (interaction.commandName === 'quests') {
+          const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
+          if (qMgr) { await handleQuestCommand(interaction, qMgr); }
+          else { await interaction.reply({ content: '🚫 Quests are not enabled on this server.', ephemeral: true }); }
+          return;
+        }
+
+        // Phase 15n: Achievement/Prestige commands — /badges, /prestige
+        if (interaction.commandName === 'badges' || interaction.commandName === 'prestige') {
+          const achMgr = (client as unknown as Record<string, unknown>)._achievementsManager as AchievementsManager | undefined;
+          if (achMgr) { await handleAchievementCommand(interaction, achMgr); }
+          else { await interaction.reply({ content: '🚫 Achievements are not enabled on this server.', ephemeral: true }); }
+          return;
+        }
+
+        // Phase 15o: Profile commands — /profile, /title, /bio
+        if (['profile', 'title', 'bio'].includes(interaction.commandName)) {
+          const profMgr = (client as unknown as Record<string, unknown>)._profilesManager as ProfilesManager | undefined;
+          if (profMgr) { await handleProfileCommand(interaction, profMgr); }
+          else { await interaction.reply({ content: '🚫 Profiles are not available.', ephemeral: true }); }
           return;
         }
 
