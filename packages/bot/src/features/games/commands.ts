@@ -51,8 +51,7 @@ export function buildGameCommands(): Record<string, SlashCommandBuilder> {
 
   const highlow = new SlashCommandBuilder()
     .setName('highlow')
-    .setDescription('Guess if the next number is higher or lower (free)')
-    as SlashCommandBuilder;
+    .setDescription('Guess if the next number is higher or lower (free)') as unknown as SlashCommandBuilder;
 
   const scratch = new SlashCommandBuilder()
     .setName('scratch')
