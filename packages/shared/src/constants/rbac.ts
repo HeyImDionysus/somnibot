@@ -132,6 +132,8 @@ export const ROUTE_PERMISSIONS: Record<string, DashboardPermission | null> = {
   '/store/promotions': 'dashboard.manage_store',
   '/economy': 'dashboard.manage_economy',
   '/economy/shop': 'dashboard.manage_economy',
+  '/economy/crafting': 'dashboard.manage_economy',
+  '/economy/farming': 'dashboard.manage_economy',
   '/analytics': 'dashboard.view_analytics',
   '/audit': 'dashboard.view_audit',
   '/diagnostics': 'dashboard.view_diagnostics',

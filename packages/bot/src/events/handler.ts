@@ -69,6 +69,12 @@ import { handlePurgeCommand } from '../features/moderation/purge-command.js';
 import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
 import type { EconomyManager } from '../features/economy/economy-manager.js';
 import { handleEconomyCommand } from '../features/economy/commands.js';
+import { handleGatheringCommand } from '../features/gathering/commands.js';
+import { handleCraftingCommand } from '../features/crafting/commands.js';
+import { handleFarmingCommand } from '../features/farming/commands.js';
+import type { GatheringManager } from '../features/gathering/gathering-manager.js';
+import type { CraftingManager } from '../features/crafting/crafting-manager.js';
+import type { FarmingManager } from '../features/farming/farming-manager.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -724,6 +730,41 @@ export function registerEvents(client: SomniClient): void {
             await handleEconomyCommand(interaction, econMgr);
           } else {
             await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15b: Gathering commands — /hunt, /dig, /mine
+        const gatheringCommands = new Set(['hunt', 'dig', 'mine']);
+        if (gatheringCommands.has(interaction.commandName)) {
+          const gatherMgr = (client as unknown as Record<string, unknown>)._gatheringManager as GatheringManager | undefined;
+          if (gatherMgr) {
+            await handleGatheringCommand(interaction, gatherMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The gathering system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15c: Crafting commands — /craft, /recipes
+        const craftingCommands = new Set(['craft', 'recipes']);
+        if (craftingCommands.has(interaction.commandName)) {
+          const craftMgr = (client as unknown as Record<string, unknown>)._craftingManager as CraftingManager | undefined;
+          if (craftMgr) {
+            await handleCraftingCommand(interaction, craftMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The crafting system is not enabled on this server.', ephemeral: true });
+          }
+          return;
+        }
+
+        // Phase 15d: Farming commands — /farm
+        if (interaction.commandName === 'farm') {
+          const farmMgr = (client as unknown as Record<string, unknown>)._farmingManager as FarmingManager | undefined;
+          if (farmMgr) {
+            await handleFarmingCommand(interaction, farmMgr);
+          } else {
+            await interaction.reply({ content: '🚫 The farming system is not enabled on this server.', ephemeral: true });
           }
           return;
         }
