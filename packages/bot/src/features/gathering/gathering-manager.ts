@@ -322,33 +322,12 @@ export class GatheringManager {
     return { tier: bestTier, inventoryId: bestInvId, durabilityLeft: bestDurability };
   }
 
-  private async consumeDurability(inventoryId: string): Promise<void> {
-    // Decrement durability; if it hits 0, remove the item
-    const { data } = await this.supabase
-      .from('economy_inventory')
-      .select('durability_remaining, quantity')
-      .eq('id', inventoryId)
-      .single();
-
-    if (!data) return;
-
-    if (data.durability_remaining !== null) {
-      const newDur = (data.durability_remaining as number) - 1;
-      if (newDur <= 0) {
-        // Tool broke — reduce quantity or delete
-        if ((data.quantity as number) <= 1) {
-          await this.supabase.from('economy_inventory').delete().eq('id', inventoryId);
-        } else {
-          await this.supabase.from('economy_inventory')
-            .update({ quantity: (data.quantity as number) - 1 })
-            .eq('id', inventoryId);
-        }
-      } else {
-        await this.supabase.from('economy_inventory')
-          .update({ durability_remaining: newDur, updated_at: new Date().toISOString() })
-          .eq('id', inventoryId);
-      }
-    }
+  private async consumeDurability(inventoryId: string): Promise<boolean> {
+    // Atomic durability decrement — prevents TOCTOU race
+    const { data: stillExists } = await this.supabase.rpc('economy_decrement_durability', {
+      p_inventory_id: inventoryId,
+    });
+    return stillExists === true;
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {

@@ -1090,7 +1090,9 @@ async function main(): Promise<void> {
     // Reconciliation timer
     const reconTimer = (client as unknown as Record<string, unknown>)._reconciliationTimer as NodeJS.Timeout | undefined;
     if (reconTimer) clearInterval(reconTimer);
-    // Economy timers: lottery draws, pet decay, quest weekly reset, games daily reset
+    // Economy timers: heist cleanup, lottery draws, pet decay, quest weekly reset, games daily reset
+    const heistMgr = (client as unknown as Record<string, unknown>)._heistManager as { cleanup?: () => void } | undefined;
+    if (heistMgr?.cleanup) heistMgr.cleanup();
     const lotteryMgr = (client as unknown as Record<string, unknown>)._lotteryManager as { stopDrawTimer?: () => void } | undefined;
     if (lotteryMgr?.stopDrawTimer) lotteryMgr.stopDrawTimer();
     const gamesMgr = (client as unknown as Record<string, unknown>)._gamesManager as { stopDailyResetTimer?: () => void } | undefined;

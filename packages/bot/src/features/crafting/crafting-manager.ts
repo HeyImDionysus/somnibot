@@ -285,30 +285,30 @@ export class CraftingManager {
     }));
   }
 
-  private async removeFromInventory(userId: string, itemName: string, qty: number): Promise<void> {
-    // Find the inventory entry by item name
+  private async removeFromInventory(userId: string, itemName: string, qty: number): Promise<boolean> {
+    // Resolve item_id from name, then use atomic RPC to decrement
     const { data: items } = await this.supabase
       .from('economy_inventory')
-      .select('id, quantity, item_id, economy_items!inner(name)')
+      .select('item_id, economy_items!inner(name)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .gt('quantity', 0);
 
-    if (!items) return;
+    if (!items) return false;
 
     const match = (items as any[]).find((i) =>
       ((i.economy_items as any)?.name ?? '').toLowerCase() === itemName.toLowerCase()
     );
-    if (!match) return;
+    if (!match) return false;
 
-    const newQty = (match.quantity as number) - qty;
-    if (newQty <= 0) {
-      await this.supabase.from('economy_inventory').delete().eq('id', match.id);
-    } else {
-      await this.supabase.from('economy_inventory')
-        .update({ quantity: newQty, updated_at: new Date().toISOString() })
-        .eq('id', match.id);
-    }
+    // Atomic decrement — prevents TOCTOU race on inventory quantity
+    const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
+      p_guild_id: this.guild.id,
+      p_user_id: userId,
+      p_item_id: match.item_id,
+      p_quantity: qty,
+    });
+    return success === true;
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
