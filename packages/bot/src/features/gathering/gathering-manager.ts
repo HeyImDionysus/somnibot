@@ -9,6 +9,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -251,6 +252,9 @@ export class GatheringManager {
       )
       .setColor(RARITY_COLORS[picked.rarity])
       .setTimestamp();
+
+    // Quest progress
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'gather').catch(() => {});
 
     return {
       embed,
