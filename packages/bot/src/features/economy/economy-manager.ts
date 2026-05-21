@@ -337,29 +337,18 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: 'Your bank is full!' };
     }
 
-    const actualAmount = Math.min(amount, maxDeposit);
+    const requestedAmount = Math.min(amount, maxDeposit);
 
-    // Use atomic RPC: debit wallet, then credit bank in one shot
-    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
+    // Atomic bank deposit — debits wallet + credits bank in a single FOR UPDATE txn
+    const { data: actualAmount, error: depositErr } = await this.supabase.rpc('economy_bank_deposit', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: actualAmount,
+      p_amount: requestedAmount,
     });
 
-    if (debitErr) {
+    if (depositErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your wallet." };
     }
-
-    // Credit bank (direct update is safe — only deposit/withdraw touch bank, and
-    // these are user-initiated sequential commands)
-    await this.supabase
-      .from('economy_wallets')
-      .update({
-        bank: wallet.bank + actualAmount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId);
 
     const updated = await this.getOrCreateWallet(userId);
     await this.recordTransaction(userId, 'deposit', -actualAmount, updated.wallet, `Deposited ${actualAmount} to bank`);
@@ -380,32 +369,17 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your bank." };
     }
 
-    let newWallet = wallet.wallet + amount;
-    if (cfg.economy_max_wallet > 0) {
-      newWallet = Math.min(newWallet, cfg.economy_max_wallet);
-    }
-    const actualAmount = newWallet - wallet.wallet;
-
-    // Credit wallet atomically via RPC
-    const { error: addErr } = await this.supabase.rpc('economy_add_balance', {
+    // Atomic bank withdraw — debits bank + credits wallet in a single FOR UPDATE txn
+    const { data: actualAmount, error: withdrawErr } = await this.supabase.rpc('economy_bank_withdraw', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: actualAmount,
+      p_amount: amount,
+      p_max_wallet: cfg.economy_max_wallet,
     });
 
-    if (addErr) {
+    if (withdrawErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: 'Failed to withdraw.' };
     }
-
-    // Debit bank (direct update is safe — only deposit/withdraw touch bank)
-    await this.supabase
-      .from('economy_wallets')
-      .update({
-        bank: wallet.bank - actualAmount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', userId);
 
     const updated = await this.getOrCreateWallet(userId);
     await this.recordTransaction(userId, 'withdraw', actualAmount, updated.wallet, `Withdrew ${actualAmount} from bank`);

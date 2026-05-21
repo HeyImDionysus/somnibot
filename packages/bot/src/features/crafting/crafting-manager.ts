@@ -200,9 +200,27 @@ export class CraftingManager {
       };
     }
 
-    // Consume materials
+    // Consume materials — check each decrement succeeds (prevents free crafts from TOCTOU)
+    const consumed: { itemName: string; qty: number; itemId: string }[] = [];
     for (const input of recipe.inputs) {
-      await this.removeFromInventory(userId, input.item_name, input.qty);
+      const result = await this.removeFromInventory(userId, input.item_name, input.qty);
+      if (!result.success) {
+        // Refund already-consumed materials
+        for (const c of consumed) {
+          await this.supabase.rpc('economy_upsert_inventory', {
+            p_guild_id: this.guild.id,
+            p_user_id: userId,
+            p_item_id: c.itemId,
+            p_quantity: c.qty,
+          }).catch(() => {});
+        }
+        return {
+          embed: new EmbedBuilder()
+            .setDescription(`❌ Failed to consume **${input.item_name}** — another action used it first. Try again.`)
+            .setColor(0xff0000),
+        };
+      }
+      consumed.push({ itemName: input.item_name, qty: input.qty, itemId: result.itemId });
     }
 
     // Give output
@@ -285,7 +303,7 @@ export class CraftingManager {
     }));
   }
 
-  private async removeFromInventory(userId: string, itemName: string, qty: number): Promise<boolean> {
+  private async removeFromInventory(userId: string, itemName: string, qty: number): Promise<{ success: boolean; itemId: string }> {
     // Resolve item_id from name, then use atomic RPC to decrement
     const { data: items } = await this.supabase
       .from('economy_inventory')
@@ -294,12 +312,12 @@ export class CraftingManager {
       .eq('user_id', userId)
       .gt('quantity', 0);
 
-    if (!items) return false;
+    if (!items) return { success: false, itemId: '' };
 
     const match = (items as any[]).find((i) =>
       ((i.economy_items as any)?.name ?? '').toLowerCase() === itemName.toLowerCase()
     );
-    if (!match) return false;
+    if (!match) return { success: false, itemId: '' };
 
     // Atomic decrement — prevents TOCTOU race on inventory quantity
     const { data: success } = await this.supabase.rpc('economy_decrement_inventory', {
@@ -308,7 +326,7 @@ export class CraftingManager {
       p_item_id: match.item_id,
       p_quantity: qty,
     });
-    return success === true;
+    return { success: success === true, itemId: match.item_id as string };
   }
 
   private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {

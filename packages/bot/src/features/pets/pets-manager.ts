@@ -415,15 +415,16 @@ export class PetsManager {
     });
 
     const battleWinnerId = iWin ? interaction.user.id : opponent.id;
-    await (this.supabase as any).rpc('economy_add_balance', {
+    const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
       p_guild_id: guildId, p_user_id: battleWinnerId, p_amount: reward,
-    }).catch(() => {});
+    });
+    if (payoutErr) console.error('[Pets] battlePet payout failed:', payoutErr.message);
 
-    // XP for both
-    for (const [pet, uid] of [[myPet, interaction.user.id], [theirPet, opponent.id]] as const) {
-      await (this.supabase as any).from('economy_pets')
-        .update({ xp: (pet as any).xp + 10, updated_at: new Date().toISOString() })
-        .eq('guild_id', guildId).eq('user_id', uid);
+    // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
+    for (const uid of [interaction.user.id, opponent.id]) {
+      await (this.supabase as any).rpc('economy_pet_add_xp', {
+        p_guild_id: guildId, p_user_id: uid, p_xp: 10,
+      }).catch((err: Error) => console.error('[Pets] pet XP increment failed:', err.message));
     }
 
     await interaction.reply({
