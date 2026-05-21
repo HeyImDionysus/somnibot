@@ -20,8 +20,8 @@ import { ConfirmDialog } from '@/components/shared/confirm-dialog';
 
 interface LevelConfig {
   levels_enabled: boolean;
-  min_xp: number;
-  max_xp: number;
+  xp_min: number;
+  xp_max: number;
   xp_cooldown_seconds: number;
   voice_xp_enabled: boolean;
   voice_xp_per_interval: number;
@@ -33,6 +33,7 @@ interface LevelConfig {
   level_up_message: string | null;
   rank_card_accent_color: number | null;
   rank_card_background: string | null;
+  no_xp_role_id: string | null;
 }
 
 interface LevelReward {
@@ -63,8 +64,8 @@ interface LeaderboardEntry {
 
 const DEFAULT_CONFIG: LevelConfig = {
   levels_enabled: false,
-  min_xp: 15,
-  max_xp: 25,
+  xp_min: 15,
+  xp_max: 25,
   xp_cooldown_seconds: 60,
   voice_xp_enabled: false,
   voice_xp_per_interval: 10,
@@ -76,6 +77,7 @@ const DEFAULT_CONFIG: LevelConfig = {
   level_up_message: null,
   rank_card_accent_color: null,
   rank_card_background: null,
+  no_xp_role_id: null,
 };
 
 function numToHex(n: number | null): string {
@@ -197,13 +199,13 @@ export default function LevelsPage() {
     setError(null);
 
     // Client-side validation
-    if (config.min_xp < 1 || config.max_xp < 1) {
+    if (config.xp_min < 1 || config.xp_max < 1) {
       setError('XP values must be at least 1');
       toast({ title: 'XP values must be at least 1', variant: 'error' });
       setSaving(false);
       return;
     }
-    if (config.min_xp >= config.max_xp) {
+    if (config.xp_min >= config.xp_max) {
       setError('Min XP must be less than Max XP');
       toast({ title: 'Min XP must be less than Max XP', variant: 'error' });
       setSaving(false);
@@ -407,8 +409,8 @@ export default function LevelsPage() {
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Min XP per Message</label>
                 <input
                   type="number"
-                  value={config.min_xp}
-                  onChange={(e) => setConfig({ ...config, min_xp: Number(e.target.value) })}
+                  value={config.xp_min}
+                  onChange={(e) => setConfig({ ...config, xp_min: Number(e.target.value) })}
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
                 />
               </div>
@@ -416,8 +418,8 @@ export default function LevelsPage() {
                 <label className="mb-1 block text-xs font-medium text-discord-text-muted">Max XP per Message</label>
                 <input
                   type="number"
-                  value={config.max_xp}
-                  onChange={(e) => setConfig({ ...config, max_xp: Number(e.target.value) })}
+                  value={config.xp_max}
+                  onChange={(e) => setConfig({ ...config, xp_max: Number(e.target.value) })}
                   className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary border border-discord-border-subtle focus:border-discord-accent focus:outline-none"
                 />
               </div>
@@ -506,6 +508,21 @@ export default function LevelsPage() {
                 placeholder="Select channels…"
               />
             </div>
+          </div>
+
+          {/* No-XP Role */}
+          <div className="rounded-card border border-discord-border-subtle bg-discord-bg-secondary p-5">
+            <h2 className="mb-4 text-lg font-semibold text-discord-text-primary">XP Exclusion</h2>
+            <RolePicker
+              label="No-XP Role"
+              value={config.no_xp_role_id}
+              onChange={(v) => setConfig({ ...config, no_xp_role_id: (v as string) || null })}
+              placeholder="Select a role (members with this role won't earn XP)"
+              allowNone
+            />
+            <p className="mt-2 text-xs text-discord-text-muted">
+              Members with this role will be completely excluded from earning XP. Useful for bots, staff, or other roles you want to opt out of the leveling system.
+            </p>
           </div>
 
           {/* Level-Up Announcements */}

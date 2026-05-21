@@ -128,6 +128,8 @@ export default function StorePage() {
   const [paypalEnabled, setPaypalEnabled] = useState(false);
   const [togglingStore, setTogglingStore] = useState(false);
   const [togglingPaypal, setTogglingPaypal] = useState(false);
+  const [gracePeriodDays, setGracePeriodDays] = useState(3);
+  const [savingGrace, setSavingGrace] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -142,6 +144,7 @@ export default function StorePage() {
       if (guildJson.config) {
         setStoreEnabled(guildJson.config.store_enabled ?? false);
         setPaypalEnabled(guildJson.config.paypal_enabled ?? false);
+        setGracePeriodDays(guildJson.config.grace_period_days ?? 3);
       }
     } finally {
       setLoading(false);
@@ -189,6 +192,29 @@ export default function StorePage() {
       toast({ title: 'Failed to toggle PayPal', variant: 'error' });
     } finally {
       setTogglingPaypal(false);
+    }
+  };
+
+  const saveGracePeriod = async (value: number) => {
+    setSavingGrace(true);
+    try {
+      const clamped = Math.max(0, Math.min(30, value));
+      const res = await fetch('/api/guild', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grace_period_days: clamped }),
+      });
+      const json = await res.json();
+      if (json.success || !json.error) {
+        setGracePeriodDays(clamped);
+        toast({ title: 'Grace period saved', variant: 'success' });
+      } else {
+        toast({ title: json.error ?? 'Failed to save', variant: 'error' });
+      }
+    } catch {
+      toast({ title: 'Failed to save grace period', variant: 'error' });
+    } finally {
+      setSavingGrace(false);
     }
   };
 
@@ -386,6 +412,32 @@ export default function StorePage() {
               }`}
             />
           </button>
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm font-medium text-discord-text-primary">Subscription Grace Period</span>
+            <p className="text-xs text-discord-text-muted">
+              Days after a subscription expires before entitlements are revoked. Set to 0 for immediate revocation.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={30}
+              value={gracePeriodDays}
+              onChange={(e) => setGracePeriodDays(parseInt(e.target.value) || 0)}
+              className="w-20 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-1.5 text-sm text-discord-text-primary focus:border-discord-accent focus:outline-none"
+            />
+            <span className="text-xs text-discord-text-muted">days</span>
+            <button
+              onClick={() => saveGracePeriod(gracePeriodDays)}
+              disabled={savingGrace}
+              className="rounded-md bg-discord-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-discord-accent/80 disabled:opacity-50"
+            >
+              {savingGrace ? '…' : 'Save'}
+            </button>
+          </div>
         </div>
       </div>
 
