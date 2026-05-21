@@ -13,6 +13,9 @@ import { PawPrint } from 'lucide-react';
 interface PetsConfig {
   economy_pets_enabled: boolean;
   economy_pet_decay_rate: number;
+  economy_pet_decay_interval_hours: number;
+  economy_pet_low_stat_threshold: number;
+  economy_pet_notify_owner: boolean;
   economy_pet_battle_enabled: boolean;
   economy_pet_prestige_enabled: boolean;
   economy_pet_feed_cost: number;
@@ -22,6 +25,9 @@ interface PetsConfig {
 const DEFAULT_CONFIG: PetsConfig = {
   economy_pets_enabled: false,
   economy_pet_decay_rate: 5,
+  economy_pet_decay_interval_hours: 1,
+  economy_pet_low_stat_threshold: 20,
+  economy_pet_notify_owner: true,
   economy_pet_battle_enabled: true,
   economy_pet_prestige_enabled: true,
   economy_pet_feed_cost: 50,
@@ -110,6 +116,20 @@ export default function PetsPage() {
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_train_cost: parseInt(e.target.value) || 0 })}
                 className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
             </div>
+            <div>
+              <label className="text-sm text-discord-text-secondary">Decay Check Interval (hours)</label>
+              <input type="number" min={1} max={168} value={config.economy_pet_decay_interval_hours}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_decay_interval_hours: parseInt(e.target.value) || 1 })}
+                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+              <p className="text-xs text-discord-text-secondary mt-1">How often the bot checks and applies stat decay.</p>
+            </div>
+            <div>
+              <label className="text-sm text-discord-text-secondary">Low Stat Warning Threshold (%)</label>
+              <input type="number" min={0} max={100} value={config.economy_pet_low_stat_threshold}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_low_stat_threshold: parseInt(e.target.value) || 20 })}
+                className="w-full mt-1 bg-discord-tertiary text-discord-text-primary rounded px-3 py-2" />
+              <p className="text-xs text-discord-text-secondary mt-1">Pets below this threshold are marked as sad or sick.</p>
+            </div>
           </div>
 
           <div className="bg-discord-secondary rounded-lg p-4 space-y-3">
@@ -125,6 +145,12 @@ export default function PetsPage() {
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_prestige_enabled: e.target.checked })}
                 className="rounded" />
               <span className="text-sm text-discord-text-primary">Enable Pet Prestige</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={config.economy_pet_notify_owner}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => saveConfig({ economy_pet_notify_owner: e.target.checked })}
+                className="rounded" />
+              <span className="text-sm text-discord-text-primary">DM Owner When Pet Is Sad/Sick</span>
             </label>
             <div className="mt-4 p-3 bg-discord-tertiary rounded text-sm text-discord-text-secondary">
               <strong>Pet Types:</strong><br />
