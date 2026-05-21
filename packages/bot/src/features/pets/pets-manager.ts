@@ -13,6 +13,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 let _manager: PetsManager | null = null;
 export function registerPetsManager(mgr: PetsManager): void { _manager = mgr; }
@@ -216,9 +217,13 @@ export class PetsManager {
       return;
     }
 
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: price,
-    }).catch(() => {});
+    });
+    if (debitErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${price.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
     await (this.supabase as any).from('economy_pets').insert({
@@ -253,15 +258,21 @@ export class PetsManager {
       return;
     }
 
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: feedDebitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    }).catch(() => {});
+    });
+    if (feedDebitErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     const newHunger = Math.min(100, pet.hunger + 30);
     const newStatus = newHunger > 30 && pet.happiness > 30 ? 'happy' : 'sad';
     await (this.supabase as any).from('economy_pets')
       .update({ hunger: newHunger, status: newStatus, updated_at: new Date().toISOString() })
       .eq('id', pet.id);
+
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch(() => {});
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -312,9 +323,13 @@ export class PetsManager {
       return;
     }
 
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: trainDebitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-    }).catch(() => {});
+    });
+    if (trainDebitErr) {
+      await interaction.reply({ content: `❌ Payment failed — you need **${cost.toLocaleString()}** coins.`, ephemeral: true });
+      return;
+    }
 
     const xpGain = 20 + Math.floor(Math.random() * 15);
     const newXp = pet.xp + xpGain;
@@ -339,6 +354,8 @@ export class PetsManager {
 
     let desc = `${pet.name} trained hard! +${xpGain} XP (${newXp} total)\nCost: **${cost}** coins`;
     if (leveledUp) desc += `\n🎉 *Level up! Now level ${newLevel}!*`;
+
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch(() => {});
 
     await interaction.reply({
       embeds: [new EmbedBuilder().setTitle('💪 Training Complete!').setDescription(desc).setColor(0x57F287)],

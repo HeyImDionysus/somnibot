@@ -8,6 +8,7 @@
 import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextChannel } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
 
@@ -224,10 +225,17 @@ export class LotteryManager {
       return;
     }
 
-    // Deduct balance
-    await (this.supabase as any).rpc('economy_subtract_balance', {
+    // Deduct balance — bail if insufficient funds
+    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
-    }).catch(() => {});
+    });
+    if (debitErr) {
+      await interaction.reply({
+        content: `❌ You don't have enough to buy ${count} ticket(s) (need **${totalCost.toLocaleString()}**).`,
+        ephemeral: true,
+      });
+      return;
+    }
 
     // Insert tickets
     const tickets = Array.from({ length: count }, () => ({
@@ -243,6 +251,8 @@ export class LotteryManager {
     const { data: newJackpot } = await (this.supabase as any).rpc('lottery_increment_jackpot', {
       p_drawing_id: drawing.id, p_amount: totalCost,
     });
+
+    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch(() => {});
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

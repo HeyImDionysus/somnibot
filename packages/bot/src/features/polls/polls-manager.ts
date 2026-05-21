@@ -11,6 +11,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
 
@@ -183,6 +184,8 @@ export class PollsManager {
       option_id: optionId,
       user_id: userId,
     });
+
+    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch(() => {});
 
     await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
   }
