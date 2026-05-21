@@ -46,6 +46,7 @@ import {
   Gamepad2,
   PawPrint,
   Award,
+  Pickaxe,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -103,6 +104,7 @@ const navigation: NavGroup[] = [
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
       { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
       { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
+      { label: 'Gathering', href: '/economy/gathering', icon: Pickaxe, requires: 'discord' },
       { label: 'Crafting', href: '/economy/crafting', icon: Hammer, requires: 'discord' },
       { label: 'Farming', href: '/economy/farming', icon: Sprout, requires: 'discord' },
       { label: 'Fishing', href: '/economy/fishing', icon: Fish, requires: 'discord' },
