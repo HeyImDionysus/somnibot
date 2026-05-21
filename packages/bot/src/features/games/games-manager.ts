@@ -5,6 +5,7 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
 
@@ -65,9 +66,37 @@ export class GamesManager {
   private supabase: SupabaseClient;
   private configCache = new Map<string, DbGuildConfig>();
   private dailyLosses = new Map<string, number>(); // `guildId:userId` → today's losses
+  private dailyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase as any;
+    this.scheduleDailyLossReset();
+  }
+
+  /** Schedule daily loss map reset at next midnight UTC, then every 24h. */
+  private scheduleDailyLossReset(): void {
+    const now = new Date();
+    const nextMidnight = new Date(now);
+    nextMidnight.setUTCHours(24, 0, 0, 0);
+    const msUntilMidnight = nextMidnight.getTime() - now.getTime();
+
+    this.dailyResetTimer = setTimeout(() => {
+      this.dailyLosses.clear();
+      console.log('[Games] Daily loss limits reset (midnight UTC)');
+      // Then repeat every 24 hours
+      this.dailyResetTimer = setInterval(() => {
+        this.dailyLosses.clear();
+        console.log('[Games] Daily loss limits reset (midnight UTC)');
+      }, 24 * 60 * 60 * 1000) as unknown as ReturnType<typeof setTimeout>;
+    }, msUntilMidnight);
+  }
+
+  stopDailyResetTimer(): void {
+    if (this.dailyResetTimer) {
+      clearTimeout(this.dailyResetTimer);
+      clearInterval(this.dailyResetTimer);
+      this.dailyResetTimer = null;
+    }
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -100,6 +129,8 @@ export class GamesManager {
         p_guild_id: guildId, p_user_id: userId, p_amount: Math.abs(amount),
       }).catch(() => {});
     }
+    // Track quest progress for any gamble action (win or loss)
+    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch(() => {});
   }
 
   private checkDailyLimit(guildId: string, userId: string, config: DbGuildConfig, amount: number): boolean {

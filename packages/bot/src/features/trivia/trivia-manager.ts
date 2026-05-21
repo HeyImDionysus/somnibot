@@ -12,6 +12,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
+import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
 
@@ -247,6 +248,7 @@ export class TriviaManager {
           p_user_id: userId,
           p_amount: payout,
         }).catch(() => {});
+        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch(() => {});
       } else {
         losers.push(userId);
         this.setStreak(guildId, userId, 0);
