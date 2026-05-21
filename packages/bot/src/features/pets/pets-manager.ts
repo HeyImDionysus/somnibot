@@ -46,11 +46,13 @@ export class PetsManager {
   clearCache(): void { this.configCache.clear(); }
 
   /** Start the pet decay timer. Call once at boot. */
-  schedulePetDecay(guildId: string): void {
+  async schedulePetDecay(guildId: string): Promise<void> {
     if (this.decayTimer) { clearInterval(this.decayTimer); this.decayTimer = null; }
 
-    // Run decay every hour (the rate is per-interval, configurable)
-    const ONE_HOUR = 60 * 60 * 1000;
+    // Read the configured interval from guild config
+    const config = await this.getConfig(guildId);
+    const intervalHours = config?.economy_pet_decay_interval_hours ?? 1;
+    const intervalMs = intervalHours * 60 * 60 * 1000;
 
     // Initial decay after 5 minutes (let bot fully boot)
     setTimeout(() => {
@@ -59,7 +61,7 @@ export class PetsManager {
 
     this.decayTimer = setInterval(() => {
       this.runDecayCycle(guildId).catch(console.error);
-    }, ONE_HOUR);
+    }, intervalMs);
   }
 
   stopDecayTimer(): void {
@@ -72,8 +74,8 @@ export class PetsManager {
       if (!config?.economy_pets_enabled) return;
 
       const decayRate = config.economy_pet_decay_rate ?? 5;
-      const threshold = (config as any).economy_pet_low_stat_threshold ?? 20;
-      const shouldNotify = (config as any).economy_pet_notify_owner ?? true;
+      const threshold = config.economy_pet_low_stat_threshold ?? 20;
+      const shouldNotify = config.economy_pet_notify_owner ?? true;
 
       // Get all pets for this guild
       const { data: pets } = await (this.supabase as any)
@@ -241,6 +243,16 @@ export class PetsManager {
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
 
+    // Check balance before deducting
+    const { data: feedWallet } = await (this.supabase as any)
+      .from('economy_wallets').select('wallet')
+      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+
+    if (!feedWallet || feedWallet.wallet < cost) {
+      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to feed your pet.`, ephemeral: true });
+      return;
+    }
+
     await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
     }).catch(() => {});
@@ -289,6 +301,16 @@ export class PetsManager {
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (pet.energy < 20) { await interaction.reply({ content: '⚡ Your pet needs more energy! Wait or play with it.', ephemeral: true }); return; }
     if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
+
+    // Check balance before deducting
+    const { data: trainWallet } = await (this.supabase as any)
+      .from('economy_wallets').select('wallet')
+      .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
+
+    if (!trainWallet || trainWallet.wallet < cost) {
+      await interaction.reply({ content: `❌ You need **${cost.toLocaleString()}** coins to train your pet.`, ephemeral: true });
+      return;
+    }
 
     await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
@@ -353,7 +375,11 @@ export class PetsManager {
 
     if (!myPet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
     if (!theirPet) { await interaction.reply({ content: '❌ They don\'t have a pet!', ephemeral: true }); return; }
-    if (myPet.status === 'sad') { await interaction.reply({ content: '😢 Your pet is too sad to battle! Take care of it first.', ephemeral: true }); return; }
+    if (myPet.status === 'sad' || myPet.status === 'sick') {
+      const emoji = myPet.status === 'sick' ? '🤒' : '😢';
+      await interaction.reply({ content: `${emoji} Your pet is too ${myPet.status} to battle! Take care of it first.`, ephemeral: true });
+      return;
+    }
 
     // Simple battle calc
     const myPower = myPet.attack * 2 + myPet.speed + myPet.health + Math.random() * 10;
@@ -371,11 +397,10 @@ export class PetsManager {
       reward,
     });
 
-    if (iWin) {
-      await (this.supabase as any).rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: reward,
-      }).catch(() => {});
-    }
+    const battleWinnerId = iWin ? interaction.user.id : opponent.id;
+    await (this.supabase as any).rpc('economy_add_balance', {
+      p_guild_id: guildId, p_user_id: battleWinnerId, p_amount: reward,
+    }).catch(() => {});
 
     // XP for both
     for (const [pet, uid] of [[myPet, interaction.user.id], [theirPet, opponent.id]] as const) {
