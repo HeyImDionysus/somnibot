@@ -8,7 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
 
 export async function GET() {
-  const ctx = await requirePermission('/economy/market');
+  const ctx = await requirePermission('dashboard.manage_economy');
   const supabase = createAdminSupabase();
 
   const { count } = await supabase

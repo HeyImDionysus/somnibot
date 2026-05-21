@@ -24,7 +24,7 @@ const speciesSchema = z.object({
 });
 
 export async function GET() {
-  const ctx = await requirePermission('/economy/fishing');
+  const ctx = await requirePermission('dashboard.manage_economy');
   const supabase = createAdminSupabase();
 
   const { data, error } = await supabase
@@ -39,7 +39,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const ctx = await requirePermission('/economy/fishing');
+  const ctx = await requirePermission('dashboard.manage_economy');
   const body = await request.json();
   const parsed = speciesSchema.parse(body);
 
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const ctx = await requirePermission('/economy/fishing');
+  const ctx = await requirePermission('dashboard.manage_economy');
   const body = await request.json();
   const parsed = speciesSchema.parse(body);
 
@@ -95,7 +95,7 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
-  const ctx = await requirePermission('/economy/fishing');
+  const ctx = await requirePermission('dashboard.manage_economy');
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
