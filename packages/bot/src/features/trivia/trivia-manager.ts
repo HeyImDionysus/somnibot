@@ -243,11 +243,12 @@ export class TriviaManager {
         const payout = Math.floor(basePayout * hardMult * streakBonus);
 
         // Award currency
-        await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: triviaPayErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId,
           p_user_id: userId,
           p_amount: payout,
-        }).catch(() => {});
+        });
+        if (triviaPayErr) console.error(`[Trivia] Failed to pay ${userId}:`, triviaPayErr.message);
         getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch(() => {});
       } else {
         losers.push(userId);

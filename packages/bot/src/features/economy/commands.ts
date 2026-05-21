@@ -301,25 +301,29 @@ async function handleCrime(interaction: ChatInputCommandInteraction, mgr: Econom
 }
 
 async function handleBeg(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
   const result = await mgr.beg(interaction.user.id);
-  await interaction.reply({ content: result.message });
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleSearch(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
   const result = await mgr.search(interaction.user.id);
-  await interaction.reply({ content: result.message });
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleDeposit(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
   const amount = interaction.options.getInteger('amount', true);
   const result = await mgr.deposit(interaction.user.id, amount);
-  await interaction.reply({ content: result.message, ephemeral: !result.success });
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleWithdraw(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply();
   const amount = interaction.options.getInteger('amount', true);
   const result = await mgr.withdraw(interaction.user.id, amount);
-  await interaction.reply({ content: result.message, ephemeral: !result.success });
+  await interaction.editReply({ content: result.message });
 }
 
 async function handlePay(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
@@ -358,8 +362,9 @@ async function handleRob(interaction: ChatInputCommandInteraction, mgr: EconomyM
 }
 
 async function handlePassive(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
   const result = await mgr.togglePassive(interaction.user.id);
-  await interaction.reply({ content: result.message, ephemeral: true });
+  await interaction.editReply({ content: result.message });
 }
 
 async function handleShop(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {

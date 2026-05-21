@@ -1131,19 +1131,21 @@ export class EconomyManager {
   // ── Leaderboard ─────────────────────────────────────────
 
   async getLeaderboard(limit: number = 10): Promise<Array<{ user_id: string; net_worth: number; wallet: number; bank: number }>> {
+    // Fetch extra rows to account for users with high bank but low wallet,
+    // then sort by net_worth (wallet + bank) and take top N.
+    const fetchLimit = Math.max(limit * 5, 50);
     const { data } = await this.supabase
       .from('economy_wallets')
       .select('user_id, wallet, bank')
       .eq('guild_id', this.guild.id)
-      .order('wallet', { ascending: false })
-      .limit(limit);
+      .limit(fetchLimit);
 
     return (data ?? []).map((row: Record<string, unknown>) => ({
       user_id: row.user_id as string,
       net_worth: (row.wallet as number) + (row.bank as number),
       wallet: row.wallet as number,
       bank: row.bank as number,
-    })).sort((a: { net_worth: number }, b: { net_worth: number }) => b.net_worth - a.net_worth);
+    })).sort((a: { net_worth: number }, b: { net_worth: number }) => b.net_worth - a.net_worth).slice(0, limit);
   }
 
   // ── Internal helpers ────────────────────────────────────
