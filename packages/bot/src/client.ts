@@ -11,6 +11,8 @@ import { getSupabase } from './services/supabase.js';
 import { getValkey } from './services/valkey.js';
 import { eventBus } from './services/event-bus.js';
 import { getConfig, type BotEnv } from './config.js';
+import { GuildRouter } from './guild-router.js';
+import type { GuildContext } from './guild-context.js';
 
 /**
  * SomniClient — extends discord.js Client with platform infrastructure.
@@ -20,14 +22,13 @@ import { getConfig, type BotEnv } from './config.js';
  * - Supabase (database)
  * - Valkey (cache)
  * - Platform event bus
- * - Guild ID (single-guild architecture)
+ * - GuildRouter (multi-guild context management)
+ * - guildId (primary guild — backwards compatible with single-guild usage)
+ *
+ * V53 Phase 4: Added GuildRouter for multi-guild support. `client.guildId`
+ * remains for backwards compat (set to primary/first guild). New code should
+ * use `client.router.getContext(guildId)` for guild-specific state.
  */
-// TODO: Replace Record<string, unknown> casts with typed manager properties:
-//   giveawayManager?: GiveawayManager;
-//   musicPlayer?: MusicPlayerManager;
-//   tempChannelManager?: TempChannelManager;
-//   etc.
-// This eliminates 48 unsafe casts across index.ts, handler.ts, and shutdown.
 export class SomniClient extends Client {
   public readonly shoukaku: Shoukaku;
   public readonly supabase: SupabaseClient;
@@ -35,6 +36,7 @@ export class SomniClient extends Client {
   public readonly eventBus = eventBus;
   public guildId: string;
   public readonly env: BotEnv;
+  public router!: GuildRouter;
 
   constructor() {
     const env = getConfig();

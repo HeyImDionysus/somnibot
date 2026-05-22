@@ -78,13 +78,49 @@ export class CrossFeatureBridge {
       await this.cleanupMemberEconomy(userId, 'left');
     });
 
-    // ── 2. Level Up → (role grants handled by level-announcer) ─
-    // V47-L1: removed the duplicate level.up role-grant handler.
-    // `level-announcer.ts` is the canonical path for level reward
-    // roles — it correctly honours `level_rewards.remove_at_level`
-    // (swapping out the old role on tiered ladders), whereas this
-    // bridge only added new roles, producing stacked / desynced
-    // role state.
+    // ── 2. Level Up → Unlock Economy Features (V53 Phase 4 — Finding 4.2) ──
+    // Role grants still handled by level-announcer.ts (V47-L1).
+    // Bridge handles feature unlocks (fishing, farming, etc.) based on level_unlock_configs.
+    this.on('level.up', async (event) => {
+      const userId = event.data.discordId;
+      const newLevel = event.data.newLevel;
+      if (!userId || !newLevel) return;
+
+      try {
+        // Check for feature unlocks at this level
+        const { data: unlocks } = await this.supabase
+          .from('level_unlock_configs')
+          .select('feature_key, unlock_message')
+          .eq('guild_id', this.guild.id)
+          .eq('required_level', newLevel);
+
+        if (unlocks && unlocks.length > 0) {
+          for (const unlock of unlocks) {
+            // Record unlock for user
+            await this.supabase.from('member_feature_unlocks').upsert({
+              guild_id: this.guild.id,
+              user_id: userId,
+              feature_key: unlock.feature_key,
+              unlocked_at: new Date().toISOString(),
+            }, { onConflict: 'guild_id,user_id,feature_key' });
+
+            console.log(`[CrossFeatureBridge] User ${userId} unlocked "${unlock.feature_key}" at level ${newLevel}`);
+          }
+
+          // Cache unlocked features in Valkey for fast command-time checks
+          const allKeys = unlocks.map(u => u.feature_key);
+          const cacheKey = `unlocks:${this.guild.id}:${userId}`;
+          const existing = await this.valkey.smembers(cacheKey);
+          const newKeys = allKeys.filter(k => !existing.includes(k));
+          if (newKeys.length > 0) {
+            await this.valkey.sadd(cacheKey, ...newKeys);
+            await this.valkey.expire(cacheKey, 86400); // 24h TTL, refreshed on access
+          }
+        }
+      } catch (err) {
+        console.error(`[CrossFeatureBridge] Level-up unlock check failed for ${userId}:`, err);
+      }
+    });
 
     // ── 3. Purchase Complete → XP bonus + Celebration ──────
 
@@ -170,6 +206,120 @@ export class CrossFeatureBridge {
     // here that was queuing action-queue entries with an incompatible payload
     // shape (missing required FulfillmentPayload fields), risking double
     // fulfillment and error spam.
+
+    // ── 7. Achievement Earned → Economy Bonus (V53 Phase 4 — Finding 4.2) ──
+    this.on('level.up', async (event) => {
+      const userId = event.data.discordId;
+      const newLevel = event.data.newLevel;
+      if (!userId || !newLevel) return;
+
+      // Check if this level is an achievement milestone (multiples of 10)
+      if (newLevel % 10 !== 0) return;
+
+      try {
+        // Grant milestone bonus: 100 coins per 10 levels
+        const bonus = (newLevel / 10) * 100;
+        const { error } = await this.supabase.rpc('economy_credit_wallet', {
+          p_guild_id: this.guild.id,
+          p_user_id: userId,
+          p_amount: bonus,
+          p_reason: `Level ${newLevel} milestone bonus`,
+        });
+
+        if (!error) {
+          console.log(`[CrossFeatureBridge] Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
+        }
+      } catch (err) {
+        console.error('[CrossFeatureBridge] Milestone bonus failed:', err);
+      }
+    });
+
+    // ── 8. Ticket Closed → Satisfaction Survey DM (V53 Phase 4 — Finding 4.2) ──
+    this.on('ticket.closed', async (event) => {
+      const ticketId = event.data.ticketId;
+      const creatorId = event.data.userDiscordId;
+      if (!ticketId || !creatorId) return;
+
+      try {
+        // Check if satisfaction surveys are enabled
+        const { data: config } = await this.supabase
+          .from('guild_config')
+          .select('ticket_satisfaction_survey')
+          .eq('guild_id', this.guild.id)
+          .single();
+
+        if (!config?.ticket_satisfaction_survey) return;
+
+        // DM the ticket creator with a satisfaction survey
+        const member = await this.guild.members.fetch(creatorId).catch(() => null);
+        if (!member) return;
+
+        const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import('discord.js');
+        const embed = new EmbedBuilder()
+          .setTitle('📋 How was your support experience?')
+          .setDescription(`Your ticket #${ticketId.slice(0, 8)} has been resolved. We\'d love your feedback!`)
+          .setColor(0x5865F2)
+          .setTimestamp();
+
+        const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
+          new ButtonBuilder().setCustomId(`survey:${ticketId}:great`).setLabel('😊 Great').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`survey:${ticketId}:okay`).setLabel('😐 Okay').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`survey:${ticketId}:poor`).setLabel('😞 Poor').setStyle(ButtonStyle.Danger),
+        );
+
+        await member.send({ embeds: [embed], components: [row] }).catch(() => {
+          // User may have DMs disabled — that's fine
+        });
+      } catch (err) {
+        console.error('[CrossFeatureBridge] Satisfaction survey failed:', err);
+      }
+    });
+
+    // ── 9. Economy Purchase of Role Item → Grant Discord Role (V53 Phase 4 — Finding 4.2) ──
+    this.on('purchase.completed', async (event) => {
+      const userId = event.data.discordId;
+      const productId = event.data.productId;
+      if (!userId || !productId) return;
+
+      try {
+        // Check if this product is a role-grant item
+        const { data: product } = await this.supabase
+          .from('economy_items')
+          .select('metadata')
+          .eq('id', productId)
+          .maybeSingle();
+
+        if (!product) return;
+        const metadata = product.metadata as Record<string, unknown> | null;
+        const roleId = metadata?.grant_role_id as string | undefined;
+        if (!roleId) return;
+
+        const member = await this.guild.members.fetch(userId).catch(() => null);
+        if (!member) return;
+
+        const roleDurationHours = metadata?.role_duration_hours as number | undefined;
+        const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
+
+        await member.roles.add(roleId, 'SomniBot economy purchase — role item');
+        console.log(`[CrossFeatureBridge] Granted role ${roleId} to ${userId} via economy purchase`);
+
+        // If temporary role, schedule removal
+        if (durationMs) {
+          const expiresAt = new Date(Date.now() + durationMs).toISOString();
+          await this.supabase.from('temp_role_grants').insert({
+            guild_id: this.guild.id,
+            user_id: userId,
+            role_id: roleId,
+            expires_at: expiresAt,
+            source: 'economy_purchase',
+            source_id: productId,
+          });
+          console.log(`[CrossFeatureBridge] Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
+        }
+      } catch (err) {
+        console.error('[CrossFeatureBridge] Role grant from purchase failed:', err);
+      }
+    });
 
     console.log(`[CrossFeatureBridge] ✅ ${this.listeners.length} cross-feature event bridges active`);
   }

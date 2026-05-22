@@ -38,6 +38,7 @@ import { MusicStatusReporter } from './services/music-status-reporter.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { AlertService } from './services/alert-service.js';
 import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
+import { GuildRouter } from './guild-router.js';
 import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
@@ -143,6 +144,15 @@ async function main(): Promise<void> {
       Object.defineProperty(client, 'guildId', { value: detectedGuild.id, writable: false });
       console.log(`[Boot] 🔍 Auto-detected guild: ${detectedGuild.name} (${detectedGuild.id})`);
     }
+
+    // V53 Phase 4: Initialize GuildRouter for multi-guild support
+    client.router = new GuildRouter(
+      client,
+      client.supabase,
+      client.valkey,
+      client.eventBus,
+    );
+    console.log('[Boot] ✅ GuildRouter initialized');
 
     // Check bot role position
     const guild = client.guilds.cache.get(client.guildId);

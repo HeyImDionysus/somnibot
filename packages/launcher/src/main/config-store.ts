@@ -11,12 +11,22 @@
 
 import Store from 'electron-store';
 
+/** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
+export interface GuildEntry {
+  discordGuildId: string;
+  name: string;
+  enabled: boolean;
+}
+
 export interface LauncherConfig {
   // ── Discord (required) ──
   discordToken: string;
   discordApplicationId: string;
   discordClientSecret: string;
+  /** @deprecated Use `guilds` array for multi-guild. Kept for migration. */
   discordGuildId: string;
+  /** V53 Phase 4: Multi-guild support. If empty, falls back to discordGuildId. */
+  guilds: GuildEntry[];
 
   // ── Supabase (required) ──
   supabaseUrl: string;
@@ -41,6 +51,7 @@ const DEFAULTS: LauncherConfig = {
   discordApplicationId: '',
   discordClientSecret: '',
   discordGuildId: '',
+  guilds: [],
   supabaseUrl: '',
   supabaseSecretKey: '',
   supabasePublishableKey: '',
@@ -62,6 +73,7 @@ export function getConfig(): LauncherConfig {
     discordApplicationId: store.get('discordApplicationId', ''),
     discordClientSecret: store.get('discordClientSecret', ''),
     discordGuildId: store.get('discordGuildId', ''),
+    guilds: store.get('guilds', []),
     supabaseUrl: store.get('supabaseUrl', ''),
     supabaseSecretKey: store.get('supabaseSecretKey', ''),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
@@ -96,7 +108,10 @@ export function buildEnvVars(
     DISCORD_TOKEN: config.discordToken,
     DISCORD_APPLICATION_ID: config.discordApplicationId,
     DISCORD_CLIENT_SECRET: config.discordClientSecret,
-    DISCORD_GUILD_ID: config.discordGuildId,
+    // V53 Phase 4: Pass all enabled guild IDs (comma-separated), with legacy fallback
+    DISCORD_GUILD_ID: config.guilds.length > 0
+      ? config.guilds.filter(g => g.enabled).map(g => g.discordGuildId).join(',')
+      : config.discordGuildId,
 
     // Supabase — bot format
     SUPABASE_URL: config.supabaseUrl,
