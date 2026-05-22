@@ -72,7 +72,7 @@ export async function executeAutoModAction(
       }
 
       await writeAuditLog(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.delete',
@@ -91,7 +91,7 @@ export async function executeAutoModAction(
     case 'warn': {
       // Create warning infraction
       const infraction = await createInfraction(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
         type: 'warn',
@@ -102,12 +102,12 @@ export async function executeAutoModAction(
 
       const activeWarnings = await getActiveWarningCount(
         client.supabase,
-        client.guildId,
+        message.guild!.id,
         member.id,
       );
 
       // Emit infraction event
-      client.eventBus.emit('infraction.created', client.guildId, {
+      client.eventBus.emit('infraction.created', message.guild!.id, {
         userId: member.id,
         moderatorId: 'system',
         type: 'warn',
@@ -143,7 +143,7 @@ export async function executeAutoModAction(
       }
 
       await writeAuditLog(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.warn',
@@ -171,7 +171,7 @@ export async function executeAutoModAction(
       }
 
       await createInfraction(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
         type: 'mute',
@@ -181,7 +181,7 @@ export async function executeAutoModAction(
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
       });
 
-      client.eventBus.emit('member.muted', client.guildId, {
+      client.eventBus.emit('member.muted', message.guild!.id, {
         discordId: member.id,
         moderatorId: 'system',
         reason: fullReason,
@@ -201,7 +201,7 @@ export async function executeAutoModAction(
       }
 
       await writeAuditLog(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.mute',
@@ -234,7 +234,7 @@ export async function executeAutoModAction(
       }
 
       await createInfraction(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
         type: 'kick',
@@ -243,7 +243,7 @@ export async function executeAutoModAction(
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
       });
 
-      client.eventBus.emit('member.kicked', client.guildId, {
+      client.eventBus.emit('member.kicked', message.guild!.id, {
         discordId: member.id,
         moderatorId: 'system',
         reason: fullReason,
@@ -261,7 +261,7 @@ export async function executeAutoModAction(
       }
 
       await writeAuditLog(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.kick',
@@ -289,7 +289,7 @@ export async function executeAutoModAction(
       }
 
       await createInfraction(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         memberId: member.id,
         moderatorId: 'system',
         type: 'ban',
@@ -298,7 +298,7 @@ export async function executeAutoModAction(
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
       });
 
-      client.eventBus.emit('member.banned', client.guildId, {
+      client.eventBus.emit('member.banned', message.guild!.id, {
         discordId: member.id,
         moderatorId: 'system',
         reason: fullReason,
@@ -316,7 +316,7 @@ export async function executeAutoModAction(
       }
 
       await writeAuditLog(client.supabase, {
-        guildId: client.guildId,
+        guildId: message.guild!.id,
         actorType: 'bot',
         actorId: 'automod',
         action: 'automod.ban',

@@ -239,7 +239,7 @@ export function registerEvents(client: SomniClient): void {
   // ── Message Events (Phase 6: Auto-Mod + Phase 8: Automations + Phase 9: XP) ──
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
-    if (message.guild?.id !== client.guildId) return;
+    if (!message.guild) return; // Multi-guild: accept events from any guild
 
     // Auto-mod pipeline — runs before any other message processing
     try {
@@ -253,7 +253,7 @@ export function registerEvents(client: SomniClient): void {
     // Phase 8: Emit message.sent event for automations
     const messageEvent = {
       type: 'message.sent' as const,
-      guildId: client.guildId,
+      guildId: message.guild!.id,
       timestamp: Date.now(),
       data: {
         discordId: message.author.id,
@@ -280,7 +280,7 @@ export function registerEvents(client: SomniClient): void {
         message,
         client.supabase,
         client.valkey,
-        client.guildId,
+        message.guild!.id,
       );
 
       if (xpResult.leveledUp && xpResult.newLevel != null && xpResult.oldLevel != null && xpResult.newXp != null) {
@@ -315,7 +315,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
       if (qMgr) {
-        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+        qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
       }
     } catch {
       // Ignore quest tracking errors
@@ -326,7 +326,7 @@ export function registerEvents(client: SomniClient): void {
   client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
     const message = reaction.message;
-    if (message.guild?.id !== client.guildId) return;
+    if (!message.guild) return; // Multi-guild: accept events from any guild
 
     // Phase 9: Reaction roles (check first — higher priority)
     const guild = message.guild;
@@ -349,7 +349,7 @@ export function registerEvents(client: SomniClient): void {
     // Emit reaction.added event for automations
     const reactionEvent = {
       type: 'reaction.added' as const,
-      guildId: client.guildId,
+      guildId: message.guild!.id,
       timestamp: Date.now(),
       data: {
         discordId: user.id,
@@ -377,11 +377,11 @@ export function registerEvents(client: SomniClient): void {
     }
 
     // Also emit to event bus for non-message automations
-    client.eventBus.emit('reaction.added', client.guildId, reactionEvent.data);
+    client.eventBus.emit('reaction.added', reaction.message.guild!.id, reactionEvent.data);
 
     // Starboard check
     try {
-      await handleStarboardReaction(reaction, user, client.supabase, client.guildId);
+      await handleStarboardReaction(reaction, user, client.supabase, reaction.message.guild!.id);
     } catch (err) {
       console.error('[Events] Starboard reaction error:', err);
     }
@@ -391,7 +391,7 @@ export function registerEvents(client: SomniClient): void {
   client.on('messageReactionRemove', async (reaction, user) => {
     if (user.bot) return;
     const message = reaction.message;
-    if (message.guild?.id !== client.guildId) return;
+    if (!message.guild) return; // Multi-guild: accept events from any guild
 
     const guild = message.guild;
     if (guild) {
@@ -429,7 +429,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Voice State (Phase 8: Automations + Phase 9: Voice XP + future Music/Temp Channels) ──
   client.on('voiceStateUpdate', async (oldState, newState) => {
-    if (newState.guild.id !== client.guildId) return;
+    // Multi-guild: accept voice events from any guild the bot is in
     const member = newState.member ?? oldState.member;
     if (!member || member.user.bot) return;
 
@@ -457,7 +457,7 @@ export function registerEvents(client: SomniClient): void {
 
     // Joined a voice channel
     if (!oldState.channelId && newState.channelId) {
-      client.eventBus.emit('voice.joined', client.guildId, {
+      client.eventBus.emit('voice.joined', newState.guild.id, {
         discordId: member.id,
         username: member.user.username,
         channelId: newState.channelId,
@@ -467,7 +467,7 @@ export function registerEvents(client: SomniClient): void {
 
     // Left a voice channel
     if (oldState.channelId && !newState.channelId) {
-      client.eventBus.emit('voice.left', client.guildId, {
+      client.eventBus.emit('voice.left', oldState.guild.id, {
         discordId: member.id,
         username: member.user.username,
         channelId: oldState.channelId,
@@ -477,13 +477,13 @@ export function registerEvents(client: SomniClient): void {
 
     // Moved between channels (emit both left and joined)
     if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
-      client.eventBus.emit('voice.left', client.guildId, {
+      client.eventBus.emit('voice.left', oldState.guild.id, {
         discordId: member.id,
         username: member.user.username,
         channelId: oldState.channelId,
         channelName: oldState.channel?.name ?? '',
       });
-      client.eventBus.emit('voice.joined', client.guildId, {
+      client.eventBus.emit('voice.joined', newState.guild.id, {
         discordId: member.id,
         username: member.user.username,
         channelId: newState.channelId,
@@ -494,7 +494,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Interaction Handler (Phase 7: Tickets + Phase 8: Button automations + Phase 9: Commands) ──
   client.on('interactionCreate', async (interaction) => {
-    if (!interaction.guild || interaction.guild.id !== client.guildId) return;
+    if (!interaction.guild) return; // Multi-guild: accept interactions from any guild
 
     try {
       // Handle setup wizard interactions (buttons + select menu)
@@ -533,7 +533,7 @@ export function registerEvents(client: SomniClient): void {
           const { data: storeCfg } = await client.supabase
             .from('guild_config')
             .select('store_enabled')
-            .eq('guild_id', client.guildId)
+            .eq('guild_id', interaction.guildId!)
             .maybeSingle();
           if (storeCfg?.store_enabled === false) {
             await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
@@ -547,7 +547,7 @@ export function registerEvents(client: SomniClient): void {
             await handleBuyButton(
               interaction,
               client.supabase,
-              client.guildId,
+              interaction.guildId!,
               paypalApiBase,
               paypalClientId,
               paypalClientSecret,
@@ -564,7 +564,7 @@ export function registerEvents(client: SomniClient): void {
             // Queue pagination buttons
             if (interaction.customId.startsWith('music:queue_page:')) {
               const page = parseInt(interaction.customId.split(':')[2] ?? '1', 10);
-              const queue = await musicMgr.queueManager.getQueue(client.guildId);
+              const queue = await musicMgr.queueManager.getQueue(interaction.guildId!);
               if (queue) {
                 const { buildQueueEmbed } = await import('../features/music/music-embeds.js');
                 const { embeds, components } = buildQueueEmbed(queue, page);
@@ -717,7 +717,7 @@ export function registerEvents(client: SomniClient): void {
 
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
-          client.eventBus.emit('button.clicked', client.guildId, {
+          client.eventBus.emit('button.clicked', interaction.guild!.id, {
             discordId: interaction.user.id,
             username: interaction.user.username,
             buttonId: interaction.customId,
@@ -731,13 +731,13 @@ export function registerEvents(client: SomniClient): void {
       if (interaction.isUserContextMenuCommand()) {
         switch (interaction.commandName) {
           case 'View Profile':
-            await handleViewProfile(interaction, client.supabase, client.guildId);
+            await handleViewProfile(interaction, client.supabase, interaction.guildId!);
             return;
           case 'Warn User':
             await handleWarnUser(interaction);
             return;
           case 'View Purchases':
-            await handleViewPurchases(interaction, client.supabase, client.guildId);
+            await handleViewPurchases(interaction, client.supabase, interaction.guildId!);
             return;
         }
       }
@@ -770,7 +770,7 @@ export function registerEvents(client: SomniClient): void {
 
       // Handle autocomplete interactions
       if (interaction.isAutocomplete()) {
-        await handleAutocomplete(interaction, client.supabase, client.shoukaku, client.guildId);
+        await handleAutocomplete(interaction, client.supabase, client.shoukaku, interaction.guildId!);
         return;
       }
 
@@ -817,7 +817,7 @@ export function registerEvents(client: SomniClient): void {
             await handleSetupCommand(interaction, client);
             return;
           case 'forgetme':
-            await handleForgetMeCommand(interaction, client.supabase, client.guildId);
+            await handleForgetMeCommand(interaction, client.supabase, interaction.guildId!);
             return;
           case 'mydata':
             await handleMyDataCommand(interaction);
@@ -885,7 +885,7 @@ export function registerEvents(client: SomniClient): void {
           const { data: storeFlagCfg } = await client.supabase
             .from('guild_config')
             .select('store_enabled')
-            .eq('guild_id', client.guildId)
+            .eq('guild_id', interaction.guildId!)
             .maybeSingle();
           if (storeFlagCfg?.store_enabled === false) {
             await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
@@ -895,7 +895,7 @@ export function registerEvents(client: SomniClient): void {
             await handleStoreCommand(
               interaction,
               client.supabase,
-              client.guildId,
+              interaction.guildId!,
               process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com',
             );
             return;
@@ -903,7 +903,7 @@ export function registerEvents(client: SomniClient): void {
           await handleLicenseCommand(
             interaction,
             client.supabase,
-            client.guildId,
+            interaction.guildId!,
           );
           return;
         }

@@ -33,7 +33,7 @@ async function loadConfig(client: SomniClient): Promise<MessageLogConfig> {
   const { data } = await client.supabase
     .from('guild_config')
     .select('message_log_enabled, message_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', message.guild!.id)
     .maybeSingle();
 
   _configCache = {
@@ -59,7 +59,7 @@ export async function logMessageEdit(
 ): Promise<void> {
   // Ignore bot messages, embeds-only changes, and non-guild messages
   if (newMessage.author?.bot) return;
-  if (!newMessage.guild || newMessage.guild.id !== client.guildId) return;
+  if (!newMessage.guild || newMessage.guild.id !== message.guild!.id) return;
   if (oldMessage.content === newMessage.content) return; // Embed update, not a content edit
 
   const config = await loadConfig(client);
@@ -108,7 +108,7 @@ export async function logMessageDelete(
 ): Promise<void> {
   // Ignore bot messages and non-guild messages
   if (message.author?.bot) return;
-  if (!message.guild || message.guild.id !== client.guildId) return;
+  if (!message.guild || message.guild.id !== message.guild!.id) return;
 
   const config = await loadConfig(client);
   if (!config.message_log_enabled || !config.message_log_channel_id) return;

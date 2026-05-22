@@ -12,7 +12,7 @@ export async function registerTicketCommands(client: SomniClient): Promise<void>
 
     // Get existing commands
     const existingCommands = (await rest.get(
-      Routes.applicationGuildCommands(client.env.DISCORD_APPLICATION_ID, client.guildId),
+      Routes.applicationGuildCommands(client.env.DISCORD_APPLICATION_ID, interaction.guildId!),
     )) as Array<{ name: string; id: string }>;
 
     // Check if /ticket already exists
@@ -23,7 +23,7 @@ export async function registerTicketCommands(client: SomniClient): Promise<void>
 
     // Register/update the ticket command
     await rest.put(
-      Routes.applicationGuildCommands(client.env.DISCORD_APPLICATION_ID, client.guildId),
+      Routes.applicationGuildCommands(client.env.DISCORD_APPLICATION_ID, interaction.guildId!),
       {
         body: [
           ...existingCommands.filter((c) => c.name !== 'ticket').map((c) => c),

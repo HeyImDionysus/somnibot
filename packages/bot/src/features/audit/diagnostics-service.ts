@@ -95,7 +95,7 @@ export class DiagnosticsService {
       }
 
       // Guild stats
-      const guild = this.client.guilds.cache.get(this.client.guildId);
+      const guild = this.client.guilds.cache.get(this.this.guildId);
       const guildMemberCount = guild?.memberCount ?? 0;
       const activeVoiceConnections = guild?.voiceStates.cache.filter(
         (vs) => vs.channelId !== null
@@ -107,7 +107,7 @@ export class DiagnosticsService {
         const { count } = await this.supabase
           .from('scheduled_messages')
           .select('id', { count: 'exact', head: true })
-          .eq('guild_id', this.client.guildId)
+          .eq('guild_id', this.this.guildId)
           .eq('active', true);
         scheduledMessageCount = count ?? 0;
       } catch {
@@ -120,7 +120,7 @@ export class DiagnosticsService {
         const { count } = await this.supabase
           .from('automations')
           .select('id', { count: 'exact', head: true })
-          .eq('guild_id', this.client.guildId)
+          .eq('guild_id', this.this.guildId)
           .eq('enabled', true);
         automationCount = count ?? 0;
       } catch {
@@ -131,7 +131,7 @@ export class DiagnosticsService {
       const memoryHeapMb = Math.round(memUsage.heapUsed / 1024 / 1024 * 100) / 100;
 
       const snapshot = {
-        guild_id: this.client.guildId,
+        guild_id: this.this.guildId,
         type: 'health',
         uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
         memory_rss_mb: memoryRssMb,
@@ -158,7 +158,7 @@ export class DiagnosticsService {
 
       // Evaluate alert thresholds
       await this.alertManager.evaluate({
-        guild_id: this.client.guildId,
+        guild_id: this.this.guildId,
         memory_rss_mb: memoryRssMb,
         discord_ws_ping: this.client.ws.ping,
         valkey_connected: valkeyConnected,
@@ -177,7 +177,7 @@ export class DiagnosticsService {
    * Metrics: db_latency, valkey_latency, ws_ping
    */
   private async writeHealthMetrics(valkeyConnected: boolean): Promise<void> {
-    const guildId = this.client.guildId;
+    const guildId = this.this.guildId;
     const metrics: Array<{ guild_id: string; metric_type: string; value_ms: number }> = [];
 
     // 1. DB round-trip latency

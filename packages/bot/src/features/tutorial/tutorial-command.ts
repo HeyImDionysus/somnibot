@@ -17,6 +17,6 @@ export async function handleTutorialCommand(
   interaction: ChatInputCommandInteraction,
 ): Promise<void> {
   const client = interaction.client as SomniClient;
-  const engine = new TutorialEngine(client.supabase, client.guildId);
+  const engine = new TutorialEngine(client.supabase, interaction.guildId!);
   await engine.startTutorial(interaction);
 }

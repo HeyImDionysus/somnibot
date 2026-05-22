@@ -59,7 +59,7 @@ export async function postModLogEntry(
   if (!entry.channelId) return;
 
   try {
-    const guild = client.guilds.cache.get(client.guildId);
+    const guild = client.guilds.cache.get(guildId);
     if (!guild) return;
 
     const channel = guild.channels.cache.get(entry.channelId) as TextChannel | undefined;

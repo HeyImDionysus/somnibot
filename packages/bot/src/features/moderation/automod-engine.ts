@@ -48,7 +48,7 @@ async function loadRules(client: SomniClient): Promise<DbAutomodRule[]> {
   const { data, error } = await client.supabase
     .from('automod_rules')
     .select('*')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', message.guild!.id)
     .eq('enabled', true);
 
   if (error) {
@@ -127,7 +127,7 @@ export async function processMessage(
   // Quick bail-outs
   if (!message.guild || !message.member) return false;
   if (message.author.bot) return false;
-  if (message.guild.id !== client.guildId) return false;
+  if (message.guild.id !== message.guild!.id) return false;
 
   const rules = await loadRules(client);
   if (rules.length === 0) return false;
