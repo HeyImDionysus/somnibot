@@ -425,21 +425,10 @@ export interface DbChannelTemplate {
   updated_at: string;
 }
 
-export interface DbServerTemplate {
-  id: string;
-  guild_id: string | null;
-  name: string;
-  description: string | null;
-  template_data: Record<string, unknown>;
-  version: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-}
+// DbServerTemplate removed in v53 — table dropped (never referenced by bot or dashboard)
 
 export interface DbGuildDesiredState {
   guild_id: string;
-  server_template_id: string | null;
   roles: Record<string, unknown>[];
   channels: Record<string, unknown>[];
   permission_map: Record<string, unknown>;
