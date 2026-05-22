@@ -108,10 +108,28 @@ export async function runSyncCycle(
     }
   }
 
-  // 7. Auto-repair other drift if configured
+  // 7. Auto-repair other drift if configured (V53 Phase 4 — Finding 4.1)
   if (config.autoRepair) {
-    // TODO: Implement granular auto-repair for roles/channels
-    // This is complex and needs careful ordering — deferred to Phase 5 full implementation
+    for (const item of driftItems) {
+      if (item.suggestedAction !== 'repair') continue;
+
+      try {
+        const repairResult = await repairDriftItem(guild, supabase, item, idMap);
+        if (repairResult.success) {
+          repaired++;
+          console.log(`[Sync] Auto-repaired ${item.entityType} "${item.entityName}": ${repairResult.action}`);
+        } else if (repairResult.action === 'manual_required') {
+          console.log(`[Sync] "${item.entityName}" needs manual attention: ${repairResult.reason}`);
+        }
+      } catch (err) {
+        console.error(`[Sync] Failed to auto-repair ${item.entityType} "${item.entityName}":`, err);
+      }
+    }
+
+    // Post sync report to alert channel if anything was repaired or needs attention
+    if (repaired > 0 || driftItems.some(d => d.suggestedAction === 'accept')) {
+      await postSyncReport(guild, supabase, eventBus, driftItems, repaired, timestamp);
+    }
   }
 
   // 8. Store drift status in Supabase
@@ -223,4 +241,198 @@ export function startSyncScheduler(
       if (timer) clearInterval(timer);
     },
   };
+}
+
+// ── V53 Phase 4 (4.1): Auto-Repair Helpers ───────────────────────
+
+interface RepairResult {
+  success: boolean;
+  action: string;
+  reason?: string;
+}
+
+/**
+ * Attempt to repair a single drift item.
+ * Returns success/failure and description of what was done.
+ */
+async function repairDriftItem(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  switch (item.type) {
+    case 'ROLE_MISSING': {
+      // Role was deleted — recreate from desired state
+      const roleKey = findKeyForEntity(idMap, item.entityDiscordId, 'role');
+      if (!roleKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+      const { data: desired } = await supabase
+        .from('guild_desired_state')
+        .select('roles')
+        .eq('guild_id', guild.id)
+        .single();
+
+      const desiredRoles = (desired?.roles ?? []) as Array<{ key: string; name: string; color?: number; permissions?: string; hoist?: boolean; mentionable?: boolean }>;
+      const roleDef = desiredRoles.find(r => r.key === roleKey);
+      if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
+
+      const created = await guild.roles.create({
+        name: roleDef.name,
+        color: roleDef.color ?? 0,
+        permissions: BigInt(roleDef.permissions ?? '0'),
+        hoist: roleDef.hoist ?? false,
+        mentionable: roleDef.mentionable ?? false,
+        reason: 'SomniBot sync auto-repair — recreated missing role',
+      });
+
+      // Update ID mapping
+      await supabase.from('discord_id_map').upsert({
+        guild_id: guild.id,
+        template_key: `role:${roleKey}`,
+        discord_id: created.id,
+      }, { onConflict: 'guild_id,template_key' });
+
+      return { success: true, action: `Recreated role "${roleDef.name}" (${created.id})` };
+    }
+
+    case 'ROLE_PERMISSION_DRIFT': {
+      // Role permissions changed — restore
+      if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+      const role = guild.roles.cache.get(item.entityDiscordId);
+      if (!role) return { success: false, action: 'manual_required', reason: 'Role not in cache' };
+      if (role.managed) return { success: false, action: 'manual_required', reason: 'Role is managed by an integration' };
+
+      const expected = item.details?.permissions?.expected;
+      if (typeof expected === 'string') {
+        await role.setPermissions(BigInt(expected), 'SomniBot sync auto-repair');
+        return { success: true, action: `Restored permissions on "${role.name}"` };
+      }
+      return { success: false, action: 'manual_required', reason: 'No expected permissions in drift details' };
+    }
+
+    case 'CHANNEL_MISSING': {
+      // Channel deleted — recreate from desired state
+      const chanKey = findKeyForEntity(idMap, item.entityDiscordId, 'channel');
+      if (!chanKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+      const { data: desired } = await supabase
+        .from('guild_desired_state')
+        .select('channels')
+        .eq('guild_id', guild.id)
+        .single();
+
+      const desiredChannels = (desired?.channels ?? []) as Array<{ key: string; name: string; type?: number; parentKey?: string; topic?: string }>;
+      const chanDef = desiredChannels.find(c => c.key === chanKey);
+      if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
+
+      const parentId = chanDef.parentKey ? idMap.get(`category:${chanDef.parentKey}`) ?? undefined : undefined;
+      const created = await guild.channels.create({
+        name: chanDef.name,
+        type: chanDef.type ?? 0,
+        parent: parentId,
+        topic: chanDef.topic,
+        reason: 'SomniBot sync auto-repair — recreated missing channel',
+      });
+
+      await supabase.from('discord_id_map').upsert({
+        guild_id: guild.id,
+        template_key: `channel:${chanKey}`,
+        discord_id: created.id,
+      }, { onConflict: 'guild_id,template_key' });
+
+      return { success: true, action: `Recreated channel "${chanDef.name}" (${created.id})` };
+    }
+
+    case 'CHANNEL_PERMISSION_DRIFT': {
+      // Channel permission overwrites changed — restore
+      if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+      // Channel permission repairs are complex (need to reconstruct overwrites).
+      // Log for manual intervention rather than risk breaking permissions.
+      return { success: false, action: 'manual_required', reason: 'Channel permission repair requires manual review' };
+    }
+
+    case 'EXTRA_ROLE':
+    case 'EXTRA_CHANNEL': {
+      // Extra entities not in desired state — never auto-delete, just surface
+      return { success: false, action: 'manual_required', reason: `Extra ${item.entityType} not in desired config — manual cleanup recommended` };
+    }
+
+    default:
+      return { success: false, action: 'manual_required', reason: `Repair not implemented for ${item.type}` };
+  }
+}
+
+/**
+ * Find the template key for a Discord entity ID in the ID map.
+ */
+function findKeyForEntity(
+  idMap: Map<string, string>,
+  discordId: string | undefined,
+  prefix: string,
+): string | undefined {
+  if (!discordId) return undefined;
+  for (const [key, id] of idMap) {
+    if (id === discordId && key.startsWith(`${prefix}:`)) {
+      return key.slice(prefix.length + 1);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Post a sync report to the alert channel after auto-repair.
+ */
+async function postSyncReport(
+  guild: Guild,
+  supabase: SupabaseClient,
+  eventBus: PlatformEventBus,
+  driftItems: DriftItem[],
+  repairedCount: number,
+  timestamp: string,
+): Promise<void> {
+  const needsAttention = driftItems.filter(d => d.suggestedAction === 'accept' || d.suggestedAction === 'ignore');
+  const repaired = driftItems.filter(d => d.suggestedAction === 'repair');
+
+  const reportLines: string[] = [
+    `**Sync Report — ${new Date(timestamp).toLocaleString()}**`,
+    '',
+    `✅ Auto-repaired: ${repairedCount}`,
+    `⚠️ Needs attention: ${needsAttention.length}`,
+    `📊 Total drift items: ${driftItems.length}`,
+  ];
+
+  if (repairedCount > 0) {
+    reportLines.push('', '**Repaired:**');
+    for (const item of repaired) {
+      reportLines.push(`  • ${item.entityType} "${item.entityName}" — ${item.description}`);
+    }
+  }
+
+  if (needsAttention.length > 0) {
+    reportLines.push('', '**Needs Manual Attention:**');
+    for (const item of needsAttention) {
+      reportLines.push(`  • ${item.entityType} "${item.entityName}" — ${item.description}`);
+    }
+  }
+
+  eventBus.emit('sync.report' as never, guild.id, {
+    report: reportLines.join('\n'),
+    repairedCount,
+    needsAttentionCount: needsAttention.length,
+    totalDrift: driftItems.length,
+    timestamp,
+  } as never);
+
+  // Also store report in DB for dashboard access
+  await supabase.from('sync_reports').insert({
+    guild_id: guild.id,
+    repaired_count: repairedCount,
+    attention_count: needsAttention.length,
+    total_drift: driftItems.length,
+    details: { items: driftItems },
+    created_at: timestamp,
+  }).then(({ error }) => {
+    if (error) console.error('[Sync] Failed to store sync report:', error.message);
+  });
 }
