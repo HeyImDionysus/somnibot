@@ -416,11 +416,38 @@ export class PollsManager {
       return;
     }
 
-    // Update pool atomically (prevents TOCTOU — concurrent bets racing)
-    const { data: newPool } = await (this.supabase as any).rpc('economy_increment_prediction_pool', {
-      p_prediction_id: predictionId,
-      p_amount: amount,
-    });
+    // V48-C1: update pool atomically. The RPC error was previously
+    // ignored — if it failed we'd have a bet row + debit on the user
+    // but the predictions.total_pool snapshot would be short, and
+    // resolvePrediction would under-pay every winner. On failure,
+    // refund the user and delete the bet so the books reconcile.
+    const { data: newPool, error: poolErr } = await (this.supabase as any).rpc(
+      'economy_increment_prediction_pool',
+      { p_prediction_id: predictionId, p_amount: amount },
+    );
+    if (poolErr) {
+      console.error('[Polls] economy_increment_prediction_pool failed:', poolErr.message);
+      // Compensate: re-credit and delete the bet so we don't keep a
+      // ghost bet that resolvePrediction will try to pay out of a pool
+      // that doesn't include it.
+      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: amount,
+      });
+      if (refundErr) {
+        console.error('[Polls] CRITICAL: pool RPC failed AND refund failed — manual reconcile required', {
+          predictionId, userId, amount, poolErr: poolErr.message, refundErr: refundErr.message,
+        });
+      }
+      await (this.supabase as any)
+        .from('prediction_bets')
+        .delete()
+        .eq('id', insertedBet.id);
+      await interaction.reply({
+        content: '❌ Failed to place bet — please try again. Your coins were refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -498,28 +525,67 @@ export class PollsManager {
       .select('*')
       .eq('prediction_id', predictionId);
 
-    const winningBets = (allBets ?? []).filter((b: any) => b.option_id === winningOption.id);
-    const totalWinnerPool = winningBets.reduce((sum: number, b: any) => sum + b.amount, 0);
+    const allBetsArr = (allBets ?? []) as Array<{
+      id: string;
+      user_id: string;
+      option_id: string;
+      amount: number;
+      payout: number | null;
+    }>;
+    const winningBets = allBetsArr.filter((b) => b.option_id === winningOption.id);
+    const totalWinnerPool = winningBets.reduce((sum, b) => sum + b.amount, 0);
 
-    // Distribute winnings proportionally
-    for (const bet of winningBets) {
-      // Skip bets that were already paid (defence-in-depth — should not
-      // happen now that the status flip is atomic, but worth the safety net).
-      if (bet.payout != null) continue;
+    // V48-C2: when no one picked the winning option, the previous
+    // implementation distributed nothing — every bettor lost their stake
+    // and the entire pool evaporated. Refund all unpaid bets at face
+    // value so losers don't fund a non-existent winner.
+    let refundedCount = 0;
+    let payoutCount = 0;
+    if (winningBets.length === 0) {
+      for (const bet of allBetsArr) {
+        if (bet.payout != null) continue;
+        const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+          p_guild_id: guildId, p_user_id: bet.user_id, p_amount: bet.amount,
+        });
+        if (refundErr) {
+          console.error(`[Polls] Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
+          continue;
+        }
+        await (this.supabase as any)
+          .from('prediction_bets')
+          .update({ payout: bet.amount })
+          .eq('id', bet.id);
+        refundedCount++;
+      }
+    } else {
+      // Distribute winnings proportionally
+      for (const bet of winningBets) {
+        // Skip bets that were already paid (defence-in-depth — should not
+        // happen now that the status flip is atomic, but worth the safety net).
+        if (bet.payout != null) continue;
 
-      const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
-      const payout = Math.floor(finalTotalPool * share);
+        const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
+        const payout = Math.floor(finalTotalPool * share);
 
-      const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
-      });
-      if (payoutErr) console.error(`[Polls] Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
+        const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
+          p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
+        });
+        if (payoutErr) {
+          console.error(`[Polls] Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
+          continue;
+        }
 
-      await (this.supabase as any)
-        .from('prediction_bets')
-        .update({ payout })
-        .eq('id', bet.id);
+        await (this.supabase as any)
+          .from('prediction_bets')
+          .update({ payout })
+          .eq('id', bet.id);
+        payoutCount++;
+      }
     }
+
+    const summaryLine = winningBets.length === 0
+      ? `🔁 No bets on the winning outcome — pool refunded to **${refundedCount}** bettor(s).`
+      : `🏆 Winners: **${payoutCount}** player(s)`;
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -527,7 +593,7 @@ export class PollsManager {
         .setDescription(
           `✅ Winning outcome: **${winningOption.label}**\n` +
           `💰 Pool: **${finalTotalPool.toLocaleString()}** coins\n` +
-          `🏆 Winners: **${winningBets.length}** player(s)`
+          summaryLine
         )
         .setColor(0x57F287)],
     });

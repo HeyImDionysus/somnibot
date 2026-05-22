@@ -702,13 +702,28 @@ async function processAction(
   supabase: SupabaseClient,
   action: ActionRow,
 ): Promise<void> {
-  console.log(`[ActionQueue] Processing: ${action.action} (${action.id})`);
+  // V48-C3: atomic claim. Two paths feed processAction (the startup
+  // `pending` sweep and the Realtime INSERT subscription), and a third
+  // path (`bot_action_queue_recover_stale`) re-queues rows that crashed
+  // mid-process. Without an atomic claim, two of those paths can both
+  // pick up the same row, double-creating Discord entities, double-
+  // fulfilling orders, or duplicating role revokes. The RPC returns
+  // the row iff status was still 'pending' when this caller flipped it.
+  const { data: claimed, error: claimErr } = await (supabase as any).rpc(
+    'bot_action_queue_claim',
+    { p_action_id: action.id },
+  );
+  if (claimErr) {
+    console.error(`[ActionQueue] Claim RPC failed for ${action.id}:`, claimErr.message);
+    return;
+  }
+  const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
+  if (!claimedRow) {
+    console.log(`[ActionQueue] Skipping ${action.id} — already claimed by another worker`);
+    return;
+  }
 
-  // Mark as processing
-  await supabase
-    .from('bot_action_queue')
-    .update({ status: 'processing', started_at: new Date().toISOString() })
-    .eq('id', action.id);
+  console.log(`[ActionQueue] Processing: ${action.action} (${action.id})`);
 
   const handler = ACTION_HANDLERS[action.action];
   let result: ActionResult;
@@ -777,11 +792,67 @@ async function processAction(
  * 1. Process any existing pending actions (in case we missed them while offline)
  * 2. Subscribe to Realtime INSERT events on bot_action_queue
  */
+// V48-C3: how long an action can be stuck in 'processing' before we
+// assume the worker crashed and re-queue it (or fail it if the retry
+// budget is exhausted).
+const STALE_PROCESSING_TIMEOUT_SECS = 300; // 5 minutes
+const STALE_RECOVERY_INTERVAL_MS = 60_000; // sweep every minute
+const ACTION_QUEUE_MAX_RETRIES = 5;
+
+async function recoverStaleActions(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<void> {
+  const { data: recovered, error } = await (supabase as any).rpc(
+    'bot_action_queue_recover_stale',
+    {
+      p_guild_id: guild.id,
+      p_timeout_seconds: STALE_PROCESSING_TIMEOUT_SECS,
+      p_max_retries: ACTION_QUEUE_MAX_RETRIES,
+    },
+  );
+  if (error) {
+    console.error('[ActionQueue] Stale recovery failed:', error.message);
+    return;
+  }
+  const rows: Array<{ id: string; action: string; was_failed: boolean }> = recovered ?? [];
+  if (rows.length === 0) return;
+
+  const failedCount = rows.filter((r) => r.was_failed).length;
+  const requeuedCount = rows.length - failedCount;
+  if (failedCount > 0) {
+    console.warn(`[ActionQueue] DLQ: ${failedCount} action(s) failed after exhausting retries`);
+  }
+  if (requeuedCount > 0) {
+    console.log(`[ActionQueue] Re-queued ${requeuedCount} stale action(s) for processing`);
+    // The recovery RPC flipped them back to 'pending', but Realtime only
+    // fires on INSERT — re-fetch and feed them through processAction so
+    // they get picked up immediately on this worker instead of waiting
+    // for the next restart.
+    const requeuedIds = rows.filter((r) => !r.was_failed).map((r) => r.id);
+    const { data: rows2 } = await supabase
+      .from('bot_action_queue')
+      .select('*')
+      .in('id', requeuedIds);
+    for (const r of (rows2 ?? []) as ActionRow[]) {
+      if (r.status === 'pending') {
+        await processAction(guild, supabase, r);
+      }
+    }
+  }
+}
+
 export async function startActionQueueListener(
   guild: Guild,
   supabase: SupabaseClient,
 ): Promise<void> {
   console.log('[ActionQueue] Starting action queue listener');
+
+  // V48-C3: before processing pending rows, recover anything stuck in
+  // 'processing' from a previous bot crash. This is the DLQ-equivalent —
+  // exhausted retries become 'failed', everything else flips back to
+  // 'pending' and is picked up by the loop below.
+  await recoverStaleActions(guild, supabase);
 
   // Process any pending actions from while the bot was offline
   const { data: pending } = await supabase
@@ -797,6 +868,14 @@ export async function startActionQueueListener(
       await processAction(guild, supabase, action as ActionRow);
     }
   }
+
+  // Periodic stale-row sweep (runs in addition to the startup pass so
+  // long-running deployments don't accumulate stuck rows).
+  setInterval(() => {
+    recoverStaleActions(guild, supabase).catch((err) => {
+      console.error('[ActionQueue] Stale recovery sweep error:', err);
+    });
+  }, STALE_RECOVERY_INTERVAL_MS).unref?.();
 
   // Subscribe to new inserts
   supabase
