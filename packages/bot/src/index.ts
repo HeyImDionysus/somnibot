@@ -33,6 +33,8 @@ import { ConfigWatcher } from './services/config-watcher.js';
 import { OwnerNotificationService } from './services/owner-notifications.js';
 import { GiveawayFulfillmentService } from './services/giveaway-fulfillment.js';
 import { MusicStatusReporter } from './services/music-status-reporter.js';
+import { HeartbeatService } from './services/heartbeat.js';
+import { AlertService } from './services/alert-service.js';
 import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
 import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
@@ -886,6 +888,24 @@ async function main(): Promise<void> {
       diagnosticsService.start();
       (client as unknown as Record<string, unknown>)._diagnosticsService = diagnosticsService;
 
+      // V53 Phase 2: Heartbeat service
+      const heartbeatService = new HeartbeatService(client.valkey, client.supabase, client.guildId);
+      heartbeatService.start();
+      (client as unknown as Record<string, unknown>)._heartbeatService = heartbeatService;
+
+      // V53 Phase 2: Alert service (automation failures, DLQ, etc.)
+      const alertService = new AlertService(client.valkey, client.supabase, guild!);
+      await alertService.init();
+      (client as unknown as Record<string, unknown>)._alertService = alertService;
+
+      // V53 Phase 2: Wire alert service into automation engine (late-bind)
+      const autoEngine = (client as unknown as Record<string, unknown>)._automationEngine as
+        | { setAlertService?: (svc: AlertService) => void }
+        | undefined;
+      if (autoEngine?.setAlertService) {
+        autoEngine.setAlertService(alertService);
+      }
+
       console.log('[Boot] ✅ Phase 13 (Audit & Diagnostics) initialized');
     } catch (err) {
       console.error('[Boot] ⚠️  Phase 13 (Audit & Diagnostics) initialization error:', err);
@@ -1090,6 +1110,9 @@ async function main(): Promise<void> {
     if (auditSvc?.stop) auditSvc.stop();
     const diagSvc = (client as unknown as Record<string, unknown>)._diagnosticsService as { stop?: () => void } | undefined;
     if (diagSvc?.stop) diagSvc.stop();
+    // V53 Phase 2: Stop heartbeat
+    const heartbeatSvc = (client as unknown as Record<string, unknown>)._heartbeatService as { stop?: () => void } | undefined;
+    if (heartbeatSvc?.stop) heartbeatSvc.stop();
     // Reconciliation timer
     const reconTimer = (client as unknown as Record<string, unknown>)._reconciliationTimer as NodeJS.Timeout | undefined;
     if (reconTimer) clearInterval(reconTimer);

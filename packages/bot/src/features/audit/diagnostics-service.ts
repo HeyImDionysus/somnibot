@@ -164,8 +164,65 @@ export class DiagnosticsService {
         valkey_connected: valkeyConnected,
         lavalink_nodes: lavalinkNodes,
       });
+
+      // V53 Phase 2: Write latency metrics for sparkline trends
+      await this.writeHealthMetrics(valkeyConnected);
     } catch (err) {
       console.error('[DiagnosticsService] Snapshot error:', err);
+    }
+  }
+
+  /**
+   * Measure and write latency metrics to health_metrics table.
+   * Metrics: db_latency, valkey_latency, ws_ping
+   */
+  private async writeHealthMetrics(valkeyConnected: boolean): Promise<void> {
+    const guildId = this.client.guildId;
+    const metrics: Array<{ guild_id: string; metric_type: string; value_ms: number }> = [];
+
+    // 1. DB round-trip latency
+    try {
+      const dbStart = performance.now();
+      await this.supabase.from('guild').select('id').eq('id', guildId).limit(1).maybeSingle();
+      const dbLatency = Math.round((performance.now() - dbStart) * 100) / 100;
+      metrics.push({ guild_id: guildId, metric_type: 'db_latency', value_ms: dbLatency });
+    } catch {
+      // skip
+    }
+
+    // 2. Valkey ping latency
+    if (valkeyConnected) {
+      try {
+        const vkStart = performance.now();
+        await this.client.valkey.ping();
+        const vkLatency = Math.round((performance.now() - vkStart) * 100) / 100;
+        metrics.push({ guild_id: guildId, metric_type: 'valkey_latency', value_ms: vkLatency });
+      } catch {
+        // skip
+      }
+    }
+
+    // 3. Discord WebSocket ping
+    const wsPing = this.client.ws.ping;
+    if (wsPing >= 0) {
+      metrics.push({ guild_id: guildId, metric_type: 'ws_ping', value_ms: wsPing });
+    }
+
+    if (metrics.length > 0) {
+      try {
+        await this.supabase.from('health_metrics').insert(metrics);
+      } catch (err) {
+        console.warn('[DiagnosticsService] Failed to write health metrics:', err instanceof Error ? err.message : err);
+      }
+    }
+
+    // Cleanup old metrics periodically (every ~10 snapshots ≈ 10 min)
+    if (Math.random() < 0.1) {
+      try {
+        await (this.supabase as any).rpc('cleanup_old_health_metrics');
+      } catch {
+        // Non-critical
+      }
     }
   }
 }

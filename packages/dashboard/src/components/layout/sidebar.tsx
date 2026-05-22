@@ -135,6 +135,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Automations', href: '/automations', icon: Zap, requires: 'discord' },
       { label: 'Custom Commands', href: '/commands', icon: Terminal, requires: 'discord' },
+      { label: 'Failed Actions', href: '/action-queue', icon: AlertTriangle, requires: 'discord' },
     ],
   },
   {

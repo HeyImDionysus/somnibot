@@ -76,3 +76,15 @@ export function ActiveGiveawaysBadge() {
     />
   );
 }
+
+/**
+ * V53 Phase 2: DLQ badge — shows count of unacknowledged failed actions.
+ */
+export function DlqBadge() {
+  return (
+    <SidebarBadge
+      table="action_queue_dlq"
+      filter={`guild_id=eq.${GUILD_ID}&acknowledged=eq.false&retried=eq.false`}
+    />
+  );
+}

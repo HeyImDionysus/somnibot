@@ -12,6 +12,7 @@ import type { PlatformEventBus } from '../../services/event-bus.js';
 import { AutomationLoader, type LoadedAutomation } from './automation-loader.js';
 import { evaluateConditions, type ConditionContext } from './condition-evaluator.js';
 import { executeActions, type ActionContext } from './action-executor.js';
+import type { AlertService } from '../../services/alert-service.js';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
 
@@ -31,16 +32,26 @@ export class AutomationEngine {
   private loader: AutomationLoader;
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
+  private alertService: AlertService | null;
 
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
     valkey: Valkey,
     private eventBus: PlatformEventBus,
+    alertService?: AlertService,
   ) {
     this.loader = new AutomationLoader(supabase, guild.id);
     this.rateLimiter = new AutomationRateLimiter(valkey);
     this.executionLogger = new ExecutionLogger(supabase);
+    this.alertService = alertService ?? null;
+  }
+
+  /**
+   * Set alert service after construction (for late-binding when boot order matters).
+   */
+  setAlertService(alertService: AlertService): void {
+    this.alertService = alertService;
   }
 
   /**
@@ -180,6 +191,19 @@ export class AutomationEngine {
     };
 
     await this.executionLogger.log(result);
+
+    // V53 Phase 2: Track success/failure for alert service
+    if (this.alertService) {
+      if (failed > 0) {
+        await this.alertService.recordFailure(
+          automation.id,
+          automation.name,
+          errors.join('; '),
+        );
+      } else {
+        await this.alertService.recordSuccess(automation.id);
+      }
+    }
 
     if (errors.length > 0) {
       console.warn(`[AutomationEngine] "${automation.name}" completed with ${failed} error(s):`, errors);
