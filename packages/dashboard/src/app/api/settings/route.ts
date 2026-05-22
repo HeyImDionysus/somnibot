@@ -3,6 +3,13 @@ import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const settingsUpdate = z.object({
+  section: z.string().min(1).max(64),
+  values: z.record(z.string().max(4096)),
+});
 
 /**
  * Settings API — read and write operator configuration.
@@ -170,12 +177,9 @@ export async function PUT(request: Request) {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
 
-    const body = await request.json();
-    const { section, values } = body as { section: string; values: Record<string, string> };
-
-    if (!section || !values) {
-      return NextResponse.json({ error: 'Missing section or values' }, { status: 400 });
-    }
+    const parsed = await parseBody(request as any, settingsUpdate);
+    if (!parsed.ok) return parsed.response;
+    const { section, values } = parsed.data;
 
     const admin = createAdminSupabase();
 

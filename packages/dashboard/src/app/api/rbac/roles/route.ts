@@ -7,6 +7,23 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const rbacRoleCreate = z.object({
+  name: z.string().min(1).max(100).trim(),
+  description: z.string().max(500).optional().nullable(),
+  permissions: z.array(z.string().max(128)).max(100).default([]),
+  priority: z.number().int().min(0).max(999).default(10),
+});
+
+const rbacRoleUpdate = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(100).trim().optional(),
+  description: z.string().max(500).optional().nullable(),
+  permissions: z.array(z.string().max(128)).max(100).optional(),
+  priority: z.number().int().min(0).max(999).optional(),
+});
 
 export async function GET() {
   try {
@@ -31,7 +48,9 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_team');
-    const body = await request.json();
+    const parsed = await parseBody(request, rbacRoleCreate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const { data, error } = await admin
@@ -58,7 +77,9 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_team');
-    const body = await request.json();
+    const parsed = await parseBody(request, rbacRoleUpdate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     // Can't modify system roles except owner

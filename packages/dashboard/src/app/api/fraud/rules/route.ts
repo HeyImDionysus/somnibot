@@ -7,6 +7,26 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { parseBody } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const fraudRuleCreate = z.object({
+  name: z.string().min(1).max(100).trim(),
+  description: z.string().max(500).optional().nullable(),
+  rule_type: z.string().min(1).max(64),
+  enabled: z.boolean().default(true),
+  config: z.record(z.unknown()).default({}),
+  auto_action: z.string().max(32).default('flag'),
+});
+
+const fraudRuleUpdate = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(100).trim().optional(),
+  description: z.string().max(500).optional().nullable(),
+  enabled: z.boolean().optional(),
+  config: z.record(z.unknown()).optional(),
+  auto_action: z.string().max(32).optional(),
+});
 
 export async function GET() {
   try {
@@ -30,7 +50,9 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_fraud');
-    const body = await request.json();
+    const parsed = await parseBody(request, fraudRuleCreate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const { data, error } = await admin
@@ -58,7 +80,9 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_fraud');
-    const body = await request.json();
+    const parsed = await parseBody(request, fraudRuleUpdate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };

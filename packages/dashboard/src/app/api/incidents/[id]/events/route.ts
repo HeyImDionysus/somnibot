@@ -5,6 +5,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const incidentEventCreate = z.object({
+  event_type: z.string().max(64).default('note'),
+  message: z.string().min(1).max(4000),
+  metadata: z.record(z.unknown()).default({}),
+});
 
 export async function GET(
   _request: NextRequest,
@@ -36,17 +44,19 @@ export async function POST(
   try {
     const ctx = await requirePermission('dashboard.manage_incidents');
     const { id } = await params;
-    const body = await request.json();
+    const parsed = await parseBody(request, incidentEventCreate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const { data, error } = await admin
       .from('incident_events')
       .insert({
         incident_id: id,
-        event_type: body.event_type || 'note',
+        event_type: body.event_type,
         actor_id: ctx.discordId,
         message: body.message,
-        metadata: body.metadata || {},
+        metadata: body.metadata,
       })
       .select()
       .single();

@@ -10,6 +10,26 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+const ticketPanelUpdate = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(100).trim().optional(),
+  channel_id: snowflake.optional(),
+  panel_message: z.string().max(2000).optional(),
+  input_mode: z.string().max(32).optional(),
+  ticket_types: z.array(z.record(z.unknown())).max(25).optional(),
+  manager_roles: z.array(snowflake).max(100).optional(),
+  open_category_id: snowflake.optional().nullable(),
+  closed_category_id: snowflake.optional().nullable(),
+  transcript_channel_id: snowflake.optional().nullable(),
+  dm_transcript_to_creator: z.boolean().optional(),
+  max_open_per_user: z.number().int().min(1).max(10).optional(),
+  introduction_message: z.string().max(2000).optional(),
+  active: z.boolean().optional(),
+});
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -36,7 +56,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.ticketPanel.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     name,
@@ -106,11 +128,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-
-  if (!body.id) {
-    return NextResponse.json({ success: false, error: 'Missing panel id' }, { status: 400 });
-  }
+  const parsed = await parseBody(req, ticketPanelUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const updates: Record<string, unknown> = {};
   const allowedFields = [
@@ -130,8 +150,8 @@ export async function PUT(req: NextRequest) {
   ];
 
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+    if ((body as Record<string, unknown>)[field] !== undefined) {
+      updates[field] = (body as Record<string, unknown>)[field];
     }
   }
 

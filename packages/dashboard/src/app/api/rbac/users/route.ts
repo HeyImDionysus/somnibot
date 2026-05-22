@@ -6,6 +6,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const rbacUserAssign = z.object({
+  discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
+  role_id: z.string().uuid(),
+});
 
 export async function GET() {
   try {
@@ -54,7 +61,9 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_team');
-    const body = await request.json();
+    const parsed = await parseBody(request, rbacUserAssign);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const { data, error } = await admin

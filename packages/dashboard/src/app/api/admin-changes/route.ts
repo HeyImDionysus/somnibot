@@ -5,6 +5,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const undoChangeSchema = z.object({
+  action: z.literal('undo'),
+  id: z.string().uuid(),
+});
 
 export async function GET(request: NextRequest) {
   try {
@@ -45,12 +52,10 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.undo_changes');
-    const body = await request.json();
+    const parsed = await parseBody(request, undoChangeSchema);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
-
-    if (body.action !== 'undo') {
-      return NextResponse.json({ error: 'Only undo action is supported' }, { status: 400 });
-    }
 
     // Get the change to undo
     const { data: change } = await admin

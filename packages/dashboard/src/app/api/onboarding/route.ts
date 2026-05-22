@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -35,7 +36,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.onboarding.config);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   // Whitelist allowed fields
   const allowed: Record<string, unknown> = {};
@@ -46,7 +49,7 @@ export async function PUT(req: NextRequest) {
   ];
 
   for (const key of fields) {
-    if (key in body) allowed[key] = body[key];
+    if (key in body) allowed[key] = (body as Record<string, unknown>)[key];
   }
 
   const { error } = await supabase

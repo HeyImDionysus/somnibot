@@ -194,6 +194,7 @@ const productCreate = z.object({
   active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
   metadata: z.record(z.unknown()).optional(),
+  plans: z.array(z.record(z.unknown())).optional(),
 });
 
 const productUpdate = z.object({
@@ -312,6 +313,7 @@ const giveawayAction = z.object({
   prize_license_count: z.number().int().min(1).max(100).optional(),
   status: z.string().max(32).optional(),
   winners: z.array(z.unknown()).optional(),
+  ended_at: z.string().datetime().optional().nullable(),
 });
 
 // ── Welcome/onboarding schemas ──────────────────────
@@ -496,6 +498,10 @@ const deployAction = z.object({
   action: z.enum(['deploy', 'preview']).default('deploy'),
   template_id: uuid.optional(),
   options: z.record(z.unknown()).optional(),
+  roles: z.array(z.record(z.unknown())).optional(),
+  channels: z.array(z.record(z.unknown())).optional(),
+  permissionMap: z.record(z.unknown()).optional(),
+  cleanExisting: z.boolean().optional(),
 });
 
 // ── Sync action schemas ─────────────────────────────
@@ -523,6 +529,8 @@ const musicConfig = z.object({
   music_enabled: z.boolean().optional(),
   music_default_volume: z.number().int().min(0).max(150).optional(),
   dj_role_id: snowflake.optional().nullable(),
+  music_auto_leave_minutes: z.number().int().min(0).max(60).optional(),
+  music_auto_destroy_minutes: z.number().int().min(0).max(60).optional(),
 });
 
 // ── Product file schemas ────────────────────────────

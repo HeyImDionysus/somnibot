@@ -7,6 +7,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const embedSendSchema = z.object({
+  embed_id: z.string().uuid(),
+  channel_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
+});
+
 export async function POST(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -14,24 +22,9 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  let body: { embed_id?: string; channel_id?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { success: false, error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { embed_id, channel_id } = body;
-
-  if (!embed_id || !channel_id) {
-    return NextResponse.json(
-      { success: false, error: 'Both embed_id and channel_id are required' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, embedSendSchema);
+  if (!parsed.ok) return parsed.response;
+  const { embed_id, channel_id } = parsed.data;
 
   // Verify the embed exists and belongs to this guild
   const { data: embed, error: embedError } = await supabase

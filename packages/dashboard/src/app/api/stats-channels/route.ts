@@ -10,6 +10,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const statsChannelUpdate = z.object({
+  id: z.string().uuid(),
+  stat_type: z.string().min(1).max(64).optional(),
+  name_format: z.string().max(128).optional(),
+  stat_config: z.record(z.unknown()).optional(),
+  active: z.boolean().optional(),
+});
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -36,7 +46,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.statsChannel.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { stat_type, name_format, stat_config } = body;
 
@@ -87,17 +99,15 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-
-  if (!body.id) {
-    return NextResponse.json({ success: false, error: 'Missing stats channel id' }, { status: 400 });
-  }
+  const parsed = await parseBody(req, statsChannelUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const allowedFields = ['stat_type', 'name_format', 'stat_config', 'active'];
   const updates: Record<string, unknown> = {};
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+    if ((body as Record<string, unknown>)[field] !== undefined) {
+      updates[field] = (body as Record<string, unknown>)[field];
     }
   }
   updates.updated_at = new Date().toISOString();
