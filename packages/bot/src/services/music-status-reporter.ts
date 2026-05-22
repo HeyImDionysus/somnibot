@@ -18,7 +18,7 @@ export class MusicStatusReporter {
   ) {}
 
   start(intervalMs: number = 15_000): void {
-    this.report().catch(() => {});
+    this.report().catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
     this.timer = setInterval(() => {
       this.report().catch((err) => {
         console.error('[MusicStatusReporter] Error:', err);

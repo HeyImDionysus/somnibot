@@ -268,7 +268,7 @@ async function handleTicketFromMessageModal(
     .single();
 
   if (error) {
-    await ticketChannel.delete().catch(() => {});
+    await ticketChannel.delete().catch(() => { /* channel may already be deleted */ });
     await interaction.editReply({ content: `❌ Failed to create ticket: ${error.message}` });
     return;
   }

@@ -211,7 +211,7 @@ export class CraftingManager {
             p_user_id: userId,
             p_item_id: c.itemId,
             p_quantity: c.qty,
-          }).catch(() => {});
+          }).catch((e: unknown) => { console.warn('[Crafting] Operation failed:', (e as Error)?.message ?? e); });
         }
         return {
           embed: new EmbedBuilder()
@@ -240,7 +240,7 @@ export class CraftingManager {
           p_user_id: userId,
           p_item_id: c.itemId,
           p_quantity: c.qty,
-        }).catch(() => {});
+        }).catch((e: unknown) => { console.warn('[Crafting] Operation failed:', (e as Error)?.message ?? e); });
       }
       return {
         embed: new EmbedBuilder()
@@ -264,7 +264,7 @@ export class CraftingManager {
     });
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed: new EmbedBuilder()

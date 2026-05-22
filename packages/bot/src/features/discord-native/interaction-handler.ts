@@ -125,12 +125,12 @@ export async function withEphemeralProgress<T>(
       ? options.successMessage(result)
       : options.successMessage ?? '✅ Done!';
 
-    await interaction.editReply({ content: successMsg }).catch(() => {});
+    await interaction.editReply({ content: successMsg }).catch(() => { /* interaction may have expired */ });
 
     return result;
   } catch (err) {
     const errorMsg = options.errorMessage ?? '❌ Something went wrong. Please try again.';
-    await interaction.editReply({ content: errorMsg }).catch(() => {});
+    await interaction.editReply({ content: errorMsg }).catch(() => { /* interaction may have expired */ });
     console.error('[EphemeralProgress] Operation failed:', err);
     return null;
   }
@@ -157,7 +157,7 @@ export function withCooldown(
       await interaction.reply({
         content: `⏳ Please wait ${seconds}s before using this again.`,
         ephemeral: true,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Silent] Suppressed error:', (e as Error)?.message ?? e); });
       return;
     }
 

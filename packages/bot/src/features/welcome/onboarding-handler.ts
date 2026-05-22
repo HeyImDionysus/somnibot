@@ -99,6 +99,16 @@ export async function handleMemberJoin(
   if (lookup.isReturning) {
     console.log(`[Onboarding] Returning member detected: ${member.user.tag}`);
 
+    // V53 B-4: Unsuspend economy wallet for returning members
+    try {
+      await client.supabase.rpc('unsuspend_member_economy', {
+        p_guild_id: client.guildId,
+        p_user_id: member.id,
+      });
+    } catch (err) {
+      console.warn('[Onboarding] Failed to unsuspend economy:', (err as Error)?.message ?? err);
+    }
+
     // Returning members skip onboarding — they already completed it
     // Grant Member role immediately
     if (config.member_role_id) {

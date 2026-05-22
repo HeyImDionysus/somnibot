@@ -346,7 +346,7 @@ export class FarmingManager {
     });
 
     // Quest progress — count each harvested crop
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed: new EmbedBuilder()

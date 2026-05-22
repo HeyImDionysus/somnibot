@@ -199,7 +199,7 @@ export class ForumTicketService {
           newTags.push(forumConfig.closed_tag_id);
         }
         newTags = [...new Set(newTags)].slice(0, 5);
-        await thread.edit({ appliedTags: newTags }).catch(() => {});
+        await thread.edit({ appliedTags: newTags }).catch(() => { /* channel may already be deleted */ });
       }
 
       // Send close message
@@ -210,11 +210,11 @@ export class ForumTicketService {
             .setColor(0xed4245)
             .setTimestamp(),
         ],
-      }).catch(() => {});
+      }).catch(() => { /* forum thread may be inaccessible */ });
 
       // Lock and archive
-      await thread.setLocked(true, 'Ticket closed').catch(() => {});
-      await thread.setArchived(true, 'Ticket closed').catch(() => {});
+      await thread.setLocked(true, 'Ticket closed').catch(() => { /* channel may already be deleted */ });
+      await thread.setArchived(true, 'Ticket closed').catch(() => { /* channel may already be deleted */ });
 
       return true;
     } catch (err) {

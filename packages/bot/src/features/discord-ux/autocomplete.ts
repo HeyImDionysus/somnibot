@@ -37,7 +37,7 @@ export async function handleAutocomplete(
         await interaction.respond([]);
     }
   } catch {
-    await interaction.respond([]).catch(() => {});
+    await interaction.respond([]).catch(() => { /* interaction may have expired */ });
   }
 }
 
