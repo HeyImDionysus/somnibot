@@ -278,10 +278,11 @@ export class EconomyManager {
   }
 
   /**
-   * Atomically credit a user's wallet via RPC. Returns updated wallet data.
+   * Atomically credit a user's wallet via RPC. Returns updated wallet data,
+   * or null if the RPC failed (V50-L2: callers must handle null).
    * Uses economy_add_balance to avoid TOCTOU race conditions.
    */
-  async creditWallet(userId: string, amount: number): Promise<WalletData> {
+  async creditWallet(userId: string, amount: number): Promise<WalletData | null> {
     // Ensure wallet exists before RPC call
     await this.getOrCreateWallet(userId);
 
@@ -293,6 +294,7 @@ export class EconomyManager {
 
     if (error) {
       console.error('[Economy] creditWallet RPC error:', error);
+      return null;
     }
 
     // Re-read wallet to get updated state (RPC doesn't return row)
@@ -466,8 +468,12 @@ export class EconomyManager {
     const streakBonus = Math.floor(baseAmount * ((currentStreak - 1) * cfg.economy_streak_bonus_pct / 100));
     const totalAmount = baseAmount + streakBonus;
 
-    // Credit wallet
+    // Credit wallet — V50-L2: handle null (RPC failure)
     const updated = await this.creditWallet(userId, totalAmount);
+    if (!updated) {
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: `❌ Failed to credit your ${type} reward. Please try again.` };
+    }
 
     // Update streak
     const nextClaimAt = new Date(now.getTime() + intervals[type]).toISOString();
@@ -545,6 +551,10 @@ export class EconomyManager {
     const amount = randInt(cfg.economy_work_min, cfg.economy_work_max);
     const job = WORK_JOBS[Math.floor(Math.random() * WORK_JOBS.length)];
     const updated = await this.creditWallet(userId, amount);
+    if (!updated) {
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your work earnings. Please try again.' };
+    }
 
     await this.recordTransaction(userId, 'work', amount, updated.wallet, `Worked: ${job}`);
     await this.logEconomyEvent(userId, 'work', amount);
@@ -579,6 +589,10 @@ export class EconomyManager {
       // Success
       const amount = randInt(cfg.economy_crime_min, cfg.economy_crime_max);
       const updated = await this.creditWallet(userId, amount);
+      if (!updated) {
+        const wallet = await this.getOrCreateWallet(userId);
+        return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your crime earnings. Please try again.' };
+      }
       const story = CRIME_SUCCESS[Math.floor(Math.random() * CRIME_SUCCESS.length)];
 
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
@@ -634,6 +648,10 @@ export class EconomyManager {
       // Success
       const amount = randInt(1, 50);
       const updated = await this.creditWallet(userId, amount);
+      if (!updated) {
+        const wallet = await this.getOrCreateWallet(userId);
+        return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your begging earnings.' };
+      }
       const story = BEG_SUCCESS[Math.floor(Math.random() * BEG_SUCCESS.length)];
 
       await this.recordTransaction(userId, 'beg', amount, updated.wallet, `Begged: ${story}`);
@@ -671,6 +689,10 @@ export class EconomyManager {
       const loc = SEARCH_LOCATIONS[Math.floor(Math.random() * SEARCH_LOCATIONS.length)];
       const amount = randInt(loc.min, loc.max);
       const updated = await this.creditWallet(userId, amount);
+      if (!updated) {
+        const wallet = await this.getOrCreateWallet(userId);
+        return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your search findings.' };
+      }
 
       await this.recordTransaction(userId, 'search', amount, updated.wallet, `Searched ${loc.name}`);
 
@@ -722,11 +744,18 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: senderWallet, message: "You don't have enough in your wallet." };
     }
 
-    // Credit receiver
-    await this.creditWallet(receiverId, received);
+    // V50-C3: Credit receiver — if this fails, refund the sender so
+    // coins are not destroyed. Previously the creditWallet result was
+    // unchecked and a DB error would silently eat the sender's coins.
+    const receiverWallet = await this.creditWallet(receiverId, received);
+    if (!receiverWallet) {
+      console.error(`[Economy] pay() creditWallet failed for receiver ${receiverId} — refunding sender ${senderId}`);
+      await this.creditWallet(senderId, amount);
+      return { success: false, amount: 0, balance: await this.getOrCreateWallet(senderId), message: '❌ Payment failed — your coins have been refunded.' };
+    }
 
     await this.recordTransaction(senderId, 'pay_send', -amount, updatedSender.wallet, `Paid <@${receiverId}>`);
-    await this.recordTransaction(receiverId, 'pay_receive', received, (await this.getOrCreateWallet(receiverId)).wallet, `Received from <@${senderId}>`);
+    await this.recordTransaction(receiverId, 'pay_receive', received, receiverWallet.wallet, `Received from <@${senderId}>`);
     await this.logEconomyEvent(senderId, `paid ${receiverId}`, amount);
 
     let msg = `${cfg.currency_emoji} Sent **${amount.toLocaleString()} ${cfg.currency_name}** to <@${receiverId}>.`;
@@ -753,16 +782,19 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: "You can't rob yourself." };
     }
 
-    // 10 min cooldown
+    // V50-C1: claim cooldown atomically with SET PX NX BEFORE any
+    // wallet reads or outcome logic. The previous GET→check→SET pattern
+    // let two concurrent /rob commands both pass the cooldown check.
+    const cooldownMs = 600_000;
     const cooldownKey = `economy:${this.guild.id}:${robberId}:rob`;
-    const lastRob = await this.valkey.get(cooldownKey);
-    if (lastRob) {
-      const remaining = parseInt(lastRob, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(robberId);
-        const mins = Math.ceil(remaining / 60000);
-        return { success: false, amount: 0, balance: wallet, message: `⏰ You need to wait **${mins}m** before robbing again.` };
-      }
+    const expiresAt = Date.now() + cooldownMs;
+    const claimedSlot = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimedSlot) {
+      const lastRob = await this.valkey.get(cooldownKey);
+      const remaining = lastRob ? parseInt(lastRob, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(robberId);
+      const mins = Math.max(1, Math.ceil(remaining / 60000));
+      return { success: false, amount: 0, balance: wallet, message: `⏰ You need to wait **${mins}m** before robbing again.` };
     }
 
     const robberWallet = await this.getOrCreateWallet(robberId);
@@ -808,24 +840,44 @@ export class EconomyManager {
       }
 
       if (padlockConsumed) {
-        const cooldownMs = 600_000;
-        await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
-
+        // V50-C1: cooldown already claimed via SET NX above — no redundant SET needed
         return { success: false, amount: 0, balance: robberWallet, message: `🔒 <@${victimId}>'s padlock blocked your robbery attempt! The padlock was consumed.` };
       }
       // padlock raced out — fall through to normal rob attempt
     }
 
-    const cooldownMs = 600_000;
-    await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
+    // V50-C1: cooldown already claimed via SET NX above — no redundant SET needed
 
     if (chance(cfg.economy_rob_success_pct)) {
       // Success — steal 10-50% of their wallet
       const stealPct = randInt(10, 50);
       const stolen = Math.floor(victimWallet.wallet * (stealPct / 100));
 
-      await this.debitWallet(victimId, stolen);
+      // V50-C2: check debitWallet return — if victim's wallet was drained
+      // concurrently, the debit fails and we must NOT credit the robber
+      // (previous code created coins from thin air).
+      const debitResult = await this.debitWallet(victimId, stolen);
+      if (!debitResult) {
+        return {
+          success: false,
+          amount: 0,
+          balance: robberWallet,
+          message: `💨 <@${victimId}>'s wallet was emptied before you could grab anything!`,
+        };
+      }
+
       const updatedRobber = await this.creditWallet(robberId, stolen);
+      if (!updatedRobber) {
+        // Credit failed after debit — refund victim to avoid coin destruction
+        console.error(`[Economy] rob() creditWallet failed for robber ${robberId} — refunding victim ${victimId}`);
+        await this.creditWallet(victimId, stolen);
+        return {
+          success: false,
+          amount: 0,
+          balance: await this.getOrCreateWallet(robberId),
+          message: '❌ Something went wrong with the robbery. The victim has been refunded.',
+        };
+      }
 
       await this.recordTransaction(robberId, 'rob_success', stolen, updatedRobber.wallet, `Robbed <@${victimId}>`);
       await this.recordTransaction(victimId, 'rob_victim', -stolen, (await this.getOrCreateWallet(victimId)).wallet, `Robbed by <@${robberId}>`);
@@ -1050,8 +1102,12 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: `❌ You don't have enough of this item.` };
     }
 
-    // Credit wallet
+    // Credit wallet — V50-L2: handle null (RPC failure)
     const updated = await this.creditWallet(userId, totalValue);
+    if (!updated) {
+      const wallet = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit sale proceeds. Please try again.' };
+    }
 
     await this.recordTransaction(userId, 'shop_sell', totalValue, updated.wallet, `Sold ${quantity}x ${item.name}`);
 
@@ -1089,18 +1145,19 @@ export class EconomyManager {
     const cfg = await this.loadConfig();
     if (!cfg.economy_enabled || !cfg.economy_chat_income_enabled) return;
 
-    // Cooldown
+    // V50-M1: claim cooldown atomically with SET PX NX. The previous
+    // GET→check→SET pattern let two messages in rapid succession both
+    // pass the cooldown check and each award chat income.
+    const cooldownMs = cfg.economy_chat_income_cooldown_seconds * 1000;
     const cooldownKey = `economy:${this.guild.id}:${userId}:chat_income`;
-    const last = await this.valkey.get(cooldownKey);
-    if (last) return; // Still on cooldown
+    const claimed = await this.valkey.set(cooldownKey, '1', 'PX', cooldownMs, 'NX');
+    if (!claimed) return; // Still on cooldown
 
     const amount = randInt(cfg.economy_chat_income_min, cfg.economy_chat_income_max);
     if (amount <= 0) return;
 
     const updated = await this.creditWallet(userId, amount);
-
-    const cooldownMs = cfg.economy_chat_income_cooldown_seconds * 1000;
-    await this.valkey.set(cooldownKey, '1', 'PX', cooldownMs);
+    if (!updated) return; // RPC failed — cooldown consumed but no harm
 
     await this.recordTransaction(userId, 'chat_income', amount, updated.wallet, 'Chat income');
   }
