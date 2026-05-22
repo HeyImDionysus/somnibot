@@ -47,6 +47,22 @@
 38. [Deployment & Environment Parity](#38-deployment--environment-parity)
 39. [Security Model](#39-security-model)
 40. [Implementation Phases](#40-implementation-phases)
+41. [Virtual Economy System](#41-virtual-economy-system)
+42. [Player Market](#42-player-market)
+43. [Heist System](#43-heist-system)
+44. [Lottery System](#44-lottery-system)
+45. [Mini-Games](#45-mini-games)
+46. [Economy Subsystems (Fishing, Farming, Crafting, Gathering, Adventures, Pets)](#46-economy-subsystems)
+47. [Quests, Achievements & Prestige](#47-quests-achievements--prestige)
+48. [Trivia System](#48-trivia-system)
+49. [Polls & Prediction Markets](#49-polls--prediction-markets)
+50. [Profiles](#50-profiles)
+51. [Starboard](#51-starboard)
+52. [Message Log](#52-message-log)
+53. [Anti-Raid System](#53-anti-raid-system)
+54. [Desktop Launcher (`packages/launcher`)](#54-desktop-launcher)
+55. [Dashboard RBAC & Team Management](#55-dashboard-rbac--team-management)
+56. [Customer Portal](#56-customer-portal)
 
 ---
 
@@ -5732,6 +5748,657 @@ volumes:
 - Performance optimization (query optimization, Valkey caching review)
 - Accessibility pass on dashboard
 - Documentation
+
+### Phase 14: Virtual Economy
+- Core wallet system (wallet + bank, deposit/withdraw, starting balance)
+- Earning commands: daily, weekly, monthly, work, crime, beg, search, collect-income
+- Streak system with consecutive-day bonuses
+- Spending: pay (with tax), rob (with passive mode protection), shop, buy, sell, use, inventory
+- Chat income (passive XP-style currency drip)
+- Economy leaderboard (server-side `economy_leaderboard` RPC)
+- Economy log channel
+- Item system: shop items with rarity, effects, durability, categories
+- Role-based passive income (`economy_role_income`)
+- All economy tables: wallets, transactions, items, inventory, streaks, role_income
+- Dashboard: economy settings, item editor, shop configuration
+
+### Phase 15: Economy Subsystems
+- **Player Market**: P2P item trading, configurable fee (currency sink), browse/list/buy/cancel, atomic buy/revert RPCs, reconciliation queue
+- **Heist**: Cooperative multi-user heists, recruiting phase, role assignment, configurable cooldown (Valkey NX + DB fallback), payout splitting
+- **Lottery**: Periodic drawings, ticket purchasing, jackpot pooling, winner selection
+- **Mini-Games**: Coinflip, slots, RPS, dice, blackjack (interactive hit/stand/double), high-low, scratch cards, number guess — all with per-user game locks and daily loss limits
+- **Fishing**: Species rarity tiers, catch logging, rod/bait item effects
+- **Farming**: Crop planting, growth timers, plot management, harvest yields
+- **Crafting**: Recipe system, material requirements, loot tables for gathered materials
+- **Gathering**: Location-based material collection, loot-table rolls
+- **Adventures**: Multi-scene branching stories, scene choices, reward paths, adventure sessions
+- **Pets**: Adopt, feed, play, train, battle, prestige — stat decay timer with DM notifications, 4 types (hunting/guard/foraging/lucky) with gameplay bonuses
+- **Quests**: Template-driven daily/weekly quests, progress tracking across all economy actions (market_trade, fish_catch, heist_complete, etc.)
+- **Achievements**: Definition-based unlock system, badge display on profiles
+- **Prestige**: Reset economy progress for permanent multiplier bonuses
+- **Trivia**: Question bank, timed sessions, currency rewards, difficulty scaling
+- **Polls & Predictions**: Community polls with multi-option voting + prediction markets with currency betting and pari-mutuel payout
+
+### Phase 16: Community & Protection
+- **Profiles**: User cards with title, bio, net worth, pet, prestige, achievements, badges, view counter (atomic RPC)
+- **Starboard**: Configurable emoji/threshold, self-star toggle, auto-crosspost to starboard channel, count updates on existing entries
+- **Message Log**: Edit/delete tracking, embed posts to configured log channel, attachment logging
+- **Anti-Raid**: Sliding-window join flood detection, configurable threshold/window/action (kick/ban/lockdown), minimum account age filter, auto-deactivation after 5m calm, mod log integration
+
+### Phase 17: Desktop Launcher
+- Electron app (`packages/launcher`) — one-click bot + dashboard startup
+- Credential store (electron-store with obfuscation)
+- Supabase cloud sync (push/pull credentials via REST)
+- Process manager: fork bot + Next.js dashboard as child processes, IPC heartbeat monitoring
+- Lavalink manager: Java detection, one-click JAR download, application.yml generation, child process lifecycle
+- Stale-process cleanup on restart (PID tracking)
+- Port-conflict detection before dashboard start
+- Auto-updater via electron-updater (GitHub Releases)
+- First-run onboarding wizard
+- Context-isolated preload (no Node.js in renderer)
+- Cross-platform: Windows (NSIS), macOS (DMG), Linux (AppImage)
+
+### Phase 18: Dashboard RBAC & Customer Portal
+- 5-tier role system: Owner (full access), Admin, Moderator, Manager, Viewer — plus custom roles
+- 22 granular permissions (manage_store, manage_team, view_audit, etc.)
+- Dashboard team management page: assign/remove roles, create custom roles, edit permissions
+- Owner role immutable, system roles undeletable
+- **Customer Portal**: Discord OAuth login, session tokens (SHA-256 hashed, 7-day expiry)
+- Portal pages: orders (purchase history), licenses (key list + active sessions), downloads (entitled product files)
+- Portal API: `/api/portal/auth`, `/api/portal/orders`, `/api/portal/licenses`, `/api/portal/downloads`
+
+---
+
+## 41. Virtual Economy System
+
+The virtual economy is a standalone fake-currency system with **zero connection** to the real-money commerce/licensing platform. It provides engagement mechanics through earning, spending, trading, and competing.
+
+### 41.1 Architecture
+
+```
+packages/bot/src/features/
+├── economy/
+│   ├── economy-manager.ts    # Core wallet + transaction logic (1,300 lines)
+│   ├── commands.ts           # 20+ slash commands
+│   └── index.ts              # Registration
+├── market/                   # P2P item trading (§42)
+├── heist/                    # Cooperative heists (§43)
+├── lottery/                  # Periodic draws (§44)
+├── games/                    # 8 mini-games (§45)
+├── fishing/                  # Fish species + catches
+├── farming/                  # Crop planting + harvesting
+├── crafting/                 # Recipe-based item creation
+├── gathering/                # Material collection
+├── adventures/               # Branching story events
+├── pets/                     # Virtual pet care + battles
+├── quests/                   # Daily/weekly objectives
+├── achievements/             # Badge/unlock system
+├── trivia/                   # Timed Q&A sessions
+└── polls/                    # Polls + prediction markets (§49)
+```
+
+### 41.2 Wallet System
+
+Every guild member has a dual-balance wallet stored in `economy_wallets`:
+
+| Field | Type | Description |
+|---|---|---|
+| `guild_id` | TEXT | Guild snowflake |
+| `user_id` | TEXT | Discord user ID |
+| `wallet` | BIGINT | Spendable balance |
+| `bank` | BIGINT | Protected savings (configurable cap) |
+| `passive` | BOOLEAN | Robbery protection toggle |
+| `total_earned` | BIGINT | Lifetime earnings |
+| `total_spent` | BIGINT | Lifetime spending |
+
+- All balance mutations go through atomic Supabase RPCs: `economy_add_balance`, `economy_subtract_balance` — these prevent negative balances and TOCTOU races.
+- Every mutation is recorded in `economy_transactions` (type, amount, from/to, metadata).
+- Wallets are auto-created on first interaction with configurable `economy_starting_balance`.
+
+### 41.3 Earning Commands
+
+| Command | Behavior | Cooldown |
+|---|---|---|
+| `/daily` | Fixed reward + streak bonus | 24h (streak resets if missed) |
+| `/weekly` | Larger fixed reward | 7 days |
+| `/monthly` | Largest fixed reward | 30 days |
+| `/work` | Random amount in [work_min, work_max], random job flavor text | Configurable (default 60s) |
+| `/crime` | Success (crime_success_pct): earn [crime_min, crime_max]. Fail: lose fine_pct% of wallet | Same as work |
+| `/beg` | Small random reward or nothing | Shared work cooldown |
+| `/search` | Random location with different payout ranges or empty | Shared work cooldown |
+| `/collect-income` | Per-role passive income from `economy_role_income` table | 24h |
+
+**Streak system**: Consecutive daily claims increase the bonus by `streak_bonus_pct` per day. Streaks are tracked in `economy_streaks` with `current_streak`, `longest_streak`, and `last_claimed_at`.
+
+### 41.4 Spending & Transfer
+
+| Command | Behavior |
+|---|---|
+| `/deposit <amount>` | Move coins from wallet to bank (bank has configurable max) |
+| `/withdraw <amount>` | Move coins from bank to wallet |
+| `/pay <user> <amount>` | Transfer with configurable tax percentage (currency sink) |
+| `/rob <user>` | Steal from another user's wallet. Configurable success rate. Fails = fine. Blocked by passive mode. |
+| `/passive` | Toggle robbery protection (prevents robbing AND being robbed) |
+
+### 41.5 Shop & Inventory
+
+- **Items** are defined in `economy_items` with: name, description, emoji, price, category, rarity, effect_type, effect_value, max_stock, sellable flag, sell_price_pct, durability.
+- `/shop [category]` — browse available items
+- `/buy <item> [quantity]` — purchase items (atomic balance deduction + inventory upsert)
+- `/sell <item> [quantity]` — sell back at `sell_price_pct` of original price
+- `/inventory [user]` — view owned items with durability
+- `/use <item>` — consume an item, applying its effect
+
+Items can have effects like XP boosts, rob protection shields, cooldown reductions, etc. The effect system is extensible through `effect_type` + `effect_value` on the item definition.
+
+### 41.6 Chat Income
+
+When `economy_chat_income_enabled` is true, users passively earn random amounts in [`chat_income_min`, `chat_income_max`] from regular messages. A per-user Valkey cooldown (`chat_income_cooldown_seconds`) prevents farming. This runs inside `messageCreate` and never responds visibly — it's a silent background reward.
+
+### 41.7 Leaderboard
+
+`/economy-leaderboard` calls the server-side `economy_leaderboard` RPC (added in V53-M2) which computes `wallet + bank` as net worth and returns the top N members, sorted descending. This avoids client-side sorting of potentially thousands of wallet rows.
+
+### 41.8 Configuration
+
+All economy settings live in `guild_config` with the `economy_` prefix. Over 30 configurable values control every aspect: enable/disable, currency name/emoji, amounts, cooldowns, percentages, caps, and log channels. Dashboard editors expose all settings.
+
+---
+
+## 42. Player Market
+
+Peer-to-peer item trading marketplace. Players list inventory items for sale, others browse and buy. A configurable market fee acts as a currency sink.
+
+### 42.1 Listing Flow
+
+1. `/market list <item> <quantity> <price>` — checks inventory, atomically decrements via `economy_decrement_inventory` RPC (prevents listing same item twice), creates `economy_market_listings` row with expiration date.
+2. If listing insert fails, items are refunded to inventory.
+3. Max active listings per user is configurable (`economy_market_max_listings`).
+
+### 42.2 Buy Flow (Atomic Multi-Step)
+
+1. `/market buy <id> [quantity]` — find listing by ID prefix
+2. Atomically decrement listing remaining via `economy_market_buy(UUID, INT)` RPC (V53-C1: positive quantity guard)
+3. Debit buyer's wallet via `economy_subtract_balance`
+4. Credit seller's earnings (total minus fee) via `economy_add_balance`
+5. Add items to buyer's inventory via `economy_upsert_inventory`
+
+**Rollback on failure**: If any step fails after the listing decrement, `economy_market_buy_revert(UUID, INT)` restores the listing quantity, and any partial balance changes are reversed. Three distinct rollback paths handle: buyer insufficient funds, seller credit failure, and inventory upsert failure.
+
+### 42.3 Cancel Flow
+
+`/market cancel <id>` uses `economy_market_atomic_cancel` RPC which atomically flips `status` from `active` to `cancelled` (prevents concurrent cancel duplication). Items are returned to inventory; if return fails, a reconciliation entry is queued in `bot_action_queue` for automatic retry.
+
+### 42.4 Browse
+
+`/market browse [search]` — lists active listings with price sorting, ILIKE search (with wildcard-escape to prevent injection), and seller attribution.
+
+---
+
+## 43. Heist System
+
+Multi-user cooperative heist events. One player starts a heist, others join during the recruiting window.
+
+### 43.1 Flow
+
+1. `/heist start` — creates heist with `recruiting` status, opens 60s join window
+2. `/heist join` — adds participant with random role (Hacker, Muscle, Lookout, Driver, Demolitions)
+3. Timer resolves: base success = `economy_heist_success_pct` + 5% per additional member. Target is randomly selected (Corner Store → Federal Reserve) with difficulty/payout modifiers.
+4. **Success**: Pool is split among participants proportional to risk role
+5. **Failure**: All participants lose their buy-in
+
+### 43.2 Cooldown
+
+Dual-layer cooldown:
+- **Valkey**: `SET heist:cd:{guild} 1 EX {seconds} NX` — atomic, prevents races (V53-L3)
+- **DB fallback**: `economy_heists.resolved_at` check — covers Valkey-down scenarios
+
+### 43.3 Database Tables
+
+- `economy_heists`: id, guild_id, channel_id, initiator_id, status (recruiting/in_progress/success/failed), target_name, pool_amount, resolved_at
+- `economy_heist_participants`: heist_id, user_id, role, payout
+
+---
+
+## 44. Lottery System
+
+Periodic lottery drawings where players buy tickets for a chance at the jackpot.
+
+### 44.1 Architecture
+
+- `economy_lottery_drawings`: guild_id, status (open/drawing/completed), prize_pool, ticket_price, winner_id, drawn_at
+- `economy_lottery_tickets`: drawing_id, user_id, ticket_count, purchased_at
+
+### 44.2 Flow
+
+1. Owner configures lottery schedule and ticket price
+2. Members buy tickets (`/lottery buy <count>`) — balance deducted, tickets added to pool
+3. Drawing resolves: random weighted winner selection (more tickets = higher chance)
+4. Winner receives prize pool minus configurable house-cut
+
+---
+
+## 45. Mini-Games
+
+Eight gambling-style mini-games, all with per-user Valkey-based game locks and daily loss limits.
+
+### 45.1 Game List
+
+| Game | Command | Mechanic |
+|---|---|---|
+| Coinflip | `/coinflip <bet>` | 50/50, 2x payout |
+| Slots | `/slots <bet>` | 3-reel slot machine, symbol matching, up to 10x |
+| Rock-Paper-Scissors | `/rps <bet> <choice>` | Classic RPS vs. bot |
+| Dice | `/dice <bet>` | Roll 2d6, beat the house |
+| Blackjack | `/blackjack <bet>` | Interactive hit/stand/double-down with button collector (V53-L5) |
+| High-Low | `/highlow` | Guess if next number is higher or lower |
+| Scratch Card | `/scratch <bet>` | Reveal grid for instant prizes |
+| Number Guess | `/guess <bet>` | Guess a number 1-10, 5x payout |
+
+### 45.2 Safety Controls
+
+- **Per-user game lock**: Valkey-based lock acquired before bet validation — prevents concurrent games from double-spending the same balance.
+- **Daily loss limit**: `economy_daily_losses` table tracks cumulative losses per user per day. Configurable `economy_daily_loss_limit` prevents excessive gambling.
+- **Minimum/maximum bet**: Enforced per-game via slash command `minValue`/`maxValue`.
+- **Blackjack collector**: Button interaction collector with 60s timeout. On timeout, hand auto-stands and resolves (V53-L5 fix: was previously auto-resolving on deal with no interactive play).
+
+---
+
+## 46. Economy Subsystems (Fishing, Farming, Crafting, Gathering, Adventures, Pets)
+
+### 46.1 Fishing
+
+- `economy_fish_species`: name, rarity (common/uncommon/rare/legendary), base_price, emoji, min_weight, max_weight
+- `economy_fish_catches`: user catch log with species, weight, sell price
+- Rod/bait items from the shop modify catch rates and rarity chances
+- `/fish` — cast a line, roll against rarity table, record catch
+- `/fish sell` — sell catches for currency
+
+### 46.2 Farming
+
+- `economy_crops`: name, grow_time_minutes, base_yield, seed_price
+- `economy_farm_plots`: guild_id, user_id, plot_number, crop_id, planted_at, watered, harvested
+- `/farm plant <crop>` — buy seeds, plant in next available plot
+- `/farm water` — water crops (speeds growth)
+- `/farm harvest` — collect mature crops, add to inventory
+- `/farm status` — view all plots with growth progress
+
+### 46.3 Crafting
+
+- `economy_recipes`: name, materials (JSONB array of item_id + quantity), result_item_id, result_quantity, xp_reward
+- `/craft <recipe>` — checks inventory for materials, consumes them, creates result item
+- Recipes are admin-defined in the dashboard
+
+### 46.4 Gathering
+
+- `economy_loot_tables`: name, drops (JSONB array of item_id + chance + min_qty + max_qty), energy_cost, cooldown_seconds
+- `/gather <location>` — spend energy, roll loot table, receive materials for crafting
+- Locations are admin-defined with different drop tables
+
+### 46.5 Adventures
+
+- `economy_adventures`: name, description, min_level, reward_range
+- `economy_adventure_scenes`: adventure_id, scene_number, text, choices (JSONB), outcomes (JSONB)
+- `economy_adventure_sessions`: user's active adventure state (current scene, choices made, rewards accumulated)
+- `/adventure start` — begin a random level-appropriate adventure
+- Interactive button choices navigate through branching scenes
+- Final outcome determines currency + item rewards
+
+### 46.6 Pets
+
+- `economy_pets`: guild_id, user_id, name, pet_type (hunting/guard/foraging/lucky), level, xp, hunger, happiness, energy, status (happy/sad/sick), prestige
+- `economy_pet_battles`: challenger_id, defender_id, winner_id, xp_gained
+
+| Command | Behavior |
+|---|---|
+| `/pet adopt <type>` | Buy a pet (hunting 🐺, guard 🐕, foraging 🐿️, lucky 🐈) |
+| `/pet feed` | Restore hunger |
+| `/pet play` | Restore happiness (30s cooldown) |
+| `/pet train` | Gain XP, progress toward next level |
+| `/pet battle <user>` | PvP pet battle, winner gains XP |
+| `/pet status` | View pet stats |
+
+**Stat Decay**: A background timer (`schedulePetDecay`) reduces hunger/happiness periodically. When stats drop below threshold → status changes to `sad`/`sick`. Owner gets a DM notification (if configured). Max level 50, with prestige reset for permanent bonuses.
+
+**Gameplay bonuses**: Hunting pets boost loot, guard pets reduce rob success against you, foraging pets give passive item finds, lucky pets boost gambling.
+
+---
+
+## 47. Quests, Achievements & Prestige
+
+### 47.1 Quest System
+
+- `economy_quest_templates`: type (daily/weekly), description, objective_type (e.g. `market_trade`, `fish_catch`, `heist_complete`), target_count, reward_amount, reward_item_id
+- `economy_quest_progress`: user's active quests, current_count, completed flag
+
+Quests are auto-assigned on first daily/weekly interaction. Progress is tracked via `QuestsManager.trackProgress(guildId, userId, objectiveType)` — called from every relevant subsystem (market buy, fish catch, heist resolve, pet battle, etc.).
+
+### 47.2 Achievement System
+
+- `economy_achievement_defs`: name, description, emoji, criteria_type, criteria_value, reward_amount, badge_emoji
+- `economy_user_achievements`: which user unlocked which achievement, timestamp
+
+Achievements are checked after significant economy events. Unlocking an achievement grants a badge (displayed on profile) and optional currency reward.
+
+### 47.3 Prestige
+
+- `economy_prestige`: guild_id, user_id, prestige_level, multiplier_pct
+
+Players can prestige (reset wallet/bank/inventory) in exchange for a permanent earnings multiplier. Each prestige level adds to `multiplier_pct`, which is applied to all earning commands.
+
+---
+
+## 48. Trivia System
+
+Timed question-and-answer sessions with currency rewards.
+
+- `economy_trivia_questions`: question, answers (JSONB), correct_answer_index, difficulty, category
+- `economy_trivia_sessions`: active session tracking with participants and scores
+
+### 48.1 Flow
+
+1. `/trivia start [category]` — creates a session, posts first question with button options
+2. Players answer within the time limit
+3. Correct answers earn points + currency based on difficulty and speed
+4. After all questions, leaderboard is posted with rewards distributed
+
+---
+
+## 49. Polls & Prediction Markets
+
+### 49.1 Polls
+
+Standard community polls with multi-option voting:
+
+- `polls`: guild_id, channel_id, message_id, question, status (open/closed), created_by, closes_at
+- `poll_options`: poll_id, label, emoji, vote_count
+- `poll_votes`: poll_id, user_id, option_id (unique constraint prevents double-voting)
+
+`/poll create <question>` — creates poll with up to 10 options. Voting via button interactions. `/poll close <id>` — closes poll and displays results.
+
+### 49.2 Prediction Markets
+
+Currency-backed predictions where users bet on outcomes:
+
+- `predictions`: guild_id, question, status (open/locked/resolved), pool_amount, winning_option_id, created_by
+- `prediction_options`: prediction_id, label
+- `prediction_bets`: prediction_id, user_id, option_id, amount
+
+`/prediction create <question>` — create with 2+ options. Users place bets (`/prediction bet <id> <option> <amount>`) — currency is deducted atomically. Creator resolves with `/prediction resolve <id> <winning_option>`. Payout is pari-mutuel: winners split the pool proportionally to their bets. If bet placement fails after balance deduction, the deduction is reversed.
+
+---
+
+## 50. Profiles
+
+User profile cards integrating data from across the economy system.
+
+### 50.1 Data Model
+
+`economy_profiles`: guild_id, user_id, title (max 64 chars), bio (max 256 chars), badge_slots (TEXT[]), profile_views (atomic counter via `increment_profile_views` RPC).
+
+### 50.2 Commands
+
+| Command | Behavior |
+|---|---|
+| `/profile [user]` | Display profile card: title, bio, net worth (wallet + bank), pet, prestige level + multiplier, achievement count, badges, view counter |
+| `/title <text>` | Set display title |
+| `/bio <text>` | Set profile bio |
+
+Profile view command fetches wallet, pet, prestige, and achievement data in parallel (`Promise.all`) for fast rendering.
+
+---
+
+## 51. Starboard
+
+Highlights popular messages that receive enough star reactions by cross-posting them to a dedicated starboard channel.
+
+### 51.1 Configuration (via `guild_config`)
+
+| Setting | Default | Description |
+|---|---|---|
+| `starboard_enabled` | false | Enable/disable |
+| `starboard_channel_id` | null | Target channel for starred messages |
+| `starboard_threshold` | 3 | Minimum reactions to qualify |
+| `starboard_emoji` | ⭐ | The emoji that counts |
+| `starboard_self_star` | false | Whether author's own reaction counts |
+
+### 51.2 Flow
+
+1. `messageReactionAdd` event fires
+2. Check emoji match, threshold, and config
+3. If self-star disabled, subtract author's reaction from count
+4. If threshold met:
+   - **New**: Create embed (author, content, image, jump link, channel) → send to starboard channel → store in `starboard_entries`
+   - **Update**: Edit existing starboard message with new count
+5. `starboard_entries` tracks: guild_id, source_channel_id, source_message_id, starboard_message_id, star_count, author_id
+
+---
+
+## 52. Message Log
+
+Logs message edits and deletes to a designated channel for moderation transparency.
+
+### 52.1 Configuration (via `guild_config`)
+
+| Setting | Default | Description |
+|---|---|---|
+| `message_log_enabled` | false | Enable/disable |
+| `message_log_channel_id` | null | Target channel for log embeds |
+
+### 52.2 Events Tracked
+
+| Event | Embed Color | Content |
+|---|---|---|
+| `messageUpdate` | 🟠 Orange | Before/after content, channel, author, jump link |
+| `messageDelete` | 🔴 Red | Deleted content, channel, author, attachments list |
+
+Bot messages are ignored. Content is truncated to 1,024 characters (Discord embed field limit). Deletions in the log channel itself are not logged (prevents infinite loops).
+
+---
+
+## 53. Anti-Raid System
+
+Detects join floods and takes automatic protective action.
+
+### 53.1 Configuration (via `guild_config`)
+
+| Setting | Default | Description |
+|---|---|---|
+| `anti_raid_enabled` | false | Enable/disable |
+| `anti_raid_join_threshold` | 10 | Joins in window to trigger raid mode |
+| `anti_raid_join_window_seconds` | 10 | Sliding window size |
+| `anti_raid_account_age_days` | 7 | Minimum account age (always enforced) |
+| `anti_raid_action` | kick | Action on raid: `kick`, `ban`, or `lockdown` |
+| `anti_raid_log_channel_id` | null | Channel for raid alerts (falls back to mod_log) |
+
+### 53.2 Detection Flow
+
+1. **Account age filter** (always active): New members younger than `anti_raid_account_age_days` are automatically kicked with a DM explanation.
+2. **Join flood detection**: A sliding window tracks recent join timestamps. When count exceeds `anti_raid_join_threshold` within `anti_raid_join_window_seconds`:
+   - Raid mode activates
+   - All subsequent joins are actioned (kick/ban depending on config)
+   - Alert embed posted to log channel
+3. **Auto-deactivation**: Raid mode automatically deactivates after 5 minutes of calm (no new threshold violations).
+
+### 53.3 Actions
+
+| Action | Behavior |
+|---|---|
+| `kick` | DM warning → kick member |
+| `ban` | DM warning → ban member (no message deletion) |
+| `lockdown` | Log-only (full Discord verification level changes require higher privilege) |
+
+---
+
+## 54. Desktop Launcher (`packages/launcher`)
+
+An Electron desktop application that provides one-click startup of the bot + dashboard for non-technical users.
+
+### 54.1 Architecture
+
+```
+packages/launcher/
+├── src/
+│   ├── main/
+│   │   ├── index.ts             # Main process: window, IPC, lifecycle
+│   │   ├── config-store.ts      # electron-store credential persistence
+│   │   ├── process-manager.ts   # Bot + dashboard child process management
+│   │   ├── lavalink-manager.ts  # Java detection, JAR download, Lavalink lifecycle
+│   │   ├── supabase-sync.ts     # Cloud credential sync via REST
+│   │   ├── updater.ts           # electron-updater auto-updates
+│   │   ├── preload.ts           # Context-isolated IPC bridge
+│   │   └── validators.ts        # Credential validation
+│   └── renderer/
+│       ├── index.html           # Launcher UI
+│       ├── renderer.js          # UI logic
+│       └── styles.css           # Styles
+├── electron-builder.yml         # Build configuration
+├── package.json
+└── tsconfig.json
+```
+
+### 54.2 Process Management
+
+The launcher forks the bot and dashboard as Node.js child processes:
+
+- **Bot**: `fork()` with IPC channel for heartbeat monitoring. If no heartbeat for 60s → status changes to `error`.
+- **Dashboard**: `fork()` Next.js standalone server on `localhost:3456`. Detects "ready" from stdout.
+- **Lavalink**: Optional managed child process (Java required). One-click download from GitHub Releases, auto-generates `application.yml`.
+
+### 54.3 Credential Management
+
+- **Local storage**: `electron-store` with basic obfuscation (`encryptionKey`). Stores Discord credentials, Supabase connection, UI preferences.
+- **Cloud sync**: Push/pull credentials to/from Supabase `instance_settings` table via direct REST calls. Bootstrap creds (Supabase URL + secret key) always needed locally; everything else recoverable from cloud.
+- **Session token**: Generated fresh each run (`crypto.randomBytes(32)`) for dashboard local-mode auth.
+
+### 54.4 Environment Variables
+
+The launcher builds the complete env var set for child processes from stored credentials:
+
+```
+DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET, DISCORD_GUILD_ID
+SUPABASE_URL, SUPABASE_SECRET_KEY
+NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+SESSION_TOKEN (generated per-run)
+PORT=3456, HOSTNAME=127.0.0.1
+LAVALINK_HOST, LAVALINK_PORT, LAVALINK_PASSWORD
+VALKEY_URL
+```
+
+### 54.5 Safety Features
+
+- **Single instance lock**: `app.requestSingleInstanceLock()` prevents multiple launchers.
+- **Port conflict detection**: Checks port 3456 availability before starting dashboard.
+- **Stale process cleanup**: PID tracking in config. On startup, kills any leftover PIDs from a previous crash.
+- **Graceful shutdown**: `before-quit` stops all child processes with SIGTERM, followed by SIGKILL after 5s timeout.
+- **Context isolation**: Renderer has no direct Node.js access. All IPC goes through the preload bridge.
+
+### 54.6 Auto-Updates
+
+Uses `electron-updater` with GitHub Releases as the update source. The renderer receives update events (checking, available, progress, downloaded) and can trigger install.
+
+### 54.7 Distribution
+
+Configured via `electron-builder.yml`:
+- **Windows**: NSIS installer (one-click, per-user)
+- **macOS**: DMG (x64 + arm64 universal)
+- **Linux**: AppImage (x64)
+
+Published to GitHub Releases (owner: HeyImDionysus, repo: somnibot).
+
+---
+
+## 55. Dashboard RBAC & Team Management
+
+Role-based access control for the web dashboard, allowing the guild owner to delegate dashboard access to team members.
+
+### 55.1 Role Hierarchy
+
+| Role | Source | Permissions |
+|---|---|---|
+| **Owner** | Discord guild ownership | `dashboard.full_access` — immutable, cannot be modified or deleted |
+| **Custom roles** | Created by owner | Any combination of 22 granular permissions |
+
+### 55.2 Available Permissions (22 total)
+
+```
+dashboard.full_access          dashboard.view_analytics
+dashboard.manage_store         dashboard.manage_products
+dashboard.manage_orders        dashboard.manage_customers
+dashboard.manage_licenses      dashboard.manage_moderation
+dashboard.manage_tickets       dashboard.manage_automations
+dashboard.manage_server        dashboard.manage_roles
+dashboard.manage_channels      dashboard.manage_team
+dashboard.view_audit           dashboard.view_diagnostics
+dashboard.manage_incidents     dashboard.view_fraud
+dashboard.manage_fraud         dashboard.view_workflows
+dashboard.manage_workflows     dashboard.undo_changes
+```
+
+### 55.3 Data Model
+
+- `dashboard_roles`: id, guild_id, name, description, permissions (TEXT[]), is_system, priority
+- `dashboard_user_roles`: id, guild_id, discord_id, role_id, assigned_by, assigned_at
+
+### 55.4 Auth Resolution (`rbac.ts`)
+
+1. Get authenticated Supabase user → extract Discord ID from metadata
+2. Check if user is guild owner → full access
+3. Otherwise, look up `dashboard_user_roles` → aggregate permissions from all assigned roles
+4. `requirePermission(perm)` throws if user lacks the required permission
+
+### 55.5 API Routes
+
+| Route | Methods | Permission Required |
+|---|---|---|
+| `/api/rbac/roles` | GET, POST, PATCH, DELETE | `dashboard.manage_team` |
+| `/api/rbac/users` | GET, POST, DELETE | `dashboard.manage_team` |
+
+System roles (owner) cannot be modified or deleted. Role creation validates: name (1-100 chars), permissions (max 100), priority (0-999).
+
+### 55.6 Dashboard Page
+
+`/settings/team` — two-tab interface:
+- **Members tab**: List team members with their roles, add member (by Discord ID + role), remove assignments
+- **Roles tab**: List roles with member counts, create custom roles with permission checkboxes, edit permissions, delete non-system roles
+
+---
+
+## 56. Customer Portal
+
+A customer-facing area of the dashboard where buyers can view their orders, manage licenses, and download purchased products. Separate from the guild-owner dashboard auth.
+
+### 56.1 Authentication
+
+- **Login flow**: Discord OAuth2 → exchange code for access token → fetch `/users/@me` → match `discord_id` against `customers` table
+- **Session storage**: `portal_sessions` table with SHA-256 hashed token, 7-day expiry (V53-I4), IP address, user agent, revoke flag
+- **Token delivery**: Raw token returned to frontend, included as `x-portal-token` header on subsequent requests
+- **Session validation**: GET `/api/portal/auth` checks token hash, expiry, and revoked flag; updates `last_used_at`
+
+### 56.2 Portal Pages
+
+| Page | Route | Data |
+|---|---|---|
+| **Dashboard** | `/portal` | Overview of customer's account |
+| **Orders** | `/portal/orders` | Purchase history with order details, payment status |
+| **Licenses** | `/portal/licenses` | License keys with product info, active sessions (device name, fingerprint, IP, last seen) |
+| **Downloads** | `/portal/downloads` | Entitled product files, grouped by product |
+
+### 56.3 Portal API Routes
+
+| Route | Auth | Data Source |
+|---|---|---|
+| `/api/portal/auth` (POST) | Discord OAuth code | `customers` → `portal_sessions` |
+| `/api/portal/auth` (GET) | `x-portal-token` | Session validation |
+| `/api/portal/orders` | `x-portal-token` | `orders` + `products` + `payments` |
+| `/api/portal/licenses` | `x-portal-token` | `license_keys` + `products` + `license_sessions` |
+| `/api/portal/downloads` | `x-portal-token` | `entitlements` + `products` + `product_files` |
+
+All portal API routes resolve the customer via token → session lookup, scoping all queries to that customer's ID.
+
+### 56.4 Layout
+
+The portal uses a dedicated layout (`/portal/layout.tsx`) separate from the guild-owner dashboard, with portal-specific navigation (Orders, Licenses, Downloads).
 
 ---
 

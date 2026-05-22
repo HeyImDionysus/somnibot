@@ -8,21 +8,65 @@ A full-featured Discord bot with a web dashboard. Moderation, levels, music, tic
 
 ## Features
 
-- **Moderation** — Auto-mod rules, infractions, escalation, mod log
-- **Tickets** — Panel-based ticket system with transcripts
-- **Levels & XP** — Message + voice XP, rank cards, level rewards
-- **Music** — Lavalink-powered player with queue, filters, and rich embeds
+### Community & Engagement
+- **Levels & XP** — Message + voice XP, rank cards, level rewards, leaderboards
+- **Welcome & Goodbye** — Custom welcome cards, DMs, auto-roles, Discord onboarding integration
+- **Profiles** — User profile cards with customizable titles and bios
 - **Reaction Roles** — Configurable reaction-to-role mappings
-- **Custom Commands** — Create custom slash commands from the dashboard
 - **Giveaways** — Timed giveaways with requirements and commerce integration
+- **Starboard** — Highlight popular messages when they receive enough reactions
+- **Polls & Predictions** — Free polls and currency-based prediction markets
 - **Scheduled Messages** — Recurring messages with cron scheduling
 - **Temp Channels** — Hub-based temporary voice channels
 - **Stats Channels** — Live server stats displayed as voice channel names
-- **Commerce** — Product store, PayPal checkout, license key generation
-- **Automations** — Event-driven automation workflows
+
+### Virtual Economy
+- **Economy Core** — Wallet, bank, daily/weekly rewards, role income, streaks
+- **Shop & Market** — Server shop + player-to-player marketplace with fees
+- **Games** — Blackjack, coinflip, slots, roulette with configurable house edges and loss limits
+- **Heist** — Multiplayer cooperative heists with join windows and cooldowns
+- **Lottery** — Jackpot drawings with atomic ticket purchase and claim
+- **Gathering** — /hunt, /dig, /mine with loot tables and tool durability
+- **Fishing** — Fish species, bait system, catch tracking
+- **Crafting** — Recipe-based item crafting from gathered materials
+- **Farming** — Plant, water, and harvest crops on farm plots
+- **Adventures** — Multi-scene story adventures with choices and rewards
+- **Pets** — Pet collection, feeding, XP, prestige system
+- **Quests** — Daily/weekly quest assignment and reward claiming
+- **Achievements** — Milestone badges and prestige multipliers
+- **Trivia** — Trivia rounds with difficulty scaling and streak bonuses
+
+### Moderation & Security
+- **Auto-Mod** — Word, link, invite, spam, and caps filters with configurable actions
+- **Infractions** — Warning/infraction system with escalation chains
+- **Anti-Raid** — Sliding-window join flood detection with auto-lockdown
+- **Tickets** — Panel-based ticket system with transcripts and commerce integration
+- **Message Log** — Logs message edits and deletes to a designated channel
+
+### Music
+- **Music Player** — Lavalink-powered with queue, filters, DJ permissions, and rich embeds
+- **Persistent Queue** — Valkey-backed queue state survives restarts; vote-skip, loop modes, shuffle
+
+### Commerce & Licensing
+- **Product Store** — Products, plans, and digital goods configurable from the dashboard
+- **PayPal Integration** — Checkout, subscriptions, webhook handling, refund/chargeback processing
+- **License Keys** — Cryptographic key generation, multi-device tracking, heartbeat sessions
+- **Customer Portal** — Customer-facing portal for downloads, orders, and license management
+- **Fraud Detection** — Velocity checks, device abuse, IP mismatch, payment pattern analysis
+
+### Administration
+- **Dashboard RBAC** — 5 system roles (owner/admin/moderator/support/finance) with granular permissions
+- **Team Management** — Invite team members and assign dashboard roles
+- **Automations** — Event-driven trigger → condition → action workflows
+- **Custom Commands** — Create custom slash commands from the dashboard
 - **Server Sync** — Desired-state configuration with drift detection
-- **Audit Log** — Full audit trail of all bot actions
+- **Audit Log** — Full audit trail of all bot and dashboard actions
 - **Diagnostics** — Real-time system health monitoring
+- **Incident Management** — Track and manage operational incidents
+
+### Infrastructure
+- **Electron Launcher** — Desktop launcher for local deployment with auto-update
+- **License SDK** — `@somnibot/license-sdk` for third-party app integration
 
 ---
 
@@ -105,7 +149,7 @@ SUPABASE_SECRET_KEY=sb_secret_...your-secret-key
 
 # Also fill these for the dashboard:
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=eyJhbG...your-anon-key
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
 ```
 
 > **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
@@ -167,6 +211,8 @@ All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., 
 | `start-dashboard.sh` | Starts the dashboard only (on port 3000) |
 | `stop.sh` / `stop.bat` | Stops all running services |
 | `rebuild.sh` | Pulls latest code, reinstalls deps, and rebuilds |
+| `build-launcher.mjs` | Builds the Electron launcher package |
+| `generate-db-types.py` | Generates TypeScript types from the Supabase database schema |
 
 ### Common Workflows
 
@@ -225,7 +271,7 @@ Railway will deploy three services:
 | Variable | Value |
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Same Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon** key (Settings → API → anon/public) |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key (Settings → API) |
 | `SUPABASE_SECRET_KEY` | Same secret key |
 | `DISCORD_APPLICATION_ID` | Same Client ID |
 | `DISCORD_CLIENT_SECRET` | Same Client Secret |
@@ -241,6 +287,7 @@ somnibot/
 ├── packages/
 │   ├── bot/           Discord.js bot (Shoukaku, Supabase, Valkey)
 │   ├── dashboard/     Next.js App Router dashboard
+│   ├── launcher/      Electron desktop launcher
 │   ├── shared/        Shared types, constants, validators
 │   ├── supabase/      Database migrations (auto-run on first boot)
 │   └── license-sdk/   @somnibot/license-sdk for third-party integrations
@@ -290,10 +337,16 @@ somnibot/
 ### Optional
 | Variable | Description |
 |---|---|
+| `NEXT_PUBLIC_APP_URL` | Dashboard URL (defaults to `http://localhost:3000`) |
 | `PAYPAL_CLIENT_ID` | PayPal app client ID (for commerce features) |
 | `PAYPAL_CLIENT_SECRET` | PayPal app secret |
+| `PAYPAL_SANDBOX` | `true` for sandbox mode, `false` for live (defaults to `true`) |
+| `PAYPAL_API_BASE` | PayPal API URL (sandbox: `https://api-m.sandbox.paypal.com`) |
+| `PAYPAL_WEBHOOK_ID` | PayPal webhook ID for signature verification |
+| `PAYPAL_WEBHOOK_URL` | PayPal webhook endpoint URL |
 | `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music reliability) |
 | `SUPABASE_ACCESS_TOKEN` | Supabase Management API token (for auto-migration) |
+| `SUPABASE_DB_URL` | Direct Postgres connection URL (alternative for auto-migration) |
 
 ---
 

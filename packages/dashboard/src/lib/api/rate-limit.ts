@@ -236,6 +236,13 @@ export async function checkRateLimit(
     }
   }
 
+  // I-6: Log when falling back to in-memory rate limiting so operators know
+  // Valkey is down and rate limits are not shared across instances.
+  if (!valkeyReady && !valkeyFailed) {
+    console.warn('[RateLimit] Valkey not ready — using in-memory fallback (not shared across instances)');
+  } else if (valkeyFailed) {
+    console.warn('[RateLimit] Valkey connection failed — using in-memory fallback (not shared across instances)');
+  }
   return checkRateLimitMemory(key, maxHits, windowMs);
 }
 

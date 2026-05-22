@@ -151,28 +151,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  // Check for duplicate (skipped on internal replay — the row already exists
-  // and is exactly what we are re-processing).
+  // I-3: Atomic dedup — INSERT the event row first; if a duplicate already exists
+  // (event_id is PRIMARY KEY), the ON CONFLICT DO NOTHING makes the insert a no-op
+  // and returns no rows. This closes the SELECT-then-INSERT race window where two
+  // concurrent deliveries could both pass a SELECT check and both process.
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
-  if (eventId && !replay) {
-    const { data: existing } = await supabase
+  if (!replay) {
+    const resolvedId = eventId || randomBytes(16).toString('hex');
+    const { data: inserted } = await supabase
       .from('webhook_events')
-      .select('event_id')
-      .eq('event_id', eventId)
-      .maybeSingle();
+      .upsert(
+        {
+          event_id: resolvedId,
+          event_type: event.event_type,
+          payload: event as unknown as Record<string, unknown>,
+        },
+        { onConflict: 'event_id', ignoreDuplicates: true },
+      )
+      .select('event_id');
 
-    if (existing) {
+    // If upsert returned no rows, the event_id already existed — duplicate delivery
+    if (!inserted || inserted.length === 0) {
       return NextResponse.json({ status: 'duplicate' }, { status: 200 });
     }
-  }
-
-  // Log the event (only on the first delivery — never duplicate on replay)
-  if (!replay) {
-    await supabase.from('webhook_events').insert({
-      event_id: eventId || randomBytes(16).toString('hex'),
-      event_type: event.event_type,
-      payload: event as unknown as Record<string, unknown>,
-    }).then(() => {}, () => {/* ignore logging failure */});
   }
 
   try {
