@@ -118,7 +118,9 @@ export default function TutorialPage() {
     if (newIdx < 0 || newIdx >= steps.length) return;
     setSteps((prev) => {
       const arr = [...prev];
-      [arr[idx]!, arr[newIdx]!] = [arr[newIdx]!, arr[idx]!];
+      const tmp = arr[idx];
+      arr[idx] = arr[newIdx]!;
+      arr[newIdx] = tmp!;
       return arr.map((s, i) => ({ ...s, step_order: i }));
     });
   };
