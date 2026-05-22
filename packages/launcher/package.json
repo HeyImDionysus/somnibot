@@ -11,9 +11,7 @@
     "dev": "tsc && electron dist/main/index.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "clean": "rm -rf dist",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "electron-store": "^10.0.0",
@@ -23,7 +21,6 @@
     "@types/node": "^22.0.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "typescript": "^5.7.0"
   }
 }

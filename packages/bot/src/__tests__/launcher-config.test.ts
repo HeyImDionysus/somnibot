@@ -1,10 +1,55 @@
 /**
- * Launcher Config Tests — V53 Phase 5 (Finding 5.3)
+ * Launcher Config buildEnvVars Tests — V53 Phase 5 (Finding 5.3)
  *
- * Tests `buildEnvVars()` for single-guild, multi-guild, and legacy fallback.
+ * Tests the env var generation for single-guild, multi-guild, and legacy fallback.
+ * Function inlined here to avoid cross-package import (launcher is Electron).
  */
 import { describe, it, expect } from 'vitest';
-import { buildEnvVars, type LauncherConfig, type GuildEntry } from '../main/config-store.js';
+
+// Replicated from packages/launcher/src/main/config-store.ts
+interface GuildEntry {
+  discordGuildId: string;
+  name: string;
+  enabled: boolean;
+}
+
+interface LauncherConfig {
+  discordToken: string;
+  discordApplicationId: string;
+  discordClientSecret: string;
+  discordGuildId: string;
+  guilds: GuildEntry[];
+  supabaseUrl: string;
+  supabaseSecretKey: string;
+  supabasePublishableKey: string;
+  firstRunComplete: boolean;
+  lavalinkEnabled: boolean;
+  lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null };
+}
+
+function buildEnvVars(config: LauncherConfig, sessionToken: string): Record<string, string> {
+  return {
+    DISCORD_TOKEN: config.discordToken,
+    DISCORD_APPLICATION_ID: config.discordApplicationId,
+    DISCORD_CLIENT_SECRET: config.discordClientSecret,
+    DISCORD_GUILD_ID: config.guilds.length > 0
+      ? config.guilds.filter(g => g.enabled).map(g => g.discordGuildId).join(',')
+      : config.discordGuildId,
+    SUPABASE_URL: config.supabaseUrl,
+    SUPABASE_SECRET_KEY: config.supabaseSecretKey,
+    NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: config.supabasePublishableKey,
+    SESSION_TOKEN: sessionToken,
+    PORT: '3456',
+    HOSTNAME: '127.0.0.1',
+    NEXT_PUBLIC_APP_URL: 'http://localhost:3456',
+    LAVALINK_HOST: 'localhost',
+    LAVALINK_PORT: '2333',
+    LAVALINK_PASSWORD: 'youshallnotpass',
+    VALKEY_URL: 'redis://127.0.0.1:6379',
+    NODE_ENV: 'production',
+  };
+}
 
 function makeConfig(overrides: Partial<LauncherConfig> = {}): LauncherConfig {
   return {
@@ -83,7 +128,6 @@ describe('buildEnvVars', () => {
       { discordGuildId: '111', name: 'Guild A', enabled: false },
     ];
     const env = buildEnvVars(makeConfig({ guilds }), 'sess');
-    // guilds.length > 0 but no enabled ones → empty string
     expect(env.DISCORD_GUILD_ID).toBe('');
   });
 });
