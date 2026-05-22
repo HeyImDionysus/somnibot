@@ -139,10 +139,10 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    // Create listing
+    // Create listing — V49-C4: check insert result; refund items on failure
     const expiresAt = new Date(Date.now() + config.economy_market_listing_days * 24 * 60 * 60 * 1000).toISOString();
 
-    await this.supabase.from('economy_market_listings').insert({
+    const { error: insertErr } = await this.supabase.from('economy_market_listings').insert({
       guild_id: this.guild.id,
       seller_id: userId,
       item_id: invEntry.economy_items.id,
@@ -153,6 +153,19 @@ export class MarketManager {
       status: 'active',
       expires_at: expiresAt,
     });
+
+    if (insertErr) {
+      console.error('[Market] Listing insert failed — refunding inventory:', insertErr.message);
+      await this.supabase.rpc('economy_upsert_inventory', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_item_id: invEntry.item_id,
+        p_quantity: quantity,
+      }).catch(() => {});
+      return new EmbedBuilder()
+        .setDescription('❌ Failed to create listing. Your items have been returned.')
+        .setColor(0xff0000);
+    }
 
     return new EmbedBuilder()
       .setTitle('📦 Item Listed!')
@@ -280,21 +293,58 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    // Pay seller (atomic — upserts wallet if needed)
+    // V49-C5: Pay seller — if this fails, refund buyer and restore listing
     const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: listing.seller_id,
       p_amount: sellerEarnings,
     });
-    if (payErr) console.error(`[Market] economy_add_balance failed for seller ${listing.seller_id}:`, payErr.message);
+    if (payErr) {
+      console.error(`[Market] economy_add_balance failed for seller ${listing.seller_id} — refunding buyer:`, payErr.message);
+      // Refund buyer
+      await this.supabase.rpc('economy_add_balance', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_amount: totalCost,
+      }).catch(() => {});
+      // Restore listing quantity
+      await this.supabase.rpc('economy_market_buy', {
+        p_listing_id: listing.id,
+        p_quantity: -buyQty,
+      }).catch(() => {});
+      return new EmbedBuilder()
+        .setDescription('❌ Purchase failed — your coins have been refunded.')
+        .setColor(0xff0000);
+    }
 
-    // Add item to buyer inventory atomically (prevents TOCTOU on quantity)
-    await this.supabase.rpc('economy_upsert_inventory', {
+    // Add item to buyer inventory — V49-C5: check error, refund if failed
+    const { error: invErr } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: listing.item_id,
       p_quantity: buyQty,
     });
+    if (invErr) {
+      console.error(`[Market] inventory upsert failed for buyer ${userId} — refunding:`, invErr.message);
+      // Refund buyer and claw back seller payment
+      await this.supabase.rpc('economy_add_balance', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_amount: totalCost,
+      }).catch(() => {});
+      await this.supabase.rpc('economy_subtract_balance', {
+        p_guild_id: this.guild.id,
+        p_user_id: listing.seller_id,
+        p_amount: sellerEarnings,
+      }).catch(() => {});
+      await this.supabase.rpc('economy_market_buy', {
+        p_listing_id: listing.id,
+        p_quantity: -buyQty,
+      }).catch(() => {});
+      return new EmbedBuilder()
+        .setDescription('❌ Failed to add items to your inventory — your coins have been refunded.')
+        .setColor(0xff0000);
+    }
 
     // Quest progress — market trade (buyer counts as completing a trade)
     getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch(() => {});
@@ -344,9 +394,12 @@ export class MarketManager {
   // ── Cancel Listing ────────────────────────────────────
 
   async cancelListing(userId: string, listingIdPrefix: string): Promise<EmbedBuilder> {
+    // V49-C3: Look up the listing ID first, then use atomic cancel RPC.
+    // The RPC flips status to 'cancelled' only if still 'active', preventing
+    // concurrent cancels from both returning items (duplication).
     const { data: listings } = await this.supabase
       .from('economy_market_listings')
-      .select('*')
+      .select('id')
       .eq('guild_id', this.guild.id)
       .eq('seller_id', userId)
       .eq('status', 'active')
@@ -359,25 +412,33 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    const listing = listings[0] as MarketListing;
+    const listingId = (listings[0] as { id: string }).id;
 
-    // Return items to seller inventory atomically (prevents TOCTOU on quantity)
+    // Atomic cancel — returns the listing only if it was actually cancelled
+    const { data: cancelled } = await this.supabase.rpc('economy_market_atomic_cancel', {
+      p_listing_id: listingId,
+      p_seller_id: userId,
+    });
+
+    if (!cancelled || !Array.isArray(cancelled) || cancelled.length === 0) {
+      return new EmbedBuilder()
+        .setDescription('❌ Listing not found or already ended.')
+        .setColor(0xff0000);
+    }
+
+    const row = cancelled[0] as { id: string; item_id: string; item_name: string; remaining: number };
+
+    // Return items to seller inventory atomically
     await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_item_id: listing.item_id,
-      p_quantity: listing.remaining,
+      p_item_id: row.item_id,
+      p_quantity: row.remaining,
     });
-
-    // Cancel listing
-    await this.supabase
-      .from('economy_market_listings')
-      .update({ status: 'cancelled' })
-      .eq('id', listing.id);
 
     return new EmbedBuilder()
       .setTitle('🗑️ Listing Cancelled')
-      .setDescription(`**${listing.item_name}** x${listing.remaining} returned to your inventory.`)
+      .setDescription(`**${row.item_name}** x${row.remaining} returned to your inventory.`)
       .setColor(0xff9800);
   }
 }
