@@ -35,6 +35,7 @@ interface FishCatch {
   species: FishSpecies;
   weight: number;
   price: number;
+  paid?: boolean; // V52-M2: tracks whether wallet credit succeeded
 }
 
 interface JunkCatch {
@@ -278,33 +279,43 @@ export class FishingManager {
     if (roll < junkThreshold) {
       // Junk catch
       const junk = JUNK_ITEMS[Math.floor(Math.random() * JUNK_ITEMS.length)];
-      await this.addCurrency(userId, junk.currency);
+      // V52-M2: check addCurrency return so failed credits are surfaced
+      const paid = await this.addCurrency(userId, junk.currency);
       embed = new EmbedBuilder()
         .setTitle('🎣 You cast your line...')
-        .setDescription(`${junk.emoji} You caught **${junk.name}**!\nYou sold it for 💰 **${junk.currency}**.`)
-        .setColor(0x607d8b)
+        .setDescription(
+          `${junk.emoji} You caught **${junk.name}**!\n` +
+          (paid ? `You sold it for 💰 **${junk.currency}**.` : '⚠️ Wallet credit failed — contact an admin.'),
+        )
+        .setColor(paid ? 0x607d8b : 0xff0000)
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
     } else if (roll < treasureThreshold) {
       // Treasure catch
       const treasure = TREASURE_ITEMS[Math.floor(Math.random() * TREASURE_ITEMS.length)];
-      await this.addCurrency(userId, treasure.currency);
+      // V52-M2: check addCurrency return so failed credits are surfaced
+      const paid = await this.addCurrency(userId, treasure.currency);
       embed = new EmbedBuilder()
         .setTitle('🎣 You cast your line...')
         .setDescription(
           `🎁 You found a **Treasure Chest**!\n` +
-          `${treasure.emoji} Inside: **${treasure.name}** + 💰 **${treasure.currency}**!`,
+          `${treasure.emoji} Inside: **${treasure.name}**` +
+          (paid ? ` + 💰 **${treasure.currency}**!` : ' ⚠️ Wallet credit failed — contact an admin.'),
         )
-        .setColor(0xffd700)
+        .setColor(paid ? 0xffd700 : 0xff0000)
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
     } else {
       // Fish catch
       const fishCatch = await this.rollFishCatch(userId, baitUsed);
+      // V52-M2: surface wallet credit failure in the embed
+      const valueText = fishCatch.paid !== false
+        ? `💰 Value: **${fishCatch.price.toLocaleString()}** coins`
+        : '⚠️ Wallet credit failed — contact an admin.';
       embed = new EmbedBuilder()
         .setTitle('🎣 You cast your line...')
         .setDescription(
           `${fishCatch.species.emoji} You caught a **${fishCatch.species.name}**!\n` +
           `⚖️ Weight: **${fishCatch.weight.toFixed(2)} kg**\n` +
-          `💰 Value: **${fishCatch.price.toLocaleString()}** coins`,
+          valueText,
         )
         .setColor(RARITY_COLORS[fishCatch.species.rarity])
         .addFields({ name: 'Rarity', value: fishCatch.species.rarity.toUpperCase(), inline: true })
@@ -362,9 +373,13 @@ export class FishingManager {
       weight: parseFloat(weight.toFixed(2)),
       price_earned: price,
     });
-    await this.addCurrency(userId, price);
+    // V52-M2: check addCurrency and flag failed payout on the catch record
+    const paid = await this.addCurrency(userId, price);
+    if (!paid) {
+      console.error(`[Fishing] Fish catch recorded but wallet credit failed for ${userId} — ${price} coins lost`);
+    }
 
-    return { species: picked, weight, price };
+    return { species: picked, weight, price, paid };
   }
 
   // ── Sell fish from bucket ─────────────────────────────
@@ -443,12 +458,18 @@ export class FishingManager {
 
   // ── Helpers ───────────────────────────────────────────
 
-  private async addCurrency(userId: string, amount: number): Promise<void> {
+  // V52-M2: return boolean so callers can detect and surface wallet failures
+  // instead of silently losing coins.
+  private async addCurrency(userId: string, amount: number): Promise<boolean> {
     const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
-    if (error) console.error(`[Fishing] economy_add_balance failed for ${userId}:`, error.message);
+    if (error) {
+      console.error(`[Fishing] economy_add_balance failed for ${userId}:`, error.message);
+      return false;
+    }
+    return true;
   }
 }

@@ -39,11 +39,13 @@ export async function GET(
   }
 
   // ── Entitlement check: customer must own the product ──
+  // V52-L1: add guild_id scope from portal session for defense-in-depth
   const { data: entitlement } = await supabase
     .from('entitlements')
     .select('id')
     .eq('customer_id', session.customer_id)
     .eq('product_id', productId)
+    .eq('guild_id', session.guild_id)
     .in('status', ['active', 'grace_period'])
     .limit(1)
     .maybeSingle();
