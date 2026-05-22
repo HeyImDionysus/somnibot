@@ -2,7 +2,14 @@
  * GamesManager — mini-games: coinflip, slots, rps, dice, blackjack,
  * highlow, scratch, guess. All use virtual currency only.
  */
-import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
+  EmbedBuilder,
+  type ChatInputCommandInteraction,
+} from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
@@ -389,6 +396,8 @@ export class GamesManager {
   }
 
   // ── Blackjack ───────────────────────────────────────────
+  // V53-L5: Interactive blackjack with Hit/Stand/Double Down buttons.
+  // Players make their own decisions instead of auto-play.
 
   async blackjack(interaction: ChatInputCommandInteraction, amount: number): Promise<void> {
     const v = await this.validateBet(interaction, amount, 'economy_blackjack_max_bet');
@@ -400,73 +409,218 @@ export class GamesManager {
       const deck = makeDeck();
       const playerHand = [deck.pop()!, deck.pop()!];
       const dealerHand = [deck.pop()!, deck.pop()!];
+      let currentBet = amount;
+      let doubled = false;
 
-      // Auto-play: player stands on 17+, hits below
-      while (handValue(playerHand) < 17) {
-        playerHand.push(deck.pop()!);
-      }
+      // ── Check for natural blackjack ──
+      if (handValue(playerHand) === 21) {
+        // Player has natural blackjack — resolve immediately
+        const dealerVal = this.dealerPlay(dealerHand, deck);
+        const { result, color, net } = dealerVal === 21 && dealerHand.length === 2
+          ? { result: `Push! Both have natural blackjack. Coins returned.`, color: 0xFEE75C, net: 0 }
+          : { result: `♠️ BLACKJACK! You win **${Math.floor(amount * 1.5).toLocaleString()}** coins! 🎉`, color: 0x57F287, net: Math.floor(amount * 1.5) };
 
-      const playerVal = handValue(playerHand);
-      let dealerVal = handValue(dealerHand);
-
-      // Dealer hits until 17
-      while (dealerVal < 17) {
-        dealerHand.push(deck.pop()!);
-        dealerVal = handValue(dealerHand);
-      }
-
-      let result: string;
-      let color: number;
-      let net: number;
-
-      if (playerVal > 21) {
-        result = `Bust! You went over with **${playerVal}**. Lost **${amount.toLocaleString()}** coins.`;
-        color = 0xED4245;
-        net = -amount;
-      } else if (dealerVal > 21) {
-        result = `Dealer busts with **${dealerVal}**! You win **${amount.toLocaleString()}** coins! 🎉`;
-        color = 0x57F287;
-        net = amount;
-      } else if (playerVal === 21 && playerHand.length === 2) {
-        const blackjackPayout = Math.floor(amount * 1.5);
-        result = `♠️ BLACKJACK! You win **${blackjackPayout.toLocaleString()}** coins! 🎉`;
-        color = 0x57F287;
-        net = blackjackPayout;
-      } else if (playerVal > dealerVal) {
-        result = `You win with **${playerVal}** vs dealer's **${dealerVal}**! Won **${amount.toLocaleString()}** coins! 🎉`;
-        color = 0x57F287;
-        net = amount;
-      } else if (playerVal < dealerVal) {
-        result = `Dealer wins with **${dealerVal}** vs your **${playerVal}**. Lost **${amount.toLocaleString()}** coins.`;
-        color = 0xED4245;
-        net = -amount;
-      } else {
-        result = `Push! Both had **${playerVal}**. Coins returned.`;
-        color = 0xFEE75C;
-        net = 0;
-      }
-
-      if (net !== 0) {
-        const ok = await this.adjustBalance(guildId, userId, net);
-        if (!ok && net < 0) {
-          await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
-          return;
+        if (net !== 0) {
+          const ok = await this.adjustBalance(guildId, userId, net);
+          if (!ok && net < 0) { await interaction.reply({ content: '❌ Transaction failed.', ephemeral: true }); return; }
+          if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
         }
-        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
+
+        await interaction.reply({ embeds: [this.bjEmbed(playerHand, dealerHand, result, color, false)] });
+        return;
       }
 
-      const embed = new EmbedBuilder()
-        .setTitle('🃏 Blackjack')
-        .setDescription(
-          `**Your hand:** ${formatHand(playerHand)} (${playerVal})\n` +
-          `**Dealer:** ${formatHand(dealerHand)} (${dealerVal})\n\n` +
-          result
-        )
-        .setColor(color);
+      // ── Build action buttons ──
+      const makeButtons = (canDouble: boolean) => new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId('bj_hit').setLabel('Hit').setStyle(ButtonStyle.Primary).setEmoji('🃏'),
+        new ButtonBuilder().setCustomId('bj_stand').setLabel('Stand').setStyle(ButtonStyle.Secondary).setEmoji('🛑'),
+        new ButtonBuilder().setCustomId('bj_double').setLabel('Double Down').setStyle(ButtonStyle.Danger).setEmoji('💰').setDisabled(!canDouble),
+      );
 
-      await interaction.reply({ embeds: [embed] });
+      // Can only double down on first action (2 cards) and if player has enough balance
+      const canDouble = playerHand.length === 2;
+
+      const reply = await interaction.reply({
+        embeds: [this.bjEmbed(playerHand, dealerHand, 'Your move!', 0x5865F2, true)],
+        components: [makeButtons(canDouble)],
+        fetchReply: true,
+      });
+
+      // ── Collector for button interactions ──
+      const collector = reply.createMessageComponentCollector({
+        componentType: ComponentType.Button,
+        filter: (i) => i.user.id === userId,
+        time: 60_000, // 60 second timeout
+      });
+
+      collector.on('collect', async (btnInteraction) => {
+        try {
+          if (btnInteraction.customId === 'bj_hit') {
+            playerHand.push(deck.pop()!);
+            const pv = handValue(playerHand);
+
+            if (pv > 21) {
+              // Bust
+              collector.stop('bust');
+              const net = -currentBet;
+              const ok = await this.adjustBalance(guildId, userId, net);
+              if (ok) await this.addDailyLoss(guildId, userId, Math.abs(net));
+              await btnInteraction.update({
+                embeds: [this.bjEmbed(playerHand, dealerHand, `Bust! You went over with **${pv}**. Lost **${currentBet.toLocaleString()}** coins.`, 0xED4245, false)],
+                components: [],
+              });
+              return;
+            }
+
+            if (pv === 21) {
+              // Auto-stand on 21
+              collector.stop('stand');
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
+              return;
+            }
+
+            // Continue playing — can no longer double down after first hit
+            await btnInteraction.update({
+              embeds: [this.bjEmbed(playerHand, dealerHand, 'Your move!', 0x5865F2, true)],
+              components: [makeButtons(false)],
+            });
+
+          } else if (btnInteraction.customId === 'bj_stand') {
+            collector.stop('stand');
+            await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
+
+          } else if (btnInteraction.customId === 'bj_double') {
+            // Double down: double the bet, take exactly one more card, then stand
+            doubled = true;
+            currentBet = amount * 2;
+            playerHand.push(deck.pop()!);
+            const pv = handValue(playerHand);
+
+            collector.stop('double');
+
+            if (pv > 21) {
+              const net = -currentBet;
+              const ok = await this.adjustBalance(guildId, userId, net);
+              if (ok) await this.addDailyLoss(guildId, userId, Math.abs(net));
+              await btnInteraction.update({
+                embeds: [this.bjEmbed(playerHand, dealerHand, `Bust on double down! **${pv}**. Lost **${currentBet.toLocaleString()}** coins.`, 0xED4245, false)],
+                components: [],
+              });
+            } else {
+              await this.resolveBlackjack(btnInteraction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
+            }
+          }
+        } catch (err) {
+          console.error('[Games] Blackjack button handler error:', err);
+          collector.stop('error');
+        }
+      });
+
+      collector.on('end', async (_collected, reason) => {
+        if (reason === 'time') {
+          // Timed out — auto-stand and resolve
+          try {
+            await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
+          } catch (err) {
+            console.error('[Games] Blackjack timeout resolution error:', err);
+          }
+        }
+      });
     } finally {
       v.unlock();
+    }
+  }
+
+  /** Dealer plays out their hand (hits until 17+). Returns final hand value. */
+  private dealerPlay(dealerHand: Card[], deck: Card[]): number {
+    let dealerVal = handValue(dealerHand);
+    while (dealerVal < 17) {
+      dealerHand.push(deck.pop()!);
+      dealerVal = handValue(dealerHand);
+    }
+    return dealerVal;
+  }
+
+  /** Build a blackjack embed. When `hideDealer` is true, only the first dealer card is shown. */
+  private bjEmbed(playerHand: Card[], dealerHand: Card[], status: string, color: number, hideDealer: boolean): EmbedBuilder {
+    const pv = handValue(playerHand);
+    const dealerDisplay = hideDealer
+      ? `${dealerHand[0].rank}${dealerHand[0].suit} ❓`
+      : `${formatHand(dealerHand)} (${handValue(dealerHand)})`;
+
+    return new EmbedBuilder()
+      .setTitle('🃏 Blackjack')
+      .setDescription(
+        `**Your hand:** ${formatHand(playerHand)} (${pv})\n` +
+        `**Dealer:** ${dealerDisplay}\n\n` +
+        status
+      )
+      .setColor(color);
+  }
+
+  /** Resolve the game after player stands or doubles. */
+  private async resolveBlackjack(
+    btnInteraction: { update: (opts: Record<string, unknown>) => Promise<unknown> },
+    guildId: string, userId: string,
+    playerHand: Card[], dealerHand: Card[], deck: Card[],
+    currentBet: number, _doubled: boolean,
+  ): Promise<void> {
+    const playerVal = handValue(playerHand);
+    const dealerVal = this.dealerPlay(dealerHand, deck);
+
+    const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet);
+
+    if (net !== 0) {
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (ok && net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
+    }
+
+    await btnInteraction.update({
+      embeds: [this.bjEmbed(playerHand, dealerHand, result, color, false)],
+      components: [],
+    });
+  }
+
+  /** Resolve after timeout (auto-stand). */
+  private async resolveBlackjackTimeout(
+    interaction: ChatInputCommandInteraction,
+    guildId: string, userId: string,
+    playerHand: Card[], dealerHand: Card[], deck: Card[],
+    currentBet: number, _doubled: boolean,
+  ): Promise<void> {
+    const playerVal = handValue(playerHand);
+    const dealerVal = this.dealerPlay(dealerHand, deck);
+
+    const { result, color, net } = this.bjOutcome(playerVal, playerHand.length, dealerVal, currentBet);
+
+    if (net !== 0) {
+      const ok = await this.adjustBalance(guildId, userId, net);
+      if (ok && net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
+    }
+
+    try {
+      await interaction.editReply({
+        embeds: [this.bjEmbed(playerHand, dealerHand, `⏰ Time's up — auto-stand.\n\n${result}`, color, false)],
+        components: [],
+      });
+    } catch { /* message may be gone */ }
+  }
+
+  /** Compute blackjack outcome. */
+  private bjOutcome(playerVal: number, playerCards: number, dealerVal: number, bet: number): { result: string; color: number; net: number } {
+    if (playerVal > 21) {
+      return { result: `Bust! You went over with **${playerVal}**. Lost **${bet.toLocaleString()}** coins.`, color: 0xED4245, net: -bet };
+    } else if (dealerVal > 21) {
+      return { result: `Dealer busts with **${dealerVal}**! You win **${bet.toLocaleString()}** coins! 🎉`, color: 0x57F287, net: bet };
+    } else if (playerVal === 21 && playerCards === 2) {
+      const payout = Math.floor(bet * 1.5);
+      return { result: `♠️ BLACKJACK! You win **${payout.toLocaleString()}** coins! 🎉`, color: 0x57F287, net: payout };
+    } else if (playerVal > dealerVal) {
+      return { result: `You win with **${playerVal}** vs dealer's **${dealerVal}**! Won **${bet.toLocaleString()}** coins! 🎉`, color: 0x57F287, net: bet };
+    } else if (playerVal < dealerVal) {
+      return { result: `Dealer wins with **${dealerVal}** vs your **${playerVal}**. Lost **${bet.toLocaleString()}** coins.`, color: 0xED4245, net: -bet };
+    } else {
+      return { result: `Push! Both had **${playerVal}**. Coins returned.`, color: 0xFEE75C, net: 0 };
     }
   }
 

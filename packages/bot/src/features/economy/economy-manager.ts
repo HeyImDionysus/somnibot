@@ -1055,7 +1055,10 @@ export class EconomyManager {
           p_user_id: 'shop',
           p_item_id: itemId,
           p_quantity: quantity,
-        }).catch(() => {});
+        }).catch((err: unknown) => {
+          // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
+          console.error(`[Economy] CRITICAL: buyItem stock restore failed for item ${itemId} qty ${quantity}:`, err);
+        });
       }
       const w = await this.getOrCreateWallet(userId);
       return { success: false, amount: 0, balance: w, message: '❌ Failed to add item to inventory. You have been refunded.' };
@@ -1141,7 +1144,10 @@ export class EconomyManager {
         p_user_id: userId,
         p_item_id: itemId,
         p_quantity: quantity,
-      }).catch(() => {});
+      }).catch((err: unknown) => {
+        // V53-L1: Log item restore failures — if this fails, items are permanently lost
+        console.error(`[Economy] CRITICAL: sellItem item restore failed for user ${userId}, item ${itemId} qty ${quantity}:`, err);
+      });
       const wallet = await this.getOrCreateWallet(userId);
       return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit sale proceeds. Your items have been returned.' };
     }
@@ -1202,14 +1208,30 @@ export class EconomyManager {
   // ── Leaderboard ─────────────────────────────────────────
 
   async getLeaderboard(limit: number = 10): Promise<Array<{ user_id: string; net_worth: number; wallet: number; bank: number }>> {
-    // Fetch extra rows to account for users with high bank but low wallet,
-    // then sort by net_worth (wallet + bank) and take top N.
-    const fetchLimit = Math.max(limit * 5, 50);
+    // V53-M2: Use RPC for accurate server-side net_worth ranking.
+    // Falls back to client-side sort if RPC doesn't exist yet.
+    const { data: rpcData, error: rpcError } = await this.supabase
+      .rpc('economy_leaderboard', {
+        p_guild_id: this.guild.id,
+        p_limit: limit,
+      });
+
+    if (!rpcError && rpcData) {
+      return (rpcData as Array<Record<string, unknown>>).map((row) => ({
+        user_id: row.user_id as string,
+        net_worth: row.net_worth as number,
+        wallet: row.wallet as number,
+        bank: row.bank as number,
+      }));
+    }
+
+    // Fallback: fetch all wallets and sort client-side (covers pre-migration state)
     const { data } = await this.supabase
       .from('economy_wallets')
       .select('user_id, wallet, bank')
       .eq('guild_id', this.guild.id)
-      .limit(fetchLimit);
+      .order('wallet', { ascending: false })
+      .limit(500);
 
     return (data ?? []).map((row: Record<string, unknown>) => ({
       user_id: row.user_id as string,

@@ -161,7 +161,10 @@ export class MarketManager {
         p_user_id: userId,
         p_item_id: invEntry.item_id,
         p_quantity: quantity,
-      }).catch(() => {});
+      }).catch((err: unknown) => {
+        // V53-L1: Log inventory refund failures — if this fails, items are permanently lost
+        console.error(`[Market] CRITICAL: createListing refund failed for user ${userId}, item ${invEntry.item_id} qty ${quantity}:`, err);
+      });
       return new EmbedBuilder()
         .setDescription('❌ Failed to create listing. Your items have been returned.')
         .setColor(0xff0000);
@@ -437,12 +440,32 @@ export class MarketManager {
     });
     if (returnErr) {
       console.error('[Market] cancelListing inventory return failed:', returnErr.message);
+
+      // V53-M4: Queue a reconciliation entry so the item return can be retried
+      // automatically, rather than requiring manual admin intervention.
+      await this.supabase.from('bot_action_queue').insert({
+        guild_id: this.guild.id,
+        action: 'market_item_reconcile',
+        payload: {
+          user_id: userId,
+          item_id: row.item_id,
+          item_name: row.item_name,
+          quantity: row.remaining,
+          listing_id: row.id,
+          reason: 'cancel_listing_return_failed',
+          original_error: returnErr.message,
+        },
+        status: 'pending',
+      }).then(({ error }) => {
+        if (error) console.error('[Market] Failed to queue reconciliation:', error.message);
+      });
+
       return new EmbedBuilder()
-        .setTitle('⚠️ Listing Cancelled — Item Return Failed')
+        .setTitle('⚠️ Listing Cancelled — Item Return Queued')
         .setDescription(
-          `Your listing was cancelled but **${row.item_name}** x${row.remaining} could not be returned to your inventory. Please contact an admin.`,
+          `Your listing was cancelled but **${row.item_name}** x${row.remaining} could not be returned immediately. It has been queued for automatic retry.`,
         )
-        .setColor(0xff0000);
+        .setColor(0xff9800);
     }
 
     return new EmbedBuilder()

@@ -50,12 +50,27 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     .limit(1)
     .maybeSingle();
 
-  const guild = ownedGuild ?? (await admin
-    .from('guild')
-    .select('id, owner_discord_id')
-    .limit(1)
-    .maybeSingle()
-  ).data;
+  // V53-M3: If user doesn't own a guild, only fall back to a guild where
+  // they have an explicit dashboard_user_roles assignment. Prevents scoping
+  // to an arbitrary guild in multi-guild deployments.
+  let guild = ownedGuild;
+  if (!guild) {
+    const { data: roleAssignment } = await admin
+      .from('dashboard_user_roles')
+      .select('guild_id')
+      .eq('discord_id', discordId)
+      .limit(1)
+      .maybeSingle();
+
+    if (roleAssignment) {
+      const { data: assignedGuild } = await admin
+        .from('guild')
+        .select('id, owner_discord_id')
+        .eq('id', roleAssignment.guild_id)
+        .single();
+      guild = assignedGuild;
+    }
+  }
 
   if (!guild) return null;
 

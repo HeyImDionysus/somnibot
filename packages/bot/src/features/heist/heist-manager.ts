@@ -13,6 +13,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
 // ── Module-level state ────────────────────────────────────
@@ -55,12 +56,14 @@ const FAIL_STORIES = [
 export class HeistManager {
   private supabase: SupabaseClient;
   private client: Client;
+  private valkey: Valkey | null;
   private configCache = new Map<string, DbGuildConfig>();
   private resolveTimers = new Map<string, NodeJS.Timeout>();
 
-  constructor(supabase: SupabaseClient, client: Client) {
+  constructor(supabase: SupabaseClient, client: Client, valkey?: Valkey) {
     this.supabase = supabase as any;
     this.client = client;
+    this.valkey = valkey ?? null;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -89,7 +92,23 @@ export class HeistManager {
       return;
     }
 
-    // Check cooldown
+    // V53-L3: Valkey-based atomic cooldown (defense-in-depth alongside DB check + unique index)
+    const cooldownSecs = config.economy_heist_cooldown_seconds ?? 300;
+    if (this.valkey) {
+      const cooldownKey = `heist:cd:${guildId}`;
+      const locked = await this.valkey.set(cooldownKey, '1', 'EX', cooldownSecs, 'NX');
+      if (!locked) {
+        const ttl = await this.valkey.ttl(cooldownKey);
+        const remaining = Math.ceil(ttl / 60);
+        await interaction.reply({
+          content: `⏰ The crew needs to lay low. Next heist available in **${remaining}m**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+    }
+
+    // Check cooldown (DB fallback — covers case where Valkey was unavailable at last resolve)
     const { data: recent } = await (this.supabase as any)
       .from('economy_heists')
       .select('resolved_at')
@@ -100,7 +119,7 @@ export class HeistManager {
       .maybeSingle();
 
     if (recent?.resolved_at) {
-      const cooldownMs = (config.economy_heist_cooldown_seconds ?? 300) * 1000;
+      const cooldownMs = cooldownSecs * 1000;
       const elapsed = Date.now() - new Date(recent.resolved_at).getTime();
       if (elapsed < cooldownMs) {
         const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
@@ -224,7 +243,11 @@ export class HeistManager {
 
     // Schedule resolution
     const timer = setTimeout(async () => {
-      await this.resolveHeist(guildId, heist.id, interaction.channelId);
+      try {
+        await this.resolveHeist(guildId, heist.id, interaction.channelId);
+      } catch (err) {
+        console.error(`[Heist] Failed to resolve heist ${heist.id} in guild ${guildId}:`, err);
+      }
     }, joinWindowSecs * 1000);
     this.resolveTimers.set(heist.id, timer);
 
@@ -594,7 +617,11 @@ export class HeistManager {
         const config = await this.getConfig(guildId);
         const channelId = config?.economy_log_channel_id ?? '';
         const timer = setTimeout(async () => {
-          await this.resolveHeist(guildId, heist.id, channelId);
+          try {
+            await this.resolveHeist(guildId, heist.id, channelId);
+          } catch (err) {
+            console.error(`[Heist] Failed to resolve pending heist ${heist.id} in guild ${guildId}:`, err);
+          }
         }, remaining);
         this.resolveTimers.set(heist.id, timer);
       }
