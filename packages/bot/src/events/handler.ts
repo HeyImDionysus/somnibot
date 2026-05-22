@@ -114,9 +114,16 @@ import type { MarketManager } from '../features/market/market-manager.js';
  * Phase 9: Levels/XP, reaction roles, custom commands.
  */
 export function registerEvents(client: SomniClient): void {
-  // Safety net: prevent unhandled rejections from crashing the bot
+  // Safety nets: prevent unhandled errors from crashing the bot silently
   process.on('unhandledRejection', (error) => {
     console.error('[Events] Unhandled promise rejection:', error);
+  });
+
+  process.on('uncaughtException', (error) => {
+    console.error('[Events] Uncaught exception — process will continue but may be unstable:', error);
+    // Note: Node.js docs warn the process may be in an undefined state after
+    // an uncaught exception. In production, a process manager (PM2/Railway)
+    // should restart the process. We log here to preserve context.
   });
 
   // ── Ready ──────────────────────────────────────────────

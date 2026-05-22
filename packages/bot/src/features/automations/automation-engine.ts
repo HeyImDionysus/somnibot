@@ -13,6 +13,7 @@ import { AutomationLoader, type LoadedAutomation } from './automation-loader.js'
 import { evaluateConditions, type ConditionContext } from './condition-evaluator.js';
 import { executeActions, type ActionContext } from './action-executor.js';
 import type { AlertService } from '../../services/alert-service.js';
+import { AUTOMATION_LIMITS } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
 
@@ -33,6 +34,9 @@ export class AutomationEngine {
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
   private alertService: AlertService | null;
+  /** Current chain depth — incremented during automation execution so any
+   *  events emitted as side-effects (e.g., role.gained from give_role) inherit it. */
+  private _currentChainDepth = 0;
 
   constructor(
     private guild: Guild,
@@ -61,9 +65,14 @@ export class AutomationEngine {
     await this.loader.load();
     this.loader.subscribe();
 
-    // Listen to ALL platform events and check for matching automations
+    // Listen to ALL platform events and check for matching automations.
+    // If an event arrives without _chainDepth but we're currently executing
+    // an automation (side-effect event), inherit the current depth + 1.
     this.eventBus.onAny(async (event: PlatformEvent) => {
       if (event.guildId !== this.guild.id) return;
+      if (event._chainDepth === undefined && this._currentChainDepth > 0) {
+        event._chainDepth = this._currentChainDepth;
+      }
       await this.handleEvent(event);
     });
 
@@ -72,14 +81,27 @@ export class AutomationEngine {
 
   /**
    * Process a platform event against all matching automations.
+   * Chain-depth guard: if an automation's action emits a new event that triggers
+   * another automation, the depth counter increments. Events beyond MAX_CHAIN_DEPTH
+   * are dropped to prevent infinite loops (e.g., role.gained → give_role → role.gained).
    */
   private async handleEvent(event: PlatformEvent): Promise<void> {
+    // ── Chain-depth guard ──────────────────────────────────
+    const depth = event._chainDepth ?? 0;
+    if (depth >= AUTOMATION_LIMITS.MAX_CHAIN_DEPTH) {
+      console.warn(
+        `[AutomationEngine] Chain depth ${depth} exceeds max (${AUTOMATION_LIMITS.MAX_CHAIN_DEPTH}), ` +
+        `dropping event "${event.type}" to prevent infinite loop`,
+      );
+      return;
+    }
+
     const triggerType = event.type;
     const automations = this.loader.getForTrigger(triggerType);
 
     if (automations.length === 0) return;
 
-    // Build context from the event data
+    // Build context from the event data, carrying forward the chain depth
     const ctx = this.buildEventContext(event);
 
     for (const automation of automations) {
@@ -158,7 +180,10 @@ export class AutomationEngine {
       return;
     }
 
-    // 4. Execute actions
+    // 4. Execute actions — track chain depth so side-effect events inherit it
+    const depth = (event._chainDepth ?? 0) + 1;
+    this._currentChainDepth = depth;
+
     const actionCtx: ActionContext = {
       guild: this.guild,
       member: ctx.member,
@@ -172,10 +197,17 @@ export class AutomationEngine {
       variables: ctx.variables,
     };
 
-    const { executed, failed, errors } = await executeActions(
-      automation.actions as { type: string; config: Record<string, unknown> }[],
-      actionCtx,
-    );
+    let actionResult: { executed: number; failed: number; errors: string[] };
+    try {
+      actionResult = await executeActions(
+        automation.actions as { type: string; config: Record<string, unknown> }[],
+        actionCtx,
+      );
+    } finally {
+      // Reset chain depth after execution completes
+      this._currentChainDepth = Math.max(0, this._currentChainDepth - 1);
+    }
+    const { executed, failed, errors } = actionResult;
 
     // 5. Log execution
     const result: ExecutionResult = {
