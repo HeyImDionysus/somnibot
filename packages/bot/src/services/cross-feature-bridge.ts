@@ -52,7 +52,10 @@ export class CrossFeatureBridge {
       // Close any open tickets by this user
       await this.closeUserTickets(userId, 'User was banned');
 
-      console.log(`[CrossFeatureBridge] Cleaned up giveaways + tickets for banned user ${userId}`);
+      // V53 B-4: Clean up economy data — cancel listings, forfeit heists, suspend wallet
+      await this.cleanupMemberEconomy(userId, 'banned');
+
+      console.log(`[CrossFeatureBridge] Cleaned up giveaways + tickets + economy for banned user ${userId}`);
     });
 
     this.on('member.kicked', async (event) => {
@@ -61,6 +64,18 @@ export class CrossFeatureBridge {
 
       // Remove from active giveaway entries
       await this.removeGiveawayEntries(userId, 'kicked');
+
+      // V53 B-4: Clean up economy data
+      await this.cleanupMemberEconomy(userId, 'kicked');
+    });
+
+    // ── 1b. Member Left → Economy cleanup ──────────────────
+    this.on('member.left', async (event) => {
+      const userId = event.data.discordId;
+      if (!userId) return;
+
+      // V53 B-4: Clean up economy data for departing members
+      await this.cleanupMemberEconomy(userId, 'left');
     });
 
     // ── 2. Level Up → (role grants handled by level-announcer) ─
@@ -214,6 +229,46 @@ export class CrossFeatureBridge {
       }
     } catch (err) {
       console.error('[CrossFeatureBridge] Failed to remove giveaway entries:', err);
+    }
+  }
+
+  /**
+   * V53 B-4: Clean up economy data when a member is banned/kicked/leaves.
+   * Calls the cleanup_member_economy RPC which atomically:
+   * - Cancels active market listings (refunds items to inventory)
+   * - Forfeits active heist participation
+   * - Suspends the wallet (prevents targeting by /rob etc.)
+   */
+  private async cleanupMemberEconomy(userId: string, reason: string): Promise<void> {
+    try {
+      const { data, error } = await this.supabase.rpc('cleanup_member_economy', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_reason: reason,
+      });
+
+      if (error) {
+        console.error(`[CrossFeatureBridge] cleanup_member_economy failed for ${userId}:`, error.message);
+        return;
+      }
+
+      if (data) {
+        const summary = data as {
+          listings_cancelled: number;
+          heists_forfeited: number;
+          wallet_suspended: boolean;
+        };
+        if (summary.listings_cancelled > 0 || summary.heists_forfeited > 0 || summary.wallet_suspended) {
+          console.log(
+            `[CrossFeatureBridge] Economy cleanup for ${userId} (${reason}):`,
+            `${summary.listings_cancelled} listing(s) cancelled,`,
+            `${summary.heists_forfeited} heist(s) forfeited,`,
+            `wallet ${summary.wallet_suspended ? 'suspended' : 'already suspended/absent'}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.error('[CrossFeatureBridge] Failed to clean up member economy:', err);
     }
   }
 
