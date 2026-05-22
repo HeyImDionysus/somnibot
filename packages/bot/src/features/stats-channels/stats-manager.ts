@@ -139,7 +139,7 @@ export class StatsChannelManager {
 
   private async gatherStats(): Promise<Record<string, string>> {
     const guild = this.guild;
-    await guild.members.fetch().catch(() => {}); // ensure cache is populated
+    await guild.members.fetch().catch((e: unknown) => { console.warn('[Stats] Failed to fetch members:', (e as Error)?.message ?? e); }); // ensure cache is populated
 
     const totalMembers = guild.memberCount;
     const onlineMembers = guild.members.cache.filter(

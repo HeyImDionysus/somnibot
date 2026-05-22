@@ -303,7 +303,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
       if (qMgr) {
-        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch(() => {});
+        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
       }
     } catch {
       // Ignore quest tracking errors

@@ -304,7 +304,7 @@ async function executeAction(
       for (const roleId of (panel.manager_roles ?? [])) {
         await ticketChannel.permissionOverwrites.create(roleId, {
           ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
-        }).catch(() => {});
+        }).catch((e: unknown) => { console.warn('[Automation] Action failed:', (e as Error)?.message ?? e); });
       }
 
       // Create ticket record
@@ -323,7 +323,7 @@ async function executeAction(
         .single();
 
       if (ticketError) {
-        await ticketChannel.delete().catch(() => {});
+        await ticketChannel.delete().catch(() => { /* channel may already be deleted */ });
         return { success: false, error: `Ticket DB error: ${ticketError.message}` };
       }
 

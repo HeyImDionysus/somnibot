@@ -1048,7 +1048,7 @@ async function main(): Promise<void> {
           client.supabase
             .from('instance_settings')
             .upsert({ key: 'first_boot_dm_sent', value: 'true', section: 'boot' }),
-        ).catch(() => {});
+        ).catch((e: unknown) => { console.warn('[Boot] Operation failed:', (e as Error)?.message ?? e); });
       }
     } catch (err) {
       // Non-fatal — skip if instance_settings doesn't exist yet
@@ -1111,7 +1111,7 @@ async function main(): Promise<void> {
     if (autoModSync?.stop) autoModSync.stop();
     client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
     client.destroy();
-    await client.valkey.quit().catch(() => {});
+    await client.valkey.quit().catch(() => { /* intentionally silent — shutdown cleanup */ });
     console.log('[Bot] Goodbye.');
     process.exit(0);
   };

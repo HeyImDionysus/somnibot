@@ -262,7 +262,7 @@ export class TriviaManager {
         });
         if (triviaPayErr) console.error(`[Trivia] Failed to pay ${userId}:`, triviaPayErr.message);
         winners.push({ userId, paid: !triviaPayErr });
-        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch(() => {});
+        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
       } else {
         losers.push(userId);
         await this.setStreak(guildId, userId, 0);

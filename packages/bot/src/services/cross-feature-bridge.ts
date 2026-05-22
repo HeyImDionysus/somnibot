@@ -126,12 +126,12 @@ export class CrossFeatureBridge {
           });
 
         // Update Valkey stats
-        await this.valkey.hincrby(`stats:tickets:${this.guild.id}`, 'total_resolved', 1).catch(() => {});
+        await this.valkey.hincrby(`stats:tickets:${this.guild.id}`, 'total_resolved', 1).catch(() => { /* fire-and-forget stats */ });
         await this.valkey.lpush(
           `stats:tickets:${this.guild.id}:resolution_times`,
           String(resolutionMs),
-        ).catch(() => {});
-        await this.valkey.ltrim(`stats:tickets:${this.guild.id}:resolution_times`, 0, 99).catch(() => {});
+        ).catch(() => { /* fire-and-forget stats */ });
+        await this.valkey.ltrim(`stats:tickets:${this.guild.id}:resolution_times`, 0, 99).catch(() => { /* fire-and-forget stats */ });
       }
     });
 

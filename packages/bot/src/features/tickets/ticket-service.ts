@@ -191,7 +191,7 @@ export async function createTicket(
   if (dbError || !ticket) {
     console.error('[Tickets] Failed to save ticket:', dbError?.message);
     // Clean up the channel
-    await channel.delete().catch(() => {});
+    await channel.delete().catch(() => { /* channel may already be deleted */ });
     return { error: 'Failed to save ticket to database.' };
   }
 
@@ -363,7 +363,7 @@ export async function closeTicket(
         .single();
 
       if (panel?.closed_category_id) {
-        await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch(() => {});
+        await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch((e: unknown) => { console.warn('[Tickets] Failed to move channel:', (e as Error)?.message ?? e); });
       }
     } catch (err) {
       console.error('[Tickets] Failed to lock channel:', err);
@@ -436,7 +436,7 @@ export async function reopenTicket(
         .single();
 
       if (panel?.open_category_id) {
-        await channel.setParent(panel.open_category_id, { lockPermissions: false }).catch(() => {});
+        await channel.setParent(panel.open_category_id, { lockPermissions: false }).catch((e: unknown) => { console.warn('[Tickets] Failed to move channel:', (e as Error)?.message ?? e); });
       }
 
       const reopenEmbed = new EmbedBuilder()

@@ -139,7 +139,7 @@ export async function handleButtonRoleInteraction(
             .map((e) => e.role_id)
             .filter((rid) => member.roles.cache.has(rid));
           for (const rid of rolesToRemove) {
-            await member.roles.remove(rid, 'Button role exclusive group swap').catch(() => {});
+            await member.roles.remove(rid, 'Button role exclusive group swap').catch((e: unknown) => { console.warn('[Discord] Role operation failed:', (e as Error)?.message ?? e); });
           }
         }
       }

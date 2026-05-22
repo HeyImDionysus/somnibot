@@ -121,7 +121,7 @@ export class GamesManager {
       if (error) { console.error('[Games] economy_subtract_balance failed:', error.message); return false; }
     }
     // Track quest progress for any gamble action (win or loss)
-    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch(() => {});
+    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
     return true;
   }
 

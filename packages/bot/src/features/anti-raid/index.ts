@@ -109,7 +109,7 @@ export async function processAntiRaid(
     try {
       await member.send({
         content: `⚠️ Your account is too new to join **${guild.name}**. Accounts must be at least ${config.anti_raid_account_age_days} day(s) old. Please try again later.`,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[AntiRaid] Action failed:', (e as Error)?.message ?? e); });
 
       await member.kick(`Anti-raid: Account age ${Math.floor(accountAgeDays)}d < ${config.anti_raid_account_age_days}d minimum`);
 
@@ -172,7 +172,7 @@ export async function processAntiRaid(
       if (action === 'kick' || action === 'ban') {
         await member.send({
           content: `⚠️ **${guild.name}** is currently experiencing a raid. Your join has been temporarily blocked. Please try again later.`,
-        }).catch(() => {});
+        }).catch((e: unknown) => { console.warn('[AntiRaid] Action failed:', (e as Error)?.message ?? e); });
 
         if (action === 'ban') {
           await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: 0 });
