@@ -192,7 +192,7 @@ function formatTableName(table: string): string {
     economy_farm_plots: '🌾 Farm Plots',
     economy_fish_catches: '🐟 Fish Catches',
     economy_adventure_sessions: '⚔️ Adventures',
-    economy_trivia_sessions: '🧠 Trivia',
+    // economy_trivia_sessions dropped in v53 (table was unused — trivia uses Valkey)
     economy_lottery_tickets: '🎰 Lottery Tickets',
     economy_pets: '🐾 Pets',
     economy_quest_progress: '🎯 Quest Progress',
