@@ -233,10 +233,21 @@ export class PetsManager {
       return;
     }
 
+    // V49-M6: Check insert result — if pet already exists (23505) or any
+    // other error, refund the user.
     const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
-    await (this.supabase as any).from('economy_pets').insert({
+    const { error: insertErr } = await (this.supabase as any).from('economy_pets').insert({
       guild_id: guildId, user_id: userId, pet_type: petType, name: `${info.emoji} Pet`,
     });
+
+    if (insertErr) {
+      console.error('[Pets] buyPet insert failed — refunding:', insertErr.message);
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: price,
+      }).catch(() => {});
+      await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
+      return;
+    }
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -298,11 +309,13 @@ export class PetsManager {
     if (!(await this.ensureEnabled(interaction))) return;
     const guildId = interaction.guildId!;
 
-    // Cooldown check
+    // V49-M3: Atomic cooldown via SET PX NX — prevents two concurrent
+    // /pet play commands from both bypassing the cooldown.
     const cdKey = `pet:play:${guildId}:${interaction.user.id}`;
-    const cdVal = await this.valkey.get(cdKey);
-    if (cdVal) {
-      const remaining = Math.ceil((parseInt(cdVal) - Date.now()) / 1000);
+    const lockResult = await this.valkey.set(cdKey, '1', 'PX', PET_PLAY_COOLDOWN_SECS * 1000, 'NX');
+    if (lockResult !== 'OK') {
+      const ttl = await this.valkey.pttl(cdKey);
+      const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
       await interaction.reply({ content: `⏳ Your pet needs a break! Try again in **${remaining}s**.`, ephemeral: true });
       return;
     }
@@ -320,9 +333,6 @@ export class PetsManager {
       await interaction.reply({ content: '❌ Could not play with your pet — try again.', ephemeral: true });
       return;
     }
-
-    // Set cooldown
-    await this.valkey.set(cdKey, String(Date.now() + PET_PLAY_COOLDOWN_SECS * 1000), 'EX', PET_PLAY_COOLDOWN_SECS);
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -445,6 +455,8 @@ export class PetsManager {
     const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
       p_guild_id: guildId, p_user_id: battleWinnerId, p_amount: reward,
     });
+    // V49-L3: Surface payout failure to the user instead of silently swallowing
+    const payoutWarning = payoutErr ? '\n⚠️ *Reward payout failed — contact an admin.*' : '';
     if (payoutErr) console.error('[Pets] battlePet payout failed:', payoutErr.message);
 
     // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
@@ -460,7 +472,8 @@ export class PetsManager {
         .setDescription(
           `**${myPet.name}** (Lv.${myPet.level}) vs **${theirPet.name}** (Lv.${theirPet.level})\n\n` +
           `${iWin ? `🏆 **${myPet.name}** wins!` : `💀 **${theirPet.name}** wins!`}\n` +
-          (iWin ? `+**${reward}** coins to ${interaction.user}` : `+**${reward}** coins to ${opponent}`)
+          (iWin ? `+**${reward}** coins to ${interaction.user}` : `+**${reward}** coins to ${opponent}`) +
+          payoutWarning
         )
         .setColor(iWin ? 0x57F287 : 0xED4245)],
     });
@@ -480,17 +493,22 @@ export class PetsManager {
       await interaction.reply({ content: `❌ Your pet must be level ${MAX_LEVEL} to prestige.`, ephemeral: true }); return;
     }
 
-    const newPrestige = pet.prestige + 1;
-    await (this.supabase as any).from('economy_pets').update({
-      level: 1, xp: 0, prestige: newPrestige,
-      attack: pet.attack + 1, defense: pet.defense + 1,
-      speed: pet.speed + 1, health: pet.health + 2,
-      updated_at: new Date().toISOString(),
-    }).eq('id', pet.id);
+    // V49-M7: Atomic prestige — RPC only applies if level >= MAX_LEVEL,
+    // preventing two concurrent prestige calls from both applying bonuses.
+    const { data: prestigeResult } = await (this.supabase as any).rpc('economy_pet_atomic_prestige', {
+      p_guild_id: guildId, p_user_id: interaction.user.id, p_max_level: MAX_LEVEL,
+    });
+
+    if (!prestigeResult || !Array.isArray(prestigeResult) || prestigeResult.length === 0) {
+      await interaction.reply({ content: '❌ Prestige failed — your pet may no longer be at max level.', ephemeral: true });
+      return;
+    }
+
+    const pr = prestigeResult[0] as { new_prestige: number };
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
-        .setTitle(`⭐ Pet Prestige ${newPrestige}!`)
+        .setTitle(`⭐ Pet Prestige ${pr.new_prestige}!`)
         .setDescription(`${pet.name} has been reborn stronger!\nLevel reset to 1, but permanent stat bonuses applied.\n+1 ATK, +1 DEF, +1 SPD, +2 HP`)
         .setColor(0xF1C40F)],
     });

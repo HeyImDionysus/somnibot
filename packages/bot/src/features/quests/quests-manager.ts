@@ -77,27 +77,24 @@ export class QuestsManager {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
 
-    const { data: claimable } = await (this.supabase as any)
-      .from('economy_quest_progress')
-      .select('*, template:economy_quest_templates(*)')
-      .eq('guild_id', guildId)
-      .eq('user_id', userId)
-      .eq('completed', true)
-      .eq('claimed', false);
+    // V49-C1: Atomic claim — RPC flips claimed=true only for rows still
+    // unclaimed, returning only the rows it actually flipped.  Two concurrent
+    // calls cannot both claim the same quest.
+    const { data: claimed } = await (this.supabase as any).rpc('economy_quest_atomic_claim', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+    });
 
-    if (!claimable || claimable.length === 0) {
+    if (!claimed || !Array.isArray(claimed) || claimed.length === 0) {
       await interaction.reply({ content: '❌ No completed quests to claim.', ephemeral: true });
       return;
     }
 
     let totalCurrency = 0;
     let totalXp = 0;
-    for (const p of claimable) {
-      const t = p.template;
-      totalCurrency += t?.reward_currency ?? 0;
-      totalXp += t?.reward_xp ?? 0;
-      await (this.supabase as any).from('economy_quest_progress')
-        .update({ claimed: true }).eq('id', p.id);
+    for (const row of claimed) {
+      totalCurrency += row.reward_currency ?? 0;
+      totalXp += row.reward_xp ?? 0;
     }
 
     if (totalCurrency > 0) {
@@ -107,9 +104,9 @@ export class QuestsManager {
       if (payoutErr) {
         console.error('[Quests] claimQuests payout failed — reverting claimed status:', payoutErr.message);
         // Revert: un-claim the quests so the user can retry
-        for (const p of claimable) {
+        for (const row of claimed) {
           await (this.supabase as any).from('economy_quest_progress')
-            .update({ claimed: false }).eq('id', p.id).catch(() => {});
+            .update({ claimed: false }).eq('id', row.id).catch(() => {});
         }
         await interaction.reply({
           embeds: [new EmbedBuilder()
@@ -123,31 +120,28 @@ export class QuestsManager {
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle('🎁 Quests Claimed!')
-        .setDescription(`Claimed **${claimable.length}** quest(s)!\n💰 +**${totalCurrency.toLocaleString()}** coins\n✨ +**${totalXp}** XP`)
+        .setDescription(`Claimed **${claimed.length}** quest(s)!\n💰 +**${totalCurrency.toLocaleString()}** coins\n✨ +**${totalXp}** XP`)
         .setColor(0x57F287)],
     });
   }
 
   /** Increment quest progress for a user when they do something. */
   async trackProgress(guildId: string, userId: string, actionType: string, amount: number = 1): Promise<void> {
+    // V49-C2: Fetch matching quest IDs, then use atomic RPC to increment.
+    // The old read-modify-write pattern lost increments under concurrency.
     const { data: active } = await (this.supabase as any)
       .from('economy_quest_progress')
-      .select('*, template:economy_quest_templates(*)')
+      .select('id, template:economy_quest_templates(action_type)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .eq('completed', false);
 
     for (const p of active ?? []) {
-      if (p.template?.action_type === actionType) {
-        const newProgress = Math.min(p.progress + amount, p.template.target_count);
-        const completed = newProgress >= p.template.target_count;
-        await (this.supabase as any).from('economy_quest_progress')
-          .update({
-            progress: newProgress,
-            completed,
-            completed_at: completed ? new Date().toISOString() : null,
-          })
-          .eq('id', p.id);
+      if ((p.template as any)?.action_type === actionType) {
+        await (this.supabase as any).rpc('economy_quest_increment_progress', {
+          p_id: p.id,
+          p_amount: amount,
+        }).catch((err: Error) => console.error('[Quests] increment_progress failed:', err.message));
       }
     }
   }
@@ -166,16 +160,20 @@ export class QuestsManager {
 
     if (!templates || templates.length === 0) return;
 
-    // Shuffle and pick
+    // V49-M5: Shuffle and pick — use ON CONFLICT DO NOTHING to prevent
+    // duplicate assignments from concurrent /quests calls.
     const shuffled = templates.sort(() => Math.random() - 0.5).slice(0, count);
+    const today = new Date().toISOString().slice(0, 10);
     const rows = shuffled.map((t: any) => ({
       guild_id: guildId,
       user_id: userId,
       template_id: t.id,
       progress: 0,
+      assigned_date: today,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress').insert(rows);
+    await (this.supabase as any).from('economy_quest_progress')
+      .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
   /** Assign weekly quests — called on Monday or when user has no weekly quests this week. */
@@ -216,14 +214,18 @@ export class QuestsManager {
 
     if (shuffled.length === 0) return;
 
+    // V49-M5: ON CONFLICT DO NOTHING — idempotent under concurrent calls.
+    const mondayStr = monday.toISOString().slice(0, 10);
     const rows = shuffled.map((t: any) => ({
       guild_id: guildId,
       user_id: userId,
       template_id: t.id,
       progress: 0,
+      assigned_date: mondayStr,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress').insert(rows);
+    await (this.supabase as any).from('economy_quest_progress')
+      .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
   /** Schedule weekly quest reset — runs every hour, resets on Monday 00:00 UTC. */

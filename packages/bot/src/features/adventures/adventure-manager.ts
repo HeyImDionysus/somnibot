@@ -578,8 +578,11 @@ export class AdventureManager {
 
     const scene = firstScene as Scene;
 
-    // Create session
-    const { data: session } = await this.supabase
+    // V49-C6: Create session — catch 23505 (unique violation) from the
+    // partial unique index `uniq_active_adventure_session_per_user`.
+    // Two concurrent /adventure commands can both pass the active-session
+    // check above, but only one INSERT succeeds.
+    const { data: session, error: sessErr } = await this.supabase
       .from('economy_adventure_sessions')
       .insert({
         guild_id: this.guild.id,
@@ -593,6 +596,29 @@ export class AdventureManager {
       })
       .select('id')
       .single();
+
+    if (sessErr) {
+      // V49-L4: Refund ticket cost on session creation failure
+      if (config.economy_adventure_ticket_cost > 0) {
+        await this.supabase.rpc('economy_add_balance', {
+          p_guild_id: this.guild.id,
+          p_user_id: userId,
+          p_amount: config.economy_adventure_ticket_cost,
+        }).catch(() => {});
+      }
+
+      // Duplicate key → another concurrent command won the race
+      const isDupe = sessErr.code === '23505' || sessErr.message?.includes('duplicate');
+      return {
+        embed: new EmbedBuilder()
+          .setDescription(isDupe
+            ? '⚠️ You already have an active adventure! Finish it first.'
+            : '❌ Failed to start adventure — your coins have been refunded.')
+          .setColor(isDupe ? 0xffaa00 : 0xff0000),
+        row: null,
+        sessionId: null,
+      };
+    }
 
     const sessionId = (session as any)?.id ?? null;
 
@@ -805,14 +831,22 @@ export class AdventureManager {
       })
       .eq('id', session.id);
 
-    // Pay currency (atomic RPC — upserts wallet if needed)
+    // V49-C7: Pay currency — check error and mark session as payout_failed
+    // instead of silently swallowing. A failed payout should not disappear.
     if (currency > 0) {
       const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: this.guild.id,
         p_user_id: session.user_id,
         p_amount: currency,
       });
-      if (payErr) console.error('[Adventures] endSession payout failed:', payErr.message);
+      if (payErr) {
+        console.error('[Adventures] endSession payout failed:', payErr.message);
+        // Mark the session so admins can identify failed payouts and retry
+        await this.supabase
+          .from('economy_adventure_sessions')
+          .update({ status: 'payout_failed' })
+          .eq('id', session.id);
+      }
     }
 
     // Add loot items to inventory — resolve item names to IDs and upsert
