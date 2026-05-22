@@ -52,20 +52,31 @@ export async function lookupMember(
 /**
  * Get the next sequential member number for a guild.
  */
+/**
+ * V51: use RPC for atomic next-member-number to avoid duplicate numbers
+ * when two members join simultaneously.
+ */
 async function getNextMemberNumber(
   supabase: SupabaseClient,
   guildId: string,
 ): Promise<number> {
-  const { data, error } = await supabase
-    .from('members')
-    .select('member_number')
-    .eq('guild_id', guildId)
-    .order('member_number', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc('get_next_member_number', {
+    p_guild_id: guildId,
+  });
 
-  if (error || !data) return 1;
-  return (data.member_number as number) + 1;
+  if (error || data == null) {
+    console.warn('[MemberService] get_next_member_number RPC failed, using fallback:', error?.message);
+    const { data: row } = await supabase
+      .from('members')
+      .select('member_number')
+      .eq('guild_id', guildId)
+      .order('member_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return (row?.member_number as number ?? 0) + 1;
+  }
+
+  return data as number;
 }
 
 /**
