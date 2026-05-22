@@ -222,8 +222,18 @@ export class GatheringManager {
     if (picked.gives_item_id) {
       await this.addToInventory(userId, picked.gives_item_id, quantity);
     } else {
-      // Store as a "material" — add value to wallet
-      await this.addToWallet(userId, totalValue);
+      // V52-M1: check addToWallet return — if credit fails, tell the user
+      // instead of silently swallowing the error (coins would be lost).
+      const credited = await this.addToWallet(userId, totalValue);
+      if (!credited) {
+        return {
+          embed: new EmbedBuilder()
+            .setDescription('❌ Wallet credit failed — please try again or contact an admin.')
+            .setColor(0xff0000),
+          result: null,
+          error: 'wallet_credit_failed',
+        };
+      }
     }
 
     // Record transaction (fetch real balance for accurate audit trail)
@@ -342,13 +352,17 @@ export class GatheringManager {
     });
   }
 
-  private async addToWallet(userId: string, amount: number): Promise<void> {
+  private async addToWallet(userId: string, amount: number): Promise<boolean> {
     const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
-    if (error) console.error(`[Gathering] economy_add_balance failed for ${userId}:`, error.message);
+    if (error) {
+      console.error(`[Gathering] economy_add_balance failed for ${userId}:`, error.message);
+      return false;
+    }
+    return true;
   }
 
   private weightedRandom(entries: LootEntry[]): LootEntry {
