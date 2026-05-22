@@ -79,6 +79,9 @@ export async function validateDiscordAppId(
 /*  Discord Guild ID                                                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Validate one or more guild IDs (comma-separated for multi-guild — V53 Phase 4).
+ */
 export async function validateGuildId(
   guildId: string,
   token: string,
@@ -88,27 +91,35 @@ export async function validateGuildId(
     return { ok: true, meta: { guildName: '(will auto-detect on first join)' } };
   }
 
-  try {
-    const res = await fetch(`https://discord.com/api/v10/guilds/${guildId.trim()}`, {
-      headers: { Authorization: `Bot ${token.trim()}` },
-      signal: AbortSignal.timeout(10_000),
-    });
+  // Support comma-separated guild IDs for multi-guild
+  const guildIds = guildId.split(',').map(id => id.trim()).filter(Boolean);
+  const names: string[] = [];
 
-    if (res.status === 403 || res.status === 404) {
-      return {
-        ok: false,
-        error: 'Bot is not in that server, or the Guild ID is wrong. Make sure the bot has been invited first. You can leave this blank to auto-detect.',
-      };
-    }
-    if (!res.ok) {
-      return { ok: false, error: `Discord API returned HTTP ${res.status}. Try again or leave blank to auto-detect.` };
-    }
+  for (const id of guildIds) {
+    try {
+      const res = await fetch(`https://discord.com/api/v10/guilds/${id}`, {
+        headers: { Authorization: `Bot ${token.trim()}` },
+        signal: AbortSignal.timeout(10_000),
+      });
 
-    const data = await res.json() as { name: string };
-    return { ok: true, meta: { guildName: data.name } };
-  } catch (err) {
-    return { ok: false, error: `Could not verify Guild ID.\n${String(err)}` };
+      if (res.status === 403 || res.status === 404) {
+        return {
+          ok: false,
+          error: `Bot is not in server ${id}, or the Guild ID is wrong. Make sure the bot has been invited first.`,
+        };
+      }
+      if (!res.ok) {
+        return { ok: false, error: `Discord API returned HTTP ${res.status} for guild ${id}.` };
+      }
+
+      const data = await res.json() as { name: string };
+      names.push(data.name);
+    } catch (err) {
+      return { ok: false, error: `Could not verify Guild ID ${id}.\n${String(err)}` };
+    }
   }
+
+  return { ok: true, meta: { guildName: names.join(', ') } };
 }
 
 /* ------------------------------------------------------------------ */
