@@ -128,6 +128,27 @@ export async function POST(request: NextRequest) {
       // increase the window for token theft. 7 days balances usability with security.
       const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
+      // V53 Phase 3 (1.9): Enforce max 3 concurrent sessions.
+      // If limit reached, auto-revoke the oldest session(s).
+      const MAX_CONCURRENT_SESSIONS = 3;
+      const { data: activeSessions } = await admin
+        .from('portal_sessions')
+        .select('id, created_at')
+        .eq('guild_id', customer.guild_id)
+        .eq('customer_id', customer.id)
+        .eq('revoked', false)
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: true });
+
+      if (activeSessions && activeSessions.length >= MAX_CONCURRENT_SESSIONS) {
+        // Revoke oldest sessions to make room
+        const toRevoke = activeSessions.slice(0, activeSessions.length - MAX_CONCURRENT_SESSIONS + 1);
+        await admin
+          .from('portal_sessions')
+          .update({ revoked: true })
+          .in('id', toRevoke.map((s) => s.id));
+      }
+
       const { error } = await admin
         .from('portal_sessions')
         .insert({

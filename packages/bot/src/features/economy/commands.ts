@@ -9,6 +9,9 @@ import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   type SlashCommandSubcommandBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
@@ -232,7 +235,31 @@ async function handleBalance(
     .setFooter({ text: wallet.passive ? '🛡️ Passive mode enabled' : '⚔️ Passive mode disabled' })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  // V53 Phase 3 (3.4): Quick action buttons
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('econ_daily')
+      .setLabel('Daily')
+      .setEmoji('📅')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('econ_inventory')
+      .setLabel('Inventory')
+      .setEmoji('🎒')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('econ_shop')
+      .setLabel('Shop')
+      .setEmoji('🛒')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('econ_timers')
+      .setLabel('Timers')
+      .setEmoji('⏱️')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  await interaction.reply({ embeds: [embed], components: [row] });
 }
 
 async function handleTimedReward(
@@ -389,7 +416,21 @@ async function handleShop(interaction: ChatInputCommandInteraction, mgr: Economy
     .setFooter({ text: `Use /buy <item> to purchase • ${items.length} items` })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  // V53 Phase 3 (3.4): Quick action buttons
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('econ_balance')
+      .setLabel('Balance')
+      .setEmoji('💰')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('econ_inventory')
+      .setLabel('Inventory')
+      .setEmoji('🎒')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  await interaction.reply({ embeds: [embed], components: [row] });
 }
 
 async function handleBuy(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
@@ -444,7 +485,21 @@ async function handleInventory(interaction: ChatInputCommandInteraction, mgr: Ec
     .setFooter({ text: `${items.length} items • Use /use <item> to use an item` })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed] });
+  // V53 Phase 3 (3.4): Quick action buttons
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('econ_balance')
+      .setLabel('Balance')
+      .setEmoji('💰')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('econ_shop')
+      .setLabel('Shop')
+      .setEmoji('🛒')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  await interaction.reply({ embeds: [embed], components: [row] });
 }
 
 async function handleUse(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {

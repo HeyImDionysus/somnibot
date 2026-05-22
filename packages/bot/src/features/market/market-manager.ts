@@ -183,21 +183,31 @@ export class MarketManager {
 
   // ── Browse ────────────────────────────────────────────
 
-  async browse(searchTerm?: string): Promise<EmbedBuilder> {
+  async browse(opts?: string | {
+    search?: string;
+    sort?: 'price_asc' | 'price_desc' | 'newest' | 'name';
+    minPrice?: number;
+    maxPrice?: number;
+    page?: number;
+  }): Promise<EmbedBuilder> {
+    // Backwards compat: accept plain string
+    const options = typeof opts === 'string' ? { search: opts } : (opts ?? {});
+    const { search: searchTerm, sort = 'price_asc', minPrice, maxPrice, page = 0 } = options;
+    const PAGE_SIZE = 15;
+
     const config = await this.getConfig();
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
     }
 
+    // V53 Phase 3 (3.5): Enhanced market search with filtering, sorting, pagination
     let query = this.supabase
       .from('economy_market_listings')
-      .select('id, seller_id, item_name, remaining, price_per_unit, expires_at')
+      .select('id, seller_id, item_name, remaining, price_per_unit, expires_at', { count: 'exact' })
       .eq('guild_id', this.guild.id)
       .eq('status', 'active')
       .gt('remaining', 0)
-      .gt('expires_at', new Date().toISOString())
-      .order('price_per_unit', { ascending: true })
-      .limit(15);
+      .gt('expires_at', new Date().toISOString());
 
     if (searchTerm) {
       // Escape ILIKE special chars to prevent wildcard injection
@@ -205,8 +215,36 @@ export class MarketManager {
       query = query.ilike('item_name', `%${escaped}%`);
     }
 
-    const { data } = await query;
+    if (minPrice !== undefined) {
+      query = query.gte('price_per_unit', minPrice);
+    }
+    if (maxPrice !== undefined) {
+      query = query.lte('price_per_unit', maxPrice);
+    }
+
+    // Sort
+    switch (sort) {
+      case 'price_desc':
+        query = query.order('price_per_unit', { ascending: false });
+        break;
+      case 'newest':
+        query = query.order('created_at', { ascending: false });
+        break;
+      case 'name':
+        query = query.order('item_name', { ascending: true });
+        break;
+      case 'price_asc':
+      default:
+        query = query.order('price_per_unit', { ascending: true });
+        break;
+    }
+
+    query = query.range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+    const { data, count } = await query;
     const listings = (data ?? []) as MarketListing[];
+    const totalListings = count ?? 0;
+    const totalPages = Math.max(1, Math.ceil(totalListings / PAGE_SIZE));
 
     if (listings.length === 0) {
       return new EmbedBuilder()
@@ -215,15 +253,24 @@ export class MarketManager {
         .setColor(0x9e9e9e);
     }
 
-    const lines = listings.map((l, i) => {
+    const lines = listings.map((l) => {
       const shortId = l.id.slice(0, 8);
       return `\`${shortId}\` **${l.item_name}** x${l.remaining} — 💰 ${l.price_per_unit.toLocaleString()}/ea • <@${l.seller_id}>`;
     });
 
+    // Build filter summary
+    const filters: string[] = [];
+    if (searchTerm) filters.push(`🔍 "${searchTerm}"`);
+    if (minPrice !== undefined) filters.push(`Min: 💰${minPrice.toLocaleString()}`);
+    if (maxPrice !== undefined) filters.push(`Max: 💰${maxPrice.toLocaleString()}`);
+    const filterLine = filters.length > 0 ? `*Filters: ${filters.join(' • ')}*\n\n` : '';
+
     return new EmbedBuilder()
       .setTitle('🏪 Player Market')
-      .setDescription(lines.join('\n'))
-      .setFooter({ text: `Use /market buy <id> to purchase • ${config.economy_market_fee_pct}% fee` })
+      .setDescription(`${filterLine}${lines.join('\n')}`)
+      .setFooter({
+        text: `Page ${page + 1}/${totalPages} • ${totalListings} listing${totalListings !== 1 ? 's' : ''} • /market buy <id> • ${config.economy_market_fee_pct}% fee`,
+      })
       .setColor(0x2196f3);
   }
 

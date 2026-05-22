@@ -1,3 +1,4 @@
+import { EmbedBuilder } from 'discord.js';
 import type { SomniClient } from '../client.js';
 import {
   handleMemberJoin,
@@ -15,6 +16,8 @@ import {
 } from '../features/moderation/commands.js';
 import { handleHelpCommand, handleHelpCategorySelect } from '../features/help/index.js';
 import { handleForgetMeCommand } from '../features/privacy/forgetme-command.js';
+import { handleMyDataCommand } from '../features/account/mydata-command.js';
+import { handleTutorialCommand } from '../features/tutorial/tutorial-command.js';
 import {
   handleViewProfile,
   handleWarnUser,
@@ -70,6 +73,7 @@ import { handlePurgeCommand } from '../features/moderation/purge-command.js';
 import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
 import type { EconomyManager } from '../features/economy/economy-manager.js';
 import { handleEconomyCommand } from '../features/economy/commands.js';
+import { handleTimersCommand } from '../features/economy/timers-command.js';
 import { handleGatheringCommand } from '../features/gathering/commands.js';
 import { handleCraftingCommand } from '../features/crafting/commands.js';
 import { handleFarmingCommand } from '../features/farming/commands.js';
@@ -590,6 +594,120 @@ export function registerEvents(client: SomniClient): void {
           return;
         }
 
+        // V53 Phase 3 (3.4): Economy quick-action buttons
+        if (interaction.isButton() && interaction.customId.startsWith('econ_')) {
+          const econMgr = (client as unknown as Record<string, unknown>)._economyManager as EconomyManager | undefined;
+          if (!econMgr) {
+            await interaction.reply({ content: '🚫 Economy is not enabled.', ephemeral: true });
+            return;
+          }
+          switch (interaction.customId) {
+            case 'econ_daily': {
+              await interaction.deferReply({ ephemeral: true });
+              const cfg = await econMgr.loadConfig();
+              const result = await econMgr.claimTimedReward(interaction.user.id, 'daily');
+              if (result.success) {
+                const embed = new EmbedBuilder()
+                  .setColor(0x2ecc71)
+                  .setTitle(`${cfg.currency_emoji} Daily Reward`)
+                  .setDescription(result.message)
+                  .setTimestamp();
+                await interaction.editReply({ embeds: [embed] });
+              } else {
+                await interaction.editReply({ content: result.message });
+              }
+              return;
+            }
+            case 'econ_balance': {
+              const user = interaction.user;
+              const cfg = await econMgr.loadConfig();
+              const wallet = await econMgr.getOrCreateWallet(user.id);
+              const netWorth = wallet.wallet + wallet.bank;
+              const embed = new EmbedBuilder()
+                .setAuthor({ name: `${user.displayName}'s Balance`, iconURL: user.displayAvatarURL() })
+                .setColor(0x5865F2)
+                .addFields(
+                  { name: '💰 Wallet', value: `${cfg.currency_emoji} ${wallet.wallet.toLocaleString()}`, inline: true },
+                  { name: '🏦 Bank', value: `${cfg.currency_emoji} ${wallet.bank.toLocaleString()} / ${wallet.bank_max.toLocaleString()}`, inline: true },
+                  { name: '📊 Net Worth', value: `${cfg.currency_emoji} ${netWorth.toLocaleString()}`, inline: true },
+                )
+                .setTimestamp();
+              await interaction.reply({ embeds: [embed], ephemeral: true });
+              return;
+            }
+            case 'econ_inventory': {
+              const items = await econMgr.getInventory(interaction.user.id);
+              if (items.length === 0) {
+                await interaction.reply({ content: '📦 Your inventory is empty.', ephemeral: true });
+              } else {
+                const lines = items.map((item) => {
+                  const durStr = item.durability_remaining !== null ? ` [${item.durability_remaining} uses]` : '';
+                  return `${item.item_emoji} **${item.item_name}** ×${item.quantity}${durStr}`;
+                });
+                const embed = new EmbedBuilder()
+                  .setColor(0x9b59b6)
+                  .setAuthor({ name: `${interaction.user.displayName}'s Inventory`, iconURL: interaction.user.displayAvatarURL() })
+                  .setDescription(lines.join('\n'))
+                  .setFooter({ text: `${items.length} items` })
+                  .setTimestamp();
+                await interaction.reply({ embeds: [embed], ephemeral: true });
+              }
+              return;
+            }
+            case 'econ_shop': {
+              const cfg = await econMgr.loadConfig();
+              const shopItems = await econMgr.getShopItems();
+              if (shopItems.length === 0) {
+                await interaction.reply({ content: '🏪 The shop is empty!', ephemeral: true });
+              } else {
+                const shopLines = shopItems.slice(0, 15).map((item) => {
+                  const stockStr = item.stock !== null ? ` (${item.stock} left)` : '';
+                  return `${item.emoji} **${item.name}** — ${cfg.currency_emoji} ${item.price.toLocaleString()}${stockStr}`;
+                });
+                const embed = new EmbedBuilder()
+                  .setColor(0xf39c12)
+                  .setTitle('🏪 Shop')
+                  .setDescription(shopLines.join('\n'))
+                  .setFooter({ text: `${shopItems.length} items • Use /buy <item> to purchase` })
+                  .setTimestamp();
+                await interaction.reply({ embeds: [embed], ephemeral: true });
+              }
+              return;
+            }
+            case 'econ_timers': {
+              // Timers needs SomniClient, but responds ephemeral via button
+              const timersClient = interaction.client as unknown as SomniClient;
+              const userId = interaction.user.id;
+              const guildId2 = timersClient.guildId;
+              const valkey = timersClient.valkey;
+              if (!valkey) {
+                await interaction.reply({ content: '⏱️ Cooldown tracking unavailable.', ephemeral: true });
+                return;
+              }
+              // Quick inline version: check common cooldowns
+              const keys = ['daily', 'weekly', 'monthly', 'work', 'crime', 'beg', 'search', 'rob'];
+              const ttls = await Promise.all(
+                keys.map(async (k) => {
+                  const ttl = await valkey.ttl(`economy:${guildId2}:${userId}:${k}`);
+                  return { key: k, ttl };
+                }),
+              );
+              const active = ttls.filter((t) => t.ttl > 0);
+              if (active.length === 0) {
+                await interaction.reply({ content: '⏱️ No active cooldowns! All commands are available.', ephemeral: true });
+              } else {
+                const lines = active.map((t) => {
+                  const m = Math.floor(t.ttl / 60);
+                  const s = t.ttl % 60;
+                  return `⏳ **${t.key}** — ${m > 0 ? `${m}m ` : ''}${s}s`;
+                });
+                await interaction.reply({ content: `⏱️ *Active Cooldowns*\n${lines.join('\n')}`, ephemeral: true });
+              }
+              return;
+            }
+          }
+        }
+
         // Phase 8: Emit button.clicked event for automations
         if (interaction.isButton()) {
           client.eventBus.emit('button.clicked', client.guildId, {
@@ -694,6 +812,12 @@ export function registerEvents(client: SomniClient): void {
           case 'forgetme':
             await handleForgetMeCommand(interaction, client.supabase, client.guildId);
             return;
+          case 'mydata':
+            await handleMyDataCommand(interaction);
+            return;
+          case 'tutorial':
+            await handleTutorialCommand(interaction);
+            return;
         }
 
         // Phase 7: Ticket commands
@@ -774,6 +898,12 @@ export function registerEvents(client: SomniClient): void {
             client.supabase,
             client.guildId,
           );
+          return;
+        }
+
+        // V53 Phase 3: /timers — cooldown overview (part of economy, but uses Valkey directly)
+        if (interaction.commandName === 'timers') {
+          await handleTimersCommand(interaction);
           return;
         }
 
