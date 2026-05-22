@@ -415,22 +415,25 @@ export class EconomyManager {
       monthly: 60 * 24 * 60 * 60 * 1000, // Within 60 days
     };
 
-    // Check cooldown via Valkey
+    // V48-M1: atomic cooldown claim. /daily, /weekly, /monthly all
+    // grant large rewards — a double-fire from a click race would be
+    // worth real coins, so claim the slot via SET NX before crediting.
     const cooldownKey = `economy:${this.guild.id}:${userId}:${type}`;
-    const lastClaim = await this.valkey.get(cooldownKey);
-    if (lastClaim) {
-      const remaining = parseInt(lastClaim, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(userId);
-        const hours = Math.floor(remaining / 3600000);
-        const mins = Math.floor((remaining % 3600000) / 60000);
-        return {
-          success: false,
-          amount: 0,
-          balance: wallet,
-          message: `⏰ You already claimed your ${type} reward. Come back in **${hours}h ${mins}m**.`,
-        };
-      }
+    const cooldownMs = intervals[type];
+    const expiresAt = Date.now() + cooldownMs;
+    const claimedSlot = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimedSlot) {
+      const lastClaim = await this.valkey.get(cooldownKey);
+      const remaining = lastClaim ? parseInt(lastClaim, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(userId);
+      const hours = Math.max(0, Math.floor(remaining / 3600000));
+      const mins = Math.max(0, Math.floor((remaining % 3600000) / 60000));
+      return {
+        success: false,
+        amount: 0,
+        balance: wallet,
+        message: `⏰ You already claimed your ${type} reward. Come back in **${hours}h ${mins}m**.`,
+      };
     }
 
     // Get/update streak
@@ -483,10 +486,7 @@ export class EconomyManager {
         { onConflict: 'guild_id,user_id,streak_type' },
       );
 
-    // Set cooldown in Valkey
-    const cooldownMs = intervals[type];
-    const expiresAt = now.getTime() + cooldownMs;
-    await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs);
+    // (V48-M1) cooldown already claimed atomically above
 
     // Record transaction
     await this.recordTransaction(
@@ -525,25 +525,26 @@ export class EconomyManager {
   async work(userId: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
-    // Cooldown check
+    // V48-M1: atomic SET NX cooldown claim. The previous read-check-set
+    // pattern allowed two concurrent /work invocations from the same
+    // user to both pass the check before either wrote the cooldown,
+    // doubling the payout. SET NX returns null on race-loser so we can
+    // tell them to wait without paying anyone twice.
     const cooldownKey = `economy:${this.guild.id}:${userId}:work`;
-    const lastWork = await this.valkey.get(cooldownKey);
-    if (lastWork) {
-      const remaining = parseInt(lastWork, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(userId);
-        const mins = Math.ceil(remaining / 60000);
-        return { success: false, amount: 0, balance: wallet, message: `⏰ You need to rest before working again. Try again in **${mins}m**.` };
-      }
+    const cooldownMs = cfg.economy_work_cooldown_seconds * 1000;
+    const expiresAt = Date.now() + cooldownMs;
+    const claimed = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimed) {
+      const lastWork = await this.valkey.get(cooldownKey);
+      const remaining = lastWork ? parseInt(lastWork, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(userId);
+      const mins = Math.max(1, Math.ceil(remaining / 60000));
+      return { success: false, amount: 0, balance: wallet, message: `⏰ You need to rest before working again. Try again in **${mins}m**.` };
     }
 
     const amount = randInt(cfg.economy_work_min, cfg.economy_work_max);
     const job = WORK_JOBS[Math.floor(Math.random() * WORK_JOBS.length)];
     const updated = await this.creditWallet(userId, amount);
-
-    // Set cooldown
-    const cooldownMs = cfg.economy_work_cooldown_seconds * 1000;
-    await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
 
     await this.recordTransaction(userId, 'work', amount, updated.wallet, `Worked: ${job}`);
     await this.logEconomyEvent(userId, 'work', amount);
@@ -560,19 +561,19 @@ export class EconomyManager {
   async crime(userId: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
-    // Cooldown (same as work cooldown × 1.5)
+    // V48-M1: atomic cooldown claim (see /work). Crime cooldown is set
+    // up-front, win or lose; failing the chance still consumes it.
     const cooldownKey = `economy:${this.guild.id}:${userId}:crime`;
-    const lastCrime = await this.valkey.get(cooldownKey);
-    if (lastCrime) {
-      const remaining = parseInt(lastCrime, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(userId);
-        const mins = Math.ceil(remaining / 60000);
-        return { success: false, amount: 0, balance: wallet, message: `⏰ You need to lay low for a bit. Try again in **${mins}m**.` };
-      }
-    }
-
     const cooldownMs = Math.floor(cfg.economy_work_cooldown_seconds * 1.5) * 1000;
+    const expiresAt = Date.now() + cooldownMs;
+    const claimed = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimed) {
+      const lastCrime = await this.valkey.get(cooldownKey);
+      const remaining = lastCrime ? parseInt(lastCrime, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(userId);
+      const mins = Math.max(1, Math.ceil(remaining / 60000));
+      return { success: false, amount: 0, balance: wallet, message: `⏰ You need to lay low for a bit. Try again in **${mins}m**.` };
+    }
 
     if (chance(cfg.economy_crime_success_pct)) {
       // Success
@@ -580,7 +581,6 @@ export class EconomyManager {
       const updated = await this.creditWallet(userId, amount);
       const story = CRIME_SUCCESS[Math.floor(Math.random() * CRIME_SUCCESS.length)];
 
-      await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
       await this.logEconomyEvent(userId, 'crime (success)', amount);
       getQuestsManager()?.trackProgress(this.guild.id, userId, 'crime').catch(() => {});
@@ -598,7 +598,6 @@ export class EconomyManager {
       const updated = fine > 0 ? (await this.debitWallet(userId, fine)) ?? wallet : wallet;
       const story = CRIME_FAIL[Math.floor(Math.random() * CRIME_FAIL.length)];
 
-      await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
       if (fine > 0) {
         await this.recordTransaction(userId, 'crime', -fine, updated.wallet, `Crime failed: ${story}`);
       }
@@ -618,20 +617,18 @@ export class EconomyManager {
   async beg(userId: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
-    // Short cooldown (2 minutes)
+    // V48-M1: atomic cooldown claim.
     const cooldownKey = `economy:${this.guild.id}:${userId}:beg`;
-    const lastBeg = await this.valkey.get(cooldownKey);
-    if (lastBeg) {
-      const remaining = parseInt(lastBeg, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(userId);
-        const secs = Math.ceil(remaining / 1000);
-        return { success: false, amount: 0, balance: wallet, message: `⏰ You can beg again in **${secs}s**.` };
-      }
-    }
-
     const cooldownMs = 120_000; // 2 min
-    await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
+    const expiresAt = Date.now() + cooldownMs;
+    const claimed = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimed) {
+      const lastBeg = await this.valkey.get(cooldownKey);
+      const remaining = lastBeg ? parseInt(lastBeg, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(userId);
+      const secs = Math.max(1, Math.ceil(remaining / 1000));
+      return { success: false, amount: 0, balance: wallet, message: `⏰ You can beg again in **${secs}s**.` };
+    }
 
     if (chance(60)) {
       // Success
@@ -657,20 +654,18 @@ export class EconomyManager {
   async search(userId: string): Promise<TransactionResult> {
     const cfg = await this.loadConfig();
 
-    // 3 min cooldown
+    // V48-M1: atomic cooldown claim.
     const cooldownKey = `economy:${this.guild.id}:${userId}:search`;
-    const lastSearch = await this.valkey.get(cooldownKey);
-    if (lastSearch) {
-      const remaining = parseInt(lastSearch, 10) - Date.now();
-      if (remaining > 0) {
-        const wallet = await this.getOrCreateWallet(userId);
-        const secs = Math.ceil(remaining / 1000);
-        return { success: false, amount: 0, balance: wallet, message: `⏰ You can search again in **${secs}s**.` };
-      }
-    }
-
     const cooldownMs = 180_000;
-    await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
+    const expiresAt = Date.now() + cooldownMs;
+    const claimed = await this.valkey.set(cooldownKey, String(expiresAt), 'PX', cooldownMs, 'NX');
+    if (!claimed) {
+      const lastSearch = await this.valkey.get(cooldownKey);
+      const remaining = lastSearch ? parseInt(lastSearch, 10) - Date.now() : cooldownMs;
+      const wallet = await this.getOrCreateWallet(userId);
+      const secs = Math.max(1, Math.ceil(remaining / 1000));
+      return { success: false, amount: 0, balance: wallet, message: `⏰ You can search again in **${secs}s**.` };
+    }
 
     if (chance(65)) {
       const loc = SEARCH_LOCATIONS[Math.floor(Math.random() * SEARCH_LOCATIONS.length)];
