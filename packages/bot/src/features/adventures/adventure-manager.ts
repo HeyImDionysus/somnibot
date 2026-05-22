@@ -849,7 +849,8 @@ export class AdventureManager {
       }
     }
 
-    // Add loot items to inventory — resolve item names to IDs and upsert
+    // V53-C7: Add loot items — track failures and mark session accordingly
+    let lootFailed = false;
     for (const item of loot) {
       const { data: found } = await this.supabase
         .from('economy_items')
@@ -859,13 +860,25 @@ export class AdventureManager {
         .limit(1);
 
       if (found && found.length > 0) {
-        await this.supabase.rpc('economy_upsert_inventory', {
+        const { error: lootErr } = await this.supabase.rpc('economy_upsert_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: session.user_id,
           p_item_id: (found[0] as any).id,
           p_quantity: item.qty,
-        }).catch((err: Error) => console.error('[Adventures] loot upsert failed:', err.message));
+        });
+        if (lootErr) {
+          console.error('[Adventures] loot upsert failed:', lootErr.message);
+          lootFailed = true;
+        }
       }
+    }
+
+    // Mark session with loot_failed so reconciliation / owner can investigate
+    if (lootFailed) {
+      await this.supabase.from('economy_adventure_sessions')
+        .update({ loot_failed: true })
+        .eq('id', session.id)
+        .catch(() => {});
     }
 
     // Quest progress — count completed adventures

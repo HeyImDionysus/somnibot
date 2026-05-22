@@ -204,14 +204,23 @@ export class HeistManager {
       return;
     }
 
-    // Add initiator as participant
+    // V53-C10: Add initiator as participant — check error, refund if insert fails
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: initInsertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
       role,
     });
+    if (initInsertErr) {
+      console.error('[Heist] Failed to insert initiator participant:', initInsertErr.message);
+      // Refund entry fee
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      }).catch(() => {});
+      await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
+      return;
+    }
 
     // Schedule resolution
     const timer = setTimeout(async () => {
@@ -301,25 +310,36 @@ export class HeistManager {
       return;
     }
 
-    // Add participant
+    // V53-C8: Add participant — check insert, refund entry fee on failure
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: partInsertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
       role,
     });
+    if (partInsertErr) {
+      console.error('[Heist] Failed to insert participant:', partInsertErr.message);
+      // Refund entry fee
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      }).catch(() => {});
+      await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
+      return;
+    }
 
-    // Atomic array_append to prevent TOCTOU race when multiple users join concurrently
-    await (this.supabase as any).rpc('array_append_heist_participant', {
+    // V53-C9: Atomic array_append — await and check; refund + remove participant on failure
+    const { error: appendErr } = await (this.supabase as any).rpc('array_append_heist_participant', {
       p_heist_id: heist.id, p_user_id: userId,
-    }).catch(() => {
-      // Fallback: direct update (less safe but functional)
-      (this.supabase as any).from('economy_heists').update({
+    });
+    if (appendErr) {
+      console.error('[Heist] array_append_heist_participant failed:', appendErr.message);
+      // Fallback: direct update (awaited this time)
+      await (this.supabase as any).from('economy_heists').update({
         participants: [...(heist.participants as string[]), userId],
         success_chance: Math.min(95, heist.success_chance + 7),
       }).eq('id', heist.id);
-    });
+    }
 
     // Re-read actual participant count for accurate display
     const { count: crewCount } = await (this.supabase as any)
@@ -474,16 +494,26 @@ export class HeistManager {
       const totalPayout = heist.target_payout;
       const perPerson = Math.floor(totalPayout / participants.length);
 
+      // V53-C11: Track payout failures individually so they can be reconciled
+      const failedPayouts: string[] = [];
       for (const uid of participants) {
         const { error: payErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
         });
-        if (payErr) console.error(`[Heist] Failed to pay ${uid}:`, payErr.message);
-
-        await (this.supabase as any).from('economy_heist_participants')
-          .update({ payout: perPerson })
-          .eq('heist_id', heistId)
-          .eq('user_id', uid);
+        if (payErr) {
+          console.error(`[Heist] Failed to pay ${uid}:`, payErr.message);
+          failedPayouts.push(uid);
+          // Mark participant with payout_failed for reconciliation
+          await (this.supabase as any).from('economy_heist_participants')
+            .update({ payout: 0, payout_failed: true })
+            .eq('heist_id', heistId)
+            .eq('user_id', uid);
+        } else {
+          await (this.supabase as any).from('economy_heist_participants')
+            .update({ payout: perPerson })
+            .eq('heist_id', heistId)
+            .eq('user_id', uid);
+        }
       }
 
       await (this.supabase as any).from('economy_heists')
@@ -496,7 +526,12 @@ export class HeistManager {
         .eq('heist_id', heistId);
 
       const crewList = (partData ?? [])
-        .map((p: any) => `• <@${p.user_id}> — **${p.role}** (+${perPerson.toLocaleString()} coins)`)
+        .map((p: any) => {
+          const isFailed = failedPayouts.includes(p.user_id);
+          return isFailed
+            ? `• <@${p.user_id}> — **${p.role}** (⚠️ payout failed — contact admin)`
+            : `• <@${p.user_id}> — **${p.role}** (+${perPerson.toLocaleString()} coins)`;
+        })
         .join('\n');
 
       const story = SUCCESS_STORIES[Math.floor(Math.random() * SUCCESS_STORIES.length)];
