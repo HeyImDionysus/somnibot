@@ -24,11 +24,14 @@ export async function POST(
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  // Fetch order with entitlements and payments
+  // V47-C2: scope by guild_id so an attacker who owns another guild cannot
+  // refund (and revoke entitlements + license keys + roles for) an unrelated
+  // guild's order by sending its UUID.
   const { data: order } = await supabase
     .from('orders')
     .select('*, payments(*)')
     .eq('id', orderId)
+    .eq('guild_id', guildId)
     .single();
 
   if (!order) {

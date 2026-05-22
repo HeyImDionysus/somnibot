@@ -796,21 +796,29 @@ export class EconomyManager {
       .maybeSingle();
 
     if (padlock && padlock.quantity > 0) {
-      // Consume padlock atomically
+      // V47-M3: atomic decrement returns boolean. If a concurrent rob already
+      // consumed the last padlock the RPC returns false — in that case the
+      // padlock did NOT block THIS attempt and we must fall through to the
+      // normal rob outcome instead of pretending it did.
       const padlockItemId = (await this.findItemByEffect('padlock'))?.id;
+      let padlockConsumed = false;
       if (padlockItemId) {
-        await this.supabase.rpc('economy_decrement_inventory', {
+        const { data: consumed } = await this.supabase.rpc('economy_decrement_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: victimId,
           p_item_id: padlockItemId,
           p_quantity: 1,
         });
+        padlockConsumed = consumed === true;
       }
 
-      const cooldownMs = 600_000;
-      await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
+      if (padlockConsumed) {
+        const cooldownMs = 600_000;
+        await this.valkey.set(cooldownKey, String(Date.now() + cooldownMs), 'PX', cooldownMs);
 
-      return { success: false, amount: 0, balance: robberWallet, message: `🔒 <@${victimId}>'s padlock blocked your robbery attempt! The padlock was consumed.` };
+        return { success: false, amount: 0, balance: robberWallet, message: `🔒 <@${victimId}>'s padlock blocked your robbery attempt! The padlock was consumed.` };
+      }
+      // padlock raced out — fall through to normal rob attempt
     }
 
     const cooldownMs = 600_000;

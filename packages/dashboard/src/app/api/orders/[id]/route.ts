@@ -18,12 +18,16 @@ export async function GET(
   const { id } = await params;
   const supabase = createAdminSupabase();
 
+  // V47-C2: scope to the authenticated owner's guild so an unrelated
+  // owner cannot read another guild's customer PII / license keys / payments
+  // by guessing the order UUID.
   const { data: order, error } = await supabase
     .from('orders')
     .select(
       '*, customers(discord_id, discord_username, email), products(name, type, delivery_type), license_keys(*), entitlements(*), payments(*)',
     )
     .eq('id', id)
+    .eq('guild_id', guildId)
     .single();
 
   if (error) {

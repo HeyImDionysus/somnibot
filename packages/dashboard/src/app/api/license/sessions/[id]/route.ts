@@ -16,6 +16,20 @@ export async function DELETE(
   const { id: sessionId } = await params;
   const supabase = createAdminSupabase();
 
+  // V47-C2: license_sessions has no guild_id column — verify ownership via
+  // its parent license_keys row before deactivating. Otherwise any guild
+  // owner could remotely kill another guild's user sessions by UUID guess.
+  const { data: session } = await supabase
+    .from('license_sessions')
+    .select('id, license_keys!inner(guild_id)')
+    .eq('id', sessionId)
+    .eq('license_keys.guild_id', guildId)
+    .maybeSingle();
+
+  if (!session) {
+    return NextResponse.json({ success: false, error: 'Session not found' }, { status: 404 });
+  }
+
   const { error } = await supabase
     .from('license_sessions')
     .update({
