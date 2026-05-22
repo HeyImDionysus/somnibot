@@ -27,6 +27,7 @@ import { buildModerationCommands } from './features/moderation/commands.js';
 import { buildPurgeCommand } from './features/moderation/purge-command.js';
 import { buildXpAdminCommands } from './features/levels/admin-commands.js';
 import { buildHelpCommand } from './features/help/index.js';
+import { buildForgetMeCommand } from './features/privacy/forgetme-command.js';
 import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
 import { ConfigWatcher } from './services/config-watcher.js';
 import { OwnerNotificationService } from './services/owner-notifications.js';
@@ -908,7 +909,9 @@ async function main(): Promise<void> {
         allCommands.push(helpCmd.toJSON());
         const setupCmd = buildSetupCommand();
         allCommands.push(setupCmd.toJSON());
-        console.log('[Boot] ✅ /help and /setup commands queued');
+        const forgetMeCmd = buildForgetMeCommand();
+        allCommands.push(forgetMeCmd.toJSON());
+        console.log('[Boot] ✅ /help, /setup, and /forgetme commands queued');
 
         // 14c: Queue context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
         const contextMenuCmds = buildContextMenuCommands();
