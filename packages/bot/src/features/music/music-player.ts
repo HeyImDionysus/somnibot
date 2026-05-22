@@ -731,7 +731,7 @@ export class MusicPlayerManager {
             requestedBy: np.requestedBy,
           });
         }
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
     });
 
     player.on('end', async (data: TrackEndEvent) => {
@@ -770,7 +770,7 @@ export class MusicPlayerManager {
           if (textChannel && textChannel.type === ChannelType.GuildText) {
             await textChannel.send({
               embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-            }).catch(() => {});
+            }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
           }
         }
         return;
@@ -796,7 +796,7 @@ export class MusicPlayerManager {
         if (textChannel && textChannel.type === ChannelType.GuildText) {
           await textChannel.send({
             embeds: [buildMusicErrorEmbed('Failed to play track — skipping to next')],
-          }).catch(() => {});
+          }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
         }
       }
 

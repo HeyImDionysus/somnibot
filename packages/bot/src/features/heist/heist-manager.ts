@@ -236,7 +236,7 @@ export class HeistManager {
       // Refund entry fee
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Heist] Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
       return;
     }
@@ -346,7 +346,7 @@ export class HeistManager {
       // Refund entry fee
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Heist] Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
       return;
     }
@@ -373,7 +373,7 @@ export class HeistManager {
 
     const displayChance = Math.min(95, (config.economy_heist_success_base_pct ?? 40) + (actualCount - 1) * 7 + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0));
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch(() => {});
+    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

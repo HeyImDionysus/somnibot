@@ -307,7 +307,7 @@ export class LotteryManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch(() => {});
+    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

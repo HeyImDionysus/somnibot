@@ -275,7 +275,7 @@ export class TempChannelManager {
     if (vc) {
       try {
         // Remove old owner overwrite
-        await vc.permissionOverwrites.delete(oldOwnerId).catch(() => {});
+        await vc.permissionOverwrites.delete(oldOwnerId).catch((e: unknown) => { /* channel/user may not exist */; });
         // Add new owner overwrite
         await vc.permissionOverwrites.create(newOwnerId, {
           ManageChannels: true,

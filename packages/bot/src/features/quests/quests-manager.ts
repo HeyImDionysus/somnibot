@@ -56,7 +56,7 @@ export class QuestsManager {
     }
 
     // Also ensure weekly quests are assigned (they reset weekly, not daily)
-    await this.assignWeeklyQuests(guildId, userId).catch(() => {});
+    await this.assignWeeklyQuests(guildId, userId).catch((e: unknown) => { console.warn('[Quest] Weekly quest assignment failed:', (e as Error)?.message ?? e); });
 
     const lines = progress.map((p: any) => {
       const t = p.template;
@@ -106,7 +106,7 @@ export class QuestsManager {
         // Revert: un-claim the quests so the user can retry
         for (const row of claimed) {
           await (this.supabase as any).from('economy_quest_progress')
-            .update({ claimed: false }).eq('id', row.id).catch(() => {});
+            .update({ claimed: false }).eq('id', row.id).catch((e: unknown) => { console.warn('[Quest] Reset claimed status failed:', (e as Error)?.message ?? e); });
         }
         await interaction.reply({
           embeds: [new EmbedBuilder()

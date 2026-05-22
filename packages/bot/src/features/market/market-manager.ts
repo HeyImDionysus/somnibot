@@ -290,7 +290,7 @@ export class MarketManager {
       await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
         .setColor(0xff0000);
@@ -309,12 +309,12 @@ export class MarketManager {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_amount: totalCost,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       // Restore listing quantity
       await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription('❌ Purchase failed — your coins have been refunded.')
         .setColor(0xff0000);
@@ -334,23 +334,23 @@ export class MarketManager {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_amount: totalCost,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       await this.supabase.rpc('economy_subtract_balance', {
         p_guild_id: this.guild.id,
         p_user_id: listing.seller_id,
         p_amount: sellerEarnings,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.error('[Market] Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription('❌ Failed to add items to your inventory — your coins have been refunded.')
         .setColor(0xff0000);
     }
 
     // Quest progress — market trade (buyer counts as completing a trade)
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     return new EmbedBuilder()
       .setTitle('✅ Purchase Complete!')
