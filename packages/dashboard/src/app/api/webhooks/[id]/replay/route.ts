@@ -24,6 +24,7 @@ export async function POST(
   // ── Require guild owner ──
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
+  const { guildId } = auth.ctx;
 
   const { id } = await params;
 
@@ -37,11 +38,12 @@ export async function POST(
 
   const supabase = createAdminSupabase();
 
-  // Fetch the webhook event
+  // Fetch the webhook event — scope by guild_id to prevent cross-guild replay
   const { data: event, error: fetchError } = await supabase
     .from('webhook_events')
     .select('*')
     .eq('event_id', id)
+    .eq('guild_id', guildId)
     .single();
 
   if (fetchError || !event) {
