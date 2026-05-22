@@ -287,9 +287,9 @@ export class MarketManager {
 
     if (debitErr) {
       // Refund listing remaining since we already decremented it
-      await this.supabase.rpc('economy_market_buy', {
+      await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
-        p_quantity: -buyQty,
+        p_quantity: buyQty,
       }).catch(() => {});
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
@@ -311,9 +311,9 @@ export class MarketManager {
         p_amount: totalCost,
       }).catch(() => {});
       // Restore listing quantity
-      await this.supabase.rpc('economy_market_buy', {
+      await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
-        p_quantity: -buyQty,
+        p_quantity: buyQty,
       }).catch(() => {});
       return new EmbedBuilder()
         .setDescription('❌ Purchase failed — your coins have been refunded.')
@@ -340,9 +340,9 @@ export class MarketManager {
         p_user_id: listing.seller_id,
         p_amount: sellerEarnings,
       }).catch(() => {});
-      await this.supabase.rpc('economy_market_buy', {
+      await this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
-        p_quantity: -buyQty,
+        p_quantity: buyQty,
       }).catch(() => {});
       return new EmbedBuilder()
         .setDescription('❌ Failed to add items to your inventory — your coins have been refunded.')
@@ -456,7 +456,7 @@ export class MarketManager {
           original_error: returnErr.message,
         },
         status: 'pending',
-      }).then(({ error }) => {
+      }).then(({ error }: { error: { message: string } | null }) => {
         if (error) console.error('[Market] Failed to queue reconciliation:', error.message);
       });
 
