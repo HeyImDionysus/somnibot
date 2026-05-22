@@ -163,20 +163,19 @@ export class CraftingManager {
       };
     }
 
-    // Cooldown check
+    // V49-M1: Atomic cooldown via SET PX NX — prevents two concurrent
+    // craft calls from both bypassing the cooldown check.
+    const cooldownMs = (recipe.cooldown_seconds || config.economy_crafting_cooldown_seconds) * 1000;
     const cdKey = `economy:craft:${this.guild.id}:${userId}`;
-    const lastCraft = await this.valkey.get(cdKey);
-    if (lastCraft) {
-      const elapsed = Date.now() - parseInt(lastCraft, 10);
-      const cooldown = (recipe.cooldown_seconds || config.economy_crafting_cooldown_seconds) * 1000;
-      if (elapsed < cooldown) {
-        const remaining = Math.ceil((cooldown - elapsed) / 1000);
-        return {
-          embed: new EmbedBuilder()
-            .setDescription(`⏳ You need to wait **${this.formatTime(remaining)}** before crafting again.`)
-            .setColor(0xffa500),
-        };
-      }
+    const lockResult = await this.valkey.set(cdKey, '1', 'PX', cooldownMs, 'NX');
+    if (lockResult !== 'OK') {
+      const ttl = await this.valkey.pttl(cdKey);
+      const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
+      return {
+        embed: new EmbedBuilder()
+          .setDescription(`⏳ You need to wait **${this.formatTime(remaining)}** before crafting again.`)
+          .setColor(0xffa500),
+      };
     }
 
     // Check materials
@@ -233,8 +232,7 @@ export class CraftingManager {
     }
     await this.addToInventory(userId, recipe.output_item_id, recipe.output_qty);
 
-    // Set cooldown
-    await this.valkey.set(cdKey, Date.now().toString(), 'EX', recipe.cooldown_seconds || config.economy_crafting_cooldown_seconds);
+    // Cooldown already set at the top via SET PX NX (V49-M1).
 
     // Record transaction (fetch real balance for accurate audit trail)
     const { data: craftWallet } = await this.supabase.from('economy_wallets')
@@ -277,19 +275,62 @@ export class CraftingManager {
     return (data as Recipe[] | null) ?? [];
   }
 
+  // V49-L1: seedDefaultRecipes now creates output items in economy_items
+  // (if they don't already exist) and links them via output_item_id.
+  // Previously all default recipes had output_item_id: null, making them
+  // impossible to craft (the craft() function rejects null output_item_id).
   private async seedDefaultRecipes(): Promise<void> {
-    const rows = DEFAULT_RECIPES.map((r) => ({
-      guild_id: this.guild.id,
-      name: r.name,
-      emoji: r.emoji,
-      description: r.description,
-      inputs: JSON.stringify(r.inputs),
-      output_item_id: null, // no linked item — output is tracked by name
-      output_qty: r.output_qty,
-      cooldown_seconds: r.cooldown_seconds,
-      category: r.category,
-      is_default: true,
-    }));
+    const rows: Array<Record<string, unknown>> = [];
+
+    for (const r of DEFAULT_RECIPES) {
+      // Resolve or create the output item
+      let itemId: string | null = null;
+
+      // Check if the item already exists for this guild
+      const { data: existing } = await this.supabase
+        .from('economy_items')
+        .select('id')
+        .eq('guild_id', this.guild.id)
+        .ilike('name', r.output_name)
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        itemId = (existing[0] as { id: string }).id;
+      } else {
+        // Create the output item
+        const { data: created } = await this.supabase
+          .from('economy_items')
+          .insert({
+            guild_id: this.guild.id,
+            name: r.output_name,
+            emoji: r.emoji,
+            description: r.description,
+            category: r.category,
+            price: 0,
+            sell_price: 0,
+            usable: false,
+            tradeable: true,
+            active: true,
+          })
+          .select('id')
+          .single();
+
+        itemId = (created as { id: string } | null)?.id ?? null;
+      }
+
+      rows.push({
+        guild_id: this.guild.id,
+        name: r.name,
+        emoji: r.emoji,
+        description: r.description,
+        inputs: JSON.stringify(r.inputs),
+        output_item_id: itemId,
+        output_qty: r.output_qty,
+        cooldown_seconds: r.cooldown_seconds,
+        category: r.category,
+        is_default: true,
+      });
+    }
 
     await this.supabase.from('economy_recipes').insert(rows);
   }
