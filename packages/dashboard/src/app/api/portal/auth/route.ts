@@ -124,7 +124,9 @@ export async function POST(request: NextRequest) {
       // Create session
       const token = randomBytes(32).toString('hex');
       const tokenHash = hashToken(token);
-      const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+      // I-4: Reduced from 30 days to 7 days. Long-lived tokens without rotation
+      // increase the window for token theft. 7 days balances usability with security.
+      const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
       const { error } = await admin
         .from('portal_sessions')
