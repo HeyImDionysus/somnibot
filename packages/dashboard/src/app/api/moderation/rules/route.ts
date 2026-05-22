@@ -102,8 +102,8 @@ export async function PUT(req: NextRequest) {
   const allowedFields = ['name', 'type', 'enabled', 'config', 'action', 'mute_duration_minutes', 'exempt_roles', 'exempt_channels', 'log_to_mod_channel'];
 
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+    if ((body as Record<string, unknown>)[field] !== undefined) {
+      updates[field] = (body as Record<string, unknown>)[field];
     }
   }
 

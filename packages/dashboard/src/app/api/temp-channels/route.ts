@@ -137,8 +137,8 @@ export async function PUT(req: NextRequest) {
 
   const updates: Record<string, unknown> = {};
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+    if ((body as Record<string, unknown>)[field] !== undefined) {
+      updates[field] = (body as Record<string, unknown>)[field];
     }
   }
   updates.updated_at = new Date().toISOString();

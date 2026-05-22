@@ -155,7 +155,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   const parsed = await parseBody(request, schemas.setup.action);
   if (!parsed.ok) return parsed.response;
-  const body = parsed.data;
+  const body = parsed.data as Record<string, unknown> & { action: string };
   const action = body.action as string;
 
   // ── Maintenance unlock (requires authenticated owner) ───────

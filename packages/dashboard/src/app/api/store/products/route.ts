@@ -178,7 +178,7 @@ export async function POST(req: NextRequest) {
 
   // 1. Auto-create PayPal Catalog Product
   let paypalProductId: string | null = null;
-  paypalProductId = await createPayPalCatalogProduct(name, description, type);
+  paypalProductId = await createPayPalCatalogProduct(name, description ?? null, type);
   if (!paypalProductId) {
     console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
   }
