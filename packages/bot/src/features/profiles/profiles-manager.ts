@@ -34,16 +34,15 @@ export class ProfilesManager {
     const guildId = interaction.guildId!;
     const profile = await this.getOrCreateProfile(guildId, target.id);
 
-    // Increment views atomically (don't await)
-    void (this.supabase as any).rpc('increment_profile_views', {
+    // V52-L3: await the atomic RPC and log errors instead of fire-and-forget.
+    // The old code had a non-atomic read-modify-write fallback that could lose
+    // concurrent increments; the RPC has existed since V40 so the fallback was
+    // dead code that only hid failures.
+    const { error: viewErr } = await (this.supabase as any).rpc('increment_profile_views', {
       p_guild_id: guildId,
       p_user_id: target.id,
-    }).catch(() => {
-      // Fallback to non-atomic if RPC doesn't exist yet
-      (this.supabase as any).from('economy_profiles')
-        .update({ profile_views: (profile?.profile_views ?? 0) + 1 })
-        .eq('guild_id', guildId).eq('user_id', target.id);
     });
+    if (viewErr) console.error('[Profiles] increment_profile_views failed:', viewErr.message);
 
     // Fetch wallet, pet, prestige, achievements in parallel
     const [walletRes, petRes, prestigeRes, achRes] = await Promise.all([

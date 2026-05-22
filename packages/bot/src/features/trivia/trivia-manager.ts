@@ -241,12 +241,14 @@ export class TriviaManager {
     const diffMult = DIFFICULTY_MULTIPLIERS[round.question.difficulty] ?? 1;
     const hardMult = round.question.difficulty === 'hard' ? (config?.economy_trivia_hard_multiplier ?? 2) : diffMult;
 
-    const winners: string[] = [];
+    // V52-L4: track per-winner payment status so the embed accurately
+    // reflects who was actually paid (previously a failed economy_add_balance
+    // was only logged, but the embed still showed the user as a winner).
+    const winners: Array<{ userId: string; paid: boolean }> = [];
     const losers: string[] = [];
 
     for (const [userId, choice] of round.answers) {
       if (choice === round.correctIndex) {
-        winners.push(userId);
         const streak = (await this.getStreak(guildId, userId)) + 1;
         await this.setStreak(guildId, userId, streak);
         const streakBonus = 1 + (streak * streakMultPct) / 100;
@@ -259,6 +261,7 @@ export class TriviaManager {
           p_amount: payout,
         });
         if (triviaPayErr) console.error(`[Trivia] Failed to pay ${userId}:`, triviaPayErr.message);
+        winners.push({ userId, paid: !triviaPayErr });
         getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch(() => {});
       } else {
         losers.push(userId);
@@ -266,17 +269,28 @@ export class TriviaManager {
       }
     }
 
+    const paidWinners = winners.filter((w) => w.paid);
+    const failedWinners = winners.filter((w) => !w.paid);
+
     const labels = ['🅰️', '🅱️', '🅲', '🅳'];
+    let resultText =
+      `**${round.question.question}**\n\n` +
+      `✅ Correct Answer: ${labels[round.correctIndex]} **${round.question.correct}**\n\n`;
+
+    if (paidWinners.length > 0) {
+      resultText += `🏆 Winners: ${paidWinners.map((w) => `<@${w.userId}>`).join(', ')}\n`;
+    }
+    if (failedWinners.length > 0) {
+      resultText += `⚠️ Correct but payout failed: ${failedWinners.map((w) => `<@${w.userId}>`).join(', ')} — contact an admin\n`;
+    }
+    if (winners.length === 0) {
+      resultText += '😢 Nobody got it right!\n';
+    }
+    resultText += round.answers.size === 0 ? '💤 Nobody answered...' : `📊 ${round.answers.size} player(s) answered`;
+
     const embed = new EmbedBuilder()
       .setTitle('🧠 Trivia Results!')
-      .setDescription(
-        `**${round.question.question}**\n\n` +
-        `✅ Correct Answer: ${labels[round.correctIndex]} **${round.question.correct}**\n\n` +
-        (winners.length > 0
-          ? `🏆 Winners: ${winners.map((u) => `<@${u}>`).join(', ')}\n`
-          : '😢 Nobody got it right!\n') +
-        (round.answers.size === 0 ? '💤 Nobody answered...' : `📊 ${round.answers.size} player(s) answered`)
-      )
+      .setDescription(resultText)
       .setColor(winners.length > 0 ? 0x57F287 : 0xED4245);
 
     try {
