@@ -106,6 +106,7 @@ const navigation: NavGroup[] = [
       { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord' },
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
       { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
+      { label: 'Econ Analytics', href: '/economy/analytics', icon: TrendingUp, requires: 'discord' },
       { label: 'Shop Items', href: '/economy/shop', icon: Store, requires: 'discord' },
       { label: 'Gathering', href: '/economy/gathering', icon: Pickaxe, requires: 'discord' },
       { label: 'Crafting', href: '/economy/crafting', icon: Hammer, requires: 'discord' },
