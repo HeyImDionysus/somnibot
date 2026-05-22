@@ -149,41 +149,57 @@ export class PollsManager {
     }
 
     if (!poll.allow_multiple) {
-      // Check if already voted
-      const { data: existingVote } = await (this.supabase as any)
-        .from('poll_votes')
-        .select('id')
-        .eq('poll_id', pollId)
-        .eq('user_id', userId)
-        .limit(1)
-        .single();
+      // V50-M3: use poll_vote_single RPC — atomically inserts a vote only
+      // if the user has no existing vote on this poll. The previous
+      // read-then-write pattern let concurrent clicks both pass the
+      // "already voted?" check and insert duplicate votes.
+      const { data: voteRows, error: voteErr } = await (this.supabase as any).rpc('poll_vote_single', {
+        p_poll_id: pollId,
+        p_option_id: optionId,
+        p_user_id: userId,
+      });
 
-      if (existingVote) {
+      if (voteErr) {
+        // 23505 = unique_violation from uniq_poll_vote_per_option index
+        if ((voteErr as { code?: string }).code === '23505') {
+          await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
+          return;
+        }
+        console.error('[Polls] poll_vote_single RPC error:', voteErr);
+        await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
+        return;
+      }
+
+      // RPC returns empty set if user already had a vote on this poll
+      if (!voteRows || (Array.isArray(voteRows) && voteRows.length === 0)) {
         await buttonInteraction.reply({ content: 'You already voted! (Single vote poll)', ephemeral: true });
         return;
       }
-    }
 
-    // Check if already voted for this option
-    const { data: dupeVote } = await (this.supabase as any)
-      .from('poll_votes')
-      .select('id')
-      .eq('poll_id', pollId)
-      .eq('option_id', optionId)
-      .eq('user_id', userId)
-      .limit(1)
-      .single();
-
-    if (dupeVote) {
-      await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
+      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch(() => {});
+      await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
       return;
     }
 
-    await (this.supabase as any).from('poll_votes').insert({
-      poll_id: pollId,
-      option_id: optionId,
-      user_id: userId,
-    });
+    // Multi-vote polls: check if already voted for this specific option
+    // The uniq_poll_vote_per_option unique index is the authoritative gate.
+    const { error: insertErr } = await (this.supabase as any)
+      .from('poll_votes')
+      .insert({
+        poll_id: pollId,
+        option_id: optionId,
+        user_id: userId,
+      });
+
+    if (insertErr) {
+      if ((insertErr as { code?: string }).code === '23505') {
+        await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
+        return;
+      }
+      console.error('[Polls] poll_votes insert error:', insertErr);
+      await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
+      return;
+    }
 
     getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch(() => {});
 
