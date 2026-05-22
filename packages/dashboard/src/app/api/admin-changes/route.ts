@@ -81,6 +81,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Mark as undone
+    // V52-L2: add guild_id filter for defense-in-depth
     const { error: updateError } = await admin
       .from('admin_changes')
       .update({
@@ -88,7 +89,8 @@ export async function POST(request: NextRequest) {
         undone_at: new Date().toISOString(),
         undone_by: ctx.discordId,
       })
-      .eq('id', body.id);
+      .eq('id', body.id)
+      .eq('guild_id', ctx.guildId);
 
     if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
 
@@ -113,10 +115,12 @@ export async function POST(request: NextRequest) {
 
     // Link the undo record
     if (undoRecord) {
+      // V52-L2: add guild_id filter for defense-in-depth
       await admin
         .from('admin_changes')
         .update({ undo_change_id: undoRecord.id })
-        .eq('id', body.id);
+        .eq('id', body.id)
+        .eq('guild_id', ctx.guildId);
     }
 
     return NextResponse.json({ success: true, data: { undone: change, undoRecord } });
