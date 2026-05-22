@@ -15,6 +15,14 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes, createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const portalAuthSchema = z.object({
+  action: z.literal('login'),
+  code: z.string().min(1).max(512),
+  redirect_uri: z.string().url().max(2048).optional(),
+});
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -77,14 +85,13 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
+    const parsed = await parseBody(request, portalAuthSchema);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
-    if (body.action === 'login') {
+    {
       const code = body.code;
-      if (!code || typeof code !== 'string') {
-        return NextResponse.json({ error: 'Missing authorization code' }, { status: 400 });
-      }
 
       // Determine the redirect URI (must match what the frontend used)
       const origin = request.headers.get('origin') || request.nextUrl.origin;

@@ -352,19 +352,14 @@ async function addRoleToDesiredState(
     position: number;
   },
 ): Promise<void> {
-  const { data } = await supabase
-    .from('guild_desired_state')
-    .select('roles')
-    .eq('guild_id', guildId)
-    .single();
-
-  const roles = (data?.roles ?? []) as Array<Record<string, unknown>>;
-  roles.push(role);
-
-  await supabase
-    .from('guild_desired_state')
-    .update({ roles, updated_at: new Date().toISOString() })
-    .eq('guild_id', guildId);
+  // Atomic: appends to the JSONB array in a single UPDATE (no read-modify-write race)
+  const { error } = await supabase.rpc('desired_state_add_role', {
+    p_guild_id: guildId,
+    p_role: role,
+  });
+  if (error) {
+    console.error('[ActionQueue] desired_state_add_role RPC failed:', error.message);
+  }
 }
 
 async function updateRoleInDesiredState(
@@ -373,27 +368,23 @@ async function updateRoleInDesiredState(
   templateKey: string,
   updates: Record<string, unknown>,
 ): Promise<void> {
-  const { data } = await supabase
-    .from('guild_desired_state')
-    .select('roles')
-    .eq('guild_id', guildId)
-    .single();
+  // Atomic: locks row FOR UPDATE, finds role by key, merges updates in SQL
+  const roleUpdates: Record<string, unknown> = {};
+  if (updates.name !== undefined) roleUpdates.name = updates.name;
+  if (updates.tier !== undefined) roleUpdates.tier = updates.tier;
+  if (updates.color !== undefined) roleUpdates.color = updates.color;
+  if (updates.hoist !== undefined) roleUpdates.hoist = updates.hoist;
+  if (updates.mentionable !== undefined) roleUpdates.mentionable = updates.mentionable;
+  if (updates.permissions !== undefined) roleUpdates.permissions = updates.permissions;
+  if (updates.position !== undefined) roleUpdates.position = updates.position;
 
-  const roles = (data?.roles ?? []) as Array<Record<string, unknown>>;
-  const idx = roles.findIndex((r) => r.key === templateKey);
-  if (idx >= 0) {
-    if (updates.name !== undefined) roles[idx].name = updates.name;
-    if (updates.tier !== undefined) roles[idx].tier = updates.tier;
-    if (updates.color !== undefined) roles[idx].color = updates.color;
-    if (updates.hoist !== undefined) roles[idx].hoist = updates.hoist;
-    if (updates.mentionable !== undefined) roles[idx].mentionable = updates.mentionable;
-    if (updates.permissions !== undefined) roles[idx].permissions = updates.permissions;
-    if (updates.position !== undefined) roles[idx].position = updates.position;
-
-    await supabase
-      .from('guild_desired_state')
-      .update({ roles, updated_at: new Date().toISOString() })
-      .eq('guild_id', guildId);
+  const { error } = await supabase.rpc('desired_state_update_role', {
+    p_guild_id: guildId,
+    p_template_key: templateKey,
+    p_updates: roleUpdates,
+  });
+  if (error) {
+    console.error('[ActionQueue] desired_state_update_role RPC failed:', error.message);
   }
 }
 
@@ -402,19 +393,14 @@ async function removeRoleFromDesiredState(
   guildId: string,
   templateKey: string,
 ): Promise<void> {
-  const { data } = await supabase
-    .from('guild_desired_state')
-    .select('roles')
-    .eq('guild_id', guildId)
-    .single();
-
-  const roles = (data?.roles ?? []) as Array<Record<string, unknown>>;
-  const filtered = roles.filter((r) => r.key !== templateKey);
-
-  await supabase
-    .from('guild_desired_state')
-    .update({ roles: filtered, updated_at: new Date().toISOString() })
-    .eq('guild_id', guildId);
+  // Atomic: locks row FOR UPDATE, filters out the role by key in SQL
+  const { error } = await supabase.rpc('desired_state_remove_role', {
+    p_guild_id: guildId,
+    p_template_key: templateKey,
+  });
+  if (error) {
+    console.error('[ActionQueue] desired_state_remove_role RPC failed:', error.message);
+  }
 }
 
 // ============================================================
@@ -623,6 +609,53 @@ async function handleTestWelcome(
 }
 
 /**
+ * Revoke Discord roles from a member (e.g., after a refund).
+ */
+async function handleRevokeRoles(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const discordId = payload.discord_id as string;
+  const roleIds = payload.role_ids as string[];
+  const reason = (payload.reason as string) || 'Role revocation';
+
+  if (!discordId) return { success: false, error: 'Missing discord_id' };
+  if (!roleIds || !Array.isArray(roleIds) || roleIds.length === 0) {
+    return { success: false, error: 'Missing or empty role_ids' };
+  }
+
+  const member = await guild.members.fetch(discordId).catch(() => null);
+  if (!member) {
+    return { success: false, error: `Member ${discordId} not found in guild` };
+  }
+
+  const removed: string[] = [];
+  const failed: string[] = [];
+
+  for (const roleId of roleIds) {
+    if (member.roles.cache.has(roleId)) {
+      try {
+        await member.roles.remove(roleId, `SomniBot — ${reason}`);
+        removed.push(roleId);
+      } catch {
+        failed.push(roleId);
+      }
+    }
+  }
+
+  console.log(`[ActionQueue] Revoked ${removed.length} roles from ${discordId} (${reason})`);
+  if (failed.length > 0) {
+    console.warn(`[ActionQueue] Failed to revoke ${failed.length} roles from ${discordId}:`, failed);
+  }
+
+  return {
+    success: true,
+    data: { discordId, removed, failed, reason },
+  };
+}
+
+/**
  * Handle manual reconciliation trigger from the dashboard.
  */
 async function handleRunReconciliation(
@@ -661,6 +694,7 @@ const ACTION_HANDLERS: Record<
   test_welcome: handleTestWelcome,
   fulfill_giveaway_prize: handleFulfillment,
   run_reconciliation: handleRunReconciliation,
+  revoke_roles: handleRevokeRoles,
 };
 
 async function processAction(

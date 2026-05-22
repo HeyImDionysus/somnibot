@@ -8,6 +8,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 
 export async function POST(request: NextRequest) {
@@ -15,7 +16,9 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
+  const parsed = await parseBody(request, schemas.deploy.action);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
   const admin = createAdminSupabase();
 
   // Validate required fields

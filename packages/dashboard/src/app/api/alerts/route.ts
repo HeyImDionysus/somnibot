@@ -9,6 +9,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const alertActionSchema = z.object({
+  id: z.string().uuid(),
+  action: z.enum(['acknowledge', 'resolve']),
+});
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -70,21 +77,9 @@ export async function PATCH(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  let body: { id?: string; action?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
-  }
-
-  const { id, action } = body;
-
-  if (!id || !action) {
-    return NextResponse.json(
-      { success: false, error: 'Missing required fields: id, action' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, alertActionSchema);
+  if (!parsed.ok) return parsed.response;
+  const { id, action } = parsed.data;
 
   if (action === 'acknowledge') {
     const { error } = await supabase

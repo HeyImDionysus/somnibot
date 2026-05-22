@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
 
 
 export async function GET() {
@@ -97,20 +98,20 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-  const { id, ...updates } = body;
+
+  // Validate with promotion.create schema (all fields optional for update) + required id
+  const promoUpdateSchema = schemas.promotion.create.partial().extend({ id: z.string().uuid() });
+  const parsed = await parseBody(req, promoUpdateSchema);
+  if (!parsed.ok) return parsed.response;
+  const { id, ...updates } = parsed.data;
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing promotion id' }, { status: 400 });
   }
 
-  delete updates.guild_id;
-  delete updates.created_at;
-  updates.updated_at = new Date().toISOString();
-
   const { data, error } = await supabase
     .from('promotions')
-    .update(updates)
+    .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', id)
     .eq('guild_id', guildId)
     .select()

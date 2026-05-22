@@ -15,6 +15,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -152,7 +153,10 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json();
+  const parsed = await parseBody(request, schemas.setup.action);
+  if (!parsed.ok) return parsed.response;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = parsed.data as any;
   const action = body.action as string;
 
   // ── Maintenance unlock (requires authenticated owner) ───────

@@ -5,6 +5,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const fraudSignalUpdate = z.object({
+  id: z.string().uuid(),
+  status: z.enum(['pending', 'confirmed', 'dismissed', 'auto_resolved']).optional(),
+  resolution_note: z.string().max(1000).optional().nullable(),
+});
 
 export async function GET(request: NextRequest) {
   try {
@@ -60,7 +68,9 @@ export async function GET(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_fraud');
-    const body = await request.json();
+    const parsed = await parseBody(request, fraudSignalUpdate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };

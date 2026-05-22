@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -28,17 +29,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { session_id: string; license_key: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { valid: false, status: 'session_invalidated', error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { session_id, license_key } = body;
+  const parsed = await parseBody(req, schemas.licenseSdk.heartbeat);
+  if (!parsed.ok) return parsed.response;
+  const { session_id, license_key } = parsed.data;
 
   if (!session_id || !license_key) {
     return NextResponse.json(
