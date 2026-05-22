@@ -45,24 +45,22 @@ export interface XpResult {
   leveledUp?: boolean;
 }
 
-// TODO: scope caches by guildId for multi-guild support
-let _levelConfigCache: LevelConfig | null = null;
-let _levelConfigCacheTime = 0;
+// Per-guild caches — keyed by guildId to support multi-guild
+interface CacheEntry<T> { data: T; time: number; }
 const CONFIG_TTL = 60_000;
 
-let _multiplierCache: XpMultiplier[] | null = null;
-let _multiplierCacheTime = 0;
-
-let _rewardCache: LevelReward[] | null = null;
-let _rewardCacheTime = 0;
+const _levelConfigCache = new Map<string, CacheEntry<LevelConfig>>();
+const _multiplierCache = new Map<string, CacheEntry<XpMultiplier[]>>();
+const _rewardCache = new Map<string, CacheEntry<LevelReward[]>>();
 
 export async function loadLevelConfig(
   supabase: SupabaseClient,
   guildId: string,
 ): Promise<LevelConfig> {
   const now = Date.now();
-  if (_levelConfigCache && now - _levelConfigCacheTime < CONFIG_TTL) {
-    return _levelConfigCache;
+  const cached = _levelConfigCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.data;
   }
 
   const { data } = await supabase
@@ -73,7 +71,7 @@ export async function loadLevelConfig(
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  _levelConfigCache = {
+  const config: LevelConfig = {
     levels_enabled: data?.levels_enabled ?? false,
     xp_min: data?.xp_min ?? LEVEL_CONFIG.DEFAULT_MIN_XP,
     xp_max: data?.xp_max ?? LEVEL_CONFIG.DEFAULT_MAX_XP,
@@ -88,8 +86,8 @@ export async function loadLevelConfig(
     level_up_message: data?.level_up_message ?? null,
     no_xp_role_id: data?.no_xp_role_id ?? null,
   };
-  _levelConfigCacheTime = now;
-  return _levelConfigCache;
+  _levelConfigCache.set(guildId, { data: config, time: now });
+  return config;
 }
 
 async function loadMultipliers(
@@ -97,8 +95,9 @@ async function loadMultipliers(
   guildId: string,
 ): Promise<XpMultiplier[]> {
   const now = Date.now();
-  if (_multiplierCache && now - _multiplierCacheTime < CONFIG_TTL) {
-    return _multiplierCache;
+  const cached = _multiplierCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.data;
   }
 
   const { data } = await supabase
@@ -106,9 +105,9 @@ async function loadMultipliers(
     .select('role_id, multiplier')
     .eq('guild_id', guildId);
 
-  _multiplierCache = (data ?? []) as XpMultiplier[];
-  _multiplierCacheTime = now;
-  return _multiplierCache;
+  const multipliers = (data ?? []) as XpMultiplier[];
+  _multiplierCache.set(guildId, { data: multipliers, time: now });
+  return multipliers;
 }
 
 export async function loadRewards(
@@ -116,8 +115,9 @@ export async function loadRewards(
   guildId: string,
 ): Promise<LevelReward[]> {
   const now = Date.now();
-  if (_rewardCache && now - _rewardCacheTime < CONFIG_TTL) {
-    return _rewardCache;
+  const cached = _rewardCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.data;
   }
 
   const { data } = await supabase
@@ -126,9 +126,9 @@ export async function loadRewards(
     .eq('guild_id', guildId)
     .order('level', { ascending: true });
 
-  _rewardCache = (data ?? []) as LevelReward[];
-  _rewardCacheTime = now;
-  return _rewardCache;
+  const rewards = (data ?? []) as LevelReward[];
+  _rewardCache.set(guildId, { data: rewards, time: now });
+  return rewards;
 }
 
 /**
@@ -364,8 +364,14 @@ export async function grantVoiceXp(
 /**
  * Reset caches when config changes.
  */
-export function invalidateLevelCaches(): void {
-  _levelConfigCache = null;
-  _multiplierCache = null;
-  _rewardCache = null;
+export function invalidateLevelCaches(guildId?: string): void {
+  if (guildId) {
+    _levelConfigCache.delete(guildId);
+    _multiplierCache.delete(guildId);
+    _rewardCache.delete(guildId);
+  } else {
+    _levelConfigCache.clear();
+    _multiplierCache.clear();
+    _rewardCache.clear();
+  }
 }

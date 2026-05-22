@@ -176,7 +176,7 @@ export class PollsManager {
         return;
       }
 
-      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch(() => {});
+      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
       await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
       return;
     }
@@ -201,7 +201,7 @@ export class PollsManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch(() => {});
+    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
   }

@@ -286,7 +286,7 @@ export class GatheringManager {
       .setTimestamp();
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'gather').catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'gather').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed,

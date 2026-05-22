@@ -14,6 +14,7 @@ import {
   handleInfractionsCommand,
 } from '../features/moderation/commands.js';
 import { handleHelpCommand, handleHelpCategorySelect } from '../features/help/index.js';
+import { handleForgetMeCommand } from '../features/privacy/forgetme-command.js';
 import {
   handleViewProfile,
   handleWarnUser,
@@ -303,7 +304,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
       if (qMgr) {
-        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch(() => {});
+        qMgr.trackProgress(client.guildId, message.author.id, 'chat').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
       }
     } catch {
       // Ignore quest tracking errors
@@ -689,6 +690,9 @@ export function registerEvents(client: SomniClient): void {
             return;
           case 'setup':
             await handleSetupCommand(interaction, client);
+            return;
+          case 'forgetme':
+            await handleForgetMeCommand(interaction, client.supabase, client.guildId);
             return;
         }
 

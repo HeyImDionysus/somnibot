@@ -133,7 +133,7 @@ export class PetsManager {
                     `Use \`/pet feed\` and \`/pet play\` to cheer them up!`
                   )
                   .setColor(newStatus === 'sick' ? 0xED4245 : 0xFEE75C)],
-              }).catch(() => {}); // Ignore DM failures (user may have DMs disabled)
+              }).catch(() => { /* DM may be disabled */ }); // Ignore DM failures (user may have DMs disabled)
             }
           } catch {
             // Ignore notification failures
@@ -244,7 +244,7 @@ export class PetsManager {
       console.error('[Pets] buyPet insert failed — refunding:', insertErr.message);
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: price,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Pets] Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -295,7 +295,7 @@ export class PetsManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch(() => {});
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -383,7 +383,7 @@ export class PetsManager {
       // Refund since training failed
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-      }).catch(() => {});
+      }).catch((e: unknown) => { console.warn('[Pets] Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -392,7 +392,7 @@ export class PetsManager {
     if (tr.leveled_up) desc += `\n🎉 *Level up! Now level ${tr.new_level}!*`;
     if (tr.stat_bonus) desc += `\n⭐ +1 ${tr.stat_bonus}!`;
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch(() => {});
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder().setTitle('💪 Training Complete!').setDescription(desc).setColor(0x57F287)],

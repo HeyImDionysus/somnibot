@@ -75,7 +75,7 @@ export class AutoModSync {
 
     // Periodic sync every 15 minutes as safety net
     this.syncInterval = setInterval(() => {
-      this.syncRules().catch(() => {});
+      this.syncRules().catch((e: unknown) => { console.warn('[AutoMod] Sync failed:', (e as Error)?.message ?? e); });
     }, 15 * 60 * 1000);
 
     console.log('[AutoModSync] ✅ AutoMod sync service started');

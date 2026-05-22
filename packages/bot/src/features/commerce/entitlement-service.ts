@@ -103,11 +103,12 @@ export class EntitlementService {
   ): Promise<boolean> {
     const guildId = this.guild.id;
 
-    // Fetch entitlement
+    // Fetch entitlement — scoped to guild_id to prevent cross-guild access
     const { data: ent } = await this.supabase
       .from('entitlements')
       .select('*, products(name)')
       .eq('id', entitlementId)
+      .eq('guild_id', guildId)
       .single();
 
     if (!ent) {
@@ -125,7 +126,7 @@ export class EntitlementService {
     };
     const newStatus = statusMap[reason] ?? 'expired';
 
-    // Update DB
+    // Update DB — scoped to guild_id
     const { error } = await this.supabase
       .from('entitlements')
       .update({
@@ -133,18 +134,20 @@ export class EntitlementService {
         cancelled_at: reason === 'cancelled' ? new Date().toISOString() : undefined,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', entitlementId);
+      .eq('id', entitlementId)
+      .eq('guild_id', guildId);
 
     if (error) {
       console.error('[Commerce] Failed to revoke entitlement:', error.message);
       return false;
     }
 
-    // Get customer discord_id
+    // Get customer discord_id — scoped to guild_id
     const { data: customer } = await this.supabase
       .from('customers')
       .select('discord_id')
       .eq('id', ent.customer_id)
+      .eq('guild_id', guildId)
       .single();
 
     const discordId = customer?.discord_id;
@@ -162,7 +165,7 @@ export class EntitlementService {
       });
     }
 
-    // Also revoke associated license sessions
+    // Also revoke associated license sessions — scoped to guild_id
     if (ent.license_key_id) {
       await this.supabase
         .from('license_sessions')
@@ -172,6 +175,7 @@ export class EntitlementService {
           deactivation_reason: 'entitlement_revoked',
         })
         .eq('license_key_id', ent.license_key_id)
+        .eq('guild_id', guildId)
         .eq('active', true);
     }
 
@@ -194,6 +198,7 @@ export class EntitlementService {
    * Suspend an entitlement (payment failure → grace period).
    */
   async suspend(entitlementId: string, gracePeriodDays: number = 3): Promise<boolean> {
+    const guildId = this.guild.id;
     const gracePeriodEnds = new Date();
     gracePeriodEnds.setDate(gracePeriodEnds.getDate() + gracePeriodDays);
 
@@ -204,7 +209,8 @@ export class EntitlementService {
         grace_period_ends_at: gracePeriodEnds.toISOString(),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', entitlementId);
+      .eq('id', entitlementId)
+      .eq('guild_id', guildId);
 
     if (error) {
       console.error('[Commerce] Failed to suspend entitlement:', error.message);
@@ -219,10 +225,13 @@ export class EntitlementService {
    * Reactivate a suspended/grace entitlement.
    */
   async reactivate(entitlementId: string): Promise<boolean> {
+    const guildId = this.guild.id;
+
     const { data: ent } = await this.supabase
       .from('entitlements')
       .select('*')
       .eq('id', entitlementId)
+      .eq('guild_id', guildId)
       .single();
 
     if (!ent) return false;
@@ -234,7 +243,8 @@ export class EntitlementService {
         grace_period_ends_at: null,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', entitlementId);
+      .eq('id', entitlementId)
+      .eq('guild_id', guildId);
 
     if (error) {
       console.error('[Commerce] Failed to reactivate entitlement:', error.message);

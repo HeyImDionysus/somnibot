@@ -604,7 +604,7 @@ export class AdventureManager {
           p_guild_id: this.guild.id,
           p_user_id: userId,
           p_amount: config.economy_adventure_ticket_cost,
-        }).catch(() => {});
+        }).catch((e: unknown) => { console.warn('[Adventure] Operation failed:', (e as Error)?.message ?? e); });
       }
 
       // Duplicate key → another concurrent command won the race
@@ -878,10 +878,10 @@ export class AdventureManager {
       await this.supabase.from('economy_adventure_sessions')
         .update({ loot_failed: true })
         .eq('id', session.id)
-        .catch(() => {});
+        .catch((e: unknown) => { console.warn('[Adventure] Operation failed:', (e as Error)?.message ?? e); });
     }
 
     // Quest progress — count completed adventures
-    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
   }
 }

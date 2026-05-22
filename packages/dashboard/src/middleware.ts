@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { checkCsrf } from '@/lib/api/csrf';
 
 /* ------------------------------------------------------------------ */
 /*  Local-mode detection                                               */
@@ -126,6 +127,10 @@ export async function middleware(request: NextRequest) {
     url.pathname = '/dashboard';
     return NextResponse.redirect(url);
   }
+
+  // V53 Phase 1.8: CSRF protection for mutating requests
+  const csrfError = checkCsrf(request);
+  if (csrfError) return csrfError;
 
   return supabaseResponse;
 }
