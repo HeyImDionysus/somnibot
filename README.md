@@ -382,9 +382,15 @@ The Supabase Discord auth provider needs to be configured. Run the setup wizard 
 
 ### Type Checking
 ```bash
-cd packages/shared && bun x tsc --noEmit
-cd packages/bot && bun x tsc --noEmit
-cd packages/dashboard && bun x tsc --noEmit
+pnpm --filter shared exec tsc --noEmit
+pnpm --filter bot exec tsc --noEmit
+pnpm --filter dashboard exec tsc --noEmit
+```
+
+### Testing
+```bash
+pnpm --filter bot test          # 82 unit tests
+pnpm --filter bot test:watch    # Watch mode
 ```
 
 ### Build Order
@@ -395,6 +401,11 @@ cd packages/dashboard && bun x tsc --noEmit
 
 ### Database Migrations
 Migrations live in `packages/supabase/migrations/`. The bot auto-runs them on first boot if `SUPABASE_ACCESS_TOKEN` or `SUPABASE_DB_URL` is set. Otherwise, apply them manually via the Supabase SQL editor.
+
+### Further Documentation
+- **[Architecture](somnibot_architecture_v53.md)** — Full system design, 56 sections, every feature documented
+- **[Contributing](CONTRIBUTING.md)** — Coding standards, patterns, testing, migration rules
+- **[Deployment](DEPLOYMENT.md)** — Production deployment checklist with env vars and troubleshooting
 
 </details>
 

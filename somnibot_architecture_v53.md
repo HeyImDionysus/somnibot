@@ -1,7 +1,29 @@
-# SomniBot — Architecture Document v4
+# SomniBot — Architecture Document v53
 
-> Version 4.0 · May 2026
+> Version 53.0 · May 2026
 > A production-grade Discord business operating system: bot, dashboard, commerce, music, and community — unified.
+
+### What Changed in v53
+
+| Area | v4 | v53 |
+|------|----|-----|
+| Error Handling | 84 silent `.catch(() => {})` blocks across 20+ bot files | All 84 replaced with structured `writeAuditLog()` calls, capturing error context, guild context, and operation name. Every error is now observable. |
+| Entitlement Scoping | `revokeEntitlement()` not scoped to guild | Added `guild_id` filter to entitlement revocation queries — prevents cross-guild leaks. |
+| XP Cache Scoping | 3 module-level caches in xp-tracker shared across guilds | All 3 caches (`cooldownMap`, `pendingXP`, `levelCache`) now keyed by `guildId:userId`. |
+| CSRF Protection | No CSRF tokens on dashboard API mutations | CSRF middleware on all state-changing API routes. Token generation + validation with HMAC-SHA256. |
+| Privacy | No data deletion command | `/forgetme` slash command with full `purge_user_data()` RPC — deletes across 15+ tables with audit trail. |
+| Observability | No alerting, no heartbeat visibility, no DLQ | Bot heartbeat/config sync alerts, automation failure alerts, DLQ visibility dashboard with retry/purge, real health metrics (event throughput, queue depth, automation success rate). |
+| Member Features | Static bot interactions | `/timers`, tutorial system, `/mydata` export, interactive button commands, market search with filters/sorting, music UX with volume/seek controls, embed theming, ticket pagination. |
+| Multi-Guild | Single-guild hardwired (`client.guildId`) | `GuildContext` + `GuildRouter` classes, `getGuildId()` helper, dashboard guild selector, launcher multi-guild config. DB already fully scoped with RLS. |
+| Sync Engine | Drift detection only, no auto-repair | Full auto-repair for MISSING_RESOURCE (roles/channels/categories) and PERMISSION_DRIFT (roles/@everyone). Sync reports table. |
+| Cross-Feature | Features isolated | Level up → feature unlock, milestone bonus. Ticket close → satisfaction survey DM. Economy purchase → role grant (temp/permanent). |
+| Bulk Ops | Dashboard single-item only | Bulk member management: assign/remove role, reset economy, export, send DM. Checkbox selection + search + pagination. |
+| Analytics | No economy analytics | Full economy analytics dashboard: daily totals, tx volume by type, market activity, top earners, popular items, feature DAU. 6 SQL RPCs. |
+| Performance | No targeted indexes | Composite leaderboard index, time-range indexes on transactions/market, XP index, paginated leaderboard RPC. Transcript 10k message cap. |
+| Testing | No unit tests | 82 tests across 8 suites: escalation, guild router, economy, action queue, CSRF, drift detection, event bus, launcher config. |
+| Dead Code | `economy_trivia_sessions` and `server_templates` tables unused | Both tables dropped. `server_template_id` column removed from `guild_desired_state`. |
+| Migrations | 2 timestamp collisions | Fixed: `20260520000000` and `20260520400000` collisions resolved with `000001` suffixes. |
+| Portal Sessions | No revocation UI | Portal session management page with active session list, revoke button, and revoke-all. |
 
 ---
 
