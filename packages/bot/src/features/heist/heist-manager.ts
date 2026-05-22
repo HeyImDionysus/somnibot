@@ -158,8 +158,14 @@ export class HeistManager {
     const joinWindowSecs = config.economy_heist_join_window_secs ?? 60;
     const expiresAt = new Date(Date.now() + joinWindowSecs * 1000).toISOString();
 
-    // Create heist
-    const { data: heist } = await (this.supabase as any)
+    // V48-M2: create heist with a unique-violation refund path.
+    // The "no active heist" check above is racy — two concurrent
+    // /heist start invocations could both pass it before either
+    // INSERTs. The new partial unique index
+    // `uniq_active_heist_per_guild` makes the loser's INSERT fail with
+    // 23505. We refund their entry fee and surface a clean error so
+    // they aren't charged for a heist they didn't get to start.
+    const { data: heist, error: heistErr } = await (this.supabase as any)
       .from('economy_heists')
       .insert({
         guild_id: guildId,
@@ -173,8 +179,28 @@ export class HeistManager {
       .select()
       .single();
 
-    if (!heist) {
-      await interaction.reply({ content: '❌ Failed to create heist.', ephemeral: true });
+    if (heistErr || !heist) {
+      const code = (heistErr as any)?.code;
+      // Always refund the entry fee — we charged it before the insert.
+      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      });
+      if (refundErr) {
+        console.error('[Heist] CRITICAL: heist insert failed AND refund failed', {
+          guildId, userId, entryFee, heistErr, refundErr,
+        });
+      }
+      if (code === '23505') {
+        await interaction.reply({
+          content: '❌ Someone else just started a heist! Use `/heist join` to join it. Your entry fee was refunded.',
+          ephemeral: true,
+        });
+      } else {
+        await interaction.reply({
+          content: '❌ Failed to create heist. Your entry fee was refunded.',
+          ephemeral: true,
+        });
+      }
       return;
     }
 

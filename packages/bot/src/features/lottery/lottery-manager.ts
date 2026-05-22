@@ -237,7 +237,11 @@ export class LotteryManager {
       return;
     }
 
-    // Insert tickets
+    // V48-M3: insert tickets and refund on failure. Previously the
+    // insert error was swallowed — a transient DB error would debit the
+    // user but produce no tickets and no jackpot increment, robbing
+    // them. We also no longer mutate the jackpot if ticket insert
+    // failed (otherwise winners get coins from nowhere).
     const tickets = Array.from({ length: count }, () => ({
       drawing_id: drawing.id,
       guild_id: guildId,
@@ -245,12 +249,55 @@ export class LotteryManager {
       ticket_number: Math.floor(Math.random() * 10000),
     }));
 
-    await (this.supabase as any).from('economy_lottery_tickets').insert(tickets);
+    const { error: ticketsErr } = await (this.supabase as any)
+      .from('economy_lottery_tickets')
+      .insert(tickets);
+    if (ticketsErr) {
+      console.error('[Lottery] ticket insert failed, refunding user:', ticketsErr.message);
+      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
+      });
+      if (refundErr) {
+        console.error('[Lottery] CRITICAL: ticket insert failed AND refund failed', {
+          guildId, userId, totalCost, ticketsErr, refundErr,
+        });
+      }
+      await interaction.reply({
+        content: '❌ Failed to record your tickets — your coins were refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
 
     // Atomically increment jackpot to prevent TOCTOU race
-    const { data: newJackpot } = await (this.supabase as any).rpc('lottery_increment_jackpot', {
+    const { data: newJackpot, error: jackpotErr } = await (this.supabase as any).rpc('lottery_increment_jackpot', {
       p_drawing_id: drawing.id, p_amount: totalCost,
     });
+    if (jackpotErr) {
+      // Tickets exist but jackpot is short. Best-effort compensate by
+      // deleting just-inserted tickets and refunding the user so the
+      // pool stays consistent with what was paid in.
+      console.error('[Lottery] jackpot increment failed, rolling back tickets:', jackpotErr.message);
+      await (this.supabase as any)
+        .from('economy_lottery_tickets')
+        .delete()
+        .eq('drawing_id', drawing.id)
+        .eq('user_id', userId)
+        .in('ticket_number', tickets.map((t) => t.ticket_number));
+      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
+      });
+      if (refundErr) {
+        console.error('[Lottery] CRITICAL: jackpot increment failed AND refund failed', {
+          guildId, userId, totalCost, jackpotErr, refundErr,
+        });
+      }
+      await interaction.reply({
+        content: '❌ Failed to update the jackpot — your coins were refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
 
     getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch(() => {});
 
@@ -310,25 +357,68 @@ export class LotteryManager {
     const drawing = await this.getActiveDrawing(guildId);
     if (!drawing) return null;
 
+    // V48-L1: atomic active→drawing claim. The previous flow flipped
+    // status to 'drawn' unconditionally and only *logged* a failed
+    // payout — so a failed `economy_add_balance` left the winner unpaid
+    // and the drawing closed, with no recovery. It was also non-
+    // idempotent: a manual /lottery draw racing the scheduler could
+    // award two payouts. The RPC returns the drawing iff it was still
+    // 'active', so exactly one caller will proceed.
+    const { data: claimed, error: claimErr } = await (this.supabase as any).rpc(
+      'lottery_claim_drawing',
+      { p_drawing_id: drawing.id },
+    );
+    if (claimErr) {
+      console.error('[Lottery] lottery_claim_drawing failed:', claimErr.message);
+      return null;
+    }
+    const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
+    if (!claimedRow) {
+      console.log(`[Lottery] Skipping draw of ${drawing.id} — already claimed by another worker`);
+      return null;
+    }
+
+    const jackpotSnapshot: number = claimedRow.jackpot ?? drawing.jackpot ?? 0;
+
     const { data: tickets } = await (this.supabase as any)
       .from('economy_lottery_tickets')
       .select('*')
       .eq('drawing_id', drawing.id);
 
-    if (!tickets || tickets.length === 0) return null;
+    if (!tickets || tickets.length === 0) {
+      // No tickets — revert the claim so the scheduled "no entries"
+      // path can flip it to 'cancelled' (the executeDrawAndAnnounce
+      // caller expects status='active' to update).
+      await (this.supabase as any)
+        .from('economy_lottery_drawings')
+        .update({ status: 'active' })
+        .eq('id', drawing.id);
+      return null;
+    }
 
     // Random winner
     const winnerTicket = tickets[Math.floor(Math.random() * tickets.length)];
 
-    // Award jackpot
+    // Award jackpot BEFORE flipping to 'drawn' so a payout failure
+    // doesn't leave the winner unpaid + the drawing permanently closed.
     const { error: jackpotErr } = await (this.supabase as any).rpc('economy_add_balance', {
       p_guild_id: guildId,
       p_user_id: winnerTicket.user_id,
-      p_amount: drawing.jackpot,
+      p_amount: jackpotSnapshot,
     });
-    if (jackpotErr) console.error(`[Lottery] Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
+    if (jackpotErr) {
+      console.error(`[Lottery] Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
+      // Revert to 'active' so the next scheduled tick retries the draw
+      // (and the same winner won't necessarily be picked, but the pool
+      // is preserved and no one is silently shortchanged).
+      await (this.supabase as any)
+        .from('economy_lottery_drawings')
+        .update({ status: 'active' })
+        .eq('id', drawing.id);
+      return null;
+    }
 
-    // Close drawing
+    // Close drawing — finalize from 'drawing' to 'drawn'.
     await (this.supabase as any)
       .from('economy_lottery_drawings')
       .update({
@@ -337,8 +427,9 @@ export class LotteryManager {
         winning_number: winnerTicket.ticket_number,
         drawn_at: new Date().toISOString(),
       })
-      .eq('id', drawing.id);
+      .eq('id', drawing.id)
+      .eq('status', 'drawing');
 
-    return { winnerId: winnerTicket.user_id, jackpot: drawing.jackpot, winningNumber: winnerTicket.ticket_number };
+    return { winnerId: winnerTicket.user_id, jackpot: jackpotSnapshot, winningNumber: winnerTicket.ticket_number };
   }
 }
