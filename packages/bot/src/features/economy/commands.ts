@@ -528,6 +528,10 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
   }
 
   const updated = await mgr.creditWallet(interaction.user.id, totalIncome);
+  if (!updated) {
+    await interaction.reply({ content: '❌ Failed to credit role income. Please try again.', ephemeral: true });
+    return;
+  }
   await interaction.reply({
     content: `${cfg.currency_emoji} Collected **${totalIncome.toLocaleString()} ${cfg.currency_name}** from ${collected} role${collected > 1 ? 's' : ''}!\n💰 Balance: **${updated.wallet.toLocaleString()}**`,
   });

@@ -185,13 +185,12 @@ export async function processMessageXp(
     return { granted: false };
   }
 
-  // Check cooldown via Valkey
+  // V50-L1: claim cooldown atomically with SET EX NX. The previous
+  // GET→check→SET pattern let two messages in rapid succession both
+  // pass the cooldown check and each get an XP award.
   const cooldownKey = `xp:cooldown:${guildId}:${userId}`;
-  const onCooldown = await valkey.get(cooldownKey);
-  if (onCooldown) return { granted: false };
-
-  // Set cooldown
-  await valkey.set(cooldownKey, '1', 'EX', config.xp_cooldown_seconds);
+  const claimed = await valkey.set(cooldownKey, '1', 'EX', config.xp_cooldown_seconds, 'NX');
+  if (!claimed) return { granted: false };
 
   // Calculate XP
   let xpAmount = randomXp(config.xp_min, config.xp_max);
