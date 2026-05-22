@@ -16,10 +16,12 @@ export async function GET(
   const { id } = await params;
   const supabase = createAdminSupabase();
 
+  // V47-C2: prevent reading customers from other guilds by UUID guess.
   const { data: customer, error } = await supabase
     .from('customers')
     .select('*, orders(*, products(name)), entitlements(*, products(name))')
     .eq('id', id)
+    .eq('guild_id', guildId)
     .single();
 
   if (error) {

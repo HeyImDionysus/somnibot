@@ -207,13 +207,17 @@ export class FishingManager {
     if (!data || data.length === 0) return null;
     const inv = data[0] as any;
 
-    // Atomic decrement — prevents TOCTOU on bait quantity
-    await this.supabase.rpc('economy_decrement_inventory', {
+    // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
+    // /fish call already consumed the last bait, the RPC returns false
+    // and we MUST NOT award fish on this call. Previous code ignored
+    // the return value and could yield 2 catches from 1 bait.
+    const { data: consumed } = await this.supabase.rpc('economy_decrement_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: inv.item_id,
       p_quantity: 1,
     });
+    if (consumed !== true) return null;
     return inv.economy_items.name;
   }
 
