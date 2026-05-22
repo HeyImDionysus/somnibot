@@ -22,10 +22,24 @@ export async function GET(
   const { id: customerId } = await params;
   const supabase = createAdminSupabase();
 
+  // V47-C2: assert the customer belongs to this guild before exposing
+  // entitlement history; otherwise UUID guessing leaks subscription state.
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('id', customerId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!customer) {
+    return NextResponse.json({ success: false, error: 'Customer not found' }, { status: 404 });
+  }
+
   const { data, error } = await supabase
     .from('entitlements')
     .select('*, products(name)')
     .eq('customer_id', customerId)
+    .eq('guild_id', guildId)
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -53,6 +67,30 @@ export async function POST(
 
   if (!product_id) {
     return NextResponse.json({ success: false, error: 'Missing product_id' }, { status: 400 });
+  }
+
+  // V47-C2: confirm customer + product both belong to this guild
+  // before manufacturing an order + entitlement for them.
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('id', customerId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!customer) {
+    return NextResponse.json({ success: false, error: 'Customer not found' }, { status: 404 });
+  }
+
+  const { data: product } = await supabase
+    .from('products')
+    .select('id')
+    .eq('id', product_id)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!product) {
+    return NextResponse.json({ success: false, error: 'Product not found' }, { status: 404 });
   }
 
   // Create a manual order first
@@ -128,10 +166,13 @@ export async function PUT(req: NextRequest) {
     updateData.cancelled_at = new Date().toISOString();
   }
 
+  // V47-C2: scope by guild so another owner cannot toggle entitlement
+  // status (e.g. silently reactivate a refunded entitlement) by id alone.
   const { data, error } = await supabase
     .from('entitlements')
     .update(updateData)
     .eq('id', entitlement_id)
+    .eq('guild_id', guildId)
     .select()
     .single();
 

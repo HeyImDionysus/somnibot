@@ -21,22 +21,25 @@ export async function GET(
   const { key } = await params;
   const supabase = createAdminSupabase();
 
-  // Try by ID first
+  // V47-C2: scope to the caller's guild so an unrelated owner cannot enumerate
+  // license keys (and the bound customer PII) by UUID guess or hash collision.
   let query = supabase
     .from('license_keys')
     .select('*, products(name), customers(discord_username, discord_id, email)')
     .eq('id', key)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   let { data } = await query;
 
-  // If not found by ID, try by key hash
+  // If not found by ID, try by key hash (still constrained to this guild)
   if (!data) {
     const keyHash = createHash('sha256').update(key.toUpperCase()).digest('hex');
     const res = await supabase
       .from('license_keys')
       .select('*, products(name), customers(discord_username, discord_id, email)')
       .eq('key_hash', keyHash)
+      .eq('guild_id', guildId)
       .maybeSingle();
     data = res.data;
   }
@@ -83,6 +86,20 @@ export async function PUT(
     updated_at: new Date().toISOString(),
   };
 
+  // V47-C2: confirm the target key belongs to this owner's guild BEFORE
+  // touching any session rows. Without this gate any guild owner could
+  // revoke another guild's license keys and deactivate every device session.
+  const { data: keyRow } = await supabase
+    .from('license_keys')
+    .select('id')
+    .eq('id', keyId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!keyRow) {
+    return NextResponse.json({ success: false, error: 'License key not found' }, { status: 404 });
+  }
+
   if (status === 'revoked') {
     updateData.revoked_at = new Date().toISOString();
     updateData.revocation_reason = revocation_reason ?? 'Admin revocation';
@@ -103,6 +120,7 @@ export async function PUT(
     .from('license_keys')
     .update(updateData)
     .eq('id', keyId)
+    .eq('guild_id', guildId)
     .select()
     .single();
 

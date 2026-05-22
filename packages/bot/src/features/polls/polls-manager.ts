@@ -207,10 +207,19 @@ export class PollsManager {
       return;
     }
 
-    await (this.supabase as any)
+    // V47-L2: gate the status flip on the current status so concurrent /poll close
+    // (or a retry after a deferred reply) cannot reset closed_at or re-post results.
+    const { data: closedRows } = await (this.supabase as any)
       .from('polls')
       .update({ status: 'closed', closed_at: new Date().toISOString() })
-      .eq('id', pollId);
+      .eq('id', pollId)
+      .eq('status', 'open')
+      .select('id');
+
+    if (!closedRows || closedRows.length === 0) {
+      await interaction.reply({ content: '❌ Poll is already closed.', ephemeral: true });
+      return;
+    }
 
     // Get results
     const { data: options } = await (this.supabase as any)
@@ -367,22 +376,45 @@ export class PollsManager {
       return;
     }
 
-    // Deduct balance + place bet
+    // V47-M2: Insert the bet FIRST so the UNIQUE(prediction_id, user_id)
+    // constraint is the authoritative gate. Only debit after the row is owned
+    // by this user — otherwise a concurrent /predict bet from the same user
+    // would silently consume their coins on the losing race.
+    const { data: insertedBet, error: insertErr } = await (this.supabase as any)
+      .from('prediction_bets')
+      .insert({
+        prediction_id: predictionId,
+        option_id: options[optionIndex].id,
+        guild_id: guildId,
+        user_id: userId,
+        amount,
+      })
+      .select('id')
+      .single();
+
+    if (insertErr || !insertedBet) {
+      // Duplicate bet from a concurrent invocation, or insert failure.
+      // We have NOT debited yet, so there is nothing to roll back.
+      const msg = (insertErr as { code?: string } | null)?.code === '23505'
+        ? '❌ You already placed a bet on this prediction.'
+        : '❌ Failed to place bet — please try again.';
+      await interaction.reply({ content: msg, ephemeral: true });
+      return;
+    }
+
+    // Deduct balance — bet is already locked in.
     const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: amount,
     });
     if (debitErr) {
+      // Roll back the bet so we don't credit the user with a free bet.
+      await (this.supabase as any)
+        .from('prediction_bets')
+        .delete()
+        .eq('id', insertedBet.id);
       await interaction.reply({ content: `❌ Payment failed — you need **${amount.toLocaleString()}** coins.`, ephemeral: true });
       return;
     }
-
-    await (this.supabase as any).from('prediction_bets').insert({
-      prediction_id: predictionId,
-      option_id: options[optionIndex].id,
-      guild_id: guildId,
-      user_id: userId,
-      amount,
-    });
 
     // Update pool atomically (prevents TOCTOU — concurrent bets racing)
     const { data: newPool } = await (this.supabase as any).rpc('economy_increment_prediction_pool', {
@@ -437,7 +469,30 @@ export class PollsManager {
 
     const winningOption = options[winningIndex];
 
-    // Get all bets
+    // V47-C1: atomic status flip. The RPC returns the row's locked
+    // total_pool only when the status was still open/locked — otherwise
+    // it returns no rows and we bail out without paying anyone. This
+    // makes resolve idempotent against concurrent / retried clicks.
+    const { data: resolveRows, error: resolveErr } = await (this.supabase as any)
+      .rpc('predictions_resolve_atomic', {
+        p_prediction_id: predictionId,
+        p_winning_option_id: winningOption.id,
+      });
+
+    if (resolveErr) {
+      await interaction.reply({ content: '❌ Failed to resolve prediction — please try again.', ephemeral: true });
+      return;
+    }
+
+    const resolved = Array.isArray(resolveRows) ? resolveRows[0] : resolveRows;
+    if (!resolved) {
+      await interaction.reply({ content: '❌ This prediction has already been resolved or cancelled.', ephemeral: true });
+      return;
+    }
+
+    const finalTotalPool: number = resolved.total_pool ?? 0;
+
+    // Get all bets (after the status flip — no new bets can land now)
     const { data: allBets } = await (this.supabase as any)
       .from('prediction_bets')
       .select('*')
@@ -448,8 +503,12 @@ export class PollsManager {
 
     // Distribute winnings proportionally
     for (const bet of winningBets) {
+      // Skip bets that were already paid (defence-in-depth — should not
+      // happen now that the status flip is atomic, but worth the safety net).
+      if (bet.payout != null) continue;
+
       const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
-      const payout = Math.floor(prediction.total_pool * share);
+      const payout = Math.floor(finalTotalPool * share);
 
       const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
@@ -462,22 +521,12 @@ export class PollsManager {
         .eq('id', bet.id);
     }
 
-    // Close prediction
-    await (this.supabase as any)
-      .from('predictions')
-      .update({
-        status: 'resolved',
-        winning_option_id: winningOption.id,
-        resolved_at: new Date().toISOString(),
-      })
-      .eq('id', predictionId);
-
     await interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle(`🔮 Prediction Resolved: ${prediction.title}`)
         .setDescription(
           `✅ Winning outcome: **${winningOption.label}**\n` +
-          `💰 Pool: **${prediction.total_pool.toLocaleString()}** coins\n` +
+          `💰 Pool: **${finalTotalPool.toLocaleString()}** coins\n` +
           `🏆 Winners: **${winningBets.length}** player(s)`
         )
         .setColor(0x57F287)],

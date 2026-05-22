@@ -10,11 +10,30 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
 import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
 
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
+
+// V47-C3: secret used by /api/webhooks/[id]/replay to authenticate
+// internal replay POSTs. The replay route forwards the original payload
+// with paypal-* signature headers missing; verifyWebhookSignature would
+// always fail, so we accept a constant-time match on X-Replay-Secret
+// instead. Must match the derivation in the replay route.
+const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
+  || (process.env.NEXTAUTH_SECRET
+    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+    : '');
+
+function isInternalReplay(req: NextRequest): boolean {
+  const provided = req.headers.get('x-replay-secret');
+  if (!provided || !REPLAY_SECRET) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(REPLAY_SECRET);
+  if (a.length !== b.length) return false;
+  try { return timingSafeEqual(a, b); } catch { return false; }
+}
 
 // ── Helpers ─────────────────────────────────────────
 
@@ -111,11 +130,18 @@ export async function POST(req: NextRequest) {
   const rawBody = await req.text();
   const supabase = createAdminSupabase();
 
-  // ALWAYS verify webhook signature — no bypasses
-  const valid = await verifyWebhookSignature(req, rawBody);
-  if (!valid) {
-    console.error('[Webhook] Signature verification failed');
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+  // V47-C3: accept internal replay POSTs that carry a valid X-Replay-Secret
+  // header. They originate from /api/webhooks/[id]/replay (already auth'd as
+  // guild owner) and rehydrate a previously-stored payload that lacks the
+  // original paypal-* signature headers.
+  const replay = isInternalReplay(req);
+
+  if (!replay) {
+    const valid = await verifyWebhookSignature(req, rawBody);
+    if (!valid) {
+      console.error('[Webhook] Signature verification failed');
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+    }
   }
 
   let event: { event_type: string; resource: Record<string, unknown>; id?: string };
@@ -125,9 +151,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  // Check for duplicate
+  // Check for duplicate (skipped on internal replay — the row already exists
+  // and is exactly what we are re-processing).
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
-  if (eventId) {
+  if (eventId && !replay) {
     const { data: existing } = await supabase
       .from('webhook_events')
       .select('event_id')
@@ -139,12 +166,14 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Log the event
-  await supabase.from('webhook_events').insert({
-    event_id: eventId || randomBytes(16).toString('hex'),
-    event_type: event.event_type,
-    payload: event as unknown as Record<string, unknown>,
-  }).then(() => {}, () => {/* ignore logging failure */});
+  // Log the event (only on the first delivery — never duplicate on replay)
+  if (!replay) {
+    await supabase.from('webhook_events').insert({
+      event_id: eventId || randomBytes(16).toString('hex'),
+      event_type: event.event_type,
+      payload: event as unknown as Record<string, unknown>,
+    }).then(() => {}, () => {/* ignore logging failure */});
+  }
 
   try {
     switch (event.event_type) {
@@ -165,6 +194,13 @@ export async function POST(req: NextRequest) {
         break;
       case 'PAYMENT.SALE.COMPLETED':
         await handleSubscriptionPayment(supabase, event.resource);
+        break;
+      case 'PAYMENT.CAPTURE.REFUNDED':
+      case 'PAYMENT.CAPTURE.REVERSED':
+        // V47-C3: external refunds and chargebacks were silently dropped
+        // before — orders stayed `completed`, entitlements stayed `active`,
+        // license keys stayed valid, paid roles were never revoked.
+        await handleCaptureRefunded(supabase, event.resource, event.event_type);
         break;
       default:
         console.log(`[Webhook] Unhandled event: ${event.event_type}`);
@@ -582,4 +618,134 @@ async function handleSubscriptionPayment(
   });
 
   console.log(`[Webhook] Subscription payment recorded: ${resource.id}`);
+}
+
+/**
+ * V47-C3: Externally-initiated refunds + chargebacks.
+ *
+ * Triggered by:
+ *   - PAYMENT.CAPTURE.REFUNDED — merchant- or buyer-initiated refund in PayPal
+ *   - PAYMENT.CAPTURE.REVERSED — chargeback / dispute reversal
+ *
+ * The `resource` is a refund object; the captured payment ID we need to look
+ * up is exposed via `links[rel=up].href` (`/v2/payments/captures/{captureId}`).
+ * Fall back to scanning supplementary_data.related_ids.capture_id when
+ * present.
+ */
+async function handleCaptureRefunded(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  resource: Record<string, unknown>,
+  eventType: string,
+) {
+  // Try to recover the original capture id
+  let captureId: string | undefined;
+
+  const supp = (resource as { supplementary_data?: { related_ids?: { capture_id?: string } } }).supplementary_data;
+  if (supp?.related_ids?.capture_id) {
+    captureId = supp.related_ids.capture_id;
+  }
+
+  if (!captureId) {
+    const links = (resource as { links?: Array<{ rel?: string; href?: string }> }).links ?? [];
+    const up = links.find((l) => l.rel === 'up');
+    if (up?.href) {
+      const m = up.href.match(/\/captures\/([^/?#]+)/);
+      if (m?.[1]) captureId = m[1];
+    }
+  }
+
+  if (!captureId) {
+    console.error(`[Webhook] ${eventType} arrived without a recoverable capture_id — payload:`, JSON.stringify(resource).slice(0, 500));
+    return;
+  }
+
+  // Look up the original payment row
+  const { data: payment } = await supabase
+    .from('payments')
+    .select('id, order_id, customer_id, guild_id')
+    .eq('paypal_payment_id', captureId)
+    .maybeSingle();
+
+  if (!payment?.order_id) {
+    console.warn(`[Webhook] ${eventType} for capture ${captureId} — no matching payment row, ignoring`);
+    return;
+  }
+
+  const orderId = payment.order_id;
+  const refundStatus = eventType === 'PAYMENT.CAPTURE.REVERSED' ? 'reversed' : 'refunded';
+
+  // Capture the entitlements + customer BEFORE mutating, so we can revoke roles.
+  const { data: activeEntitlements } = await supabase
+    .from('entitlements')
+    .select('id, customer_id, granted_role_ids')
+    .eq('order_id', orderId)
+    .in('status', ['active', 'pending', 'grace_period']);
+
+  // Mark payment + order
+  await supabase
+    .from('payments')
+    .update({ status: refundStatus })
+    .eq('id', payment.id);
+
+  await supabase
+    .from('orders')
+    .update({ status: 'refunded', updated_at: new Date().toISOString() })
+    .eq('id', orderId);
+
+  // Expire entitlements
+  await supabase
+    .from('entitlements')
+    .update({
+      status: 'expired',
+      cancelled_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('order_id', orderId)
+    .in('status', ['active', 'pending', 'grace_period']);
+
+  // Revoke license keys
+  await supabase
+    .from('license_keys')
+    .update({
+      status: 'revoked',
+      revoked_at: new Date().toISOString(),
+      revocation_reason: refundStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('order_id', orderId)
+    .neq('status', 'revoked');
+
+  // Queue Discord role revocation
+  if (activeEntitlements?.length) {
+    const allRoleIds = [...new Set(activeEntitlements.flatMap((e) => e.granted_role_ids ?? []))];
+    if (allRoleIds.length > 0) {
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('discord_id')
+        .eq('id', activeEntitlements[0]!.customer_id)
+        .single();
+
+      if (customer?.discord_id) {
+        await queueFulfillment(supabase, 'revoke_roles', payment.guild_id, {
+          discord_id: customer.discord_id,
+          role_ids: allRoleIds,
+          reason: refundStatus,
+          order_id: orderId,
+        });
+      }
+    }
+  }
+
+  // Audit trail
+  await supabase.from('audit_logs').insert({
+    guild_id: payment.guild_id,
+    actor_type: 'system',
+    actor_id: 'paypal_webhook',
+    action: eventType === 'PAYMENT.CAPTURE.REVERSED' ? 'order.reversed' : 'order.refunded_external',
+    target_type: 'order',
+    target_id: orderId,
+    details: { event_type: eventType, capture_id: captureId },
+  }).then(() => {}, () => {/* ignore */});
+
+  console.log(`[Webhook] ${eventType} processed for order ${orderId} (capture ${captureId})`);
 }

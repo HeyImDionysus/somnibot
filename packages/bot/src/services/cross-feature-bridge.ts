@@ -63,33 +63,13 @@ export class CrossFeatureBridge {
       await this.removeGiveawayEntries(userId, 'kicked');
     });
 
-    // ── 2. Level Up → Discount unlocks + Role grants ───────
-
-    this.on('level.up', async (event) => {
-      const userId = event.data.discordId;
-      const newLevel = event.data.newLevel;
-      if (!userId || !newLevel) return;
-
-      // Check for level-gated role grants
-      const { data: roleRewards } = await this.supabase
-        .from('level_rewards')
-        .select('role_id')
-        .eq('guild_id', this.guild.id)
-        .eq('level', newLevel);
-
-      if (roleRewards && roleRewards.length > 0) {
-        try {
-          const member = await this.guild.members.fetch(userId).catch(() => null);
-          if (member) {
-            for (const reward of roleRewards) {
-              await member.roles.add(reward.role_id, `Level ${newLevel} reward`).catch(() => {});
-            }
-          }
-        } catch {
-          // Non-fatal
-        }
-      }
-    });
+    // ── 2. Level Up → (role grants handled by level-announcer) ─
+    // V47-L1: removed the duplicate level.up role-grant handler.
+    // `level-announcer.ts` is the canonical path for level reward
+    // roles — it correctly honours `level_rewards.remove_at_level`
+    // (swapping out the old role on tiered ladders), whereas this
+    // bridge only added new roles, producing stacked / desynced
+    // role state.
 
     // ── 3. Purchase Complete → XP bonus + Celebration ──────
 
