@@ -527,11 +527,12 @@ async function handleSendEmbed(
   if (!embedId) return { success: false, error: 'Missing embed_config_id / embed_id' };
   if (!channelId) return { success: false, error: 'Missing channel_id' };
 
-  // Look up embed config
+  // Look up embed config (guild_id scoped for multi-guild safety)
   const { data, error: dbError } = await supabase
     .from('embed_configs')
     .select('*')
     .eq('id', embedId)
+    .eq('guild_id', guild.id)
     .maybeSingle();
 
   if (dbError || !data) {
@@ -676,6 +677,37 @@ async function handleRunReconciliation(
   }
 }
 
+// V53-M4: Retry failed inventory returns from market cancel/buy failures.
+// Queued automatically when economy_upsert_inventory fails during market operations.
+async function handleMarketItemReconcile(
+  _guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const guildId = payload.guild_id as string;
+  const userId = payload.user_id as string;
+  const itemId = payload.item_id as string;
+  const quantity = payload.quantity as number;
+
+  if (!guildId || !userId || !itemId || !quantity) {
+    return { success: false, error: 'Missing required fields for market item reconcile' };
+  }
+
+  const { error } = await supabase.rpc('economy_upsert_inventory', {
+    p_guild_id: guildId,
+    p_user_id: userId,
+    p_item_id: itemId,
+    p_quantity: quantity,
+  });
+
+  if (error) {
+    return { success: false, error: `Inventory return still failing: ${error.message}` };
+  }
+
+  console.log(`[ActionQueue] market_item_reconcile: returned ${quantity}x ${payload.item_name ?? itemId} to ${userId}`);
+  return { success: true, data: { userId, itemId, quantity } };
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -698,6 +730,7 @@ const ACTION_HANDLERS: Record<
   fulfill_giveaway_prize: handleFulfillment,
   run_reconciliation: handleRunReconciliation,
   revoke_roles: handleRevokeRoles,
+  market_item_reconcile: handleMarketItemReconcile,
 };
 
 async function processAction(

@@ -38,12 +38,39 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 
   const admin = createAdminSupabase();
 
-  // Find the guild (single-guild architecture)
-  const { data: guild } = await admin
+  // V53-D2: Find the guild associated with this user's Discord ID.
+  // Previous code used .limit(1).single() with no filter which would
+  // return an arbitrary guild in a multi-guild deployment.  Now we
+  // first try to match a guild where the user is the owner, then fall
+  // back to the first guild where they have a member record.
+  const { data: ownedGuild } = await admin
     .from('guild')
     .select('id, owner_discord_id')
+    .eq('owner_discord_id', discordId)
     .limit(1)
-    .single();
+    .maybeSingle();
+
+  // V53-M3: If user doesn't own a guild, only fall back to a guild where
+  // they have an explicit dashboard_user_roles assignment. Prevents scoping
+  // to an arbitrary guild in multi-guild deployments.
+  let guild = ownedGuild;
+  if (!guild) {
+    const { data: roleAssignment } = await admin
+      .from('dashboard_user_roles')
+      .select('guild_id')
+      .eq('discord_id', discordId)
+      .limit(1)
+      .maybeSingle();
+
+    if (roleAssignment) {
+      const { data: assignedGuild } = await admin
+        .from('guild')
+        .select('id, owner_discord_id')
+        .eq('id', roleAssignment.guild_id)
+        .single();
+      guild = assignedGuild;
+    }
+  }
 
   if (!guild) return null;
 

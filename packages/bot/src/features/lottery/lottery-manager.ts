@@ -47,16 +47,24 @@ export class LotteryManager {
 
     // Run the first draw check after a short delay, then on interval
     setTimeout(async () => {
-      const config = await this.getConfig(guildId);
-      const schedule = config?.economy_lottery_schedule ?? 'weekly';
-      const intervalMs = SCHEDULE_MS[schedule] ?? SCHEDULE_MS['weekly'];
+      try {
+        const config = await this.getConfig(guildId);
+        const schedule = config?.economy_lottery_schedule ?? 'weekly';
+        const intervalMs = SCHEDULE_MS[schedule] ?? SCHEDULE_MS['weekly'];
 
-      // Check if it's time to draw (based on last drawing)
-      await this.checkAndDraw(guildId);
-
-      this.drawTimer = setInterval(async () => {
+        // Check if it's time to draw (based on last drawing)
         await this.checkAndDraw(guildId);
-      }, Math.min(intervalMs, 60 * 60 * 1000)); // Check at least every hour
+
+        this.drawTimer = setInterval(async () => {
+          try {
+            await this.checkAndDraw(guildId);
+          } catch (err) {
+            console.error(`[Lottery] Draw check error for guild ${guildId}:`, err);
+          }
+        }, Math.min(intervalMs, 60 * 60 * 1000)); // Check at least every hour
+      } catch (err) {
+        console.error(`[Lottery] Failed to initialize draw schedule for guild ${guildId}:`, err);
+      }
     }, 60_000); // 1 minute after boot
   }
 
