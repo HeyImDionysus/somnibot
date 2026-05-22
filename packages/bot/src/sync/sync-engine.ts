@@ -261,103 +261,106 @@ async function repairDriftItem(
   item: DriftItem,
   idMap: Map<string, string>,
 ): Promise<RepairResult> {
+  // Use DriftType + entityType to determine the right repair action
   switch (item.type) {
-    case 'ROLE_MISSING': {
-      // Role was deleted — recreate from desired state
-      const roleKey = findKeyForEntity(idMap, item.entityDiscordId, 'role');
-      if (!roleKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+    case 'MISSING_RESOURCE': {
+      if (item.entityType === 'role') {
+        // Role was deleted — recreate from desired state
+        const roleKey = findKeyForEntity(idMap, item.entityDiscordId, 'role');
+        if (!roleKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
 
-      const { data: desired } = await supabase
-        .from('guild_desired_state')
-        .select('roles')
-        .eq('guild_id', guild.id)
-        .single();
+        const { data: desired } = await supabase
+          .from('guild_desired_state')
+          .select('roles')
+          .eq('guild_id', guild.id)
+          .single();
 
-      const desiredRoles = (desired?.roles ?? []) as Array<{ key: string; name: string; color?: number; permissions?: string; hoist?: boolean; mentionable?: boolean }>;
-      const roleDef = desiredRoles.find(r => r.key === roleKey);
-      if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
+        const desiredRoles = (desired?.roles ?? []) as Array<{ key: string; name: string; color?: number; permissions?: string; hoist?: boolean; mentionable?: boolean }>;
+        const roleDef = desiredRoles.find(r => r.key === roleKey);
+        if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
 
-      const created = await guild.roles.create({
-        name: roleDef.name,
-        color: roleDef.color ?? 0,
-        permissions: BigInt(roleDef.permissions ?? '0'),
-        hoist: roleDef.hoist ?? false,
-        mentionable: roleDef.mentionable ?? false,
-        reason: 'SomniBot sync auto-repair — recreated missing role',
-      });
+        const created = await guild.roles.create({
+          name: roleDef.name,
+          color: roleDef.color ?? 0,
+          permissions: BigInt(roleDef.permissions ?? '0'),
+          hoist: roleDef.hoist ?? false,
+          mentionable: roleDef.mentionable ?? false,
+          reason: 'SomniBot sync auto-repair — recreated missing role',
+        });
 
-      // Update ID mapping
-      await supabase.from('discord_id_map').upsert({
-        guild_id: guild.id,
-        template_key: `role:${roleKey}`,
-        discord_id: created.id,
-      }, { onConflict: 'guild_id,template_key' });
+        await supabase.from('discord_id_map').upsert({
+          guild_id: guild.id,
+          template_key: `role:${roleKey}`,
+          discord_id: created.id,
+        }, { onConflict: 'guild_id,template_key' });
 
-      return { success: true, action: `Recreated role "${roleDef.name}" (${created.id})` };
-    }
-
-    case 'ROLE_PERMISSION_DRIFT': {
-      // Role permissions changed — restore
-      if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
-      const role = guild.roles.cache.get(item.entityDiscordId);
-      if (!role) return { success: false, action: 'manual_required', reason: 'Role not in cache' };
-      if (role.managed) return { success: false, action: 'manual_required', reason: 'Role is managed by an integration' };
-
-      const expected = item.details?.permissions?.expected;
-      if (typeof expected === 'string') {
-        await role.setPermissions(BigInt(expected), 'SomniBot sync auto-repair');
-        return { success: true, action: `Restored permissions on "${role.name}"` };
+        return { success: true, action: `Recreated role "${roleDef.name}" (${created.id})` };
       }
-      return { success: false, action: 'manual_required', reason: 'No expected permissions in drift details' };
+
+      if (item.entityType === 'channel' || item.entityType === 'category') {
+        // Channel/category deleted — recreate from desired state
+        const chanKey = findKeyForEntity(idMap, item.entityDiscordId, item.entityType);
+        if (!chanKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+        const { data: desired } = await supabase
+          .from('guild_desired_state')
+          .select('channels')
+          .eq('guild_id', guild.id)
+          .single();
+
+        const desiredChannels = (desired?.channels ?? []) as Array<{ key: string; name: string; type?: number; parentKey?: string; topic?: string }>;
+        const chanDef = desiredChannels.find(c => c.key === chanKey);
+        if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
+
+        const parentId = chanDef.parentKey ? idMap.get(`category:${chanDef.parentKey}`) ?? undefined : undefined;
+        const created = await guild.channels.create({
+          name: chanDef.name,
+          type: chanDef.type ?? 0,
+          parent: parentId,
+          topic: chanDef.topic,
+          reason: 'SomniBot sync auto-repair — recreated missing channel',
+        });
+
+        await supabase.from('discord_id_map').upsert({
+          guild_id: guild.id,
+          template_key: `${item.entityType}:${chanKey}`,
+          discord_id: created.id,
+        }, { onConflict: 'guild_id,template_key' });
+
+        return { success: true, action: `Recreated ${item.entityType} "${chanDef.name}" (${created.id})` };
+      }
+
+      return { success: false, action: 'manual_required', reason: `Missing ${item.entityType} repair not supported` };
     }
 
-    case 'CHANNEL_MISSING': {
-      // Channel deleted — recreate from desired state
-      const chanKey = findKeyForEntity(idMap, item.entityDiscordId, 'channel');
-      if (!chanKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+    case 'PERMISSION_DRIFT':
+    case 'EVERYONE_DRIFT': {
+      if (item.entityType === 'role' || item.entityType === 'everyone') {
+        // Role permissions changed — restore
+        if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+        const role = guild.roles.cache.get(item.entityDiscordId);
+        if (!role) return { success: false, action: 'manual_required', reason: 'Role not in cache' };
+        if (role.managed) return { success: false, action: 'manual_required', reason: 'Role is managed by an integration' };
 
-      const { data: desired } = await supabase
-        .from('guild_desired_state')
-        .select('channels')
-        .eq('guild_id', guild.id)
-        .single();
+        const expected = item.details?.permissions?.expected;
+        if (typeof expected === 'string') {
+          await role.setPermissions(BigInt(expected), 'SomniBot sync auto-repair');
+          return { success: true, action: `Restored permissions on "${role.name}"` };
+        }
+        return { success: false, action: 'manual_required', reason: 'No expected permissions in drift details' };
+      }
 
-      const desiredChannels = (desired?.channels ?? []) as Array<{ key: string; name: string; type?: number; parentKey?: string; topic?: string }>;
-      const chanDef = desiredChannels.find(c => c.key === chanKey);
-      if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
-
-      const parentId = chanDef.parentKey ? idMap.get(`category:${chanDef.parentKey}`) ?? undefined : undefined;
-      const created = await guild.channels.create({
-        name: chanDef.name,
-        type: chanDef.type ?? 0,
-        parent: parentId,
-        topic: chanDef.topic,
-        reason: 'SomniBot sync auto-repair — recreated missing channel',
-      });
-
-      await supabase.from('discord_id_map').upsert({
-        guild_id: guild.id,
-        template_key: `channel:${chanKey}`,
-        discord_id: created.id,
-      }, { onConflict: 'guild_id,template_key' });
-
-      return { success: true, action: `Recreated channel "${chanDef.name}" (${created.id})` };
+      // Channel/category permission repairs are complex — require manual intervention
+      return { success: false, action: 'manual_required', reason: `${item.entityType} permission repair requires manual review` };
     }
 
-    case 'CHANNEL_PERMISSION_DRIFT': {
-      // Channel permission overwrites changed — restore
-      if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
-      // Channel permission repairs are complex (need to reconstruct overwrites).
-      // Log for manual intervention rather than risk breaking permissions.
-      return { success: false, action: 'manual_required', reason: 'Channel permission repair requires manual review' };
-    }
-
-    case 'EXTRA_ROLE':
-    case 'EXTRA_CHANNEL': {
+    case 'EXTRA_RESOURCE': {
       // Extra entities not in desired state — never auto-delete, just surface
       return { success: false, action: 'manual_required', reason: `Extra ${item.entityType} not in desired config — manual cleanup recommended` };
     }
 
+    case 'EXTERNAL_CHANGE':
+    case 'HIERARCHY_DRIFT':
     default:
       return { success: false, action: 'manual_required', reason: `Repair not implemented for ${item.type}` };
   }

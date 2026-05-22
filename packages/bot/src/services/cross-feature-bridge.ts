@@ -237,7 +237,7 @@ export class CrossFeatureBridge {
     // ── 8. Ticket Closed → Satisfaction Survey DM (V53 Phase 4 — Finding 4.2) ──
     this.on('ticket.closed', async (event) => {
       const ticketId = event.data.ticketId;
-      const creatorId = event.data.creatorId;
+      const creatorId = event.data.userDiscordId;
       if (!ticketId || !creatorId) return;
 
       try {
@@ -261,7 +261,7 @@ export class CrossFeatureBridge {
           .setColor(0x5865F2)
           .setTimestamp();
 
-        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
           new ButtonBuilder().setCustomId(`survey:${ticketId}:great`).setLabel('😊 Great').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`survey:${ticketId}:okay`).setLabel('😐 Okay').setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId(`survey:${ticketId}:poor`).setLabel('😞 Poor').setStyle(ButtonStyle.Danger),
@@ -289,15 +289,16 @@ export class CrossFeatureBridge {
           .eq('id', productId)
           .maybeSingle();
 
-        const roleId = product?.metadata?.grant_role_id as string | undefined;
+        if (!product) return;
+        const metadata = product.metadata as Record<string, unknown> | null;
+        const roleId = metadata?.grant_role_id as string | undefined;
         if (!roleId) return;
 
         const member = await this.guild.members.fetch(userId).catch(() => null);
         if (!member) return;
 
-        const durationMs = (product?.metadata?.role_duration_hours as number | undefined)
-          ? (product.metadata.role_duration_hours as number) * 3600_000
-          : null;
+        const roleDurationHours = metadata?.role_duration_hours as number | undefined;
+        const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
 
         await member.roles.add(roleId, 'SomniBot economy purchase — role item');
         console.log(`[CrossFeatureBridge] Granted role ${roleId} to ${userId} via economy purchase`);
