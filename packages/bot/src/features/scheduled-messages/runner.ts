@@ -235,6 +235,7 @@ export class ScheduledMessageRunner {
         .from('embed_configs')
         .select('*')
         .eq('id', schedule.embed_config_id)
+        .eq('guild_id', this.guild.id)
         .maybeSingle();
 
       if (data) {
