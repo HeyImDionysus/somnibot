@@ -527,11 +527,12 @@ async function handleSendEmbed(
   if (!embedId) return { success: false, error: 'Missing embed_config_id / embed_id' };
   if (!channelId) return { success: false, error: 'Missing channel_id' };
 
-  // Look up embed config
+  // Look up embed config (guild_id scoped for multi-guild safety)
   const { data, error: dbError } = await supabase
     .from('embed_configs')
     .select('*')
     .eq('id', embedId)
+    .eq('guild_id', guild.id)
     .maybeSingle();
 
   if (dbError || !data) {
