@@ -95,6 +95,19 @@ function categoryColor(cat: string): string {
   }
 }
 
+// V53 Phase 3 (1.9): Portal session type
+interface PortalSession {
+  id: string;
+  customer_id: string;
+  discord_id: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+  revoked: boolean;
+}
+
 // ── Component ─────────────────────────────────────────────
 
 export default function CustomersPage() {
@@ -108,17 +121,6 @@ export default function CustomersPage() {
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
 
   // V53 Phase 3 (1.9): Portal sessions
-  interface PortalSession {
-    id: string;
-    customer_id: string;
-    discord_id: string;
-    ip_address: string | null;
-    user_agent: string | null;
-    created_at: string;
-    last_used_at: string | null;
-    expires_at: string;
-    revoked: boolean;
-  }
   const [sessions, setSessions] = useState<PortalSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
 
