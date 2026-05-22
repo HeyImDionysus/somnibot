@@ -217,35 +217,39 @@ export async function claimTicket(
   ticketNumber: number,
   claimedById: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const { data: ticket, error: fetchErr } = await supabase
-    .from('tickets')
-    .select('*')
-    .eq('guild_id', guildId)
-    .eq('ticket_number', ticketNumber)
-    .single();
-
-  if (fetchErr || !ticket) {
-    return { success: false, error: 'Ticket not found.' };
-  }
-  if (ticket.status !== 'open') {
-    return { success: false, error: `Ticket is already ${ticket.status}.` };
-  }
-
-  const { error: updateErr } = await supabase
+  // V51: atomic claim — update WHERE status='open' so two concurrent claims
+  // cannot both succeed (the loser gets zero rows back).
+  const { data: claimed, error: updateErr } = await supabase
     .from('tickets')
     .update({ status: 'claimed', claimed_by: claimedById })
-    .eq('id', ticket.id);
+    .eq('guild_id', guildId)
+    .eq('ticket_number', ticketNumber)
+    .eq('status', 'open')
+    .select()
+    .maybeSingle();
 
   if (updateErr) {
     return { success: false, error: 'Failed to claim ticket.' };
   }
+  if (!claimed) {
+    // Either ticket doesn't exist or it's not in 'open' status
+    const { data: existing } = await supabase
+      .from('tickets')
+      .select('status')
+      .eq('guild_id', guildId)
+      .eq('ticket_number', ticketNumber)
+      .maybeSingle();
+
+    if (!existing) return { success: false, error: 'Ticket not found.' };
+    return { success: false, error: `Ticket is already ${existing.status}.` };
+  }
 
   eventBus.emit('ticket.claimed', guildId, {
-    ticketId: ticket.id,
+    ticketId: claimed.id,
     ticketNumber,
-    channelId: ticket.channel_id,
-    userDiscordId: ticket.creator_id,
-    panelId: ticket.panel_id,
+    channelId: claimed.channel_id,
+    userDiscordId: claimed.creator_id,
+    panelId: claimed.panel_id,
   });
 
   console.log(`[Tickets] Ticket #${ticketNumber} claimed by ${claimedById}`);
