@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
 import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+import { parseBody, schemas } from '@/lib/api/validation';
 // ── PayPal Helpers ─────────────────────────────────────
 
 /**
@@ -149,7 +150,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.product.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     name,
@@ -175,7 +178,9 @@ export async function POST(req: NextRequest) {
 
   // 1. Auto-create PayPal Catalog Product
   let paypalProductId: string | null = null;
-  paypalProductId = await createPayPalCatalogProduct(name, description, type);
+  paypalProductId = type !== 'free'
+    ? await createPayPalCatalogProduct(name, description ?? null, type)
+    : null;
   if (!paypalProductId) {
     console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
   }
@@ -209,7 +214,7 @@ export async function POST(req: NextRequest) {
   const createdPlans: { id: string; paypalPlanId: string | null }[] = [];
 
   if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const planDef of planDefs) {
+    for (const planDef of planDefs as Array<Record<string, any>>) {
       const paypalPlanId = await createPayPalBillingPlan(
         paypalProductId,
         planDef.name ?? `${name} — ${planDef.interval_unit}`,
@@ -265,7 +270,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.product.update);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { id, ...updates } = body;
 

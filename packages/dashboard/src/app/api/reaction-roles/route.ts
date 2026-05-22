@@ -10,6 +10,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+const reactionRoleUpdate = z.object({
+  id: z.string().uuid(),
+  channel_id: snowflake.optional(),
+  message_id: snowflake.optional(),
+  emoji: z.string().min(1).max(64).optional(),
+  role_id: snowflake.optional(),
+  exclusive_group: z.string().max(64).optional().nullable(),
+  require_role: snowflake.optional().nullable(),
+  require_level: z.number().int().min(0).optional().nullable(),
+  max_per_group: z.number().int().min(0).max(100).optional().nullable(),
+  remove_on_unreact: z.boolean().optional(),
+  log_actions: z.boolean().optional(),
+});
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -36,7 +53,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.reactionRole.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     channel_id,
@@ -105,14 +124,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-
-  if (!body.id) {
-    return NextResponse.json(
-      { success: false, error: 'Missing reaction role id' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, reactionRoleUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const allowedFields = [
     'channel_id',
@@ -130,8 +144,8 @@ export async function PUT(req: NextRequest) {
 
   const updates: Record<string, unknown> = {};
   for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+    if ((body as Record<string, unknown>)[field] !== undefined) {
+      updates[field] = (body as Record<string, unknown>)[field];
     }
   }
 

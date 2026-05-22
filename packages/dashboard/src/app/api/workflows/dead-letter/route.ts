@@ -5,6 +5,14 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const deadLetterAction = z.object({
+  action: z.enum(['retry', 'discard']),
+  id: z.string().uuid(),
+  note: z.string().max(1000).optional(),
+});
 
 export async function GET(request: NextRequest) {
   try {
@@ -59,7 +67,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_workflows');
-    const body = await request.json();
+    const parsed = await parseBody(request, deadLetterAction);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     if (body.action === 'retry') {

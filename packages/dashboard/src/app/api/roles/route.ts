@@ -11,6 +11,38 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+
+const roleCreate = z.object({
+  name: z.string().min(1).max(100).trim(),
+  tier: z.string().min(1).max(64),
+  color: z.number().int().min(0).max(16777215).default(0),
+  hoist: z.boolean().default(false),
+  mentionable: z.boolean().default(false),
+  permissions: z.string().optional(),
+  position: z.number().int().min(0).max(250).optional(),
+  templateKey: z.string().max(128).optional(),
+});
+
+const roleUpdate = z.object({
+  roleId: snowflake,
+  name: z.string().min(1).max(100).trim().optional(),
+  tier: z.string().max(64).optional(),
+  color: z.number().int().min(0).max(16777215).optional(),
+  hoist: z.boolean().optional(),
+  mentionable: z.boolean().optional(),
+  permissions: z.string().optional(),
+  position: z.number().int().min(0).max(250).optional(),
+  templateKey: z.string().max(128).optional(),
+});
+
+const roleDelete = z.object({
+  roleId: snowflake,
+  templateKey: z.string().max(128).optional(),
+});
 
 
 // ============================================================
@@ -59,10 +91,9 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  if (!body.name || !body.tier) {
-    return NextResponse.json({ error: 'Missing required fields: name, tier' }, { status: 400 });
-  }
+  const parsed = await parseBody(request, roleCreate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const admin = createAdminSupabase();
 
@@ -75,9 +106,9 @@ export async function POST(request: NextRequest) {
       payload: {
         name: body.name,
         tier: body.tier,
-        color: body.color ?? 0,
-        hoist: body.hoist ?? false,
-        mentionable: body.mentionable ?? false,
+        color: body.color,
+        hoist: body.hoist,
+        mentionable: body.mentionable,
         permissions: body.permissions,
         position: body.position,
         templateKey: body.templateKey,
@@ -104,10 +135,9 @@ export async function PATCH(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  if (!body.roleId) {
-    return NextResponse.json({ error: 'Missing roleId' }, { status: 400 });
-  }
+  const parsed = await parseBody(request, roleUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const admin = createAdminSupabase();
 
@@ -149,10 +179,9 @@ export async function DELETE(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  if (!body.roleId) {
-    return NextResponse.json({ error: 'Missing roleId' }, { status: 400 });
-  }
+  const parsed = await parseBody(request, roleDelete);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const admin = createAdminSupabase();
 

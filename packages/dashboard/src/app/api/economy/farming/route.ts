@@ -126,12 +126,16 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const { id } = body;
-
-    if (!id || typeof id !== 'string') {
-      return NextResponse.json({ success: false, error: 'Missing crop id' }, { status: 400 });
+    const rawBody = await request.json().catch(() => null);
+    const deleteSchema = z.object({ id: z.string().uuid() });
+    const parseResult = deleteSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      return NextResponse.json(
+        { success: false, error: parseResult.error.issues.map(i => i.message).join(', ') },
+        { status: 400 },
+      );
     }
+    const { id } = parseResult.data;
 
     const admin = createAdminSupabase();
 

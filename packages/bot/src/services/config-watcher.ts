@@ -51,12 +51,13 @@ import { invalidateHeistCache } from '../features/heist/index.js';
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
-  lastReload: number;
+  /** Per-section last-reload timestamps — prevents dropping reloads for different sections */
+  sectionLastReload: Map<string, number>;
 }
 
 export class ConfigWatcher {
-  private cache: ConfigCache = { guildConfig: null, lastReload: 0 };
-  private reloadCooldownMs = 2000; // Don't reload more than once every 2 seconds
+  private cache: ConfigCache = { guildConfig: null, sectionLastReload: new Map() };
+  private reloadCooldownMs = 2000; // Don't reload same section more than once every 2 seconds
 
   constructor(
     private guild: Guild,
@@ -75,14 +76,16 @@ export class ConfigWatcher {
       const section = event.data.section;
       const now = Date.now();
 
-      // Cooldown to prevent rapid reloads
-      if (now - this.cache.lastReload < this.reloadCooldownMs) {
+      // Per-section cooldown to prevent rapid reloads of the SAME section,
+      // while still processing different sections that arrive close together.
+      const lastReload = this.cache.sectionLastReload.get(section) ?? 0;
+      if (now - lastReload < this.reloadCooldownMs) {
         console.log(`[ConfigWatcher] Skipping reload (cooldown) — section: ${section}`);
         return;
       }
 
       console.log(`[ConfigWatcher] Config changed: ${section} (by ${event.data.changedBy})`);
-      this.cache.lastReload = now;
+      this.cache.sectionLastReload.set(section, now);
 
       try {
         switch (section) {

@@ -6,6 +6,26 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { notifyBot } from '@/lib/notify-bot';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const syncConfigAction = z.object({
+  action: z.literal('update_config'),
+  syncEnabled: z.boolean(),
+  syncIntervalMinutes: z.number().int().min(1).max(1440),
+  autoRepair: z.boolean(),
+  autoRepairEveryone: z.boolean(),
+});
+
+const syncDriftAction = z.object({
+  action: z.enum(['repair', 'accept', 'ignore']),
+  entityType: z.string().max(64).optional(),
+  entityId: z.string().max(128).optional().nullable(),
+  driftType: z.string().max(64).optional(),
+  entityName: z.string().max(256).optional(),
+});
+
+const syncAction = z.discriminatedUnion('action', [syncConfigAction, syncDriftAction]);
 
 
 export async function GET() {
@@ -57,7 +77,9 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
+  const parsed = await parseBody(request, syncAction);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
   const admin = createAdminSupabase();
 
   if (body.action === 'update_config') {
