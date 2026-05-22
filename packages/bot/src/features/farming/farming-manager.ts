@@ -313,8 +313,22 @@ export class FarmingManager {
       }
     }
 
-    // Add earnings to wallet
-    await this.addToWallet(userId, totalEarnings);
+    // V49-L2: Add earnings to wallet — if this fails, revert the harvest
+    // so the user can try again rather than losing crops + earnings silently.
+    const walletOk = await this.addToWallet(userId, totalEarnings);
+    if (!walletOk) {
+      // Revert harvest flags so the user can retry
+      for (const { plot } of harvested) {
+        await this.supabase.from('economy_farm_plots')
+          .update({ harvested: false })
+          .eq('id', plot.id);
+      }
+      return {
+        embed: new EmbedBuilder()
+          .setDescription('❌ Harvest payout failed — your crops have been restored. Try again later.')
+          .setColor(0xff0000),
+      };
+    }
 
     // Record transaction (fetch real balance for accurate audit trail)
     const { data: farmWallet } = await this.supabase.from('economy_wallets')
@@ -522,13 +536,19 @@ export class FarmingManager {
     });
   }
 
-  private async addToWallet(userId: string, amount: number): Promise<void> {
+  // V49-L2: Return success/failure so callers can handle payout errors
+  // instead of silently swallowing them.
+  private async addToWallet(userId: string, amount: number): Promise<boolean> {
     const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: amount,
     });
-    if (error) console.error(`[Farming] economy_add_balance failed for ${userId}:`, error.message);
+    if (error) {
+      console.error(`[Farming] economy_add_balance failed for ${userId}:`, error.message);
+      return false;
+    }
+    return true;
   }
 
   private formatTime(seconds: number): string {

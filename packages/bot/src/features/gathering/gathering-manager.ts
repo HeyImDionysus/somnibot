@@ -164,20 +164,21 @@ export class GatheringManager {
       };
     }
 
-    // Cooldown check
+    // V49-M2: Atomic cooldown via SET PX NX — prevents two concurrent
+    // gather commands from both bypassing the cooldown.
     const cdKey = `economy:gather:${this.guild.id}:${userId}:${sourceType}`;
-    const lastGather = await this.valkey.get(cdKey);
-    if (lastGather) {
-      const remaining = Math.ceil((config.economy_gathering_cooldown_seconds * 1000 - (Date.now() - parseInt(lastGather, 10))) / 1000);
-      if (remaining > 0) {
-        return {
-          embed: new EmbedBuilder()
-            .setDescription(`⏳ You need to wait **${this.formatCooldown(remaining)}** before ${SOURCE_CONFIG[sourceType].verb} again.`)
-            .setColor(0xffa500),
-          result: null,
-          error: 'cooldown',
-        };
-      }
+    const cooldownMs = config.economy_gathering_cooldown_seconds * 1000;
+    const lockResult = await this.valkey.set(cdKey, '1', 'PX', cooldownMs, 'NX');
+    if (lockResult !== 'OK') {
+      const ttl = await this.valkey.pttl(cdKey);
+      const remaining = Math.ceil(Math.max(ttl, 0) / 1000);
+      return {
+        embed: new EmbedBuilder()
+          .setDescription(`⏳ You need to wait **${this.formatCooldown(remaining)}** before ${SOURCE_CONFIG[sourceType].verb} again.`)
+          .setColor(0xffa500),
+        result: null,
+        error: 'cooldown',
+      };
     }
 
     // Tool check — find required tool in inventory
@@ -215,8 +216,7 @@ export class GatheringManager {
       await this.consumeDurability(toolResult.inventoryId);
     }
 
-    // Set cooldown
-    await this.valkey.set(cdKey, Date.now().toString(), 'EX', config.economy_gathering_cooldown_seconds);
+    // Cooldown already set at the top via SET PX NX (V49-M2).
 
     // Give loot to inventory or add currency
     if (picked.gives_item_id) {
