@@ -154,7 +154,7 @@ export async function handleForgetMeCommand(
     // Audit log (anonymized — just records that a purge happened)
     await writeAuditLog(supabase, {
       guildId,
-      actorType: 'user',
+      actorType: 'bot',
       actorId: 'purged_user', // Don't store the user ID — they asked to be forgotten
       action: 'member.data_purged',
       targetType: 'member',
