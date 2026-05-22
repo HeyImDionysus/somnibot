@@ -651,6 +651,19 @@ export class MusicPlayerManager {
         const result = await this.cycleLoopMode(guildId);
         return { message: result.message };
       }
+      // V53 Phase 3 (3.6): Volume buttons
+      case 'music:vol_down': {
+        const hasPerm = await this.isDJ(userId);
+        if (!hasPerm) return { message: '❌ You need the DJ role to change volume' };
+        const result = await this.setVolume(guildId, Math.max(0, (await this.queueManager.getQueue(guildId))?.volume ?? 50) - 10);
+        return { message: result.message };
+      }
+      case 'music:vol_up': {
+        const hasPerm = await this.isDJ(userId);
+        if (!hasPerm) return { message: '❌ You need the DJ role to change volume' };
+        const result = await this.setVolume(guildId, Math.min(100, ((await this.queueManager.getQueue(guildId))?.volume ?? 50) + 10));
+        return { message: result.message };
+      }
       default:
         return { message: '❌ Unknown action' };
     }

@@ -93,6 +93,8 @@ export default function TicketsPage() {
   const [confirmAction, setConfirmAction] = useState<{ type: string; id: string; label: string } | null>(null);
   const { toast } = useToast();
   const [ticketFilter, setTicketFilter] = useState<string>('all');
+  const [ticketPage, setTicketPage] = useState(0);
+  const TICKET_PAGE_SIZE = 50;
   const [transcriptEnabled, setTranscriptEnabled] = useState(false);
   const [dmTranscript, setDmTranscript] = useState(false);
   const [togglingTranscript, setTogglingTranscript] = useState(false);
@@ -110,7 +112,7 @@ export default function TicketsPage() {
   const loadTickets = useCallback(async () => {
     try {
       const statusParam = ticketFilter !== 'all' ? `&status=${ticketFilter}` : '';
-      const res = await fetch(`/api/tickets?limit=50${statusParam}`);
+      const res = await fetch(`/api/tickets?limit=${TICKET_PAGE_SIZE}&offset=${ticketPage * TICKET_PAGE_SIZE}${statusParam}`);
       const json = await res.json();
       if (json.success) {
         setTickets(json.data);
@@ -119,7 +121,7 @@ export default function TicketsPage() {
     } catch {
       setError('Failed to load tickets');
     }
-  }, [ticketFilter]);
+  }, [ticketFilter, ticketPage]);
 
   const loadGuildDefaults = useCallback(async () => {
     try {
@@ -812,7 +814,7 @@ export default function TicketsPage() {
             {['all', 'open', 'claimed', 'closed', 'deleted'].map((status) => (
               <button
                 key={status}
-                onClick={() => setTicketFilter(status)}
+                onClick={() => { setTicketFilter(status); setTicketPage(0); }}
                 className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
                   ticketFilter === status
                     ? 'bg-somni-pink text-white'
@@ -889,6 +891,61 @@ export default function TicketsPage() {
               </table>
             </div>
           )}
+
+          {/* Pagination */}
+          {ticketTotal > TICKET_PAGE_SIZE && (() => {
+            const totalPages = Math.ceil(ticketTotal / TICKET_PAGE_SIZE);
+            const startItem = ticketPage * TICKET_PAGE_SIZE + 1;
+            const endItem = Math.min((ticketPage + 1) * TICKET_PAGE_SIZE, ticketTotal);
+            return (
+              <div className="flex items-center justify-between border-t border-discord-border pt-4">
+                <span className="text-sm text-discord-text-muted">
+                  Showing {startItem}–{endItem} of {ticketTotal}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setTicketPage((p) => Math.max(0, p - 1))}
+                    disabled={ticketPage === 0}
+                    className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                    let pageNum: number;
+                    if (totalPages <= 7) {
+                      pageNum = i;
+                    } else if (ticketPage < 3) {
+                      pageNum = i;
+                    } else if (ticketPage > totalPages - 4) {
+                      pageNum = totalPages - 7 + i;
+                    } else {
+                      pageNum = ticketPage - 3 + i;
+                    }
+                    return (
+                      <button
+                        key={pageNum}
+                        onClick={() => setTicketPage(pageNum)}
+                        className={`rounded-md px-3 py-1.5 text-sm ${
+                          pageNum === ticketPage
+                            ? 'bg-somni-pink text-white'
+                            : 'border border-discord-border text-discord-text-secondary hover:bg-discord-bg-secondary'
+                        }`}
+                      >
+                        {pageNum + 1}
+                      </button>
+                    );
+                  })}
+                  <button
+                    onClick={() => setTicketPage((p) => Math.min(totalPages - 1, p + 1))}
+                    disabled={ticketPage >= totalPages - 1}
+                    className="rounded-md border border-discord-border px-3 py-1.5 text-sm text-discord-text-secondary hover:bg-discord-bg-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
