@@ -325,7 +325,7 @@ export class FishingManager {
     // (V48-M1) cooldown was already claimed via SET NX above
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch(() => {});
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
 
     return { embed, cooldownKey: cdKey };
   }
