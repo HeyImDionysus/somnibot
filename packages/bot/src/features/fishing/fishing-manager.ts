@@ -232,14 +232,23 @@ export class FishingManager {
       };
     }
 
-    // Cooldown check
+    // V48-M1: atomic SET NX cooldown claim. Without this, two concurrent
+    // /fish invocations from the same user both bypass the check before
+    // either writes the cooldown, doubling the catch (and the bait spend
+    // race that V47-M1 already locked down).
     const cdKey = `fishing:${this.guild.id}:${userId}`;
-    const onCooldown = await this.valkey.get(cdKey);
-    if (onCooldown) {
+    const claimed = await this.valkey.set(
+      cdKey,
+      '1',
+      'EX',
+      config.economy_fishing_cooldown_seconds,
+      'NX',
+    );
+    if (!claimed) {
       const ttl = await this.valkey.ttl(cdKey);
       return {
         embed: new EmbedBuilder()
-          .setDescription(`⏳ You can fish again <t:${Math.floor(Date.now() / 1000) + ttl}:R>.`)
+          .setDescription(`⏳ You can fish again <t:${Math.floor(Date.now() / 1000) + Math.max(1, ttl)}:R>.`)
           .setColor(0xffaa00),
         cooldownKey: '',
       };
@@ -302,8 +311,7 @@ export class FishingManager {
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
     }
 
-    // Set cooldown
-    await this.valkey.set(cdKey, '1', 'EX', config.economy_fishing_cooldown_seconds);
+    // (V48-M1) cooldown was already claimed via SET NX above
 
     // Quest progress
     getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch(() => {});
