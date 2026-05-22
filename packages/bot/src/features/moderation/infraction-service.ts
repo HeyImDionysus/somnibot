@@ -147,11 +147,13 @@ export async function getMemberInfractions(
 
 /**
  * Pardon an infraction (deactivate it).
+ * V51: added guildId scope to prevent IDOR.
  */
 export async function pardonInfraction(
   supabase: SupabaseClient,
   infractionId: string,
   pardonedBy: string,
+  guildId: string,
 ): Promise<boolean> {
   const { error } = await supabase
     .from('infractions')
@@ -161,7 +163,8 @@ export async function pardonInfraction(
       pardoned_by: pardonedBy,
       pardoned_at: new Date().toISOString(),
     })
-    .eq('id', infractionId);
+    .eq('id', infractionId)
+    .eq('guild_id', guildId);
 
   if (error) {
     console.error('[Moderation] Failed to pardon infraction:', error.message);
