@@ -86,8 +86,6 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Lint dashboard
         run: pnpm --filter @somnibot/dashboard lint
-        continue-on-error: true  # lint may not be fully configured yet
-
   # ──────────────────────────────────────────────────────────
   # Build — full production build
   # ──────────────────────────────────────────────────────────
