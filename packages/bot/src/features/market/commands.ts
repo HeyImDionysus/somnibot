@@ -21,7 +21,19 @@ export function buildMarketCommands(): Record<string, SlashCommandBuilder> {
         s
           .setName('browse')
           .setDescription('Browse market listings')
-          .addStringOption((o) => o.setName('search').setDescription('Search for an item').setRequired(false)),
+          .addStringOption((o) => o.setName('search').setDescription('Search for an item').setRequired(false))
+          .addStringOption((o) =>
+            o.setName('sort').setDescription('Sort order').setRequired(false)
+              .addChoices(
+                { name: 'Cheapest first', value: 'price_asc' },
+                { name: 'Most expensive', value: 'price_desc' },
+                { name: 'Newest', value: 'newest' },
+                { name: 'Name (A-Z)', value: 'name' },
+              ),
+          )
+          .addIntegerOption((o) => o.setName('min-price').setDescription('Minimum price per unit').setRequired(false).setMinValue(1))
+          .addIntegerOption((o) => o.setName('max-price').setDescription('Maximum price per unit').setRequired(false).setMinValue(1))
+          .addIntegerOption((o) => o.setName('page').setDescription('Page number').setRequired(false).setMinValue(1)),
       )
       .addSubcommand((s) =>
         s
@@ -60,7 +72,11 @@ export async function handleMarketCommand(
     }
     case 'browse': {
       const search = interaction.options.getString('search') ?? undefined;
-      const embed = await manager.browse(search);
+      const sort = (interaction.options.getString('sort') ?? 'price_asc') as 'price_asc' | 'price_desc' | 'newest' | 'name';
+      const minPrice = interaction.options.getInteger('min-price') ?? undefined;
+      const maxPrice = interaction.options.getInteger('max-price') ?? undefined;
+      const page = (interaction.options.getInteger('page') ?? 1) - 1; // 0-indexed internally
+      const embed = await manager.browse({ search, sort, minPrice, maxPrice, page });
       await interaction.editReply({ embeds: [embed] });
       break;
     }

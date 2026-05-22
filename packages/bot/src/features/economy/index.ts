@@ -6,6 +6,7 @@ import type { EconomyManager } from './economy-manager.js';
 export { EconomyManager } from './economy-manager.js';
 export type { EconomyConfig, WalletData, TransactionResult } from './economy-manager.js';
 export { buildEconomyCommands, handleEconomyCommand } from './commands.js';
+export { buildTimersCommand, handleTimersCommand } from './timers-command.js';
 
 // ── Module-level manager registry for cache invalidation ──
 

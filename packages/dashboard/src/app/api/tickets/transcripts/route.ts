@@ -52,12 +52,23 @@ export async function GET(req: NextRequest) {
   }
 
   // List transcripts (without html_content for performance)
-  const { data, error, count } = await supabase
+  const search = searchParams.get('search');
+  let query = supabase
     .from('ticket_transcripts')
     .select('id, guild_id, ticket_id, ticket_number, creator_id, closed_by_id, message_count, participant_ids, created_at', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
+
+  // V53 Phase 3: Search by ticket number
+  if (search) {
+    const parsed = parseInt(search, 10);
+    if (!isNaN(parsed)) {
+      query = query.eq('ticket_number', parsed);
+    }
+  }
+
+  const { data, error, count } = await query;
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
