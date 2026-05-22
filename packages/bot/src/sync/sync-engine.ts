@@ -319,7 +319,7 @@ async function repairDriftItem(
           parent: parentId,
           topic: chanDef.topic,
           reason: 'SomniBot sync auto-repair — recreated missing channel',
-        });
+        }) as { id: string };
 
         await supabase.from('discord_id_map').upsert({
           guild_id: guild.id,
