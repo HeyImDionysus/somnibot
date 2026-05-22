@@ -313,6 +313,7 @@ const giveawayAction = z.object({
   prize_license_count: z.number().int().min(1).max(100).optional(),
   status: z.string().max(32).optional(),
   winners: z.array(z.unknown()).optional(),
+  ended_at: z.string().datetime().optional().nullable(),
 });
 
 // ── Welcome/onboarding schemas ──────────────────────

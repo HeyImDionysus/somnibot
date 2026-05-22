@@ -49,7 +49,7 @@ export async function PUT(req: NextRequest) {
   ];
 
   for (const key of fields) {
-    if (key in body) allowed[key] = body[key];
+    if (key in body) allowed[key] = (body as Record<string, unknown>)[key];
   }
 
   const { error } = await supabase

@@ -155,7 +155,8 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   const parsed = await parseBody(request, schemas.setup.action);
   if (!parsed.ok) return parsed.response;
-  const body = parsed.data as Record<string, unknown> & { action: string };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = parsed.data as any;
   const action = body.action as string;
 
   // ── Maintenance unlock (requires authenticated owner) ───────

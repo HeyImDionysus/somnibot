@@ -178,7 +178,9 @@ export async function POST(req: NextRequest) {
 
   // 1. Auto-create PayPal Catalog Product
   let paypalProductId: string | null = null;
-  paypalProductId = await createPayPalCatalogProduct(name, description ?? null, type);
+  paypalProductId = type !== 'free'
+    ? await createPayPalCatalogProduct(name, description ?? null, type)
+    : null;
   if (!paypalProductId) {
     console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
   }
@@ -212,7 +214,7 @@ export async function POST(req: NextRequest) {
   const createdPlans: { id: string; paypalPlanId: string | null }[] = [];
 
   if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const planDef of planDefs) {
+    for (const planDef of planDefs as Array<Record<string, any>>) {
       const paypalPlanId = await createPayPalBillingPlan(
         paypalProductId,
         planDef.name ?? `${name} — ${planDef.interval_unit}`,
