@@ -21,10 +21,12 @@ export async function GET(
   const { id: productId } = await params;
   const supabase = createAdminSupabase();
 
+  // V51: scope by guild_id to prevent cross-guild file enumeration
   const { data, error } = await supabase
     .from('product_files')
     .select('*')
     .eq('product_id', productId)
+    .eq('guild_id', guildId)
     .order('sort_order', { ascending: true });
 
   if (error) {
@@ -44,6 +46,22 @@ export async function POST(
 
   const { id: productId } = await params;
   const supabase = createAdminSupabase();
+
+  // V51: verify product belongs to this guild before adding files
+  const { data: product } = await supabase
+    .from('products')
+    .select('id')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!product) {
+    return NextResponse.json(
+      { success: false, error: 'Product not found' },
+      { status: 404 },
+    );
+  }
+
   const parsed = await parseBody(req, schemas.productFile.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;

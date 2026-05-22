@@ -547,6 +547,7 @@ export async function handlePardonCommand(
     client.supabase,
     infractionId,
     interaction.user.id,
+    client.guildId,
   );
 
   if (!result) {

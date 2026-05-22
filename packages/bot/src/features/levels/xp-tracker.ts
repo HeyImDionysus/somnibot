@@ -206,7 +206,8 @@ export async function processMessageXp(
 
   // Atomically increment XP in the database to avoid race conditions
   // between concurrent message XP and voice XP grants.
-  const { data: result } = await supabase.rpc('increment_member_xp', {
+  // V51: check error to avoid silent fallback to unsafe read-then-write.
+  const { data: result, error: rpcError } = await supabase.rpc('increment_member_xp', {
     p_guild_id: guildId,
     p_member_id: userId,
     p_xp_amount: xpAmount,
@@ -214,8 +215,14 @@ export async function processMessageXp(
     p_voice_minutes: 0,
   });
 
-  // Fallback: if RPC doesn't exist, use the read-then-write approach
+  if (rpcError) {
+    console.error('[XP] increment_member_xp RPC failed:', rpcError.message);
+    return { granted: false, newXp: 0, oldLevel: 0, newLevel: 0, leveledUp: false };
+  }
+
+  // Fallback: RPC returned null (should not happen if migration is applied)
   if (!result) {
+    console.warn('[XP] increment_member_xp returned null — applying non-atomic fallback');
     const { data: existing } = await supabase
       .from('member_levels')
       .select('xp, level, total_messages')
@@ -289,7 +296,8 @@ export async function grantVoiceXp(
   const xpAmount = Math.round(amount * mult);
 
   // Atomically increment XP in the database to avoid race conditions
-  const { data: result } = await supabase.rpc('increment_member_xp', {
+  // V51: check error to avoid silent fallback to unsafe read-then-write.
+  const { data: result, error: rpcError } = await supabase.rpc('increment_member_xp', {
     p_guild_id: guildId,
     p_member_id: userId,
     p_xp_amount: xpAmount,
@@ -297,8 +305,14 @@ export async function grantVoiceXp(
     p_voice_minutes: config.voice_xp_interval_minutes,
   });
 
-  // Fallback: if RPC doesn't exist, use read-then-write
+  if (rpcError) {
+    console.error('[XP] increment_member_xp RPC failed (voice):', rpcError.message);
+    return { granted: false };
+  }
+
+  // Fallback: RPC returned null (should not happen if migration is applied)
   if (!result) {
+    console.warn('[XP] increment_member_xp returned null (voice) — applying non-atomic fallback');
     const { data: existing } = await supabase
       .from('member_levels')
       .select('xp, level, voice_minutes')

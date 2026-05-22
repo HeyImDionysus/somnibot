@@ -19,9 +19,21 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    await requirePermission('dashboard.manage_incidents');
+    const ctx = await requirePermission('dashboard.manage_incidents');
     const { id } = await params;
     const admin = createAdminSupabase();
+
+    // V51: verify incident belongs to this guild before returning events
+    const { data: incident } = await admin
+      .from('incidents')
+      .select('id')
+      .eq('id', id)
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
+
+    if (!incident) {
+      return NextResponse.json({ error: 'Incident not found' }, { status: 404 });
+    }
 
     const { data, error } = await admin
       .from('incident_events')
@@ -48,6 +60,18 @@ export async function POST(
     if (!parsed.ok) return parsed.response;
     const body = parsed.data;
     const admin = createAdminSupabase();
+
+    // V51: verify incident belongs to this guild before adding events
+    const { data: incident } = await admin
+      .from('incidents')
+      .select('id')
+      .eq('id', id)
+      .eq('guild_id', ctx.guildId)
+      .maybeSingle();
+
+    if (!incident) {
+      return NextResponse.json({ error: 'Incident not found' }, { status: 404 });
+    }
 
     const { data, error } = await admin
       .from('incident_events')

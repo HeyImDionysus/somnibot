@@ -28,10 +28,12 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // V51: scope by guild_id to prevent cross-guild file enumeration
   const { data, error } = await supabase
     .from('product_files')
     .select('*')
     .eq('product_id', productId)
+    .eq('guild_id', guildId)
     .order('sort_order', { ascending: true });
 
   if (error) {
