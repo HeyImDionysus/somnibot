@@ -519,9 +519,12 @@ async function handleSendEmbed(
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
 ): Promise<ActionResult> {
-  const embedId = payload.embed_id as string;
+  // V52-L5: the dashboard embeds/send route puts `embed_config_id` in the
+  // payload, but this handler was reading `embed_id` — accept both for
+  // backward-compat with any older queued rows.
+  const embedId = (payload.embed_config_id ?? payload.embed_id) as string;
   const channelId = payload.channel_id as string;
-  if (!embedId) return { success: false, error: 'Missing embed_id' };
+  if (!embedId) return { success: false, error: 'Missing embed_config_id / embed_id' };
   if (!channelId) return { success: false, error: 'Missing channel_id' };
 
   // Look up embed config
