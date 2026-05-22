@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState, useCallback } from 'react';
 import { cn } from '@/lib/utils/cn';
+import { GuildSelector } from '@/components/guild-selector';
 import { createClient } from '@/lib/supabase/client';
 import {
   LayoutDashboard,
@@ -83,6 +84,7 @@ const navigation: NavGroup[] = [
       { label: 'Channels', href: '/channels', icon: MessageSquare, requires: 'discord' },
       { label: 'Onboarding', href: '/onboarding', icon: Users, requires: 'discord' },
       { label: 'Welcome & Goodbye', href: '/welcome', icon: Sparkles, requires: 'discord' },
+      { label: 'Members', href: '/members', icon: Users, requires: 'discord' },
       { label: 'Sync', href: '/sync', icon: Zap, requires: 'discord' },
     ],
   },
@@ -248,6 +250,9 @@ export function Sidebar() {
         </div>
         <span className="text-base font-bold text-discord-text-primary">SomniBot</span>
       </div>
+
+      {/* Guild Selector (multi-guild — V53 Phase 4) */}
+      <GuildSelector />
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-2 py-3">

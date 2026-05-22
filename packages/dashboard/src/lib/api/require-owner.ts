@@ -65,15 +65,15 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     };
   }
 
-  // Step 3: Verify this Discord user owns the guild
+  // Step 3: Verify this Discord user owns at least one guild
+  // V53 Phase 4 (4.3): Multi-guild support — select active guild from cookie/header
   const admin = createAdminSupabase();
-  const { data: guild } = await admin
+  const { data: guilds } = await admin
     .from('guild')
     .select('id')
-    .eq('owner_discord_id', discordId)
-    .single();
+    .eq('owner_discord_id', discordId);
 
-  if (!guild) {
+  if (!guilds || guilds.length === 0) {
     return {
       ok: false,
       response: NextResponse.json(
@@ -83,12 +83,25 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     };
   }
 
+  // Determine active guild: check x-guild-id header, then cookie, then first guild
+  const { cookies, headers } = await import('next/headers');
+  const headerStore = await headers();
+  const cookieStore = await cookies();
+  const headerGuildId = headerStore.get('x-guild-id');
+  const cookieGuildId = cookieStore.get('active_guild_id')?.value;
+  const requestedGuildId = headerGuildId ?? cookieGuildId;
+
+  let activeGuild = guilds[0]!;
+  if (requestedGuildId && guilds.some(g => g.id === requestedGuildId)) {
+    activeGuild = guilds.find(g => g.id === requestedGuildId)!;
+  }
+
   return {
     ok: true,
     ctx: {
       userId: user.id,
       discordId,
-      guildId: guild.id,
+      guildId: activeGuild.id,
     },
   };
 }
