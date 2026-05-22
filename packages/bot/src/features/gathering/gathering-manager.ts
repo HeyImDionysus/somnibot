@@ -211,16 +211,36 @@ export class GatheringManager {
     const quantity = this.randomInt(picked.min_qty, picked.max_qty);
     const totalValue = picked.sell_value * quantity;
 
-    // Consume tool durability
+    // V53-M6: Consume tool durability — fail-closed so a failed decrement
+    // doesn't give a free gather (tool use without cost).
     if (toolResult.inventoryId) {
-      await this.consumeDurability(toolResult.inventoryId);
+      const durabilityOk = await this.consumeDurability(toolResult.inventoryId);
+      if (!durabilityOk) {
+        return {
+          embed: new EmbedBuilder()
+            .setDescription('❌ Failed to use your tool — please try again.')
+            .setColor(0xff0000),
+          result: null,
+          error: 'durability_failed',
+        };
+      }
     }
 
     // Cooldown already set at the top via SET PX NX (V49-M2).
 
-    // Give loot to inventory or add currency
+    // V53-M3: Give loot to inventory or add currency — check result
+    // so gathered items aren't silently lost on upsert failure.
     if (picked.gives_item_id) {
-      await this.addToInventory(userId, picked.gives_item_id, quantity);
+      const lootOk = await this.addToInventory(userId, picked.gives_item_id, quantity);
+      if (!lootOk) {
+        return {
+          embed: new EmbedBuilder()
+            .setDescription('❌ Failed to add loot to your inventory — please try again or contact an admin.')
+            .setColor(0xff0000),
+          result: null,
+          error: 'inventory_failed',
+        };
+      }
     } else {
       // V52-M1: check addToWallet return — if credit fails, tell the user
       // instead of silently swallowing the error (coins would be lost).
@@ -342,14 +362,21 @@ export class GatheringManager {
     return stillExists === true;
   }
 
-  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
+  // V53-M3: return boolean so callers can detect + handle upsert failures
+  // instead of silently losing gathered loot.
+  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<boolean> {
     // Atomic upsert — prevents TOCTOU race on inventory quantity
-    await this.supabase.rpc('economy_upsert_inventory', {
+    const { error } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
     });
+    if (error) {
+      console.error('[Gathering] addToInventory upsert failed:', error.message);
+      return false;
+    }
+    return true;
   }
 
   private async addToWallet(userId: string, amount: number): Promise<boolean> {

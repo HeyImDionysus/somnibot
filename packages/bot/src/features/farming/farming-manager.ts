@@ -307,9 +307,13 @@ export class FarmingManager {
       totalEarnings += crop.sell_price;
       harvestLines.push(`${crop.emoji} ${crop.name} — 💰 ${crop.sell_price.toLocaleString()}`);
 
-      // Return seeds to inventory if configured
+      // V53-M2: Return seeds to inventory — check result and warn user on failure
+      // so seed returns aren't silently lost.
       if (crop.seeds_returned > 0 && crop.seed_item_id) {
-        await this.addToInventory(userId, crop.seed_item_id, crop.seeds_returned);
+        const seedsOk = await this.addToInventory(userId, crop.seed_item_id, crop.seeds_returned);
+        if (!seedsOk) {
+          harvestLines.push(`⚠️ Failed to return ${crop.seeds_returned}x ${crop.name} seed(s) — please contact an admin`);
+        }
       }
     }
 
@@ -526,14 +530,21 @@ export class FarmingManager {
     return success === true;
   }
 
-  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
+  // V53-M2: return boolean so callers can detect + handle upsert failures
+  // instead of silently losing items (e.g. seed returns during harvest).
+  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<boolean> {
     // Atomic upsert — prevents TOCTOU race on inventory quantity
-    await this.supabase.rpc('economy_upsert_inventory', {
+    const { error } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
     });
+    if (error) {
+      console.error('[Farming] addToInventory upsert failed:', error.message);
+      return false;
+    }
+    return true;
   }
 
   // V49-L2: Return success/failure so callers can handle payout errors

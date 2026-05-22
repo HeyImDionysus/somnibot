@@ -204,14 +204,30 @@ export class HeistManager {
       return;
     }
 
-    // Add initiator as participant
+    // V53-M8: Add initiator as participant — check insert. If it fails,
+    // the heist exists but has no participant record for the starter.
+    // resolveHeist reads from the join table, so the initiator would be
+    // excluded from payouts. Refund and cancel the heist on failure.
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: initInsertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
       role,
     });
+    if (initInsertErr) {
+      console.error('[Heist] initiator participant insert failed, cancelling heist:', initInsertErr.message);
+      await (this.supabase as any).from('economy_heists')
+        .update({ status: 'failed' }).eq('id', heist.id);
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      }).catch((e: Error) => console.error('[Heist] CRITICAL: init insert + refund both failed:', e.message));
+      await interaction.reply({
+        content: '❌ Failed to start heist — your entry fee has been refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
 
     // Schedule resolution
     const timer = setTimeout(async () => {
@@ -301,25 +317,39 @@ export class HeistManager {
       return;
     }
 
-    // Add participant
+    // V53-M7: Add participant — check insert error. If the insert fails,
+    // refund the entry fee so the user isn't charged for a join that didn't
+    // stick. Previously the insert was fire-and-forget: a transient DB
+    // error would eat the fee and leave the user off the participant list.
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: insertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
       role,
     });
+    if (insertErr) {
+      console.error('[Heist] participant insert failed, refunding entry fee:', insertErr.message);
+      await (this.supabase as any).rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      }).catch((e: Error) => console.error('[Heist] CRITICAL: insert failed AND refund failed:', e.message));
+      await interaction.reply({
+        content: '❌ Failed to join the heist — your entry fee has been refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
 
-    // Atomic array_append to prevent TOCTOU race when multiple users join concurrently
-    await (this.supabase as any).rpc('array_append_heist_participant', {
+    // Atomic array_append to prevent TOCTOU race when multiple users join concurrently.
+    // V53-M7: remove unsafe stale-data fallback — if the RPC fails the
+    // participant is still in the join table (source of truth for
+    // resolveHeist), so the only impact is a stale embed count.
+    const { error: appendErr } = await (this.supabase as any).rpc('array_append_heist_participant', {
       p_heist_id: heist.id, p_user_id: userId,
-    }).catch(() => {
-      // Fallback: direct update (less safe but functional)
-      (this.supabase as any).from('economy_heists').update({
-        participants: [...(heist.participants as string[]), userId],
-        success_chance: Math.min(95, heist.success_chance + 7),
-      }).eq('id', heist.id);
     });
+    if (appendErr) {
+      console.warn('[Heist] array_append_heist_participant failed (participant join table is still authoritative):', appendErr.message);
+    }
 
     // Re-read actual participant count for accurate display
     const { count: crewCount } = await (this.supabase as any)

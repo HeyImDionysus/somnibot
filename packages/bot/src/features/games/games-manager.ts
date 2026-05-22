@@ -144,18 +144,23 @@ export class GamesManager {
     return ((current ?? 0) + amount) <= limit;
   }
 
-  private addDailyLoss(guildId: string, userId: string, amount: number): void {
+  // V53-L2: await the RPC so the daily loss is committed before the
+  // per-user game lock releases. Previously fire-and-forget — if the RPC
+  // failed the loss was never recorded and the user could exceed their
+  // daily limit. Still non-fatal (won't break game UX on error) but now
+  // guarantees the increment lands before the next game can start.
+  private async addDailyLoss(guildId: string, userId: string, amount: number): Promise<void> {
     if (amount <= 0) return;
-    // Fire-and-forget; failure to record a loss should never break the game UX.
-    (this.supabase as any).rpc('economy_increment_daily_loss', {
-      p_guild_id: guildId,
-      p_user_id: userId,
-      p_amount: amount,
-    }).then(({ error }: { error: unknown }) => {
+    try {
+      const { error } = await (this.supabase as any).rpc('economy_increment_daily_loss', {
+        p_guild_id: guildId,
+        p_user_id: userId,
+        p_amount: amount,
+      });
       if (error) console.error('[Games] economy_increment_daily_loss failed:', error);
-    }, (err: unknown) => {
+    } catch (err) {
       console.error('[Games] economy_increment_daily_loss threw:', err);
-    });
+    }
   }
 
   private async validateBet(
@@ -233,7 +238,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        this.addDailyLoss(guildId, userId, amount);
+        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle(`🪙 ${result}!`)
@@ -278,7 +283,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
+        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎰 Slots')
@@ -291,7 +296,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        this.addDailyLoss(guildId, userId, amount);
+        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎰 Slots')
@@ -336,7 +341,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        this.addDailyLoss(guildId, userId, amount);
+        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('✂️ Rock Paper Scissors').setDescription(`${desc}\n\nYou lost **${amount.toLocaleString()}** coins. 😢`).setColor(0xED4245)],
         });
@@ -373,7 +378,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        this.addDailyLoss(guildId, userId, amount);
+        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle('🎲 Dice Roll').setDescription(`You rolled **${playerRoll}** vs bot's **${botRoll}**\n\nYou lost **${amount.toLocaleString()}** coins. 😢`).setColor(0xED4245)],
         });
@@ -451,7 +456,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
+        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
       }
 
       const embed = new EmbedBuilder()
@@ -544,7 +549,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        this.addDailyLoss(guildId, userId, amount);
+        await this.addDailyLoss(guildId, userId, amount);
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('🎫 Scratch Card')
@@ -587,7 +592,7 @@ export class GamesManager {
           await interaction.reply({ content: '❌ Transaction failed — your balance was not changed.', ephemeral: true });
           return;
         }
-        if (net < 0) this.addDailyLoss(guildId, userId, Math.abs(net));
+        if (net < 0) await this.addDailyLoss(guildId, userId, Math.abs(net));
       }
 
       await interaction.reply({

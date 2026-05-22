@@ -230,7 +230,25 @@ export class CraftingManager {
           .setColor(0xff0000),
       };
     }
-    await this.addToInventory(userId, recipe.output_item_id, recipe.output_qty);
+    // V53-M1: check upsert result — if it fails, refund consumed materials
+    // so the user doesn't lose inputs with no output.
+    const outputOk = await this.addToInventory(userId, recipe.output_item_id, recipe.output_qty);
+    if (!outputOk) {
+      // Refund all consumed materials
+      for (const c of consumed) {
+        await this.supabase.rpc('economy_upsert_inventory', {
+          p_guild_id: this.guild.id,
+          p_user_id: userId,
+          p_item_id: c.itemId,
+          p_quantity: c.qty,
+        }).catch(() => {});
+      }
+      return {
+        embed: new EmbedBuilder()
+          .setDescription('❌ Failed to add crafted item to your inventory. Your materials have been returned.')
+          .setColor(0xff0000),
+      };
+    }
 
     // Cooldown already set at the top via SET PX NX (V49-M1).
 
@@ -377,14 +395,21 @@ export class CraftingManager {
     return { success: success === true, itemId: match.item_id as string };
   }
 
-  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<void> {
+  // V53-M1: return boolean so callers can detect + handle upsert failures
+  // instead of silently losing items.
+  private async addToInventory(userId: string, itemId: string, quantity: number): Promise<boolean> {
     // Atomic upsert — prevents TOCTOU race on inventory quantity
-    await this.supabase.rpc('economy_upsert_inventory', {
+    const { error } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
     });
+    if (error) {
+      console.error('[Crafting] addToInventory upsert failed:', error.message);
+      return false;
+    }
+    return true;
   }
 
   private formatTime(seconds: number): string {

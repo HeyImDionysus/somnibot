@@ -428,13 +428,26 @@ export class MarketManager {
 
     const row = cancelled[0] as { id: string; item_id: string; item_name: string; remaining: number };
 
-    // Return items to seller inventory atomically
-    await this.supabase.rpc('economy_upsert_inventory', {
+    // V53-M4: Return items to seller inventory — check the upsert result
+    // so items aren't silently lost on a DB failure. If return fails,
+    // revert the cancel so the listing stays active and the user can retry.
+    const { error: returnErr } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: row.item_id,
       p_quantity: row.remaining,
     });
+    if (returnErr) {
+      console.error('[Market] cancelListing inventory return failed, reverting cancel:', returnErr.message);
+      // Revert: flip back to 'active' so the user can retry
+      await this.supabase
+        .from('economy_market_listings')
+        .update({ status: 'active', cancelled_at: null })
+        .eq('id', row.id);
+      return new EmbedBuilder()
+        .setDescription('❌ Failed to return items to your inventory. Please try again.')
+        .setColor(0xff0000);
+    }
 
     return new EmbedBuilder()
       .setTitle('🗑️ Listing Cancelled')

@@ -1023,14 +1023,29 @@ export class EconomyManager {
       }
     }
 
-    // Add to inventory atomically (prevents TOCTOU on quantity)
-    await this.supabase.rpc('economy_upsert_inventory', {
+    // V53-M5: Add to inventory atomically — check the upsert result so the
+    // user doesn't pay without receiving the item. On failure, refund
+    // the wallet debit and restore stock.
+    const { error: invErr } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
       p_durability: item.durability,
     });
+    if (invErr) {
+      console.error('[Economy] buyItem inventory upsert failed, refunding:', invErr.message);
+      await this.creditWallet(userId, totalCost);
+      // Restore stock if it was decremented
+      if (item.stock !== null) {
+        await this.supabase.rpc('economy_increment_stock', {
+          p_item_id: itemId,
+          p_quantity: quantity,
+        }).catch(() => {});
+      }
+      const w = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: w, message: '❌ Failed to add item to your inventory. You have been refunded.' };
+    }
 
     // Grant role if applicable
     if (item.grant_role_id) {
