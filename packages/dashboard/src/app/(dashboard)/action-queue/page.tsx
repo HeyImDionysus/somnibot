@@ -130,7 +130,7 @@ export default function ActionQueuePage() {
   };
 
   if (loading && items.length === 0) {
-    return <DashboardSkeleton title="Action Queue" />;
+    return <DashboardSkeleton />;
   }
 
   return (
