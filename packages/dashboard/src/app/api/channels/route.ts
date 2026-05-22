@@ -9,6 +9,39 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+
+const channelCreate = z.object({
+  name: z.string().min(1).max(100).trim(),
+  isCategory: z.boolean().default(false),
+  type: z.number().int().min(0).max(15).default(0),
+  parentId: snowflake.optional().nullable(),
+  topic: z.string().max(1024).optional().nullable(),
+  nsfw: z.boolean().default(false),
+  slowmode: z.number().int().min(0).max(21600).default(0),
+  templateKey: z.string().max(128).optional(),
+});
+
+const channelUpdate = z.object({
+  channelId: snowflake,
+  name: z.string().min(1).max(100).trim().optional(),
+  topic: z.string().max(1024).optional().nullable(),
+  nsfw: z.boolean().optional(),
+  slowmode: z.number().int().min(0).max(21600).optional(),
+  parentId: snowflake.optional().nullable(),
+});
+
+const channelDelete = z.object({
+  isCategory: z.boolean().default(false),
+  channelId: snowflake.optional(),
+  categoryId: snowflake.optional(),
+}).refine(
+  (d) => d.isCategory ? !!d.categoryId : !!d.channelId,
+  { message: 'channelId or categoryId is required' },
+);
 
 
 // ============================================================
@@ -56,7 +89,9 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
+  const parsed = await parseBody(request, channelCreate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const admin = createAdminSupabase();
 
@@ -98,10 +133,9 @@ export async function PATCH(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  if (!body.channelId) {
-    return NextResponse.json({ error: 'Missing channelId' }, { status: 400 });
-  }
+  const parsed = await parseBody(request, channelUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const admin = createAdminSupabase();
 
@@ -140,16 +174,11 @@ export async function DELETE(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  const isCategory = body.isCategory ?? false;
+  const parsed = await parseBody(request, channelDelete);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
+  const isCategory = body.isCategory;
   const id = isCategory ? body.categoryId : body.channelId;
-
-  if (!id) {
-    return NextResponse.json(
-      { error: `Missing ${isCategory ? 'categoryId' : 'channelId'}` },
-      { status: 400 },
-    );
-  }
 
   const admin = createAdminSupabase();
 

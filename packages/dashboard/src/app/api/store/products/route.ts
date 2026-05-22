@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
 import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+import { parseBody, schemas } from '@/lib/api/validation';
 // ── PayPal Helpers ─────────────────────────────────────
 
 /**
@@ -149,7 +150,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.product.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     name,
@@ -265,7 +268,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.product.update);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { id, ...updates } = body;
 

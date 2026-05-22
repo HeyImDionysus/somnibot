@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -36,7 +37,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.moderation.rule);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const { name, type, config, action, mute_duration_minutes, exempt_roles, exempt_channels, log_to_mod_channel } = body;
 
@@ -86,7 +89,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.moderation.ruleUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   if (!body.id) {
     return NextResponse.json({ success: false, error: 'Missing rule id' }, { status: 400 });

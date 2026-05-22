@@ -14,6 +14,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { parseBody, schemas } from '@/lib/api/validation';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -41,17 +42,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { license_key?: string; product_id?: string; device_fingerprint?: string; device_name?: string; app_version?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { valid: false, status: 'revoked', error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { license_key, product_id, device_fingerprint, device_name, app_version } = body;
+  const parsed = await parseBody(req, schemas.licenseSdk.validate);
+  if (!parsed.ok) return parsed.response;
+  const { license_key, product_id, device_fingerprint, device_name, app_version } = parsed.data;
 
   if (!license_key || !product_id) {
     return NextResponse.json(

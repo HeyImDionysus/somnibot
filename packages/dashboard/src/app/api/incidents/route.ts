@@ -6,6 +6,31 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+
+const incidentCreate = z.object({
+  title: z.string().min(1).max(256).trim(),
+  description: z.string().max(4000).optional().nullable(),
+  severity: z.enum(['info', 'warning', 'critical']).default('warning'),
+  source: z.string().max(64).default('manual'),
+  source_ref_id: z.string().max(256).optional().nullable(),
+  assigned_to: snowflake.optional().nullable(),
+});
+
+const incidentUpdate = z.object({
+  id: z.string().uuid(),
+  status: z.enum(['open', 'investigating', 'identified', 'monitoring', 'resolved', 'closed']).optional(),
+  severity: z.enum(['info', 'warning', 'critical']).optional(),
+  assigned_to: snowflake.optional().nullable(),
+  impact_summary: z.string().max(4000).optional(),
+  root_cause: z.string().max(4000).optional(),
+  resolution: z.string().max(4000).optional(),
+  note: z.string().max(4000).optional(),
+  message: z.string().max(4000).optional(),
+});
 
 export async function GET(request: NextRequest) {
   try {
@@ -68,7 +93,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_incidents');
-    const body = await request.json();
+    const parsed = await parseBody(request, incidentCreate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     // Get next incident number (atomic sequence — no race condition)
@@ -113,7 +140,9 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_incidents');
-    const body = await request.json();
+    const parsed = await parseBody(request, incidentUpdate);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.data;
     const admin = createAdminSupabase();
 
     const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };

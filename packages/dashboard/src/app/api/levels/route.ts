@@ -10,6 +10,28 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+
+const levelsConfigUpdate = z.object({
+  levels_enabled: z.boolean().optional(),
+  xp_min: z.number().int().min(0).max(10000).optional(),
+  xp_max: z.number().int().min(0).max(10000).optional(),
+  xp_cooldown_seconds: z.number().int().min(0).max(3600).optional(),
+  voice_xp_enabled: z.boolean().optional(),
+  voice_xp_per_interval: z.number().int().min(0).max(1000).optional(),
+  voice_xp_interval_minutes: z.number().int().min(1).max(60).optional(),
+  xp_multiplier_mode: z.string().max(32).optional(),
+  xp_channel_mode: z.string().max(32).optional(),
+  xp_channel_list: z.array(snowflake).max(100).optional(),
+  level_up_channel_id: snowflake.optional().nullable(),
+  level_up_message: z.string().max(2000).optional(),
+  rank_card_accent_color: z.string().max(32).optional().nullable(),
+  rank_card_background: z.string().max(512).optional().nullable(),
+  no_xp_role_id: snowflake.optional().nullable(),
+});
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -76,30 +98,14 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-
-  const allowedFields = [
-    'levels_enabled',
-    'xp_min',
-    'xp_max',
-    'xp_cooldown_seconds',
-    'voice_xp_enabled',
-    'voice_xp_per_interval',
-    'voice_xp_interval_minutes',
-    'xp_multiplier_mode',
-    'xp_channel_mode',
-    'xp_channel_list',
-    'level_up_channel_id',
-    'level_up_message',
-    'rank_card_accent_color',
-    'rank_card_background',
-    'no_xp_role_id',
-  ];
+  const parsed = await parseBody(req, levelsConfigUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if (body[field] !== undefined) {
-      updates[field] = body[field];
+  for (const [key, val] of Object.entries(body)) {
+    if (val !== undefined) {
+      updates[key] = val;
     }
   }
 
@@ -127,7 +133,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.levelReward.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
   const type = body.type as string;
 
   if (type === 'reward') {

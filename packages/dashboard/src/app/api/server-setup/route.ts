@@ -7,6 +7,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const serverSetupSchema = z.object({
+  action: z.literal('confirm'),
+});
 
 
 export async function GET() {
@@ -77,11 +83,13 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
+  const parsed = await parseBody(request, serverSetupSchema);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
   const admin = createAdminSupabase();
 
   // Step 7: Confirm setup complete
-  if (body.action === 'confirm') {
+  {
     // Check that deployment actually happened
     const { data: desiredState } = await admin
       .from('guild_desired_state')

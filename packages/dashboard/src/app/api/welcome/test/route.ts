@@ -7,6 +7,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
+
+const welcomeTestSchema = z.object({
+  channel_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
+  type: z.enum(['welcome', 'goodbye']).default('welcome'),
+});
+
 export async function POST(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -14,31 +22,9 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  let body: { channel_id?: string; type?: 'welcome' | 'goodbye' };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json(
-      { success: false, error: 'Invalid request body' },
-      { status: 400 },
-    );
-  }
-
-  const { channel_id, type = 'welcome' } = body;
-
-  if (!channel_id) {
-    return NextResponse.json(
-      { success: false, error: 'channel_id is required' },
-      { status: 400 },
-    );
-  }
-
-  if (type !== 'welcome' && type !== 'goodbye') {
-    return NextResponse.json(
-      { success: false, error: 'type must be "welcome" or "goodbye"' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, welcomeTestSchema);
+  if (!parsed.ok) return parsed.response;
+  const { channel_id, type } = parsed.data;
 
   // Queue the action for the bot
   const { error: queueError } = await supabase

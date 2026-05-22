@@ -10,6 +10,22 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { parseBody, schemas } from '@/lib/api/validation';
+import { z } from 'zod';
+
+const snowflake = z.string().regex(/^\d{17,20}$/);
+const tempChannelUpdate = z.object({
+  id: z.string().uuid(),
+  hub_channel_id: snowflake.optional(),
+  category_id: snowflake.optional(),
+  naming_format: z.string().max(100).optional(),
+  default_user_limit: z.number().int().min(0).max(99).optional(),
+  default_bitrate: z.number().int().min(8000).max(384000).optional(),
+  keep_alive_minutes: z.number().int().min(0).max(1440).optional(),
+  allow_text_channel: z.boolean().optional(),
+  moderator_roles: z.array(snowflake).max(100).optional(),
+  active: z.boolean().optional(),
+});
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -36,7 +52,9 @@ export async function POST(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
+  const parsed = await parseBody(req, schemas.tempChannel.create);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const {
     hub_channel_id,
@@ -101,11 +119,9 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-  const body = await req.json();
-
-  if (!body.id) {
-    return NextResponse.json({ success: false, error: 'Missing hub id' }, { status: 400 });
-  }
+  const parsed = await parseBody(req, tempChannelUpdate);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const allowedFields = [
     'hub_channel_id',
