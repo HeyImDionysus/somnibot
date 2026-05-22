@@ -880,8 +880,12 @@ export class MusicPlayerManager {
     this.autoLeaveTimers.set(
       guildId,
       setTimeout(async () => {
-        console.log(`[Music] Auto-leaving voice in guild ${guildId} (empty channel timeout)`);
-        await this.stop(guildId);
+        try {
+          console.log(`[Music] Auto-leaving voice in guild ${guildId} (empty channel timeout)`);
+          await this.stop(guildId);
+        } catch (err) {
+          console.error(`[Music] Auto-leave error for guild ${guildId}:`, err);
+        }
       }, this.config.autoLeaveTimeout),
     );
   }
@@ -899,8 +903,12 @@ export class MusicPlayerManager {
     this.inactivityTimers.set(
       guildId,
       setTimeout(async () => {
-        console.log(`[Music] Auto-destroying player in guild ${guildId} (inactivity timeout)`);
-        await this.stop(guildId);
+        try {
+          console.log(`[Music] Auto-destroying player in guild ${guildId} (inactivity timeout)`);
+          await this.stop(guildId);
+        } catch (err) {
+          console.error(`[Music] Inactivity auto-stop error for guild ${guildId}:`, err);
+        }
       }, this.config.inactivityTimeout),
     );
   }

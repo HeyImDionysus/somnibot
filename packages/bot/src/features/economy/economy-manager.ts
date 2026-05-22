@@ -890,11 +890,18 @@ export class EconomyManager {
         message: `${cfg.currency_emoji} You robbed <@${victimId}> and stole **${stolen.toLocaleString()} ${cfg.currency_name}**!`,
       };
     } else {
-      // Fail — pay fine to victim
+      // V53-M2: Fail — pay fine to victim. Check debit+credit to avoid coins vanishing.
       const fine = Math.floor(robberWallet.wallet * (cfg.economy_rob_fine_pct / 100));
       if (fine > 0) {
-        await this.debitWallet(robberId, fine);
-        await this.creditWallet(victimId, fine);
+        const fineDebited = await this.debitWallet(robberId, fine);
+        if (fineDebited) {
+          const fineCredited = await this.creditWallet(victimId, fine);
+          if (!fineCredited) {
+            // Credit failed — refund the robber so coins aren't destroyed
+            console.error(`[Economy] rob() fine credit to victim ${victimId} failed — refunding robber ${robberId}`);
+            await this.creditWallet(robberId, fine);
+          }
+        }
         await this.recordTransaction(robberId, 'rob_fail', -fine, (await this.getOrCreateWallet(robberId)).wallet, `Failed robbery on <@${victimId}>`);
       }
 
@@ -921,11 +928,17 @@ export class EconomyManager {
     const wallet = await this.getOrCreateWallet(userId);
     const newState = !wallet.passive;
 
-    await this.supabase
+    // V53-M3: check update result — surface error if DB write fails
+    const { error: passiveErr } = await this.supabase
       .from('economy_wallets')
       .update({ passive: newState, updated_at: new Date().toISOString() })
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId);
+
+    if (passiveErr) {
+      console.error('[Economy] togglePassive update failed:', passiveErr.message);
+      return { enabled: !newState, message: '❌ Failed to toggle passive mode. Please try again.' };
+    }
 
     return {
       enabled: newState,
@@ -1023,14 +1036,33 @@ export class EconomyManager {
       }
     }
 
-    // Add to inventory atomically (prevents TOCTOU on quantity)
-    await this.supabase.rpc('economy_upsert_inventory', {
+    // V53-C5: Add to inventory — check result, refund payment + restore stock on failure
+    const { error: invErr } = await this.supabase.rpc('economy_upsert_inventory', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_item_id: itemId,
       p_quantity: quantity,
       p_durability: item.durability,
     });
+    if (invErr) {
+      console.error('[Economy] buyItem inventory upsert failed:', invErr.message);
+      // Refund payment
+      await this.creditWallet(userId, totalCost);
+      // Restore stock if limited
+      if (item.stock != null) {
+        await this.supabase.rpc('economy_upsert_inventory', {
+          p_guild_id: this.guild.id,
+          p_user_id: 'shop',
+          p_item_id: itemId,
+          p_quantity: quantity,
+        }).catch((err: unknown) => {
+          // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
+          console.error(`[Economy] CRITICAL: buyItem stock restore failed for item ${itemId} qty ${quantity}:`, err);
+        });
+      }
+      const w = await this.getOrCreateWallet(userId);
+      return { success: false, amount: 0, balance: w, message: '❌ Failed to add item to inventory. You have been refunded.' };
+    }
 
     // Grant role if applicable
     if (item.grant_role_id) {
@@ -1103,10 +1135,21 @@ export class EconomyManager {
     }
 
     // Credit wallet — V50-L2: handle null (RPC failure)
+    // V53-M4: refund items back to inventory if credit fails
     const updated = await this.creditWallet(userId, totalValue);
     if (!updated) {
+      // Restore the decremented items
+      await this.supabase.rpc('economy_upsert_inventory', {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+        p_item_id: itemId,
+        p_quantity: quantity,
+      }).catch((err: unknown) => {
+        // V53-L1: Log item restore failures — if this fails, items are permanently lost
+        console.error(`[Economy] CRITICAL: sellItem item restore failed for user ${userId}, item ${itemId} qty ${quantity}:`, err);
+      });
       const wallet = await this.getOrCreateWallet(userId);
-      return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit sale proceeds. Please try again.' };
+      return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit sale proceeds. Your items have been returned.' };
     }
 
     await this.recordTransaction(userId, 'shop_sell', totalValue, updated.wallet, `Sold ${quantity}x ${item.name}`);
@@ -1165,14 +1208,30 @@ export class EconomyManager {
   // ── Leaderboard ─────────────────────────────────────────
 
   async getLeaderboard(limit: number = 10): Promise<Array<{ user_id: string; net_worth: number; wallet: number; bank: number }>> {
-    // Fetch extra rows to account for users with high bank but low wallet,
-    // then sort by net_worth (wallet + bank) and take top N.
-    const fetchLimit = Math.max(limit * 5, 50);
+    // V53-M2: Use RPC for accurate server-side net_worth ranking.
+    // Falls back to client-side sort if RPC doesn't exist yet.
+    const { data: rpcData, error: rpcError } = await this.supabase
+      .rpc('economy_leaderboard', {
+        p_guild_id: this.guild.id,
+        p_limit: limit,
+      });
+
+    if (!rpcError && rpcData) {
+      return (rpcData as Array<Record<string, unknown>>).map((row) => ({
+        user_id: row.user_id as string,
+        net_worth: row.net_worth as number,
+        wallet: row.wallet as number,
+        bank: row.bank as number,
+      }));
+    }
+
+    // Fallback: fetch all wallets and sort client-side (covers pre-migration state)
     const { data } = await this.supabase
       .from('economy_wallets')
       .select('user_id, wallet, bank')
       .eq('guild_id', this.guild.id)
-      .limit(fetchLimit);
+      .order('wallet', { ascending: false })
+      .limit(500);
 
     return (data ?? []).map((row: Record<string, unknown>) => ({
       user_id: row.user_id as string,
