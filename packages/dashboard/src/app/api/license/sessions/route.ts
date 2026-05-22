@@ -20,22 +20,25 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing key_id' }, { status: 400 });
   }
 
-  // Get license config for max_devices
+  // V47-C2: only allow listing sessions for keys in the caller's guild.
   const { data: licenseKey } = await supabase
     .from('license_keys')
     .select('product_id')
     .eq('id', keyId)
-    .single();
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (!licenseKey) {
+    return NextResponse.json({ success: false, error: 'License key not found' }, { status: 404 });
+  }
 
   let maxDevices = 3;
-  if (licenseKey) {
-    const { data: config } = await supabase
-      .from('product_license_config')
-      .select('max_devices')
-      .eq('product_id', licenseKey.product_id)
-      .maybeSingle();
-    if (config) maxDevices = config.max_devices;
-  }
+  const { data: config } = await supabase
+    .from('product_license_config')
+    .select('max_devices')
+    .eq('product_id', licenseKey.product_id)
+    .maybeSingle();
+  if (config) maxDevices = config.max_devices;
 
   const { data: sessions, error } = await supabase
     .from('license_sessions')

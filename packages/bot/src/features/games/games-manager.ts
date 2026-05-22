@@ -65,39 +65,17 @@ function formatHand(cards: Card[]): string {
 export class GamesManager {
   private supabase: SupabaseClient;
   private configCache = new Map<string, DbGuildConfig>();
-  private dailyLosses = new Map<string, number>(); // `guildId:userId` → today's losses
-  private dailyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase as any;
-    this.scheduleDailyLossReset();
   }
 
-  /** Schedule daily loss map reset at next midnight UTC, then every 24h. */
-  private scheduleDailyLossReset(): void {
-    const now = new Date();
-    const nextMidnight = new Date(now);
-    nextMidnight.setUTCHours(24, 0, 0, 0);
-    const msUntilMidnight = nextMidnight.getTime() - now.getTime();
-
-    this.dailyResetTimer = setTimeout(() => {
-      this.dailyLosses.clear();
-      console.log('[Games] Daily loss limits reset (midnight UTC)');
-      // Then repeat every 24 hours
-      this.dailyResetTimer = setInterval(() => {
-        this.dailyLosses.clear();
-        console.log('[Games] Daily loss limits reset (midnight UTC)');
-      }, 24 * 60 * 60 * 1000) as unknown as ReturnType<typeof setTimeout>;
-    }, msUntilMidnight);
-  }
-
-  stopDailyResetTimer(): void {
-    if (this.dailyResetTimer) {
-      clearTimeout(this.dailyResetTimer);
-      clearInterval(this.dailyResetTimer);
-      this.dailyResetTimer = null;
-    }
-  }
+  /**
+   * V47-M4: daily loss counters live in `economy_daily_losses` (keyed by
+   * UTC date). The previous in-memory Map reset on every bot restart,
+   * letting users bypass the daily loss cap.
+   */
+  stopDailyResetTimer(): void { /* legacy no-op — kept for callers */ }
 
   clearCache(): void { this.configCache.clear(); }
 
@@ -140,17 +118,36 @@ export class GamesManager {
     return true;
   }
 
-  private checkDailyLimit(guildId: string, userId: string, config: DbGuildConfig, amount: number): boolean {
+  // V47-M4: DB-backed daily loss tracking (survives bot restarts).
+  private async checkDailyLimit(
+    guildId: string,
+    userId: string,
+    config: DbGuildConfig,
+    amount: number,
+  ): Promise<boolean> {
     const limit = config.economy_daily_loss_limit ?? 0;
     if (limit <= 0) return true; // no limit
-    const key = `${guildId}:${userId}`;
-    const current = this.dailyLosses.get(key) ?? 0;
-    return (current + amount) <= limit;
+    // p_amount: 0 → read current total without incrementing
+    const { data: current } = await (this.supabase as any).rpc('economy_increment_daily_loss', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_amount: 0,
+    });
+    return ((current ?? 0) + amount) <= limit;
   }
 
   private addDailyLoss(guildId: string, userId: string, amount: number): void {
-    const key = `${guildId}:${userId}`;
-    this.dailyLosses.set(key, (this.dailyLosses.get(key) ?? 0) + amount);
+    if (amount <= 0) return;
+    // Fire-and-forget; failure to record a loss should never break the game UX.
+    (this.supabase as any).rpc('economy_increment_daily_loss', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_amount: amount,
+    }).then(({ error }: { error: unknown }) => {
+      if (error) console.error('[Games] economy_increment_daily_loss failed:', error);
+    }, (err: unknown) => {
+      console.error('[Games] economy_increment_daily_loss threw:', err);
+    });
   }
 
   private async validateBet(
@@ -180,7 +177,7 @@ export class GamesManager {
       await interaction.reply({ content: `❌ You only have **${balance.toLocaleString()}** coins.`, ephemeral: true });
       return null;
     }
-    if (!this.checkDailyLimit(guildId, userId, config, amount)) {
+    if (!(await this.checkDailyLimit(guildId, userId, config, amount))) {
       await interaction.reply({ content: '❌ You\'ve hit your daily loss limit. Try again tomorrow!', ephemeral: true });
       return null;
     }
