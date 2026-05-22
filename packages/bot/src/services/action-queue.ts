@@ -854,10 +854,35 @@ async function recoverStaleActions(
   const rows: Array<{ id: string; action: string; was_failed: boolean }> = recovered ?? [];
   if (rows.length === 0) return;
 
-  const failedCount = rows.filter((r) => r.was_failed).length;
+  const failedRows = rows.filter((r) => r.was_failed);
+  const failedCount = failedRows.length;
   const requeuedCount = rows.length - failedCount;
   if (failedCount > 0) {
     console.warn(`[ActionQueue] DLQ: ${failedCount} action(s) failed after exhausting retries`);
+    // V53 Phase 2: Write failed actions to DLQ table for dashboard visibility
+    for (const row of failedRows) {
+      try {
+        // Fetch full action row for payload + error
+        const { data: fullRow } = await supabase
+          .from('bot_action_queue')
+          .select('action, payload, error_message, retry_count')
+          .eq('id', row.id)
+          .maybeSingle();
+        if (fullRow) {
+          await supabase.from('action_queue_dlq').insert({
+            guild_id: guild.id,
+            action: fullRow.action,
+            payload: fullRow.payload ?? {},
+            error_message: fullRow.error_message ?? 'Unknown error after max retries',
+            retry_count: fullRow.retry_count ?? 0,
+            max_retries: ACTION_QUEUE_MAX_RETRIES,
+            original_id: row.id,
+          });
+        }
+      } catch (dlqErr) {
+        console.error(`[ActionQueue] Failed to write DLQ entry for ${row.id}:`, dlqErr);
+      }
+    }
   }
   if (requeuedCount > 0) {
     console.log(`[ActionQueue] Re-queued ${requeuedCount} stale action(s) for processing`);

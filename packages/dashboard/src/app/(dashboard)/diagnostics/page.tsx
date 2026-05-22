@@ -33,6 +33,7 @@ interface DiagnosticsData {
     guildMemberCount: number;
     activeVoiceConnections: number;
     snapshotAt: string | null;
+    staleSecs: number | null;
   };
   lavalink: {
     nodes: Array<{ name: string; connected: boolean; players: number }>;
@@ -59,6 +60,8 @@ interface DiagnosticsData {
   };
   automations: { activeCount: number };
   scheduledMessages: { activeCount: number };
+  dlq: { pendingCount: number };
+  healthMetrics: Record<string, Array<{ value: number; time: string }>>;
 }
 
 interface WebhookEvent {
@@ -100,6 +103,60 @@ function formatDate(ts: string | null): string {
 function StatusDot({ ok }: { ok: boolean }) {
   return (
     <span className={`inline-block h-2.5 w-2.5 rounded-full ${ok ? 'bg-green-500' : 'bg-red-500'}`} />
+  );
+}
+
+/**
+ * Sparkline — a tiny inline SVG chart for latency trends.
+ */
+function Sparkline({
+  data,
+  color = '#5865f2',
+  width = 200,
+  height = 40,
+}: {
+  data: number[];
+  color?: string;
+  width?: number;
+  height?: number;
+}) {
+  if (data.length < 2) {
+    return <span className="text-xs text-discord-text-muted">Collecting data…</span>;
+  }
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const padding = 2;
+  const usableH = height - padding * 2;
+  const step = (width - padding * 2) / (data.length - 1);
+
+  const points = data.map((v, i) => {
+    const x = padding + i * step;
+    const y = padding + usableH - ((v - min) / range) * usableH;
+    return `${x},${y}`;
+  });
+
+  const avg = Math.round(data.reduce((a, b) => a + b, 0) / data.length * 100) / 100;
+  const latest = data[data.length - 1];
+
+  return (
+    <div className="flex items-center gap-3">
+      <svg width={width} height={height} className="shrink-0">
+        <polyline
+          points={points.join(' ')}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <div className="text-xs text-discord-text-muted whitespace-nowrap">
+        <span className="text-discord-text-secondary font-medium">{latest?.toFixed(1)}ms</span>
+        {' '}(avg {avg}ms)
+      </div>
+    </div>
   );
 }
 
@@ -443,8 +500,50 @@ export default function DiagnosticsPage() {
         </div>
       </div>
 
+      {/* V53 Phase 2: Latency sparklines */}
+      {diag?.healthMetrics && Object.keys(diag.healthMetrics).length > 0 && (
+        <div>
+          <h2 className="text-lg font-semibold text-discord-text-primary mb-4">Latency Trends (24h)</h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {diag.healthMetrics.db_latency && (
+              <div className="rounded-lg bg-discord-bg-secondary p-4">
+                <h3 className="text-xs font-semibold uppercase text-discord-text-muted mb-2">
+                  Database Round-trip
+                </h3>
+                <Sparkline
+                  data={diag.healthMetrics.db_latency.map((m) => m.value)}
+                  color="#43b581"
+                />
+              </div>
+            )}
+            {diag.healthMetrics.valkey_latency && (
+              <div className="rounded-lg bg-discord-bg-secondary p-4">
+                <h3 className="text-xs font-semibold uppercase text-discord-text-muted mb-2">
+                  Valkey Ping
+                </h3>
+                <Sparkline
+                  data={diag.healthMetrics.valkey_latency.map((m) => m.value)}
+                  color="#faa61a"
+                />
+              </div>
+            )}
+            {diag.healthMetrics.ws_ping && (
+              <div className="rounded-lg bg-discord-bg-secondary p-4">
+                <h3 className="text-xs font-semibold uppercase text-discord-text-muted mb-2">
+                  Discord WebSocket
+                </h3>
+                <Sparkline
+                  data={diag.healthMetrics.ws_ping.map((m) => m.value)}
+                  color="#5865f2"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Stats row */}
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-4">
         <div className="rounded-lg bg-discord-bg-secondary p-4 text-center">
           <p className="text-2xl font-bold text-discord-text-primary">{diag?.automations.activeCount ?? 0}</p>
           <p className="text-sm text-discord-text-muted">Active Automations</p>
@@ -456,6 +555,12 @@ export default function DiagnosticsPage() {
         <div className="rounded-lg bg-discord-bg-secondary p-4 text-center">
           <p className="text-2xl font-bold text-discord-text-primary">{diag?.webhooks.total ?? 0}</p>
           <p className="text-sm text-discord-text-muted">Recent Webhooks</p>
+        </div>
+        <div className="rounded-lg bg-discord-bg-secondary p-4 text-center">
+          <p className={`text-2xl font-bold ${(diag?.dlq?.pendingCount ?? 0) > 0 ? 'text-red-400' : 'text-discord-text-primary'}`}>
+            {diag?.dlq?.pendingCount ?? 0}
+          </p>
+          <p className="text-sm text-discord-text-muted">DLQ Pending</p>
         </div>
       </div>
 
