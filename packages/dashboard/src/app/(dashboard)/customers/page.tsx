@@ -104,8 +104,23 @@ export default function CustomersPage() {
   const [timelineLoading, setTimelineLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [activeTab, setActiveTab] = useState<'timeline' | 'commerce' | 'support' | 'moderation'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'commerce' | 'support' | 'moderation' | 'sessions'>('timeline');
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+
+  // V53 Phase 3 (1.9): Portal sessions
+  interface PortalSession {
+    id: string;
+    customer_id: string;
+    discord_id: string;
+    ip_address: string | null;
+    user_agent: string | null;
+    created_at: string;
+    last_used_at: string | null;
+    expires_at: string;
+    revoked: boolean;
+  }
+  const [sessions, setSessions] = useState<PortalSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
 
   const fetchCustomers = useCallback(async () => {
     try {
@@ -136,6 +151,46 @@ export default function CustomersPage() {
       setTimelineLoading(false);
     }
   }, []);
+
+  const fetchSessions = useCallback(async (customerId: string) => {
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(`/api/portal/sessions?customer_id=${customerId}`);
+      const json = await res.json();
+      if (json.success) setSessions(json.data ?? []);
+    } catch (err) {
+      console.error('Failed to load sessions:', err);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  const revokeSession = async (customerId: string, sessionId?: string) => {
+    try {
+      const res = await fetch('/api/portal/sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          sessionId
+            ? { customer_id: customerId, session_id: sessionId }
+            : { customer_id: customerId, revoke_all: true },
+        ),
+      });
+      const json = await res.json();
+      if (json.success) {
+        await fetchSessions(customerId);
+      }
+    } catch (err) {
+      console.error('Failed to revoke session:', err);
+    }
+  };
+
+  // Fetch sessions when sessions tab is activated
+  useEffect(() => {
+    if (activeTab === 'sessions' && selectedId) {
+      fetchSessions(selectedId);
+    }
+  }, [activeTab, selectedId, fetchSessions]);
 
   useEffect(() => {
     fetchCustomers();
@@ -257,6 +312,7 @@ export default function CustomersPage() {
                 { key: 'commerce', label: 'Commerce', icon: '💰' },
                 { key: 'support', label: 'Support', icon: '🎫' },
                 { key: 'moderation', label: 'Moderation', icon: '🛡️' },
+                { key: 'sessions', label: 'Sessions', icon: '🔑' },
               ] as const).map((tab) => (
                 <button
                   key={tab.key}
@@ -281,34 +337,92 @@ export default function CustomersPage() {
               ))}
             </div>
 
-            {/* Timeline feed */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {filteredTimeline.length === 0 ? (
-                <p className="text-discord-text-muted text-sm text-center mt-8">
-                  No events in this category
-                </p>
-              ) : (
-                filteredTimeline.map((event) => (
-                  <div
-                    key={event.id}
-                    className={`bg-discord-secondary rounded-lg p-3 border-l-4 ${categoryColor(event.category)} hover:bg-discord-tertiary transition-colors`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-2">
-                        <span className="text-base mt-0.5">{categoryIcon(event.category)}</span>
-                        <div>
-                          <p className="text-sm font-medium text-white">{event.title}</p>
-                          <p className="text-xs text-discord-text-muted mt-0.5">{event.description}</p>
+            {/* Sessions tab — V53 Phase 3 (1.9) */}
+            {activeTab === 'sessions' ? (
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-discord-text-muted">
+                    {sessions.length} active session{sessions.length !== 1 ? 's' : ''} (max 3 concurrent)
+                  </p>
+                  {sessions.length > 0 && (
+                    <button
+                      onClick={() => revokeSession(selectedId!)}
+                      className="rounded-md bg-red-500/10 border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors"
+                    >
+                      Revoke All
+                    </button>
+                  )}
+                </div>
+                {sessionsLoading ? (
+                  <p className="text-discord-text-muted text-sm text-center mt-8 animate-pulse">Loading sessions...</p>
+                ) : sessions.length === 0 ? (
+                  <p className="text-discord-text-muted text-sm text-center mt-8">No active sessions</p>
+                ) : (
+                  sessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className="bg-discord-secondary rounded-lg p-4 border border-discord-border"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-white">
+                              {session.ip_address || 'Unknown IP'}
+                            </span>
+                            <span className="text-xs text-discord-text-muted bg-discord-bg-tertiary rounded px-2 py-0.5">
+                              {session.id.slice(0, 8)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-discord-text-muted truncate max-w-md">
+                            {session.user_agent || 'Unknown device'}
+                          </p>
+                          <div className="flex gap-4 text-xs text-discord-text-muted">
+                            <span>Created: {formatDateTime(session.created_at)}</span>
+                            <span>Last used: {session.last_used_at ? formatDateTime(session.last_used_at) : 'Never'}</span>
+                            <span>Expires: {formatDateTime(session.expires_at)}</span>
+                          </div>
                         </div>
+                        <button
+                          onClick={() => revokeSession(selectedId!, session.id)}
+                          className="rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
+                        >
+                          Revoke
+                        </button>
                       </div>
-                      <span className="text-xs text-discord-text-muted whitespace-nowrap ml-4">
-                        {formatDateTime(event.timestamp)}
-                      </span>
                     </div>
-                  </div>
-                ))
-              )}
-            </div>
+                  ))
+                )}
+              </div>
+            ) : (
+              /* Timeline feed */
+              <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                {filteredTimeline.length === 0 ? (
+                  <p className="text-discord-text-muted text-sm text-center mt-8">
+                    No events in this category
+                  </p>
+                ) : (
+                  filteredTimeline.map((event) => (
+                    <div
+                      key={event.id}
+                      className={`bg-discord-secondary rounded-lg p-3 border-l-4 ${categoryColor(event.category)} hover:bg-discord-tertiary transition-colors`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-2">
+                          <span className="text-base mt-0.5">{categoryIcon(event.category)}</span>
+                          <div>
+                            <p className="text-sm font-medium text-white">{event.title}</p>
+                            <p className="text-xs text-discord-text-muted mt-0.5">{event.description}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs text-discord-text-muted whitespace-nowrap ml-4">
+                          {formatDateTime(event.timestamp)}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </>
         ) : null}
       </div>

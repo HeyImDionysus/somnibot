@@ -47,6 +47,7 @@ import {
   PawPrint,
   Award,
   Pickaxe,
+  BookOpen,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -116,6 +117,7 @@ const navigation: NavGroup[] = [
       { label: 'Pets', href: '/economy/pets', icon: PawPrint, requires: 'discord' },
       { label: 'Quests', href: '/economy/quests', icon: ScrollText, requires: 'discord' },
       { label: 'Achievements', href: '/economy/achievements', icon: Award, requires: 'discord' },
+      { label: 'Tutorial', href: '/tutorial', icon: BookOpen, requires: 'discord' },
     ],
   },
   {

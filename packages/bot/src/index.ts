@@ -28,6 +28,8 @@ import { buildPurgeCommand } from './features/moderation/purge-command.js';
 import { buildXpAdminCommands } from './features/levels/admin-commands.js';
 import { buildHelpCommand } from './features/help/index.js';
 import { buildForgetMeCommand } from './features/privacy/forgetme-command.js';
+import { buildMyDataCommand } from './features/account/mydata-command.js';
+import { buildTutorialCommand } from './features/tutorial/tutorial-command.js';
 import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
 import { ConfigWatcher } from './services/config-watcher.js';
 import { OwnerNotificationService } from './services/owner-notifications.js';
@@ -43,7 +45,7 @@ import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { REST, Routes, EmbedBuilder, type RESTPostAPIChatInputApplicationCommandsJSONBody, type RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
-import { EconomyManager, buildEconomyCommands, registerEconomyManager } from './features/economy/index.js';
+import { EconomyManager, buildEconomyCommands, registerEconomyManager, buildTimersCommand } from './features/economy/index.js';
 import { GatheringManager, buildGatheringCommands, registerGatheringManager } from './features/gathering/index.js';
 import { CraftingManager, buildCraftingCommands, registerCraftingManager } from './features/crafting/index.js';
 import { FarmingManager, buildFarmingCommands, registerFarmingManager } from './features/farming/index.js';
@@ -485,7 +487,10 @@ async function main(): Promise<void> {
           for (const cmd of Object.values(econCmds)) {
             allCommands.push(cmd.toJSON());
           }
-          console.log(`[Boot] ✅ Economy system started + ${Object.keys(econCmds).length} economy commands queued`);
+          // V53 Phase 3: /timers command (always available when economy is on)
+          const timersCmd = buildTimersCommand();
+          allCommands.push(timersCmd.toJSON());
+          console.log(`[Boot] ✅ Economy system started + ${Object.keys(econCmds).length + 1} economy commands queued`);
         } else {
           console.log('[Boot] ⏸️  Economy system disabled in config');
         }
@@ -931,7 +936,13 @@ async function main(): Promise<void> {
         allCommands.push(setupCmd.toJSON());
         const forgetMeCmd = buildForgetMeCommand();
         allCommands.push(forgetMeCmd.toJSON());
-        console.log('[Boot] ✅ /help, /setup, and /forgetme commands queued');
+        // V53 Phase 3: /mydata command
+        const myDataCmd = buildMyDataCommand();
+        allCommands.push(myDataCmd.toJSON());
+        // V53 Phase 3: /tutorial command
+        const tutorialCmd = buildTutorialCommand();
+        allCommands.push(tutorialCmd.toJSON());
+        console.log('[Boot] ✅ /help, /setup, /forgetme, /mydata, and /tutorial commands queued');
 
         // 14c: Queue context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
         const contextMenuCmds = buildContextMenuCommands();

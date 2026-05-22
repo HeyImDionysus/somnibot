@@ -91,8 +91,8 @@ export function buildNowPlayingEmbed(
     embed.setFooter({ text: `Queue: ${remaining} track${remaining === 1 ? '' : 's'} remaining` });
   }
 
-  // Playback control buttons
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+  // Playback control buttons — Row 1: core controls
+  const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId('music:pause_resume')
       .setEmoji(queue.paused ? '▶️' : '⏸️')
@@ -115,7 +115,28 @@ export function buildNowPlayingEmbed(
       .setStyle(queue.loopMode === 'off' ? ButtonStyle.Secondary : ButtonStyle.Primary),
   );
 
-  return { embeds: [embed], components: [row] };
+  // V53 Phase 3 (3.6): Row 2 — volume controls + queue view
+  const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('music:vol_down')
+      .setLabel('−10')
+      .setEmoji('🔉')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(queue.volume <= 0),
+    new ButtonBuilder()
+      .setCustomId('music:vol_up')
+      .setLabel('+10')
+      .setEmoji('🔊')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(queue.volume >= 100),
+    new ButtonBuilder()
+      .setCustomId('music:queue_page:1')
+      .setLabel('Queue')
+      .setEmoji('📜')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [row1, row2] };
 }
 
 // ── Queue Embed ───────────────────────────────────────────
