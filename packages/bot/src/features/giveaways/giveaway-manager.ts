@@ -330,10 +330,17 @@ export class GiveawayManager {
 
     const newWinners = this.pickRandom(eligibleEntries, winnerCount);
 
-    await this.supabase
-      .from('giveaways')
-      .update({ winners: [...giveaway.winners, ...newWinners] })
-      .eq('id', giveawayId);
+    // V50-M4: use giveaway_atomic_reroll RPC — appends new winners
+    // atomically. Concurrent rerolls won't overwrite each other's picks.
+    const { data: rerolled, error: rerollErr } = await this.supabase.rpc('giveaway_atomic_reroll', {
+      p_giveaway_id: giveawayId,
+      p_new_winners: newWinners,
+    });
+
+    if (rerollErr || !rerolled || (Array.isArray(rerolled) && rerolled.length === 0)) {
+      console.error('[Giveaways] giveaway_atomic_reroll failed:', rerollErr?.message);
+      return [];
+    }
 
     // Announce reroll
     const channel = this.guild.channels.cache.get(giveaway.channel_id) as TextChannel | undefined;
@@ -369,14 +376,20 @@ export class GiveawayManager {
   private async selectWinnersAndEnd(giveaway: GiveawayRow): Promise<string[]> {
     const winners = this.pickRandom(giveaway.entries, giveaway.winner_count);
 
-    await this.supabase
-      .from('giveaways')
-      .update({
-        status: 'ended',
-        winners,
-        ended_at: new Date().toISOString(),
-      })
-      .eq('id', giveaway.id);
+    // V50-M2: use giveaway_atomic_end RPC — gates the status flip on
+    // status='active' so concurrent checkExpired + manual endGiveaway
+    // cannot both succeed and double-select/double-pay winners.
+    const { data: endedRows, error: endErr } = await this.supabase.rpc('giveaway_atomic_end', {
+      p_giveaway_id: giveaway.id,
+      p_winners: winners,
+      p_ended_at: new Date().toISOString(),
+    });
+
+    if (endErr || !endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
+      // Another call already ended this giveaway — bail out
+      console.log(`[Giveaways] giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
+      return giveaway.winners;
+    }
 
     // Update the giveaway message
     const endedGiveaway = { ...giveaway, status: 'ended' as const, winners };
