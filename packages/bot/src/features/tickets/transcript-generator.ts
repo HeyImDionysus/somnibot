@@ -28,12 +28,22 @@ interface TranscriptMessage {
 
 // ── Fetch All Messages ───────────────────────────────────
 
+/** Maximum messages to include in a transcript to prevent timeouts and OOM */
+const TRANSCRIPT_MESSAGE_CAP = 10_000;
+
 async function fetchAllMessages(channel: TextChannel): Promise<TranscriptMessage[]> {
   const messages: TranscriptMessage[] = [];
   let lastId: string | undefined;
+  let capped = false;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // V53 Phase 5 (5.2): Cap at 10k messages to prevent timeouts
+    if (messages.length >= TRANSCRIPT_MESSAGE_CAP) {
+      capped = true;
+      break;
+    }
+
     const options: { limit: number; before?: string } = { limit: 100 };
     if (lastId) options.before = lastId;
 
@@ -65,6 +75,10 @@ async function fetchAllMessages(channel: TextChannel): Promise<TranscriptMessage
 
     lastId = batch.last()?.id;
     if (batch.size < 100) break;
+  }
+
+  if (capped) {
+    console.warn(`[Transcript] Message cap reached (${TRANSCRIPT_MESSAGE_CAP}). Ticket channel ${channel.id} has more messages than included.`);
   }
 
   // Reverse so oldest first
