@@ -135,7 +135,7 @@ jobs:
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
       - name: Run tests
-        run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=5 -- --reporter=verbose
+        run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=5 --reporter=verbose
 
   # ──────────────────────────────────────────────────────────
   # Migration Lint
