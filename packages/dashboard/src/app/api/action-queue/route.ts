@@ -7,8 +7,15 @@
  * V53 Phase 2 (Finding 2.3)
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody } from '@/lib/api/validation';
+
+const actionQueuePostSchema = z.object({
+  action: z.enum(['acknowledge', 'retry']),
+  ids: z.array(z.string().uuid()).min(1, 'At least one id is required'),
+});
 
 export async function GET(request: NextRequest) {
   const auth = await requireGuildOwner();
@@ -66,15 +73,9 @@ export async function POST(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await request.json();
-  const { action, ids } = body as { action: 'acknowledge' | 'retry'; ids: string[] };
-
-  if (!action || !Array.isArray(ids) || ids.length === 0) {
-    return NextResponse.json(
-      { success: false, error: 'Missing action or ids' },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(request, actionQueuePostSchema);
+  if (!parsed.ok) return parsed.response;
+  const { action, ids } = parsed.data;
 
   const supabase = createAdminSupabase();
 

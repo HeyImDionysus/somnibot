@@ -10,7 +10,10 @@ import { cookies } from 'next/headers';
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
-  const next = searchParams.get('next') ?? '/dashboard';
+  // Validate `next` to prevent open redirects.
+  // Only allow relative paths starting with "/" and block protocol-relative URLs ("//").
+  const rawNext = searchParams.get('next') ?? '/dashboard';
+  const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/dashboard';
 
   if (code) {
     const cookieStore = await cookies();
