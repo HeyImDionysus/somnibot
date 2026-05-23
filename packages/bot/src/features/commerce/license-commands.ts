@@ -13,6 +13,9 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { hashLicenseKey } from './key-generator.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('LicenseCmd');
 
 const HOT_PINK = 0xFF1493;
 const GREEN = 0x57F287;
@@ -162,7 +165,7 @@ async function handleActivate(
         }
       }
     } catch (err) {
-      console.error('[Commerce] Failed to grant roles on activation:', err);
+      log.error('Failed to grant roles on activation:', err);
     }
   }
 

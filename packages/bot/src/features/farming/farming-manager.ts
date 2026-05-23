@@ -10,6 +10,9 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Farming');
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -346,7 +349,7 @@ export class FarmingManager {
     });
 
     // Quest progress — count each harvested crop
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'farm', harvested.length).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed: new EmbedBuilder()
@@ -538,7 +541,7 @@ export class FarmingManager {
       p_quantity: quantity,
     });
     if (error) {
-      console.error('[Farming] addToInventory failed:', error.message);
+      log.error('addToInventory failed:', error.message);
       return false;
     }
     return true;
@@ -553,7 +556,7 @@ export class FarmingManager {
       p_amount: amount,
     });
     if (error) {
-      console.error(`[Farming] economy_add_balance failed for ${userId}:`, error.message);
+      log.error(`economy_add_balance failed for ${userId}:`, error.message);
       return false;
     }
     return true;

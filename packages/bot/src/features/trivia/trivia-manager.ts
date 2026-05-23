@@ -15,6 +15,8 @@ import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
+const log = createLogger('Trivia');
+
 // ── Module-level state ────────────────────────────────────
 
 let _manager: TriviaManager | null = null;
@@ -260,9 +262,9 @@ export class TriviaManager {
           p_user_id: userId,
           p_amount: payout,
         });
-        if (triviaPayErr) console.error(`[Trivia] Failed to pay ${userId}:`, triviaPayErr.message);
+        if (triviaPayErr) log.error(`Failed to pay ${userId}:`, triviaPayErr.message);
         winners.push({ userId, paid: !triviaPayErr });
-        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
       } else {
         losers.push(userId);
         await this.setStreak(guildId, userId, 0);

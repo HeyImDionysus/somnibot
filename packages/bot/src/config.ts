@@ -1,4 +1,6 @@
-import { BotEnvSchema, type BotEnv } from '@somnibot/shared';
+import { BotEnvSchema, type BotEnv , createLogger } from '@somnibot/shared';
+
+const log = createLogger('Config');
 export type { BotEnv };
 
 /**
@@ -16,7 +18,7 @@ export function loadConfig(): BotEnv {
     const errors = result.error.issues
       .map((issue) => `  • ${issue.path.join('.')}: ${issue.message}`)
       .join('\n');
-    console.error('❌ Invalid environment configuration:\n' + errors);
+    log.error('Invalid environment configuration:\n' + errors);
     process.exit(1);
   }
 

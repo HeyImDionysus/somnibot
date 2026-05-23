@@ -12,6 +12,8 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
+const log = createLogger('Fishing');
+
 // ── Local Types ───────────────────────────────────────────
 
 interface FishingConfig {
@@ -325,7 +327,7 @@ export class FishingManager {
     // (V48-M1) cooldown was already claimed via SET NX above
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return { embed, cooldownKey: cdKey };
   }
@@ -376,7 +378,7 @@ export class FishingManager {
     // V52-M2: check addCurrency and flag failed payout on the catch record
     const paid = await this.addCurrency(userId, price);
     if (!paid) {
-      console.error(`[Fishing] Fish catch recorded but wallet credit failed for ${userId} — ${price} coins lost`);
+      log.error(`Fish catch recorded but wallet credit failed for ${userId} — ${price} coins lost`);
     }
 
     return { species: picked, weight, price, paid };
@@ -467,7 +469,7 @@ export class FishingManager {
       p_amount: amount,
     });
     if (error) {
-      console.error(`[Fishing] economy_add_balance failed for ${userId}:`, error.message);
+      log.error(`economy_add_balance failed for ${userId}:`, error.message);
       return false;
     }
     return true;

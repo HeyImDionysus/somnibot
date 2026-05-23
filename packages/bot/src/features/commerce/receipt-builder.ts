@@ -4,6 +4,9 @@
  * Architecture doc §31.2 — container with accent color, order details, license key.
  */
 import {
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ReceiptBuilder');
   ContainerBuilder,
   SectionBuilder,
   SeparatorBuilder,
@@ -166,7 +169,7 @@ export async function sendReceiptDM(
     await dm.send({ embeds: [embed] });
     return true;
   } catch (err) {
-    console.error(`[Commerce] Failed to DM receipt to ${user.id}:`, err);
+    log.error(`Failed to DM receipt to ${user.id}:`, err);
     return false;
   }
 }

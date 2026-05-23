@@ -12,6 +12,9 @@
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ConfigLoader');
 
 /**
  * Map of instance_settings keys → env var names.
@@ -56,7 +59,7 @@ export async function loadConfigFromDatabase(): Promise<number> {
     || '';
 
   if (!supabaseUrl || !serviceKey) {
-    console.log('[ConfigLoader] No Supabase credentials in env — skipping DB config fallback');
+    log.info('No Supabase credentials in env — skipping DB config fallback');
     return 0;
   }
 
@@ -74,7 +77,7 @@ export async function loadConfigFromDatabase(): Promise<number> {
     }
 
     if (missingKeys.length === 0) {
-      console.log('[ConfigLoader] All config values present in env vars — no DB fallback needed');
+      log.info('All config values present in env vars — no DB fallback needed');
       return 0;
     }
 
@@ -87,10 +90,10 @@ export async function loadConfigFromDatabase(): Promise<number> {
     if (error) {
       // Table may not exist yet on first boot — that's OK
       if (error.code === '42P01') {
-        console.log('[ConfigLoader] instance_settings table not found — skipping');
+        log.info('instance_settings table not found — skipping');
         return 0;
       }
-      console.warn('[ConfigLoader] Failed to read instance_settings:', error.message);
+      log.warn('Failed to read instance_settings:', error.message);
       return 0;
     }
 
@@ -102,20 +105,20 @@ export async function loadConfigFromDatabase(): Promise<number> {
           process.env[envVar] = row.value;
           loaded++;
           // Don't log the actual value for security
-          console.log(`[ConfigLoader] Loaded ${envVar} from instance_settings`);
+          log.info(`Loaded ${envVar} from instance_settings`);
         }
       }
     }
 
     if (loaded > 0) {
-      console.log(`[ConfigLoader] ✅ Loaded ${loaded} config value(s) from database`);
+      log.info(`Loaded ${loaded} config value(s) from database`);
     } else {
-      console.log('[ConfigLoader] No additional config values found in database');
+      log.info('No additional config values found in database');
     }
 
     return loaded;
   } catch (err) {
-    console.warn('[ConfigLoader] Error loading config from database (non-fatal):', err);
+    log.warn('Error loading config from database (non-fatal):', err);
     return 0;
   }
 }
@@ -158,7 +161,7 @@ export async function syncConfigToDatabase(): Promise<number> {
     || '';
 
   if (!supabaseUrl || !serviceKey) {
-    console.log('[ConfigLoader] No Supabase credentials — skipping sync-to-DB');
+    log.info('No Supabase credentials — skipping sync-to-DB');
     return 0;
   }
 
@@ -182,7 +185,7 @@ export async function syncConfigToDatabase(): Promise<number> {
     }
 
     if (rows.length === 0) {
-      console.log('[ConfigLoader] No env vars to sync to database');
+      log.info('No env vars to sync to database');
       return 0;
     }
 
@@ -192,17 +195,17 @@ export async function syncConfigToDatabase(): Promise<number> {
 
     if (error) {
       if (error.code === '42P01') {
-        console.log('[ConfigLoader] instance_settings table not found — skipping sync-to-DB');
+        log.info('instance_settings table not found — skipping sync-to-DB');
         return 0;
       }
-      console.warn('[ConfigLoader] Failed to sync config to DB:', error.message);
+      log.warn('Failed to sync config to DB:', error.message);
       return 0;
     }
 
-    console.log(`[ConfigLoader] ✅ Synced ${rows.length} config value(s) to instance_settings`);
+    log.info(`Synced ${rows.length} config value(s) to instance_settings`);
     return rows.length;
   } catch (err) {
-    console.warn('[ConfigLoader] Error syncing config to DB (non-fatal):', err);
+    log.warn('Error syncing config to DB (non-fatal):', err);
     return 0;
   }
 }

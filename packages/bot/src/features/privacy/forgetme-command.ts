@@ -28,6 +28,9 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeAuditLog } from '../../services/audit.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ForgetMe');
 
 export function buildForgetMeCommand() {
   return new SlashCommandBuilder()
@@ -116,7 +119,7 @@ export async function handleForgetMeCommand(
     });
 
     if (error) {
-      console.error(`[ForgetMe] purge_member_data failed for ${userId}:`, error.message);
+      log.error(`purge_member_data failed for ${userId}:`, error.message);
       await interaction.editReply({
         embeds: [
           new EmbedBuilder()
@@ -165,7 +168,7 @@ export async function handleForgetMeCommand(
       },
     });
 
-    console.log(`[ForgetMe] Data purge completed for user in guild ${guildId}`);
+    log.info(`Data purge completed for user in guild ${guildId}`);
   } catch {
     // Timeout — no confirmation received
     await interaction.editReply({

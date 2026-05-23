@@ -12,6 +12,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GuildMember } from 'discord.js';
 import type { DbMember } from '@somnibot/shared';
 
+const log = createLogger('MemberService');
+
 export interface MemberLookupResult {
   member: DbMember | null;
   isReturning: boolean;
@@ -34,7 +36,7 @@ export async function lookupMember(
     .maybeSingle();
 
   if (error) {
-    console.error('[MemberService] Lookup failed:', error.message);
+    log.error('Lookup failed:', error.message);
     return { member: null, isReturning: false, previousRoles: [] };
   }
 
@@ -65,7 +67,7 @@ async function getNextMemberNumber(
   });
 
   if (error || data == null) {
-    console.warn('[MemberService] get_next_member_number RPC failed, using fallback:', error?.message);
+    log.warn('get_next_member_number RPC failed, using fallback:', error?.message);
     const { data: row } = await supabase
       .from('members')
       .select('member_number')
@@ -137,7 +139,7 @@ export async function recordMemberJoin(
     .single();
 
   if (error) {
-    console.error('[MemberService] Failed to record join:', error.message);
+    log.error('Failed to record join:', error.message);
     return null;
   }
 
@@ -165,7 +167,7 @@ export async function recordMemberLeave(
     .eq('discord_id', member.id);
 
   if (error) {
-    console.error('[MemberService] Failed to record leave:', error.message);
+    log.error('Failed to record leave:', error.message);
   }
 }
 
@@ -184,7 +186,7 @@ export async function markOnboardingCompleted(
     .eq('discord_id', discordId);
 
   if (error) {
-    console.error('[MemberService] Failed to mark onboarding completed:', error.message);
+    log.error('Failed to mark onboarding completed:', error.message);
   }
 }
 

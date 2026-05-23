@@ -12,6 +12,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DriftItem } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 
+const log = createLogger('RepairActions');
+
 /**
  * Repair a single drift item — revert Discord to desired state.
  */
@@ -79,7 +81,7 @@ export async function repairDriftItem(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[Sync:Repair] Failed to repair "${driftItem.entityName}":`, message);
+    log.error(`[Sync:Repair] Failed to repair "${driftItem.entityName}":`, message);
     return { success: false, error: message };
   }
 }

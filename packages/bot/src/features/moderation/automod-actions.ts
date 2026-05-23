@@ -19,6 +19,8 @@ import { executeEscalation } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
 import { writeAuditLog } from '../../services/audit.js';
 
+const log = createLogger('AutoModActions');
+
 /**
  * Execute the action configured for an auto-mod rule violation.
  */
@@ -45,7 +47,7 @@ export async function executeAutoModAction(
         await message.delete();
       }
     } catch (err) {
-      console.error(`[AutoMod] Failed to delete message:`, err);
+      log.error(`Failed to delete message:`, err);
     }
   }
 
@@ -167,7 +169,7 @@ export async function executeAutoModAction(
       try {
         await member.timeout(durationMs, fullReason);
       } catch (err) {
-        console.error(`[AutoMod] Failed to timeout member:`, err);
+        log.error(`Failed to timeout member:`, err);
       }
 
       await createInfraction(client.supabase, {
@@ -230,7 +232,7 @@ export async function executeAutoModAction(
       try {
         await member.kick(fullReason);
       } catch (err) {
-        console.error(`[AutoMod] Failed to kick member:`, err);
+        log.error(`Failed to kick member:`, err);
       }
 
       await createInfraction(client.supabase, {
@@ -285,7 +287,7 @@ export async function executeAutoModAction(
       try {
         await member.ban({ reason: fullReason, deleteMessageSeconds: 0 });
       } catch (err) {
-        console.error(`[AutoMod] Failed to ban member:`, err);
+        log.error(`Failed to ban member:`, err);
       }
 
       await createInfraction(client.supabase, {

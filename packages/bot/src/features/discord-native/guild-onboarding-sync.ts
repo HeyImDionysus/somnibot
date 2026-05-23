@@ -12,6 +12,9 @@
 import { Guild, GuildOnboardingPromptType } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('OnboardingSync');
 
 export interface OnboardingConfig {
   enabled: boolean;
@@ -45,12 +48,12 @@ export class GuildOnboardingSync {
     this.eventBus.on('config.changed' as never, ((data: { section?: string }) => {
       if (data.section === 'onboarding' || data.section === 'welcome') {
         this.syncOnboarding().catch((err) =>
-          console.error('[GuildOnboardingSync] Sync failed:', err),
+          log.error('Sync failed:', err),
         );
       }
     }) as never);
 
-    console.log('[GuildOnboardingSync] ✅ Guild onboarding sync started');
+    log.info('Guild onboarding sync started');
   }
 
   /**
@@ -97,9 +100,9 @@ export class GuildOnboardingSync {
         defaultChannels: onboardingConfig.default_channel_ids,
       });
 
-      console.log(`[GuildOnboardingSync] Synced ${prompts.length} onboarding prompts to Discord`);
+      log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
     } catch (err) {
-      console.error('[GuildOnboardingSync] Failed to sync onboarding:', err);
+      log.error('Failed to sync onboarding:', err);
     }
   }
 }

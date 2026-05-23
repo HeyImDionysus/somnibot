@@ -5,6 +5,9 @@
 import { REST, Routes } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import { ticketCommand } from './ticket-commands.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('RegisterCmds');
 
 export async function registerTicketCommands(client: SomniClient): Promise<void> {
   try {
@@ -18,7 +21,7 @@ export async function registerTicketCommands(client: SomniClient): Promise<void>
     // Check if /ticket already exists
     const existing = existingCommands.find((c) => c.name === 'ticket');
     if (existing) {
-      console.log('[Boot] /ticket command already registered — updating');
+      log.info('/ticket command already registered — updating');
     }
 
     // Register/update the ticket command
@@ -32,8 +35,8 @@ export async function registerTicketCommands(client: SomniClient): Promise<void>
       },
     );
 
-    console.log('[Boot] ✅ /ticket slash command registered');
+    log.info('/ticket slash command registered');
   } catch (err) {
-    console.error('[Boot] Failed to register ticket commands:', err);
+    log.error('Failed to register ticket commands:', err);
   }
 }

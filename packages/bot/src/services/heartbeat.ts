@@ -13,6 +13,9 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Heartbeat');
 
 const VALKEY_HEARTBEAT_KEY_PREFIX = 'somnibot:heartbeat:';
 const VALKEY_HEARTBEAT_TTL = 120; // 2 minutes — auto-expires if bot dies
@@ -50,7 +53,7 @@ export class HeartbeatService {
       void this.writeSupabaseHeartbeat();
     }, SUPABASE_INTERVAL_MS);
 
-    console.log('[Heartbeat] ✅ Started — Valkey every 30s, Supabase every 60s');
+    log.info('Started — Valkey every 30s, Supabase every 60s');
   }
 
   /**
@@ -65,7 +68,7 @@ export class HeartbeatService {
       clearInterval(this.supabaseTimer);
       this.supabaseTimer = null;
     }
-    console.log('[Heartbeat] Stopped');
+    log.info('Stopped');
   }
 
   /**
@@ -81,7 +84,7 @@ export class HeartbeatService {
       });
       await this.valkey.set(key, payload, 'EX', VALKEY_HEARTBEAT_TTL);
     } catch (err) {
-      console.warn('[Heartbeat] Valkey write failed:', err instanceof Error ? err.message : err);
+      log.warn('Valkey write failed:', err instanceof Error ? err.message : err);
     }
   }
 
@@ -103,10 +106,10 @@ export class HeartbeatService {
         );
 
       if (error) {
-        console.warn('[Heartbeat] Supabase write failed:', error.message);
+        log.warn('Supabase write failed:', error.message);
       }
     } catch (err) {
-      console.warn('[Heartbeat] Supabase write error:', err instanceof Error ? err.message : err);
+      log.warn('Supabase write error:', err instanceof Error ? err.message : err);
     }
   }
 }

@@ -7,9 +7,11 @@
 
 import type { Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { computeStateDiff, classifyDrift, type DesiredState, type DriftItem } from '@somnibot/shared';
+import { computeStateDiff, classifyDrift, type DesiredState, type DriftItem , createLogger } from '@somnibot/shared';
 import { takeSnapshot } from './snapshot.js';
 import type { PlatformEventBus } from '../services/event-bus.js';
+
+const log = createLogger('SyncEngine');
 
 export interface SyncConfig {
   enabled: boolean;
@@ -102,9 +104,9 @@ export async function runSyncCycle(
       const everyoneRole = guild.roles.everyone;
       await everyoneRole.setPermissions(0n, 'SomniBot auto-repair — @everyone must be 0');
       repaired++;
-      console.log('[Sync] Auto-repaired @everyone permissions to 0');
+      log.info('Auto-repaired @everyone permissions to 0');
     } catch (err) {
-      console.error('[Sync] Failed to auto-repair @everyone:', err);
+      log.error('Failed to auto-repair @everyone:', err);
     }
   }
 
@@ -117,12 +119,12 @@ export async function runSyncCycle(
         const repairResult = await repairDriftItem(guild, supabase, item, idMap);
         if (repairResult.success) {
           repaired++;
-          console.log(`[Sync] Auto-repaired ${item.entityType} "${item.entityName}": ${repairResult.action}`);
+          log.info(`Auto-repaired ${item.entityType} "${item.entityName}": ${repairResult.action}`);
         } else if (repairResult.action === 'manual_required') {
-          console.log(`[Sync] "${item.entityName}" needs manual attention: ${repairResult.reason}`);
+          log.info(`"${item.entityName}" needs manual attention: ${repairResult.reason}`);
         }
       } catch (err) {
-        console.error(`[Sync] Failed to auto-repair ${item.entityType} "${item.entityName}":`, err);
+        log.error(`Failed to auto-repair ${item.entityType} "${item.entityName}":`, err);
       }
     }
 
@@ -219,12 +221,12 @@ export function startSyncScheduler(
       const result = await runSyncCycle(guild, supabase, eventBus, config);
 
       if (result.driftItems.length > 0) {
-        console.log(
+        log.info(
           `[Sync] Drift detected: ${result.driftItems.length} items (${result.repaired} auto-repaired)`,
         );
       }
     } catch (err) {
-      console.error('[Sync] Cycle error:', err);
+      log.error('Cycle error:', err);
     } finally {
       running = false;
     }
@@ -436,6 +438,6 @@ async function postSyncReport(
     details: { items: driftItems },
     created_at: timestamp,
   }).then(({ error }) => {
-    if (error) console.error('[Sync] Failed to store sync report:', error.message);
+    if (error) log.error('Failed to store sync report:', error.message);
   });
 }

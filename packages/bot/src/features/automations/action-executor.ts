@@ -10,8 +10,10 @@ import {
   ChannelType,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { AUTOMATION_LIMITS } from '@somnibot/shared';
+import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
+
+const log = createLogger('ActionExecutor');
 
 export interface ActionContext {
   guild: Guild;
@@ -67,7 +69,7 @@ export async function executeActions(
       failed++;
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`${action.type}: ${msg}`);
-      console.error(`[ActionExecutor] Error executing ${action.type}:`, err);
+      log.error(`Error executing ${action.type}:`, err);
     }
   }
 
@@ -304,7 +306,7 @@ async function executeAction(
       for (const roleId of (panel.manager_roles ?? [])) {
         await ticketChannel.permissionOverwrites.create(roleId, {
           ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
-        }).catch((e: unknown) => { console.warn('[Automation] Action failed:', (e as Error)?.message ?? e); });
+        }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
       }
 
       // Create ticket record

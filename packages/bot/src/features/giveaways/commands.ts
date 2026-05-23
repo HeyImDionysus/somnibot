@@ -12,6 +12,9 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { GiveawayManager } from './giveaway-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('GiveawayCmds');
 
 export function buildGiveawayCommands() {
   const cmd = new SlashCommandBuilder()
@@ -161,7 +164,7 @@ export async function handleGiveawayCommand(
       }
     }
   } catch (err) {
-    console.error('[Giveaways] Command error:', err);
+    log.error('Command error:', err);
     const content = '❌ An error occurred.';
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content });

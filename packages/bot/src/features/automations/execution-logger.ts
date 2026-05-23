@@ -3,6 +3,9 @@
  * §20.7 of the architecture doc.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ExecLogger');
 
 export interface ExecutionResult {
   automationId: string;
@@ -33,7 +36,7 @@ export class ExecutionLogger {
     });
 
     if (error) {
-      console.error('[AutomationLogger] Failed to log execution:', error.message);
+      log.error('Failed to log execution:', error.message);
     }
 
     // Update execution count on the automation via RPC

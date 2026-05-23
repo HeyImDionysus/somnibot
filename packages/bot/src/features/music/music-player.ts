@@ -27,6 +27,9 @@ import {
 import { MusicSelfHealer, type SearchProvider } from './music-self-healer.js';
 import { applyFilterPreset, applyCustomTimescale, describeActiveFilters, type FilterPreset } from './music-filters.js';
 import type { Band, TimescaleSettings } from 'shoukaku';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MusicPlayer');
 
 // ── Config ────────────────────────────────────────────────
 
@@ -71,7 +74,7 @@ export class MusicPlayerManager {
   async init(): Promise<void> {
     await this.loadConfig();
     this.setupShoukakuEvents();
-    console.log('[Music] Player manager started');
+    log.info('Player manager started');
   }
 
   /** Clean up timers on shutdown. */
@@ -705,22 +708,22 @@ export class MusicPlayerManager {
 
   private setupShoukakuEvents(): void {
     this.shoukaku.on('ready', (name) => {
-      console.log(`[Music] Lavalink node "${name}" ready`);
+      log.info(`Lavalink node "${name}" ready`);
     });
 
     this.shoukaku.on('error', (name, error) => {
-      console.error(`[Music] Lavalink node "${name}" error:`, error);
+      log.error(`Lavalink node "${name}" error:`, error);
     });
 
     this.shoukaku.on('close', (name, code, reason) => {
-      console.warn(`[Music] Lavalink node "${name}" closed: ${code} — ${reason}`);
+      log.warn(`Lavalink node "${name}" closed: ${code} — ${reason}`);
     });
   }
 
   private setupPlayerEvents(player: Player): void {
     player.on('start', () => {
       this.sendNowPlaying(this.guild.id).catch((err) => {
-        console.error('[Music] Failed to send now-playing:', err);
+        log.error('Failed to send now-playing:', err);
       });
       this.clearInactivityTimer(this.guild.id);
 
@@ -744,7 +747,7 @@ export class MusicPlayerManager {
             requestedBy: np.requestedBy,
           });
         }
-      }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     });
 
     player.on('end', async (data: TrackEndEvent) => {
@@ -783,7 +786,7 @@ export class MusicPlayerManager {
           if (textChannel && textChannel.type === ChannelType.GuildText) {
             await textChannel.send({
               embeds: [buildMusicInfoEmbed('📭 Queue ended — add more tracks with `/play`')],
-            }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
+            }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
           }
         }
         return;
@@ -795,7 +798,7 @@ export class MusicPlayerManager {
     });
 
     player.on('exception', async (data: TrackExceptionEvent) => {
-      console.error('[Music] Track exception:', data);
+      log.error('Track exception:', data);
       const { shouldRecover, strategy } = this.selfHealer.recordFailure();
 
       if (shouldRecover && strategy === 'switch_search_provider') {
@@ -809,7 +812,7 @@ export class MusicPlayerManager {
         if (textChannel && textChannel.type === ChannelType.GuildText) {
           await textChannel.send({
             embeds: [buildMusicErrorEmbed('Failed to play track — skipping to next')],
-          }).catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
+          }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
         }
       }
 
@@ -820,7 +823,7 @@ export class MusicPlayerManager {
     });
 
     player.on('stuck', async () => {
-      console.warn('[Music] Track stuck, skipping...');
+      log.warn('Track stuck, skipping...');
       const { track } = await this.queueManager.nextTrack(this.guild.id);
       if (track) {
         await player.playTrack({ track: { encoded: track.track } });
@@ -828,7 +831,7 @@ export class MusicPlayerManager {
     });
 
     player.on('closed', async () => {
-      console.log('[Music] Player connection closed — attempting reconnect');
+      log.info('Player connection closed — attempting reconnect');
       const queue = await this.queueManager.getQueue(this.guild.id);
       if (!queue || !queue.voiceChannelId) {
         // No queue to resume — clean up
@@ -872,15 +875,15 @@ export class MusicPlayerManager {
           } else if (currentTrack?.track) {
             await newPlayer.playTrack({ track: { encoded: currentTrack.track } });
           }
-          console.log(`[Music] Reconnected after ${attempt} attempt(s)`);
+          log.info(`Reconnected after ${attempt} attempt(s)`);
           return;
         } catch (err) {
-          console.warn(`[Music] Reconnect attempt ${attempt}/3 failed:`, err);
+          log.warn(`Reconnect attempt ${attempt}/3 failed:`, err);
         }
       }
 
       // All reconnect attempts failed — clean up
-      console.error('[Music] Failed to reconnect after 3 attempts — destroying queue');
+      log.error('Failed to reconnect after 3 attempts — destroying queue');
       await this.queueManager.destroyQueue(this.guild.id);
       this.clearTimers(this.guild.id);
     });
@@ -894,10 +897,10 @@ export class MusicPlayerManager {
       guildId,
       setTimeout(async () => {
         try {
-          console.log(`[Music] Auto-leaving voice in guild ${guildId} (empty channel timeout)`);
+          log.info(`Auto-leaving voice in guild ${guildId} (empty channel timeout)`);
           await this.stop(guildId);
         } catch (err) {
-          console.error(`[Music] Auto-leave error for guild ${guildId}:`, err);
+          log.error(`Auto-leave error for guild ${guildId}:`, err);
         }
       }, this.config.autoLeaveTimeout),
     );
@@ -917,10 +920,10 @@ export class MusicPlayerManager {
       guildId,
       setTimeout(async () => {
         try {
-          console.log(`[Music] Auto-destroying player in guild ${guildId} (inactivity timeout)`);
+          log.info(`Auto-destroying player in guild ${guildId} (inactivity timeout)`);
           await this.stop(guildId);
         } catch (err) {
-          console.error(`[Music] Inactivity auto-stop error for guild ${guildId}:`, err);
+          log.error(`Inactivity auto-stop error for guild ${guildId}:`, err);
         }
       }, this.config.inactivityTimeout),
     );

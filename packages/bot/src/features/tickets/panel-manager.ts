@@ -17,7 +17,9 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+
+const log = createLogger('TicketPanels');
 
 // ── Button Color Mapping ─────────────────────────────────
 
@@ -138,10 +140,10 @@ export async function postPanel(
       .update({ message_id: message.id })
       .eq('id', panel.id);
 
-    console.log(`[Tickets] Panel "${panel.name}" posted in #${channel.name} (${message.id})`);
+    log.info(`Panel "${panel.name}" posted in #${channel.name} (${message.id})`);
     return { success: true, messageId: message.id };
   } catch (err) {
-    console.error('[Tickets] Failed to post panel:', err);
+    log.error('Failed to post panel:', err);
     return { success: false, error: 'Failed to post panel message.' };
   }
 }

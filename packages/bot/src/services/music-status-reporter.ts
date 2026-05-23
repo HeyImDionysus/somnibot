@@ -7,6 +7,9 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { MusicPlayerManager } from '../features/music/music-player.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MusicStatus');
 
 export class MusicStatusReporter {
   private timer: NodeJS.Timeout | null = null;
@@ -18,13 +21,13 @@ export class MusicStatusReporter {
   ) {}
 
   start(intervalMs: number = 15_000): void {
-    this.report().catch((e: unknown) => { console.warn('[Music] Operation failed:', (e as Error)?.message ?? e); });
+    this.report().catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     this.timer = setInterval(() => {
       this.report().catch((err) => {
-        console.error('[MusicStatusReporter] Error:', err);
+        log.error('Error:', err);
       });
     }, intervalMs);
-    console.log('[MusicStatusReporter] Started (15s interval)');
+    log.info('Started (15s interval)');
   }
 
   stop(): void {
@@ -54,7 +57,7 @@ export class MusicStatusReporter {
         { onConflict: 'guild_id,type' },
       )
       .then(({ error }) => {
-        if (error) console.warn('[MusicStatusReporter] Upsert error:', error.message);
+        if (error) log.warn('Upsert error:', error.message);
       });
   }
 }

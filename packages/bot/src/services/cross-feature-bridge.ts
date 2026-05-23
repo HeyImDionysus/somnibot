@@ -24,6 +24,8 @@ import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
 import type { PlatformEvent, PlatformEventMap } from '@somnibot/shared';
 
+const log = createLogger('CrossFeatureBridge');
+
 export class CrossFeatureBridge {
   private listeners: (() => void)[] = [];
 
@@ -38,7 +40,7 @@ export class CrossFeatureBridge {
    * Start listening to all cross-feature events.
    */
   start(): void {
-    console.log('[CrossFeatureBridge] Starting cross-feature event wiring...');
+    log.info('Starting cross-feature event wiring...');
 
     // ── 1. Ban/Kick → Giveaway + Ticket cleanup ────────────
 
@@ -55,7 +57,7 @@ export class CrossFeatureBridge {
       // V53 B-4: Clean up economy data — cancel listings, forfeit heists, suspend wallet
       await this.cleanupMemberEconomy(userId, 'banned');
 
-      console.log(`[CrossFeatureBridge] Cleaned up giveaways + tickets + economy for banned user ${userId}`);
+      log.info(`Cleaned up giveaways + tickets + economy for banned user ${userId}`);
     });
 
     this.on('member.kicked', async (event) => {
@@ -104,7 +106,7 @@ export class CrossFeatureBridge {
               unlocked_at: new Date().toISOString(),
             }, { onConflict: 'guild_id,user_id,feature_key' });
 
-            console.log(`[CrossFeatureBridge] User ${userId} unlocked "${unlock.feature_key}" at level ${newLevel}`);
+            log.info(`User ${userId} unlocked "${unlock.feature_key}" at level ${newLevel}`);
           }
 
           // Cache unlocked features in Valkey for fast command-time checks
@@ -118,7 +120,7 @@ export class CrossFeatureBridge {
           }
         }
       } catch (err) {
-        console.error(`[CrossFeatureBridge] Level-up unlock check failed for ${userId}:`, err);
+        log.error(`Level-up unlock check failed for ${userId}:`, err);
       }
     });
 
@@ -139,9 +141,9 @@ export class CrossFeatureBridge {
       });
 
       if (xpError) {
-        console.error(`[CrossFeatureBridge] Failed to grant purchase XP to ${userId}:`, xpError.message);
+        log.error(`Failed to grant purchase XP to ${userId}:`, xpError.message);
       } else {
-        console.log(`[CrossFeatureBridge] Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
+        log.info(`Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
       }
     });
 
@@ -173,7 +175,7 @@ export class CrossFeatureBridge {
             resolved_at: new Date().toISOString(),
           }, { onConflict: 'ticket_id' })
           .then(({ error }) => {
-            if (error) console.error('[CrossFeatureBridge] ticket_metrics upsert failed:', error.message);
+            if (error) log.error('ticket_metrics upsert failed:', error.message);
           });
 
         // Update Valkey stats
@@ -227,10 +229,10 @@ export class CrossFeatureBridge {
         });
 
         if (!error) {
-          console.log(`[CrossFeatureBridge] Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
+          log.info(`Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
         }
       } catch (err) {
-        console.error('[CrossFeatureBridge] Milestone bonus failed:', err);
+        log.error('Milestone bonus failed:', err);
       }
     });
 
@@ -271,7 +273,7 @@ export class CrossFeatureBridge {
           // User may have DMs disabled — that's fine
         });
       } catch (err) {
-        console.error('[CrossFeatureBridge] Satisfaction survey failed:', err);
+        log.error('Satisfaction survey failed:', err);
       }
     });
 
@@ -301,7 +303,7 @@ export class CrossFeatureBridge {
         const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
 
         await member.roles.add(roleId, 'SomniBot economy purchase — role item');
-        console.log(`[CrossFeatureBridge] Granted role ${roleId} to ${userId} via economy purchase`);
+        log.info(`Granted role ${roleId} to ${userId} via economy purchase`);
 
         // If temporary role, schedule removal
         if (durationMs) {
@@ -314,14 +316,14 @@ export class CrossFeatureBridge {
             source: 'economy_purchase',
             source_id: productId,
           });
-          console.log(`[CrossFeatureBridge] Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
+          log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
         }
       } catch (err) {
-        console.error('[CrossFeatureBridge] Role grant from purchase failed:', err);
+        log.error('Role grant from purchase failed:', err);
       }
     });
 
-    console.log(`[CrossFeatureBridge] ✅ ${this.listeners.length} cross-feature event bridges active`);
+    log.info(`${this.listeners.length} cross-feature event bridges active`);
   }
 
   /**
@@ -332,7 +334,7 @@ export class CrossFeatureBridge {
       unsub();
     }
     this.listeners = [];
-    console.log('[CrossFeatureBridge] Stopped');
+    log.info('Stopped');
   }
 
   // ── Helpers ──────────────────────────────────────────────
@@ -349,7 +351,7 @@ export class CrossFeatureBridge {
       // Only process events for our guild
       if (evt.guildId !== this.guild.id) return;
       Promise.resolve(handler(evt)).catch((err) => {
-        console.error(`[CrossFeatureBridge] Error handling ${event}:`, err);
+        log.error(`Error handling ${event}:`, err);
       });
     };
     this.eventBus.on(event as never, wrapped as never);
@@ -374,11 +376,11 @@ export class CrossFeatureBridge {
         });
 
         if (data && data.length > 0) {
-          console.log(`[CrossFeatureBridge] Removed ${userId} from giveaway ${g.id} (${reason})`);
+          log.info(`Removed ${userId} from giveaway ${g.id} (${reason})`);
         }
       }
     } catch (err) {
-      console.error('[CrossFeatureBridge] Failed to remove giveaway entries:', err);
+      log.error('Failed to remove giveaway entries:', err);
     }
   }
 
@@ -398,7 +400,7 @@ export class CrossFeatureBridge {
       });
 
       if (error) {
-        console.error(`[CrossFeatureBridge] cleanup_member_economy failed for ${userId}:`, error.message);
+        log.error(`cleanup_member_economy failed for ${userId}:`, error.message);
         return;
       }
 
@@ -409,7 +411,7 @@ export class CrossFeatureBridge {
           wallet_suspended: boolean;
         };
         if (summary.listings_cancelled > 0 || summary.heists_forfeited > 0 || summary.wallet_suspended) {
-          console.log(
+          log.info(
             `[CrossFeatureBridge] Economy cleanup for ${userId} (${reason}):`,
             `${summary.listings_cancelled} listing(s) cancelled,`,
             `${summary.heists_forfeited} heist(s) forfeited,`,
@@ -418,7 +420,7 @@ export class CrossFeatureBridge {
         }
       }
     } catch (err) {
-      console.error('[CrossFeatureBridge] Failed to clean up member economy:', err);
+      log.error('Failed to clean up member economy:', err);
     }
   }
 
@@ -435,7 +437,7 @@ export class CrossFeatureBridge {
         .eq('creator_id', userId)
         .eq('status', 'open');
     } catch (err) {
-      console.error('[CrossFeatureBridge] Failed to close user tickets:', err);
+      log.error('Failed to close user tickets:', err);
     }
   }
 }

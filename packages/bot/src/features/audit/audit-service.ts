@@ -13,6 +13,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { PlatformEvent } from '@somnibot/shared';
 
+const log = createLogger('AuditService');
+
 // ── Action mapping ──────────────────────────────────────
 
 interface AuditMapping {
@@ -469,7 +471,7 @@ export class AuditService {
       void this.flush();
     }, 5000);
 
-    console.log('[AuditService] ✅ Started — listening to all platform events (with before/after diffs)');
+    log.info('Started — listening to all platform events (with before/after diffs)');
   }
 
   /**
@@ -482,7 +484,7 @@ export class AuditService {
     }
     // Final flush
     void this.flush();
-    console.log('[AuditService] Stopped');
+    log.info('Stopped');
   }
 
   /**
@@ -532,7 +534,7 @@ export class AuditService {
       .insert(batch);
 
     if (error) {
-      console.error(`[AuditService] Failed to flush ${batch.length} entries:`, error.message);
+      log.error(`Failed to flush ${batch.length} entries:`, error.message);
       // Re-queue on failure (max 500 to prevent memory leak)
       if (this.queue.length < 500) {
         this.queue.unshift(...batch);

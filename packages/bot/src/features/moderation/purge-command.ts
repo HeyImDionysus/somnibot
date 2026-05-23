@@ -8,6 +8,9 @@
  */
 
 import {
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('PurgeCmd');
   SlashCommandBuilder,
   PermissionFlagsBits,
   type ChatInputCommandInteraction,
@@ -101,7 +104,7 @@ export async function handlePurgeCommand(
       `✅ Deleted **${deleted.size}** message${deleted.size !== 1 ? 's' : ''}${filterDesc.length > 0 ? ` (${filterDesc.join(', ')})` : ''}.`,
     );
   } catch (err) {
-    console.error('[Purge] Failed to bulk delete:', err);
+    log.error('Failed to bulk delete:', err);
     await interaction.editReply('❌ Failed to delete messages. Check bot permissions.');
   }
 }

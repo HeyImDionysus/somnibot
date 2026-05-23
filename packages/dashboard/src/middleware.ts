@@ -3,6 +3,42 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { checkCsrf } from '@/lib/api/csrf';
 
 /* ------------------------------------------------------------------ */
+/*  CSP Nonce — generated per request for strict script-src            */
+/* ------------------------------------------------------------------ */
+
+function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Convert to base64
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function buildCspHeader(nonce: string): string {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    // style-src still needs unsafe-inline for Tailwind/CSS-in-JS
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https://cdn.discordapp.com",
+    "font-src 'self'",
+    "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; ');
+}
+
+/**
+ * Apply CSP nonce headers to a response.
+ * The nonce is also set as a request header so the root layout
+ * can read it via headers() to pass to Script components.
+ */
+function applyCspHeaders(response: NextResponse, nonce: string): void {
+  response.headers.set('Content-Security-Policy', buildCspHeader(nonce));
+  response.headers.set('x-nonce', nonce);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Local-mode detection                                               */
 /*  When SESSION_TOKEN env var is set (by the Electron launcher),      */
 /*  we skip Supabase/Discord OAuth entirely and authenticate via a     */
@@ -62,9 +98,15 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
  * Redirects unauthenticated users away from protected routes.
  */
 export async function middleware(request: NextRequest) {
+  // Generate per-request CSP nonce
+  const nonce = generateNonce();
+
   // ── Local mode: bypass Supabase entirely ──
   const localResponse = handleLocalAuth(request);
-  if (localResponse) return localResponse;
+  if (localResponse) {
+    applyCspHeaders(localResponse, nonce);
+    return localResponse;
+  }
 
   // ── Remote mode: Supabase session refresh + Discord OAuth ──
   let supabaseResponse = NextResponse.next({
@@ -118,20 +160,31 @@ export async function middleware(request: NextRequest) {
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();
     url.pathname = '/login';
-    return NextResponse.redirect(url);
+    const redirect = NextResponse.redirect(url);
+    applyCspHeaders(redirect, nonce);
+    return redirect;
   }
 
   // Redirect authenticated users away from login
   if (user && request.nextUrl.pathname === '/login') {
     const url = request.nextUrl.clone();
     url.pathname = '/dashboard';
-    return NextResponse.redirect(url);
+    const redirect = NextResponse.redirect(url);
+    applyCspHeaders(redirect, nonce);
+    return redirect;
   }
 
   // V53 Phase 1.8: CSRF protection for mutating requests
   const csrfError = checkCsrf(request);
-  if (csrfError) return csrfError;
+  if (csrfError) {
+    applyCspHeaders(csrfError, nonce);
+    return csrfError;
+  }
 
+  // Apply CSP nonce to the response + pass nonce via header for layout
+  applyCspHeaders(supabaseResponse, nonce);
+  // Set nonce as a request header so server components can access it
+  request.headers.set('x-nonce', nonce);
   return supabaseResponse;
 }
 

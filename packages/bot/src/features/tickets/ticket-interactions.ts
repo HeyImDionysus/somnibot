@@ -28,7 +28,9 @@ import type { SomniClient } from '../../client.js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } from './ticket-service.js';
 import { generateTranscript } from './transcript-generator.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+
+const log = createLogger('TicketInteractions');
 
 interface IntakeFormField {
   label: string;
@@ -421,7 +423,7 @@ async function handleTicketDelete(
 
   if (!result.success) {
     // Channel might already be deleted
-    console.warn(`[Tickets] Delete ticket #${ticketNumber} result: ${result.error}`);
+    log.warn(`Delete ticket #${ticketNumber} result: ${result.error}`);
   }
 }
 

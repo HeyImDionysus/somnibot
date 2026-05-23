@@ -12,6 +12,8 @@ import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 
+const log = createLogger('ChannelEvents');
+
 type GuildBasedChannel = Exclude<GuildChannel, DMChannel>;
 
 /**
@@ -58,7 +60,7 @@ export async function handleChannelCreate(
 
   const entityType = channel.type === ChannelType.GuildCategory ? 'category' : 'channel';
 
-  console.log(`[Sync:Drift] New ${entityType} created externally: "${channel.name}" (${channel.id})`);
+  log.info(`[Sync:Drift] New ${entityType} created externally: "${channel.name}" (${channel.id})`);
 
   const driftItem: DriftItem = {
     type: 'EXTRA_RESOURCE',
@@ -168,7 +170,7 @@ export async function handleChannelUpdate(
   const hasPermissionChange = 'permission_overwrites' in changes || 'overwrite_count' in changes;
   const entityType = newChannel.type === ChannelType.GuildCategory ? 'category' : 'channel';
 
-  console.log(
+  log.info(
     `[Sync:Drift] ${entityType} "${newChannel.name}" modified externally:`,
     Object.keys(changes).join(', '),
   );
@@ -223,7 +225,7 @@ export async function handleChannelDelete(
 
   const entityType = channel.type === ChannelType.GuildCategory ? 'category' : 'channel';
 
-  console.log(`[Sync:Drift] Tracked ${entityType} deleted: "${channel.name}" (${channel.id})`);
+  log.info(`[Sync:Drift] Tracked ${entityType} deleted: "${channel.name}" (${channel.id})`);
 
   const driftItem: DriftItem = {
     type: 'MISSING_RESOURCE',
@@ -369,7 +371,7 @@ async function autoRepairChannel(
         reason: 'SomniBot auto-repair — restoring desired state',
       } as Record<string, unknown>);
 
-      console.log(`[Sync:Drift] Auto-repaired channel "${channel.name}"`);
+      log.info(`[Sync:Drift] Auto-repaired channel "${channel.name}"`);
 
       await writeAuditLog(client.supabase, {
         guildId: channel.guild.id,
@@ -382,6 +384,6 @@ async function autoRepairChannel(
       });
     }
   } catch (err) {
-    console.error(`[Sync:Drift] Failed to auto-repair channel "${channel.name}":`, err);
+    log.error(`[Sync:Drift] Failed to auto-repair channel "${channel.name}":`, err);
   }
 }

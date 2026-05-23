@@ -12,7 +12,9 @@
 import { EmbedBuilder, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+
+const log = createLogger('OwnerNotify');
 
 interface NotificationConfig {
   ownerDiscordId: string;
@@ -115,7 +117,7 @@ export class OwnerNotificationService {
       });
     });
 
-    console.log('[Notifications] Owner notification service started');
+    log.info('Owner notification service started');
   }
 
   private async notify(
@@ -156,7 +158,7 @@ export class OwnerNotificationService {
           await (channel as { send: (opts: unknown) => Promise<unknown> }).send({ embeds: [discordEmbed] });
         }
       } catch (err) {
-        console.error('[Notifications] Failed to send to admin channel:', err);
+        log.error('Failed to send to admin channel:', err);
       }
     }
 
@@ -166,7 +168,7 @@ export class OwnerNotificationService {
         const owner = await this.client.users.fetch(this.config.ownerDiscordId);
         await owner.send({ embeds: [discordEmbed] });
       } catch (err) {
-        console.error('[Notifications] Failed to DM owner:', err);
+        log.error('Failed to DM owner:', err);
       }
     }
   }

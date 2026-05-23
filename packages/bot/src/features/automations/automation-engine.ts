@@ -13,9 +13,11 @@ import { AutomationLoader, type LoadedAutomation } from './automation-loader.js'
 import { evaluateConditions, type ConditionContext } from './condition-evaluator.js';
 import { executeActions, type ActionContext } from './action-executor.js';
 import type { AlertService } from '../../services/alert-service.js';
-import { AUTOMATION_LIMITS } from '@somnibot/shared';
+import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
+
+const log = createLogger('AutomationEngine');
 
 /**
  * Event context passed alongside platform events for automation processing.
@@ -76,7 +78,7 @@ export class AutomationEngine {
       await this.handleEvent(event);
     });
 
-    console.log('[AutomationEngine] ✅ Started and listening for events');
+    log.info('Started and listening for events');
   }
 
   /**
@@ -89,7 +91,7 @@ export class AutomationEngine {
     // ── Chain-depth guard ──────────────────────────────────
     const depth = event._chainDepth ?? 0;
     if (depth >= AUTOMATION_LIMITS.MAX_CHAIN_DEPTH) {
-      console.warn(
+      log.warn(
         `[AutomationEngine] Chain depth ${depth} exceeds max (${AUTOMATION_LIMITS.MAX_CHAIN_DEPTH}), ` +
         `dropping event "${event.type}" to prevent infinite loop`,
       );
@@ -107,7 +109,7 @@ export class AutomationEngine {
     for (const automation of automations) {
       // Run each automation independently — errors in one don't block others
       this.processAutomation(automation, event, ctx).catch((err) => {
-        console.error(`[AutomationEngine] Uncaught error in automation "${automation.name}":`, err);
+        log.error(`Uncaught error in automation "${automation.name}":`, err);
       });
     }
   }
@@ -132,7 +134,7 @@ export class AutomationEngine {
     if (ctx.member) {
       const allowed = await this.rateLimiter.allowFire(this.guild.id, ctx.member.id);
       if (!allowed) {
-        console.log(`[AutomationEngine] Rate limited: ${automation.name} for user ${ctx.member.id}`);
+        log.info(`Rate limited: ${automation.name} for user ${ctx.member.id}`);
         return;
       }
 
@@ -238,9 +240,9 @@ export class AutomationEngine {
     }
 
     if (errors.length > 0) {
-      console.warn(`[AutomationEngine] "${automation.name}" completed with ${failed} error(s):`, errors);
+      log.warn(`"${automation.name}" completed with ${failed} error(s):`, errors);
     } else {
-      console.log(`[AutomationEngine] "${automation.name}" executed ${executed} action(s) in ${result.durationMs}ms`);
+      log.info(`"${automation.name}" executed ${executed} action(s) in ${result.durationMs}ms`);
     }
   }
 
@@ -389,7 +391,7 @@ export class AutomationEngine {
 
     for (const automation of automations) {
       this.processAutomation(automation, event, ctx).catch((err) => {
-        console.error(`[AutomationEngine] Uncaught error in message automation "${automation.name}":`, err);
+        log.error(`Uncaught error in message automation "${automation.name}":`, err);
       });
     }
   }
@@ -407,7 +409,7 @@ export class AutomationEngine {
 
     for (const automation of automations) {
       this.processAutomation(automation, event, ctx).catch((err) => {
-        console.error(`[AutomationEngine] Uncaught error in reaction automation "${automation.name}":`, err);
+        log.error(`Uncaught error in reaction automation "${automation.name}":`, err);
       });
     }
   }

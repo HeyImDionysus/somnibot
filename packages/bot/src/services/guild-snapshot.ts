@@ -15,6 +15,9 @@
 
 import { ChannelType, type Guild, type Role } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('GuildSnapshot');
 
 // ============================================================
 // Types — Live role/channel as stored in Supabase JSONB
@@ -246,7 +249,7 @@ export async function writeGuildSnapshot(
     }
     memberSnapshots = snapshots;
   } catch (err) {
-    console.warn('[Snapshot] Failed to fetch members for snapshot:', err);
+    log.warn('Failed to fetch members for snapshot:', err);
   }
 
   // ── Write to Supabase ──
@@ -268,9 +271,9 @@ export async function writeGuildSnapshot(
   );
 
   if (error) {
-    console.error('[Snapshot] Failed to write guild snapshot:', error.message);
+    log.error('Failed to write guild snapshot:', error.message);
   } else {
-    console.log(
+    log.info(
       `[Snapshot] Written: ${roles.length} roles, ${channels.length} channels, ${categories.length} categories`,
     );
   }
@@ -301,12 +304,12 @@ export function startPeriodicSnapshots(
 ): NodeJS.Timeout {
   // Immediate first write
   writeGuildSnapshot(guild, supabase).catch((err) =>
-    console.error('[Snapshot] Initial snapshot failed:', err),
+    log.error('Initial snapshot failed:', err),
   );
 
   return setInterval(() => {
     writeGuildSnapshot(guild, supabase).catch((err) =>
-      console.error('[Snapshot] Periodic snapshot failed:', err),
+      log.error('Periodic snapshot failed:', err),
     );
   }, intervalMs);
 }

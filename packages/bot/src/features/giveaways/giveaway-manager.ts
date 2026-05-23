@@ -13,6 +13,9 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Giveaway');
 
 interface GiveawayRow {
   id: string;
@@ -48,13 +51,13 @@ export class GiveawayManager {
     // Check every 30 seconds for giveaways that need to end
     this.checkTimer = setInterval(() => {
       this.checkExpired().catch((err) => {
-        console.error('[Giveaways] Check error:', err);
+        log.error('Check error:', err);
       });
     }, 30_000);
 
     // Initial check
     await this.checkExpired();
-    console.log('[Giveaways] Manager started');
+    log.info('Manager started');
   }
 
   stop(): void {
@@ -101,7 +104,7 @@ export class GiveawayManager {
       .single();
 
     if (error || !data) {
-      console.error('[Giveaways] Create error:', error?.message);
+      log.error('Create error:', error?.message);
       return null;
     }
 
@@ -193,7 +196,7 @@ export class GiveawayManager {
       });
 
       if (!updated || !Array.isArray(updated) || updated.length === 0) {
-        console.error('[Giveaways] giveaway_remove_entry RPC not found or no match — run migrations');
+        log.error('giveaway_remove_entry RPC not found or no match — run migrations');
         await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
         return true;
       }
@@ -212,7 +215,7 @@ export class GiveawayManager {
     });
 
     if (!updated || !Array.isArray(updated) || updated.length === 0) {
-      console.error('[Giveaways] giveaway_add_entry RPC not found or no match — run migrations');
+      log.error('giveaway_add_entry RPC not found or no match — run migrations');
       await interaction.reply({ content: '❌ Internal error — please try again.', ephemeral: true });
       return true;
     }
@@ -265,7 +268,7 @@ export class GiveawayManager {
     const pausedGiveaway = { ...giveaway, status: 'paused' as const };
     await this.updateGiveawayMessage(pausedGiveaway);
 
-    console.log(`[Giveaways] Paused "${giveaway.prize}"`);
+    log.info(`Paused "${giveaway.prize}"`);
     return true;
   }
 
@@ -304,7 +307,7 @@ export class GiveawayManager {
     };
     await this.updateGiveawayMessage(resumedGiveaway);
 
-    console.log(`[Giveaways] Resumed "${giveaway.prize}"`);
+    log.info(`Resumed "${giveaway.prize}"`);
     return true;
   }
 
@@ -338,7 +341,7 @@ export class GiveawayManager {
     });
 
     if (rerollErr || !rerolled || (Array.isArray(rerolled) && rerolled.length === 0)) {
-      console.error('[Giveaways] giveaway_atomic_reroll failed:', rerollErr?.message);
+      log.error('giveaway_atomic_reroll failed:', rerollErr?.message);
       return [];
     }
 
@@ -368,7 +371,7 @@ export class GiveawayManager {
       try {
         await this.selectWinnersAndEnd(row as GiveawayRow);
       } catch (err) {
-        console.error(`[Giveaways] Error ending giveaway ${row.id}:`, err);
+        log.error(`Error ending giveaway ${row.id}:`, err);
       }
     }
   }
@@ -387,7 +390,7 @@ export class GiveawayManager {
 
     if (endErr || !endedRows || (Array.isArray(endedRows) && endedRows.length === 0)) {
       // Another call already ended this giveaway — bail out
-      console.log(`[Giveaways] giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
+      log.info(`giveaway_atomic_end returned empty for "${giveaway.prize}" — already ended`);
       return giveaway.winners;
     }
 
@@ -418,7 +421,7 @@ export class GiveawayManager {
       prizeProductId: giveaway.prize_product_id,
     });
 
-    console.log(`[Giveaways] Ended "${giveaway.prize}" — ${winners.length} winner(s)`);
+    log.info(`Ended "${giveaway.prize}" — ${winners.length} winner(s)`);
     return winners;
   }
 

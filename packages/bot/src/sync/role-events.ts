@@ -13,6 +13,8 @@ import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity, DriftType } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 
+const log = createLogger('RoleEvents');
+
 /**
  * Handle roleCreate — a new role was created outside the dashboard.
  */
@@ -32,7 +34,7 @@ export async function handleRoleCreate(
 
   if (mapping) return; // This was created by us — not drift
 
-  console.log(`[Sync:Drift] New role created externally: "${role.name}" (${role.id})`);
+  log.info(`[Sync:Drift] New role created externally: "${role.name}" (${role.id})`);
 
   const driftItem: DriftItem = {
     type: 'EXTRA_RESOURCE',
@@ -66,7 +68,7 @@ export async function handleRoleUpdate(
   // Check @everyone specifically
   if (newRole.id === newRole.guild.id) {
     if (newRole.permissions.bitfield !== 0n) {
-      console.log(`[Sync:Drift] CRITICAL — @everyone permissions changed to ${newRole.permissions.bitfield}`);
+      log.info(`[Sync:Drift] CRITICAL — @everyone permissions changed to ${newRole.permissions.bitfield}`);
 
       const driftItem: DriftItem = {
         type: 'EVERYONE_DRIFT',
@@ -85,7 +87,7 @@ export async function handleRoleUpdate(
       if (config.autoRepairEveryone) {
         try {
           await newRole.setPermissions(0n, 'SomniBot auto-repair — @everyone must be 0');
-          console.log('[Sync:Drift] Auto-repaired @everyone permissions to 0');
+          log.info('[Sync:Drift] Auto-repaired @everyone permissions to 0');
 
           await writeAuditLog(client.supabase, {
             guildId: newRole.guild.id,
@@ -101,7 +103,7 @@ export async function handleRoleUpdate(
             },
           });
         } catch (err) {
-          console.error('[Sync:Drift] Failed to auto-repair @everyone:', err);
+          log.error('[Sync:Drift] Failed to auto-repair @everyone:', err);
         }
       }
 
@@ -155,7 +157,7 @@ export async function handleRoleUpdate(
 
   const hasPermissionChange = 'permissions' in changes;
 
-  console.log(
+  log.info(
     `[Sync:Drift] Role "${newRole.name}" modified externally:`,
     Object.keys(changes).join(', '),
   );
@@ -208,7 +210,7 @@ export async function handleRoleDelete(
 
   if (!mapping) return; // Untracked role — not drift
 
-  console.log(`[Sync:Drift] Tracked role deleted: "${role.name}" (${role.id})`);
+  log.info(`[Sync:Drift] Tracked role deleted: "${role.name}" (${role.id})`);
 
   const driftItem: DriftItem = {
     type: 'MISSING_RESOURCE',
@@ -354,7 +356,7 @@ async function autoRepairRole(
       reason: 'SomniBot auto-repair — restoring desired state',
     });
 
-    console.log(`[Sync:Drift] Auto-repaired role "${role.name}"`);
+    log.info(`[Sync:Drift] Auto-repaired role "${role.name}"`);
 
     await writeAuditLog(client.supabase, {
       guildId: role.guild.id,
@@ -366,6 +368,6 @@ async function autoRepairRole(
       details: { roleName: role.name, templateKey },
     });
   } catch (err) {
-    console.error(`[Sync:Drift] Failed to auto-repair role "${role.name}":`, err);
+    log.error(`[Sync:Drift] Failed to auto-repair role "${role.name}":`, err);
   }
 }

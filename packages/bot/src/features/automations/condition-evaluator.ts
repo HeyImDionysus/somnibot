@@ -4,6 +4,9 @@
  */
 import type { Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ConditionEval');
 
 export interface ConditionContext {
   guild: Guild;
@@ -205,7 +208,7 @@ async function evaluateCondition(
     }
 
     default:
-      console.warn(`[Conditions] Unknown condition type: ${type}`);
+      log.warn(`Unknown condition type: ${type}`);
       return true;
   }
 }

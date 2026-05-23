@@ -10,6 +10,9 @@ import {
   type GuildMember,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('TempChannels');
 
 
 export interface HubConfig {
@@ -73,7 +76,7 @@ export class TempChannelManager {
     // Clean up any orphaned channels
     await this.cleanupOrphans();
 
-    console.log(`[TempChannels] Loaded ${this.hubs.size} hubs, ${this.activeChannels.size} active channels`);
+    log.info(`Loaded ${this.hubs.size} hubs, ${this.activeChannels.size} active channels`);
   }
 
   isHubChannel(channelId: string): boolean {
@@ -160,7 +163,7 @@ export class TempChannelManager {
           });
           textChannelId = tc.id;
         } catch (err) {
-          console.error('[TempChannels] Failed to create text channel:', err);
+          log.error('Failed to create text channel:', err);
         }
       }
 
@@ -179,9 +182,9 @@ export class TempChannelManager {
       // Move the member to the new channel
       await member.voice.setChannel(vc);
 
-      console.log(`[TempChannels] Created "${vc.name}" for ${member.user.username}`);
+      log.info(`Created "${vc.name}" for ${member.user.username}`);
     } catch (err) {
-      console.error('[TempChannels] Failed to create temp channel:', err);
+      log.error('Failed to create temp channel:', err);
     }
   }
 
@@ -225,7 +228,7 @@ export class TempChannelManager {
           await this.deleteChannel(channelId);
         }
       } catch (err) {
-        console.error('[TempChannels] Keep-alive cleanup error:', err);
+        log.error('Keep-alive cleanup error:', err);
       }
       this.keepAliveTimers.delete(channelId);
     }, keepAliveMs);
@@ -257,7 +260,7 @@ export class TempChannelManager {
     }
 
     await this.removeChannel(channelId);
-    console.log(`[TempChannels] Deleted temp channel ${channelId}`);
+    log.info(`Deleted temp channel ${channelId}`);
   }
 
   /**
@@ -284,7 +287,7 @@ export class TempChannelManager {
           DeafenMembers: true,
         });
       } catch (err) {
-        console.error('[TempChannels] Failed to update permissions:', err);
+        log.error('Failed to update permissions:', err);
       }
     }
 

@@ -3,6 +3,9 @@
  */
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Profiles');
 
 let _manager: ProfilesManager | null = null;
 export function registerProfilesManager(mgr: ProfilesManager): void { _manager = mgr; }
@@ -42,7 +45,7 @@ export class ProfilesManager {
       p_guild_id: guildId,
       p_user_id: target.id,
     });
-    if (viewErr) console.error('[Profiles] increment_profile_views failed:', viewErr.message);
+    if (viewErr) log.error('increment_profile_views failed:', viewErr.message);
 
     // Fetch wallet, pet, prestige, achievements in parallel
     const [walletRes, petRes, prestigeRes, achRes] = await Promise.all([

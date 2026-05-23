@@ -18,6 +18,8 @@ import { writeAuditLog, writeAuditBatch } from '../services/audit.js';
 import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 import type { DesiredState, DesiredRole, DesiredChannel, DesiredCategory } from '@somnibot/shared';
 
+const log = createLogger('DeployListener');
+
 // ============================================================
 // Deploy Status Tracking
 // ============================================================
@@ -49,7 +51,7 @@ export function getDeployStatus(): DeployStatus | null {
 export function startDeployListener(client: SomniClient): void {
   const guildId = client.guildId;
 
-  console.log('[Deploy] Starting deploy listener for guild:', guildId);
+  log.info('Starting deploy listener for guild:', guildId);
 
   // Subscribe to changes on guild_desired_state
   client.supabase
@@ -72,18 +74,18 @@ export function startDeployListener(client: SomniClient): void {
           Array.isArray(newState.roles) &&
           newState.roles.length > 0
         ) {
-          console.log('[Deploy] Detected deploy request via Realtime');
+          log.info('Detected deploy request via Realtime');
           await executeDeploy(client, newState);
         }
       },
     )
     .subscribe((status) => {
-      console.log(`[Deploy] Realtime subscription: ${status}`);
+      log.info(`Realtime subscription: ${status}`);
     });
 
   // Also listen via event bus for direct deploy requests (API / tests)
   client.eventBus.on('deploy.requested', async (event) => {
-    console.log('[Deploy] Received deploy request via event bus');
+    log.info('Received deploy request via event bus');
     // For event-bus triggered deploys, fetch the desired state from Supabase
     const { data: stateRow } = await client.supabase
       .from('guild_desired_state')
@@ -94,11 +96,11 @@ export function startDeployListener(client: SomniClient): void {
     if (stateRow) {
       await executeDeploy(client, stateRow as Record<string, unknown>);
     } else {
-      console.error('[Deploy] No desired state found for guild:', guildId);
+      log.error('No desired state found for guild:', guildId);
     }
   });
 
-  console.log('[Deploy] Deploy listener active');
+  log.info('Deploy listener active');
 }
 
 // ============================================================
@@ -157,7 +159,7 @@ async function executeDeployDirect(
   optionOverrides?: Partial<DeployOptions>,
 ): Promise<void> {
   if (currentDeploy?.status === 'running') {
-    console.warn('[Deploy] Deployment already in progress — ignoring');
+    log.warn('Deployment already in progress — ignoring');
     return;
   }
 
@@ -166,7 +168,7 @@ async function executeDeployDirect(
   const guild = client.guilds.cache.get(guildId);
 
   if (!guild) {
-    console.error('[Deploy] Guild not found:', guildId);
+    log.error('Guild not found:', guildId);
     return;
   }
 
@@ -202,13 +204,13 @@ async function executeDeployDirect(
         currentDeploy.totalSteps = total;
         currentDeploy.currentAction = action;
       }
-      console.log(`[Deploy] [${step}/${total}] ${action}`);
+      log.info(`[${step}/${total}] ${action}`);
     },
     ...optionOverrides,
   };
 
   try {
-    console.log('[Deploy] Starting deployment:', deployId);
+    log.info('Starting deployment:', deployId);
     const result = await deployServerState(
       guild,
       client.supabase,
@@ -235,9 +237,9 @@ async function executeDeployDirect(
         );
 
       if (mapError) {
-        console.error('[Deploy] Failed to store ID mappings:', mapError.message);
+        log.error('Failed to store ID mappings:', mapError.message);
       } else {
-        console.log(`[Deploy] Stored ${result.idMappings.length} ID mappings`);
+        log.info(`Stored ${result.idMappings.length} ID mappings`);
       }
     }
 
@@ -253,7 +255,7 @@ async function executeDeployDirect(
         .eq('guild_id', guildId);
 
       if (updateError) {
-        console.error('[Deploy] Failed to update desired state:', updateError.message);
+        log.error('Failed to update desired state:', updateError.message);
       }
     }
 
@@ -294,9 +296,9 @@ async function executeDeployDirect(
     // Write live state snapshot after deployment so dashboard sees the result immediately
     try {
       await writeGuildSnapshot(guild, client.supabase);
-      console.log('[Deploy] Guild live state snapshot updated');
+      log.info('Guild live state snapshot updated');
     } catch (snapshotErr) {
-      console.error('[Deploy] Failed to write post-deploy snapshot:', snapshotErr);
+      log.error('Failed to write post-deploy snapshot:', snapshotErr);
     }
 
     // Emit event
@@ -317,14 +319,14 @@ async function executeDeployDirect(
       });
     }
 
-    console.log(
+    log.info(
       `[Deploy] ${result.success ? '✅ Succeeded' : '❌ Failed'} — ` +
         `${result.duration}ms, ${result.actions.length} actions, ` +
         `${result.errors.length} errors`,
     );
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    console.error('[Deploy] Fatal deployment error:', errMsg);
+    log.error('Fatal deployment error:', errMsg);
 
     currentDeploy.status = 'failed';
     currentDeploy.completedAt = new Date().toISOString();

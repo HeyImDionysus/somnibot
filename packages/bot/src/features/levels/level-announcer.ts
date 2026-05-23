@@ -8,7 +8,9 @@ import { ChannelType } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { loadLevelConfig, loadRewards } from './xp-tracker.js';
-import { totalXpForLevel, LEVEL_CONFIG } from '@somnibot/shared';
+import { totalXpForLevel, LEVEL_CONFIG , createLogger } from '@somnibot/shared';
+
+const log = createLogger('LevelAnnouncer');
 
 /**
  * Handle a level-up event: announcements + role rewards.
@@ -58,7 +60,7 @@ export async function handleLevelUp(
           }
         }
       } catch (err) {
-        console.error(`[Levels] Failed to manage reward role for level ${lvl}:`, err);
+        log.error(`Failed to manage reward role for level ${lvl}:`, err);
       }
     }
 
@@ -70,7 +72,7 @@ export async function handleLevelUp(
           await member.roles.remove(r.role_id, `Replaced at level ${lvl}`);
         }
       } catch (err) {
-        console.error(`[Levels] Failed to remove old reward role:`, err);
+        log.error(`Failed to remove old reward role:`, err);
       }
     }
   }
@@ -106,7 +108,7 @@ export async function handleLevelUp(
         await textChannel.send(content);
       }
     } catch (err) {
-      console.error('[Levels] Failed to send level-up announcement:', err);
+      log.error('Failed to send level-up announcement:', err);
     }
   }
 }

@@ -9,6 +9,8 @@ import { type GuildMember, EmbedBuilder, type TextChannel } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { InfractionType } from '@somnibot/shared';
 
+const log = createLogger('ModLog');
+
 // SomniBot palette
 const COLORS = {
   warn: 0xFF6B00,    // ORANGE
@@ -122,7 +124,7 @@ export async function postModLogEntry(
 
     await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('[ModLog] Failed to post mod log entry:', err);
+    log.error('Failed to post mod log entry:', err);
   }
 }
 

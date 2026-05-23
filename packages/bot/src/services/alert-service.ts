@@ -13,6 +13,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { Guild, TextChannel } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AlertService');
 
 const FAILURE_COUNT_PREFIX = 'somnibot:auto_fail:';
 const FAILURE_COUNT_TTL = 3600; // Reset after 1h of no failures
@@ -56,7 +59,7 @@ export class AlertService {
     } catch {
       // Non-fatal
     }
-    console.log(
+    log.info(
       `[AlertService] ✅ Initialized — threshold: ${this.failureThreshold}, ` +
         `alert channel: ${this.alertChannelId ?? 'not configured'}`,
     );
@@ -91,7 +94,7 @@ export class AlertService {
         await this.fireAutomationAlert(automationId, automationName, errorMessage, count);
       }
     } catch (err) {
-      console.error('[AlertService] Failed to record failure:', err instanceof Error ? err.message : err);
+      log.error('Failed to record failure:', err instanceof Error ? err.message : err);
     }
   }
 
@@ -159,7 +162,7 @@ export class AlertService {
         metadata: metadata ?? {},
       });
     } catch (err) {
-      console.error('[AlertService] Failed to write alert to DB:', err instanceof Error ? err.message : err);
+      log.error('Failed to write alert to DB:', err instanceof Error ? err.message : err);
     }
 
     // Post to alert channel
@@ -190,7 +193,7 @@ export class AlertService {
         metadata: { automationId, automationName, failureCount, lastError: errorMessage },
       });
     } catch (err) {
-      console.error('[AlertService] Failed to write automation alert:', err instanceof Error ? err.message : err);
+      log.error('Failed to write automation alert:', err instanceof Error ? err.message : err);
     }
 
     // Post to alert channel
@@ -226,7 +229,7 @@ export class AlertService {
         ],
       });
     } catch (err) {
-      console.error('[AlertService] Failed to post to alert channel:', err instanceof Error ? err.message : err);
+      log.error('Failed to post to alert channel:', err instanceof Error ? err.message : err);
     }
   }
 }

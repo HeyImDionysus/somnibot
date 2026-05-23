@@ -14,6 +14,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 
+const log = createLogger('Games');
+
 // ── Module-level state ────────────────────────────────────
 
 let _manager: GamesManager | null = null;
@@ -113,15 +115,15 @@ export class GamesManager {
       const { error } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: amount,
       });
-      if (error) { console.error('[Games] economy_add_balance failed:', error.message); return false; }
+      if (error) { log.error('economy_add_balance failed:', error.message); return false; }
     } else {
       const { error } = await (this.supabase as any).rpc('economy_subtract_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: Math.abs(amount),
       });
-      if (error) { console.error('[Games] economy_subtract_balance failed:', error.message); return false; }
+      if (error) { log.error('economy_subtract_balance failed:', error.message); return false; }
     }
     // Track quest progress for any gamble action (win or loss)
-    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
     return true;
   }
 
@@ -162,7 +164,7 @@ export class GamesManager {
       p_amount: amount,
     });
     if (error) {
-      console.error('[Games] economy_increment_daily_loss failed:', error);
+      log.error('economy_increment_daily_loss failed:', error);
     }
   }
 
@@ -511,7 +513,7 @@ export class GamesManager {
             }
           }
         } catch (err) {
-          console.error('[Games] Blackjack button handler error:', err);
+          log.error('Blackjack button handler error:', err);
           collector.stop('error');
         }
       });
@@ -522,7 +524,7 @@ export class GamesManager {
           try {
             await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
           } catch (err) {
-            console.error('[Games] Blackjack timeout resolution error:', err);
+            log.error('Blackjack timeout resolution error:', err);
           }
         }
       });

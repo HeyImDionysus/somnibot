@@ -9,6 +9,8 @@
 import type { GuildMember, PartialGuildMember, TextChannel } from 'discord.js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import {
+
+const log = createLogger('Goodbye');
   buildWelcomeVariables,
   formatDuration,
   interpolateMessage,
@@ -29,7 +31,7 @@ export async function executeGoodbyeFlow(
   try {
     const channel = member.guild.channels.cache.get(config.goodbye_channel_id) as TextChannel | undefined;
     if (!channel?.isTextBased()) {
-      console.warn('[Goodbye] Goodbye channel not found or not text-based:', config.goodbye_channel_id);
+      log.warn('Goodbye channel not found or not text-based:', config.goodbye_channel_id);
       return;
     }
 
@@ -53,8 +55,8 @@ export async function executeGoodbyeFlow(
     );
 
     await channel.send(messageText);
-    console.log(`[Goodbye] Message sent for ${member.user?.tag ?? member.id}`);
+    log.info(`Message sent for ${member.user?.tag ?? member.id}`);
   } catch (err) {
-    console.error('[Goodbye] Failed to send goodbye message:', err);
+    log.error('Failed to send goodbye message:', err);
   }
 }

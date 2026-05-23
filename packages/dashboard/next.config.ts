@@ -21,25 +21,13 @@ const nextConfig: NextConfig = {
     ],
   },
   // ── Security Headers ─────────────────────────────────────
+  // NOTE: CSP is set per-request in middleware.ts with a nonce.
+  // Only non-CSP security headers are set here statically.
   async headers() {
     return [
       {
         source: '/(.*)',
         headers: [
-          {
-            key: 'Content-Security-Policy',
-            value: [
-              "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval'",      // Next.js requires inline scripts
-              "style-src 'self' 'unsafe-inline'",                      // Tailwind/CSS-in-JS
-              "img-src 'self' data: https://cdn.discordapp.com",       // Discord avatars
-              "font-src 'self'",
-              "connect-src 'self' https://*.supabase.co wss://*.supabase.co", // Supabase API + Realtime
-              "frame-ancestors 'none'",                                // Prevent clickjacking
-              "base-uri 'self'",
-              "form-action 'self'",
-            ].join('; '),
-          },
           {
             key: 'X-Frame-Options',
             value: 'DENY',
