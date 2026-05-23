@@ -469,6 +469,90 @@ function RuleEditor({
 
 // ── Type-specific config editors ──
 
+function WordFilterConfig({ config, onChange }: { config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void }) {
+  const words = (config.words as string[]) ?? [];
+  const [newWord, setNewWord] = useState('');
+  return (
+    <div>
+      <label className="block text-sm font-medium text-discord-text-primary mb-1">Banned Words</label>
+      <div className="flex gap-2 mb-2">
+        <input
+          type="text"
+          value={newWord}
+          onChange={(e) => setNewWord(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && newWord.trim()) {
+              onChange({ ...config, words: [...words, newWord.trim()] });
+              setNewWord('');
+            }
+          }}
+          placeholder="Type a word and press Enter"
+          className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+        />
+        <select
+          value={(config.matchMode as string) ?? 'exact'}
+          onChange={(e) => onChange({ ...config, matchMode: e.target.value })}
+          className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+        >
+          <option value="exact">Exact</option>
+          <option value="wildcard">Wildcard</option>
+          <option value="regex">Regex</option>
+        </select>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {words.map((w, i) => (
+          <span key={i} className="inline-flex items-center gap-1 rounded bg-red-500/20 px-2 py-0.5 text-xs text-red-400">
+            {w}
+            <button onClick={() => onChange({ ...config, words: words.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LinkFilterConfig({ config, onChange }: { config: Record<string, unknown>; onChange: (c: Record<string, unknown>) => void }) {
+  const domains = (config.domains as string[]) ?? [];
+  const [newDomain, setNewDomain] = useState('');
+  return (
+    <div>
+      <div className="flex gap-2 mb-2">
+        <select
+          value={(config.mode as string) ?? 'blacklist'}
+          onChange={(e) => onChange({ ...config, mode: e.target.value })}
+          className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
+        >
+          <option value="blacklist">Blacklist (block these)</option>
+          <option value="whitelist">Whitelist (only allow these)</option>
+        </select>
+      </div>
+      <div className="flex gap-2 mb-2">
+        <input
+          type="text"
+          value={newDomain}
+          onChange={(e) => setNewDomain(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && newDomain.trim()) {
+              onChange({ ...config, domains: [...domains, newDomain.trim()] });
+              setNewDomain('');
+            }
+          }}
+          placeholder="example.com"
+          className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
+        />
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {domains.map((d, i) => (
+          <span key={i} className="inline-flex items-center gap-1 rounded bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400">
+            {d}
+            <button onClick={() => onChange({ ...config, domains: domains.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function RuleConfig({
   type,
   config,
@@ -479,89 +563,11 @@ function RuleConfig({
   onChange: (c: Record<string, unknown>) => void;
 }) {
   switch (type) {
-    case 'word_filter': {
-      const words = (config.words as string[]) ?? [];
-      const [newWord, setNewWord] = useState('');
-      return (
-        <div>
-          <label className="block text-sm font-medium text-discord-text-primary mb-1">Banned Words</label>
-          <div className="flex gap-2 mb-2">
-            <input
-              type="text"
-              value={newWord}
-              onChange={(e) => setNewWord(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && newWord.trim()) {
-                  onChange({ ...config, words: [...words, newWord.trim()] });
-                  setNewWord('');
-                }
-              }}
-              placeholder="Type a word and press Enter"
-              className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
-            />
-            <select
-              value={(config.matchMode as string) ?? 'exact'}
-              onChange={(e) => onChange({ ...config, matchMode: e.target.value })}
-              className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
-            >
-              <option value="exact">Exact</option>
-              <option value="wildcard">Wildcard</option>
-              <option value="regex">Regex</option>
-            </select>
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {words.map((w, i) => (
-              <span key={i} className="inline-flex items-center gap-1 rounded bg-red-500/20 px-2 py-0.5 text-xs text-red-400">
-                {w}
-                <button onClick={() => onChange({ ...config, words: words.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
-              </span>
-            ))}
-          </div>
-        </div>
-      );
-    }
+    case 'word_filter':
+      return <WordFilterConfig config={config} onChange={onChange} />;
 
-    case 'link_filter': {
-      const domains = (config.domains as string[]) ?? [];
-      const [newDomain, setNewDomain] = useState('');
-      return (
-        <div>
-          <div className="flex gap-2 mb-2">
-            <select
-              value={(config.mode as string) ?? 'blacklist'}
-              onChange={(e) => onChange({ ...config, mode: e.target.value })}
-              className="rounded-md border border-discord-border bg-discord-bg-tertiary px-2 py-1 text-sm text-discord-text-primary"
-            >
-              <option value="blacklist">Blacklist (block these)</option>
-              <option value="whitelist">Whitelist (only allow these)</option>
-            </select>
-          </div>
-          <div className="flex gap-2 mb-2">
-            <input
-              type="text"
-              value={newDomain}
-              onChange={(e) => setNewDomain(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && newDomain.trim()) {
-                  onChange({ ...config, domains: [...domains, newDomain.trim()] });
-                  setNewDomain('');
-                }
-              }}
-              placeholder="example.com"
-              className="flex-1 rounded-md border border-discord-border bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted"
-            />
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {domains.map((d, i) => (
-              <span key={i} className="inline-flex items-center gap-1 rounded bg-blue-500/20 px-2 py-0.5 text-xs text-blue-400">
-                {d}
-                <button onClick={() => onChange({ ...config, domains: domains.filter((_, j) => j !== i) })} className="hover:text-white">×</button>
-              </span>
-            ))}
-          </div>
-        </div>
-      );
-    }
+    case 'link_filter':
+      return <LinkFilterConfig config={config} onChange={onChange} />;
 
     case 'invite_filter':
       return (
