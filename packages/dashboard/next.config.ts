@@ -5,6 +5,9 @@ import type { NextConfig } from 'next';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
+  // Lint runs as a dedicated CI step via `eslint src/`;
+  // skip the built-in next lint during `next build` to avoid duplicate / conflicting runs.
+  eslint: { ignoreDuringBuilds: true },
   output: 'standalone',
   // Trace dependencies from monorepo root so standalone includes everything
   outputFileTracingRoot: path.join(__dirname, '../../'),
