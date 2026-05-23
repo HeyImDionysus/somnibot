@@ -41,7 +41,7 @@ export async function handleChannelCreate(
   client: SomniClient,
   channel: GuildBasedChannel,
 ): Promise<void> {
-  if (!('guild' in channel) || channel.guild.id !== channel.guild.id) return;
+  if (!('guild' in channel)) return;
 
   // Skip channels we know aren't drift
   if (isKnownDynamicChannel(channel)) return;
@@ -70,7 +70,7 @@ export async function handleChannelCreate(
     suggestedAction: 'accept',
   };
 
-  await recordChannelDrift(client, [driftItem]);
+  await recordChannelDrift(client, channel.guild.id, [driftItem]);
 
   client.eventBus.emit('drift.detected', channel.guild.id, {
     driftCount: 1,
@@ -88,13 +88,13 @@ export async function handleChannelUpdate(
   oldChannel: GuildBasedChannel,
   newChannel: GuildBasedChannel,
 ): Promise<void> {
-  if (!('guild' in newChannel) || newChannel.guild.id !== channel.guild.id) return;
+  if (!('guild' in newChannel)) return;
 
   // Check if this channel is tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
     .select('template_key')
-    .eq('guild_id', channel.guild.id)
+    .eq('guild_id', newChannel.guild.id)
     .eq('discord_id', newChannel.id)
     .maybeSingle();
 
@@ -186,15 +186,15 @@ export async function handleChannelUpdate(
     suggestedAction: 'repair',
   };
 
-  await recordChannelDrift(client, [driftItem]);
+  await recordChannelDrift(client, newChannel.guild.id, [driftItem]);
 
   // Auto-repair if configured
-  const config = await getSyncConfig(client);
+  const config = await getSyncConfig(client, newChannel.guild.id);
   if (config.autoRepair) {
     await autoRepairChannel(client, newChannel as NonThreadGuildBasedChannel, mapping.template_key);
   }
 
-  client.eventBus.emit('drift.detected', channel.guild.id, {
+  client.eventBus.emit('drift.detected', newChannel.guild.id, {
     driftCount: 1,
     criticalCount: 0,
     autoRepaired: config.autoRepair,
@@ -209,7 +209,7 @@ export async function handleChannelDelete(
   client: SomniClient,
   channel: GuildBasedChannel,
 ): Promise<void> {
-  if (!('guild' in channel) || channel.guild.id !== channel.guild.id) return;
+  if (!('guild' in channel)) return;
 
   // Check if tracked
   const { data: mapping } = await client.supabase
@@ -235,7 +235,7 @@ export async function handleChannelDelete(
     suggestedAction: 'repair',
   };
 
-  await recordChannelDrift(client, [driftItem]);
+  await recordChannelDrift(client, channel.guild.id, [driftItem]);
 
   client.eventBus.emit('drift.detected', channel.guild.id, {
     driftCount: 1,
@@ -263,8 +263,8 @@ interface SyncConfigLocal {
   autoRepair: boolean;
 }
 
-async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
-  const cacheKey = `sync_config:${channel.guild.id}`;
+async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigLocal> {
+  const cacheKey = `sync_config:${guildId}`;
 
   try {
     const cached = await client.valkey.get(cacheKey);
@@ -277,7 +277,7 @@ async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
   const { data } = await client.supabase
     .from('guild_config')
     .select('sync_auto_repair')
-    .eq('guild_id', channel.guild.id)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   const config: SyncConfigLocal = {
@@ -296,12 +296,13 @@ async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
  */
 async function recordChannelDrift(
   client: SomniClient,
+  guildId: string,
   newItems: DriftItem[],
 ): Promise<void> {
   const { data: current } = await client.supabase
     .from('guild_desired_state')
     .select('drift_details')
-    .eq('guild_id', channel.guild.id)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   const existingItems: DriftItem[] = Array.isArray(current?.drift_details)
@@ -327,7 +328,7 @@ async function recordChannelDrift(
       drift_details: merged,
       last_sync_at: new Date().toISOString(),
     })
-    .eq('guild_id', channel.guild.id);
+    .eq('guild_id', guildId);
 }
 
 /**

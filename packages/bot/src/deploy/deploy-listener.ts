@@ -161,6 +161,7 @@ async function executeDeployDirect(
     return;
   }
 
+  const guildId = client.guildId;
   const deployId = `deploy_${Date.now()}`;
   const guild = client.guilds.cache.get(guildId);
 

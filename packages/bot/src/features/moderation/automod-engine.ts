@@ -35,7 +35,7 @@ const DUP_KEY_PREFIX = 'automod:dup:';
 /**
  * Load auto-mod rules from cache or database.
  */
-async function loadRules(client: SomniClient): Promise<DbAutomodRule[]> {
+async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomodRule[]> {
   try {
     const cached = await client.valkey.get(RULES_CACHE_KEY);
     if (cached) {
@@ -48,7 +48,7 @@ async function loadRules(client: SomniClient): Promise<DbAutomodRule[]> {
   const { data, error } = await client.supabase
     .from('automod_rules')
     .select('*')
-    .eq('guild_id', message.guild!.id)
+    .eq('guild_id', guildId)
     .eq('enabled', true);
 
   if (error) {
@@ -127,9 +127,7 @@ export async function processMessage(
   // Quick bail-outs
   if (!message.guild || !message.member) return false;
   if (message.author.bot) return false;
-  if (message.guild.id !== message.guild!.id) return false;
-
-  const rules = await loadRules(client);
+  const rules = await loadRules(client, message.guild.id);
   if (rules.length === 0) return false;
 
   const member = message.member;

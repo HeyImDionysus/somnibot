@@ -172,7 +172,7 @@ export async function executeEscalation(
         await member.ban({ reason: escalationReason, deleteMessageSeconds: 0 });
 
         // Suspend entitlements (commerce interaction §18.6)
-        await suspendEntitlements(client, member.id);
+        await suspendEntitlements(client, member.guild.id, member.id);
 
         await createInfraction(client.supabase, {
           guildId: member.guild.id,
@@ -273,6 +273,7 @@ async function dmMember(
  */
 async function suspendEntitlements(
   client: SomniClient,
+  guildId: string,
   memberId: string,
 ): Promise<void> {
   try {
@@ -281,7 +282,7 @@ async function suspendEntitlements(
     const { data: customer } = await client.supabase
       .from('customers')
       .select('id')
-      .eq('guild_id', member.guild.id)
+      .eq('guild_id', guildId)
       .eq('discord_id', memberId)
       .maybeSingle();
 
@@ -290,7 +291,7 @@ async function suspendEntitlements(
     const { data, error } = await client.supabase
       .from('entitlements')
       .update({ status: 'suspended', updated_at: new Date().toISOString() })
-      .eq('guild_id', member.guild.id)
+      .eq('guild_id', guildId)
       .eq('customer_id', customer.id)
       .eq('status', 'active')
       .select('id');
