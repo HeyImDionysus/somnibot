@@ -45,11 +45,13 @@ export async function loadReactionRoles(
     return;
   }
 
-  // Clear old cache entries for this guild
-  const keys = await valkey.keys(`${CACHE_PREFIX}:${guildId}:*`);
-  if (keys.length > 0) {
-    await valkey.del(...keys);
-  }
+  // Clear old cache entries for this guild (SCAN instead of KEYS — V5 audit 6.1)
+  let cursor = '0';
+  do {
+    const [next, batch] = await valkey.scan(cursor, 'MATCH', `${CACHE_PREFIX}:${guildId}:*`, 'COUNT', '100');
+    cursor = next;
+    if (batch.length > 0) await valkey.del(...batch);
+  } while (cursor !== '0');
 
   // Cache each reaction role config by messageId:emoji
   for (const rr of data as DbReactionRole[]) {
