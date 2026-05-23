@@ -8,6 +8,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const syncConfigAction = z.object({
   action: z.literal('update_config'),
@@ -73,6 +74,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const tutorialPutSchema = z.object({
   config: z.object({
@@ -59,6 +60,9 @@ export async function GET() {
 }
 
 export async function PUT(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

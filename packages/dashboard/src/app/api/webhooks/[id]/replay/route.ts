@@ -10,6 +10,7 @@ import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createHmac } from 'crypto';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 // Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
 const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET

@@ -1,0 +1,23 @@
+# SomniBot Dashboard — Caddy Reverse Proxy
+#
+# Replace {$DOMAIN} with your actual domain, or set the DOMAIN env var.
+# Caddy handles automatic HTTPS via Let's Encrypt.
+#
+# For local-only deployments without a domain, use:
+#   :80 { reverse_proxy dashboard:3000 }
+
+{$DOMAIN:localhost} {
+	reverse_proxy dashboard:3000
+
+	# Security headers (CSP is set by Next.js middleware)
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		-Server
+	}
+
+	# Compression
+	encode gzip zstd
+}

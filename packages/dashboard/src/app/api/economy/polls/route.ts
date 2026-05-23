@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
 export async function GET() {

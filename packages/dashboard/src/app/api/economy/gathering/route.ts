@@ -8,9 +8,10 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const SOURCE_TYPES = ['hunt', 'dig', 'mine'] as const;
 const RARITIES = ['common', 'uncommon', 'rare', 'epic', 'legendary'] as const;
@@ -62,12 +63,16 @@ export async function GET() {
 
     return NextResponse.json({ success: true, entries: data ?? [] });
   } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to load loot tables';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const body = await request.json();
@@ -110,6 +115,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const body = await request.json();
@@ -157,6 +165,9 @@ export async function PUT(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const rawBody = await request.json().catch(() => null);
@@ -185,6 +196,7 @@ export async function DELETE(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to delete loot entry';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
