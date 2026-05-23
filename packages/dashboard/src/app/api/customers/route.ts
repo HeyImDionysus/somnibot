@@ -17,8 +17,9 @@ export async function GET(req: NextRequest) {
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const search = searchParams.get('search');
-  const limit = parseInt(searchParams.get('limit') ?? '50', 10);
-  const offset = parseInt(searchParams.get('offset') ?? '0', 10);
+  // V5 Audit [7.1]: Cap limit to prevent unbounded result sets
+  const limit = Math.min(Math.max(1, parseInt(searchParams.get('limit') ?? '50', 10)), 200);
+  const offset = Math.max(0, parseInt(searchParams.get('offset') ?? '0', 10));
 
   let query = supabase
     .from('customers')

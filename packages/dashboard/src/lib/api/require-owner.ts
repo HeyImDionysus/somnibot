@@ -94,6 +94,14 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
   let activeGuild = guilds[0]!;
   if (requestedGuildId && guilds.some(g => g.id === requestedGuildId)) {
     activeGuild = guilds.find(g => g.id === requestedGuildId)!;
+  } else if (requestedGuildId) {
+    // V5 Audit [1.2]: Log when a user requests a guild ID they don't own.
+    // This helps detect probing attempts without leaking info to the caller
+    // (they still get their default guild, not a 403).
+    console.warn(
+      `[requireGuildOwner] Guild probe: user ${discordId} requested guild ${requestedGuildId} ` +
+      `but only owns [${guilds.map(g => g.id).join(', ')}]. Falling back to default guild.`,
+    );
   }
 
   return {

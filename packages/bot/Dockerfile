@@ -32,6 +32,10 @@ RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @somnibot/shared build
 RUN pnpm --filter @somnibot/bot build
 
+# V5 Audit [9.2]: Prune devDependencies before copying to runtime stage.
+# Reduces image size and attack surface by excluding test/build-only deps.
+RUN pnpm prune --prod
+
 # --- Stage 2: Production Runtime ---
 FROM oven/bun:1-slim AS runtime
 
