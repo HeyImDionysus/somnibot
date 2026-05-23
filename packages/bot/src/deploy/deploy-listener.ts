@@ -88,13 +88,13 @@ export function startDeployListener(client: SomniClient): void {
     const { data: stateRow } = await client.supabase
       .from('guild_desired_state')
       .select('*')
-      .eq('guild_id', client.guildId)
+      .eq('guild_id', guildId)
       .single();
 
     if (stateRow) {
       await executeDeploy(client, stateRow as Record<string, unknown>);
     } else {
-      console.error('[Deploy] No desired state found for guild:', client.guildId);
+      console.error('[Deploy] No desired state found for guild:', guildId);
     }
   });
 
@@ -161,11 +161,12 @@ async function executeDeployDirect(
     return;
   }
 
+  const guildId = client.guildId;
   const deployId = `deploy_${Date.now()}`;
-  const guild = client.guilds.cache.get(client.guildId);
+  const guild = client.guilds.cache.get(guildId);
 
   if (!guild) {
-    console.error('[Deploy] Guild not found:', client.guildId);
+    console.error('[Deploy] Guild not found:', guildId);
     return;
   }
 
@@ -180,7 +181,7 @@ async function executeDeployDirect(
 
   // Audit: deploy started
   await writeAuditLog(client.supabase, {
-    guildId: client.guildId,
+    guildId: guildId,
     actorType: 'bot',
     actorId: 'deployer',
     action: 'deploy.started',
@@ -225,7 +226,7 @@ async function executeDeployDirect(
         .from('discord_id_map')
         .upsert(
           result.idMappings.map((m) => ({
-            guild_id: client.guildId,
+            guild_id: guildId,
             entity_type: m.entityType,
             template_key: m.key,
             discord_id: m.discordId,
@@ -249,7 +250,7 @@ async function executeDeployDirect(
           drift_detected: false,
           drift_details: null,
         })
-        .eq('guild_id', client.guildId);
+        .eq('guild_id', guildId);
 
       if (updateError) {
         console.error('[Deploy] Failed to update desired state:', updateError.message);
@@ -259,7 +260,7 @@ async function executeDeployDirect(
     // Audit: batch log all individual actions
     await writeAuditBatch(
       client.supabase,
-      client.guildId,
+      guildId,
       deployId,
       result.actions.map((a) => ({
         action: a.action,
@@ -273,7 +274,7 @@ async function executeDeployDirect(
 
     // Audit: deploy completed
     await writeAuditLog(client.supabase, {
-      guildId: client.guildId,
+      guildId: guildId,
       actorType: 'bot',
       actorId: 'deployer',
       action: result.success ? 'deploy.completed' : 'deploy.failed',
@@ -300,7 +301,7 @@ async function executeDeployDirect(
 
     // Emit event
     if (result.success) {
-      client.eventBus.emit('server.deployed', client.guildId, {
+      client.eventBus.emit('server.deployed', guildId, {
         deployId,
         rolesCreated: result.actions.filter(a => a.entityType === 'role' && a.action === 'create').length,
         channelsCreated: result.actions.filter(a => a.entityType === 'channel' && a.action === 'create').length,
@@ -309,7 +310,7 @@ async function executeDeployDirect(
         duration: result.duration,
       });
     } else {
-      client.eventBus.emit('deploy.failed', client.guildId, {
+      client.eventBus.emit('deploy.failed', guildId, {
         deployId,
         error: result.errors.map(e => `${e.entityName}: ${e.error}`).join('; '),
         duration: result.duration,
@@ -330,7 +331,7 @@ async function executeDeployDirect(
     currentDeploy.currentAction = `Fatal error: ${errMsg}`;
 
     await writeAuditLog(client.supabase, {
-      guildId: client.guildId,
+      guildId: guildId,
       actorType: 'bot',
       actorId: 'deployer',
       action: 'deploy.fatal',

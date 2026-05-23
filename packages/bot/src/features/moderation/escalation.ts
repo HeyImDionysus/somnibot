@@ -65,7 +65,7 @@ export async function executeEscalation(
   // push the user closer to escalation thresholds (matches MEE6/Dyno behavior).
   const activeWarnings = await getActiveInfractionCount(
     client.supabase,
-    client.guildId,
+    member.guild.id,
     member.id,
   );
 
@@ -94,7 +94,7 @@ export async function executeEscalation(
 
         // Create infraction record
         await createInfraction(client.supabase, {
-          guildId: client.guildId,
+          guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
           type: 'mute',
@@ -104,7 +104,7 @@ export async function executeEscalation(
         });
 
         // Emit event
-        client.eventBus.emit('member.muted', client.guildId, {
+        client.eventBus.emit('member.muted', member.guild.id, {
           discordId: member.id,
           moderatorId: 'system',
           reason: escalationReason,
@@ -136,7 +136,7 @@ export async function executeEscalation(
         await member.kick(escalationReason);
 
         await createInfraction(client.supabase, {
-          guildId: client.guildId,
+          guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
           type: 'kick',
@@ -144,7 +144,7 @@ export async function executeEscalation(
           expiresAt: calculateExpiryDate(config.infractionExpiryDays),
         });
 
-        client.eventBus.emit('member.kicked', client.guildId, {
+        client.eventBus.emit('member.kicked', member.guild.id, {
           discordId: member.id,
           moderatorId: 'system',
           reason: escalationReason,
@@ -172,10 +172,10 @@ export async function executeEscalation(
         await member.ban({ reason: escalationReason, deleteMessageSeconds: 0 });
 
         // Suspend entitlements (commerce interaction §18.6)
-        await suspendEntitlements(client, member.id);
+        await suspendEntitlements(client, member.guild.id, member.id);
 
         await createInfraction(client.supabase, {
-          guildId: client.guildId,
+          guildId: member.guild.id,
           memberId: member.id,
           moderatorId: 'system',
           type: 'ban',
@@ -183,7 +183,7 @@ export async function executeEscalation(
           expiresAt: calculateExpiryDate(config.infractionExpiryDays),
         });
 
-        client.eventBus.emit('member.banned', client.guildId, {
+        client.eventBus.emit('member.banned', member.guild.id, {
           discordId: member.id,
           moderatorId: 'system',
           reason: escalationReason,
@@ -206,7 +206,7 @@ export async function executeEscalation(
     console.error(`[Moderation] Escalation failed for ${member.user.tag}:`, err);
 
     await writeAuditLog(client.supabase, {
-      guildId: client.guildId,
+      guildId: member.guild.id,
       actorType: 'bot',
       actorId: client.user?.id ?? 'unknown',
       action: `escalation.${step.action}.failed`,
@@ -273,6 +273,7 @@ async function dmMember(
  */
 async function suspendEntitlements(
   client: SomniClient,
+  guildId: string,
   memberId: string,
 ): Promise<void> {
   try {
@@ -281,7 +282,7 @@ async function suspendEntitlements(
     const { data: customer } = await client.supabase
       .from('customers')
       .select('id')
-      .eq('guild_id', client.guildId)
+      .eq('guild_id', guildId)
       .eq('discord_id', memberId)
       .maybeSingle();
 
@@ -290,7 +291,7 @@ async function suspendEntitlements(
     const { data, error } = await client.supabase
       .from('entitlements')
       .update({ status: 'suspended', updated_at: new Date().toISOString() })
-      .eq('guild_id', client.guildId)
+      .eq('guild_id', guildId)
       .eq('customer_id', customer.id)
       .eq('status', 'active')
       .select('id');

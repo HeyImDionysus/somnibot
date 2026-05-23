@@ -92,6 +92,14 @@ export const DashboardEnvSchema = z.object({
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
   DISCORD_GUILD_ID: z.string().optional().default(''),
 
+  // Security — required for CSRF protection and webhook replay
+  CSRF_SECRET: z.string().min(1, 'CSRF_SECRET is required — generate with: openssl rand -hex 32'),
+  NEXTAUTH_SECRET: z.string().min(1, 'NEXTAUTH_SECRET is required — generate with: openssl rand -hex 32'),
+
+  // Valkey/Redis — used for rate limiting
+  VALKEY_URL: z.string().optional().default(''),
+  REDIS_URL: z.string().optional().default(''),
+
   // PayPal (Commerce — optional)
   PAYPAL_CLIENT_ID: z.string().optional().default(''),
   PAYPAL_CLIENT_SECRET: z.string().optional().default(''),

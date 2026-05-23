@@ -37,8 +37,9 @@ import { writeAuditLog } from '../../services/audit.js';
  */
 async function getGuildConfig(
   client: SomniClient,
+  guildId: string,
 ): Promise<DbGuildConfig | null> {
-  const cacheKey = `guild_config:${client.guildId}`;
+  const cacheKey = `guild_config:${guildId}`;
 
   // Try Valkey cache first
   try {
@@ -51,7 +52,7 @@ async function getGuildConfig(
   const { data, error } = await client.supabase
     .from('guild_config')
     .select('*')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   if (error || !data) {
@@ -76,21 +77,19 @@ export async function handleMemberJoin(
   client: SomniClient,
   member: GuildMember,
 ): Promise<void> {
-  if (member.guild.id !== client.guildId) return;
-
   console.log(`[Onboarding] Member joined: ${member.user.tag}`);
 
-  const config = await getGuildConfig(client);
+  const config = await getGuildConfig(client, member.guild.id);
   if (!config) return;
 
   // Check if this is a returning member
-  const lookup = await lookupMember(client.supabase, client.guildId, member.id);
+  const lookup = await lookupMember(client.supabase, member.guild.id, member.id);
 
   // Record the join
   await recordMemberJoin(client.supabase, member, lookup.isReturning);
 
   // Emit platform event
-  client.eventBus.emit('member.joined', client.guildId, {
+  client.eventBus.emit('member.joined', member.guild.id, {
     discordId: member.id,
     username: member.user.tag,
     isReturning: lookup.isReturning,
@@ -102,7 +101,7 @@ export async function handleMemberJoin(
     // V53 B-4: Unsuspend economy wallet for returning members
     try {
       await client.supabase.rpc('unsuspend_member_economy', {
-        p_guild_id: client.guildId,
+        p_guild_id: member.guild.id,
         p_user_id: member.id,
       });
     } catch (err) {
@@ -131,7 +130,7 @@ export async function handleMemberJoin(
     }
 
     // Mark onboarding as completed (they did it before)
-    await markOnboardingCompleted(client.supabase, client.guildId, member.id);
+    await markOnboardingCompleted(client.supabase, member.guild.id, member.id);
 
     // Execute welcome flow (unless configured to skip for returning)
     if (!config.returning_member_skip_welcome_dm) {
@@ -143,7 +142,7 @@ export async function handleMemberJoin(
     }
 
     await writeAuditLog(client.supabase, {
-      guildId: client.guildId,
+      guildId: member.guild.id,
       actorType: 'bot',
       actorId: 'onboarding',
       action: 'member.returning_welcome',
@@ -167,8 +166,6 @@ export async function handleMemberUpdate(
   oldMember: GuildMember | PartialGuildMember,
   newMember: GuildMember,
 ): Promise<void> {
-  if (newMember.guild.id !== client.guildId) return;
-
   // ── Detect onboarding completion ──────────────────────────
   const wasOnboarding =
     !oldMember.flags?.has(GuildMemberFlags.CompletedOnboarding);
@@ -178,11 +175,11 @@ export async function handleMemberUpdate(
   if (wasOnboarding && isCompleted) {
     console.log(`[Onboarding] ${newMember.user.tag} completed onboarding`);
 
-    const config = await getGuildConfig(client);
+    const config = await getGuildConfig(client, newMember.guild.id);
     if (!config) return;
 
     // Mark in database
-    await markOnboardingCompleted(client.supabase, client.guildId, newMember.id);
+    await markOnboardingCompleted(client.supabase, newMember.guild.id, newMember.id);
 
     // Grant Member role
     if (config.member_role_id) {
@@ -194,7 +191,7 @@ export async function handleMemberUpdate(
         console.log(`[Onboarding] Member role granted to ${newMember.user.tag}`);
 
         // Fire verified event
-        client.eventBus.emit('member.verified', client.guildId, {
+        client.eventBus.emit('member.verified', newMember.guild.id, {
           discordId: newMember.id,
           username: newMember.user.tag,
         });
@@ -207,7 +204,7 @@ export async function handleMemberUpdate(
 
         // Audit log
         await writeAuditLog(client.supabase, {
-          guildId: client.guildId,
+          guildId: newMember.guild.id,
           actorType: 'bot',
           actorId: 'onboarding',
           action: 'member.onboarding_completed',
@@ -235,7 +232,7 @@ export async function handleMemberUpdate(
   );
 
   for (const [, role] of addedRoles) {
-    client.eventBus.emit('role.gained', client.guildId, {
+    client.eventBus.emit('role.gained', newMember.guild.id, {
       discordId: newMember.id,
       roleId: role.id,
       roleName: role.name,
@@ -244,7 +241,7 @@ export async function handleMemberUpdate(
   }
 
   for (const [, role] of removedRoles) {
-    client.eventBus.emit('role.lost', client.guildId, {
+    client.eventBus.emit('role.lost', newMember.guild.id, {
       discordId: newMember.id,
       roleId: role.id,
       roleName: role.name,
@@ -260,8 +257,6 @@ export async function handleMemberLeave(
   client: SomniClient,
   member: GuildMember | PartialGuildMember,
 ): Promise<void> {
-  if (member.guild.id !== client.guildId) return;
-
   console.log(`[Onboarding] Member left: ${member.user?.tag ?? member.id}`);
 
   // Record leave (preserves roles for returning member detection)
@@ -273,20 +268,20 @@ export async function handleMemberLeave(
   }
 
   // Emit event
-  client.eventBus.emit('member.left', client.guildId, {
+  client.eventBus.emit('member.left', member.guild.id, {
     discordId: member.id,
     username: member.user?.tag ?? 'Unknown',
     roles: member.roles?.cache.map((r) => r.id) ?? [],
   });
 
   // Send goodbye message
-  const config = await getGuildConfig(client);
+  const config = await getGuildConfig(client, member.guild.id);
   if (config) {
     await executeGoodbyeFlow(member, config);
   }
 
   await writeAuditLog(client.supabase, {
-    guildId: client.guildId,
+    guildId: member.guild.id,
     actorType: 'bot',
     actorId: 'onboarding',
     action: 'member.left',
@@ -402,9 +397,10 @@ async function applyInterestRoles(
  */
 export async function invalidateGuildConfigCache(
   client: SomniClient,
+  guildId: string,
 ): Promise<void> {
   try {
-    await client.valkey.del(`guild_config:${client.guildId}`);
+    await client.valkey.del(`guild_config:${guildId}`);
   } catch {
     // Non-critical
   }

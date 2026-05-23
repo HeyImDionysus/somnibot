@@ -155,14 +155,14 @@ export async function handleWarnCommand(
   const { data: config } = await client.supabase
     .from('guild_config')
     .select('escalation_chain, infraction_expiry_days, mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   const expiryDays = config?.infraction_expiry_days ?? 30;
 
   // Create infraction
   const infraction = await createInfraction(client.supabase, {
-    guildId: client.guildId,
+    guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'warn',
@@ -176,7 +176,7 @@ export async function handleWarnCommand(
   }
 
   // Emit event for automations
-  client.eventBus.emit('moderation.action', client.guildId, {
+  client.eventBus.emit('moderation.action', interaction.guildId!, {
     action: 'warn',
     discordId: member.id,
     moderatorId: interaction.user.id,
@@ -185,7 +185,7 @@ export async function handleWarnCommand(
   });
 
   // Check escalation
-  const activeCount = await getActiveWarningCount(client.supabase, client.guildId, member.id);
+  const activeCount = await getActiveWarningCount(client.supabase, interaction.guildId!, member.id);
   const escalationChain = Array.isArray(config?.escalation_chain) ? config.escalation_chain : [];
   const nextAction = getEscalationAction(escalationChain, activeCount);
 
@@ -274,12 +274,12 @@ export async function handleMuteCommand(
   const { data: config } = await client.supabase
     .from('guild_config')
     .select('infraction_expiry_days, mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   // Create infraction
   const infraction = await createInfraction(client.supabase, {
-    guildId: client.guildId,
+    guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'mute',
@@ -289,7 +289,7 @@ export async function handleMuteCommand(
   });
 
   // Emit event
-  client.eventBus.emit('moderation.action', client.guildId, {
+  client.eventBus.emit('moderation.action', interaction.guildId!, {
     action: 'mute',
     discordId: member.id,
     moderatorId: interaction.user.id,
@@ -376,12 +376,12 @@ export async function handleKickCommand(
   const { data: config } = await client.supabase
     .from('guild_config')
     .select('infraction_expiry_days, mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   // Create infraction
   await createInfraction(client.supabase, {
-    guildId: client.guildId,
+    guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'kick',
@@ -390,7 +390,7 @@ export async function handleKickCommand(
   });
 
   // Emit event
-  client.eventBus.emit('moderation.action', client.guildId, {
+  client.eventBus.emit('moderation.action', interaction.guildId!, {
     action: 'kick',
     discordId: member.id,
     moderatorId: interaction.user.id,
@@ -465,12 +465,12 @@ export async function handleBanCommand(
   const { data: config } = await client.supabase
     .from('guild_config')
     .select('infraction_expiry_days, mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   // Create infraction
   await createInfraction(client.supabase, {
-    guildId: client.guildId,
+    guildId: interaction.guildId!,
     memberId: member.id,
     moderatorId: interaction.user.id,
     type: 'ban',
@@ -483,7 +483,7 @@ export async function handleBanCommand(
   const { data: customer } = await client.supabase
     .from('customers')
     .select('id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .eq('discord_id', member.id)
     .maybeSingle();
 
@@ -491,7 +491,7 @@ export async function handleBanCommand(
     const { data: entitlements } = await client.supabase
       .from('entitlements')
       .select('id')
-      .eq('guild_id', client.guildId)
+      .eq('guild_id', interaction.guildId!)
       .eq('customer_id', customer.id)
       .eq('status', 'active');
 
@@ -507,7 +507,7 @@ export async function handleBanCommand(
   }
 
   // Emit event
-  client.eventBus.emit('moderation.action', client.guildId, {
+  client.eventBus.emit('moderation.action', interaction.guildId!, {
     action: 'ban',
     discordId: member.id,
     moderatorId: interaction.user.id,
@@ -540,14 +540,14 @@ export async function handlePardonCommand(
     .from('infractions')
     .select('member_id')
     .eq('id', infractionId)
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   const result = await pardonInfraction(
     client.supabase,
     infractionId,
     interaction.user.id,
-    client.guildId,
+    interaction.guildId!,
   );
 
   if (!result) {
@@ -559,7 +559,7 @@ export async function handlePardonCommand(
   const { data: config } = await client.supabase
     .from('guild_config')
     .select('mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', interaction.guildId!)
     .maybeSingle();
 
   // Mod log
@@ -591,7 +591,7 @@ export async function handleInfractionsCommand(
 
   const infractions = await getMemberInfractions(
     client.supabase,
-    client.guildId,
+    interaction.guildId!,
     target.id,
   );
 
