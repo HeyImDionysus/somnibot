@@ -2,6 +2,8 @@
  * Anti-Raid Protection — Detects join floods and takes automatic action.
  *
  * V17 Behavioral Audit — Item 4
+ * V5 Audit Remediation — Moved state from module-level arrays to Valkey.
+ *   Per-guild state via sorted sets + keys. Shard-safe.
  *
  * Tracks join rate in a sliding window. When the threshold is exceeded:
  *  - "kick" mode: auto-kicks new members below account-age threshold
@@ -19,6 +21,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { getValkey } from '../../services/valkey.js';
 
 const log = createLogger('AntiRaid');
 
@@ -33,19 +36,24 @@ interface AntiRaidConfig {
 }
 
 const CONFIG_TTL = 60_000;
-let _configCache: AntiRaidConfig | null = null;
-let _configCacheTime = 0;
+// V5 Audit §6.4 — Per-guild config cache instead of global singleton
+const _configCache = new Map<string, { config: AntiRaidConfig; time: number }>();
 
-// Sliding window of recent join timestamps
-const recentJoins: number[] = [];
-let raidModeActive = false;
-let raidModeActivatedAt = 0;
 const RAID_MODE_COOLDOWN = 5 * 60_000; // Auto-deactivate after 5 minutes
+
+// Valkey key helpers
+function joinWindowKey(guildId: string): string {
+  return `antiraid:joins:${guildId}`;
+}
+function raidModeKey(guildId: string): string {
+  return `antiraid:raidmode:${guildId}`;
+}
 
 async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
-  if (_configCache && now - _configCacheTime < CONFIG_TTL) {
-    return _configCache;
+  const cached = _configCache.get(guildId);
+  if (cached && now - cached.time < CONFIG_TTL) {
+    return cached.config;
   }
 
   const { data } = await supabase
@@ -56,7 +64,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     .eq('guild_id', guildId)
     .maybeSingle();
 
-  _configCache = {
+  const config: AntiRaidConfig = {
     anti_raid_enabled: data?.anti_raid_enabled ?? false,
     anti_raid_join_threshold: data?.anti_raid_join_threshold ?? 10,
     anti_raid_join_window_seconds: data?.anti_raid_join_window_seconds ?? 10,
@@ -65,8 +73,8 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
   };
-  _configCacheTime = now;
-  return _configCache;
+  _configCache.set(guildId, { config, time: now });
+  return config;
 }
 
 function getAccountAgeDays(member: GuildMember): number {
@@ -93,6 +101,45 @@ async function logRaidEvent(
 }
 
 /**
+ * Record a join in the Valkey sliding window and return the count.
+ */
+async function recordJoinAndCount(guildId: string, windowMs: number): Promise<number> {
+  const valkey = getValkey();
+  const key = joinWindowKey(guildId);
+  const now = Date.now();
+  const windowStart = now - windowMs;
+
+  // Atomic pipeline: remove expired entries, add current, count, set expiry
+  const pipeline = valkey.pipeline();
+  pipeline.zremrangebyscore(key, '-inf', String(windowStart));
+  pipeline.zadd(key, String(now), `${now}:${Math.random().toString(36).slice(2, 8)}`);
+  pipeline.zcard(key);
+  pipeline.pexpire(key, windowMs + 10_000); // TTL slightly longer than window
+  const results = await pipeline.exec();
+
+  // zcard result is at index 2
+  const count = (results?.[2]?.[1] as number) ?? 0;
+  return count;
+}
+
+/**
+ * Check if raid mode is active for a guild.
+ */
+async function isRaidModeActive(guildId: string): Promise<boolean> {
+  const valkey = getValkey();
+  const val = await valkey.get(raidModeKey(guildId));
+  return val !== null;
+}
+
+/**
+ * Activate raid mode for a guild (with auto-expiry).
+ */
+async function activateRaidMode(guildId: string): Promise<void> {
+  const valkey = getValkey();
+  await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', RAID_MODE_COOLDOWN);
+}
+
+/**
  * Process a member join through anti-raid checks.
  * Returns true if the member was auto-actioned (kicked/banned).
  */
@@ -103,8 +150,6 @@ export async function processAntiRaid(
 ): Promise<boolean> {
   const config = await loadConfig(supabase, guild.id);
   if (!config.anti_raid_enabled) return false;
-
-  const now = Date.now();
 
   // 1. Account age check — always active when anti-raid is enabled
   const accountAgeDays = getAccountAgeDays(member);
@@ -129,37 +174,22 @@ export async function processAntiRaid(
     }
   }
 
-  // 2. Join flood detection
+  // 2. Join flood detection (Valkey-backed sliding window)
   const windowMs = config.anti_raid_join_window_seconds * 1000;
+  const joinCount = await recordJoinAndCount(guild.id, windowMs);
 
-  // Clean old entries
-  while (recentJoins.length > 0 && (recentJoins[0]! < now - windowMs)) {
-    recentJoins.shift();
-  }
+  // Check raid mode state
+  const raidActive = await isRaidModeActive(guild.id);
 
-  recentJoins.push(now);
-
-  // Auto-deactivate raid mode after cooldown
-  if (raidModeActive && now - raidModeActivatedAt > RAID_MODE_COOLDOWN) {
-    raidModeActive = false;
-    const embed = new EmbedBuilder()
-      .setColor(0x57F287)
-      .setTitle('🛡️ Raid Mode Deactivated')
-      .setDescription('Join rate has normalized. Raid mode has been automatically deactivated.')
-      .setTimestamp();
-    await logRaidEvent(guild, config, embed);
-  }
-
-  // Check if threshold exceeded
-  if (recentJoins.length >= config.anti_raid_join_threshold && !raidModeActive) {
-    raidModeActive = true;
-    raidModeActivatedAt = now;
+  // Check if threshold exceeded — activate raid mode
+  if (joinCount >= config.anti_raid_join_threshold && !raidActive) {
+    await activateRaidMode(guild.id);
 
     const embed = new EmbedBuilder()
       .setColor(0xFF0000)
       .setTitle('🚨 RAID DETECTED')
       .setDescription(
-        `**${recentJoins.length} joins** in the last ${config.anti_raid_join_window_seconds}s (threshold: ${config.anti_raid_join_threshold}).\n\n` +
+        `**${joinCount} joins** in the last ${config.anti_raid_join_window_seconds}s (threshold: ${config.anti_raid_join_threshold}).\n\n` +
         `Action: **${config.anti_raid_action}** • Raid mode will auto-deactivate after 5 minutes of calm.`,
       )
       .setTimestamp();
@@ -168,7 +198,8 @@ export async function processAntiRaid(
   }
 
   // 3. If raid mode is active, take action on this member
-  if (raidModeActive) {
+  const shouldAct = raidActive || joinCount >= config.anti_raid_join_threshold;
+  if (shouldAct) {
     try {
       const action = config.anti_raid_action;
 
@@ -206,6 +237,10 @@ export async function processAntiRaid(
 /**
  * Invalidate config cache (called from ConfigWatcher).
  */
-export function invalidateAntiRaidCache(): void {
-  _configCache = null;
+export function invalidateAntiRaidCache(guildId?: string): void {
+  if (guildId) {
+    _configCache.delete(guildId);
+  } else {
+    _configCache.clear();
+  }
 }
