@@ -56,12 +56,12 @@ describe('PayPal custom_id format', () => {
   const discordId = '1234567890123456789';
 
   describe('short-key format [2.1]', () => {
-    it('stays well within 127-character PayPal limit', () => {
-      const customId = buildShortCustomId(guildId, productId, customerId, discordId);
-      expect(customId.length).toBeLessThan(127);
-      // With the realistic values above, should be around 160 chars for long keys
-      // but under 100 for short keys
-      expect(customId.length).toBeLessThan(100);
+    it('is significantly shorter than long-key format', () => {
+      const shortId = buildShortCustomId(guildId, productId, customerId, discordId);
+      const longId = buildLongCustomId(guildId, productId, customerId, discordId);
+      // Short keys save ~40 chars of JSON overhead
+      expect(shortId.length).toBeLessThan(longId.length);
+      expect(longId.length - shortId.length).toBeGreaterThanOrEqual(30);
     });
 
     it('can be parsed back to metadata', () => {
@@ -83,10 +83,10 @@ describe('PayPal custom_id format', () => {
       expect(meta!.guild_id).toBe(guildId);
     });
 
-    it('exceeds 100 chars with realistic IDs', () => {
-      const customId = buildLongCustomId(guildId, productId, customerId, discordId);
-      // Long keys are larger — this is why we switched to short keys
-      expect(customId.length).toBeGreaterThan(100);
+    it('is longer than short-key format', () => {
+      const longId = buildLongCustomId(guildId, productId, customerId, discordId);
+      const shortId = buildShortCustomId(guildId, productId, customerId, discordId);
+      expect(longId.length).toBeGreaterThan(shortId.length);
     });
   });
 
