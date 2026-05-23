@@ -34,7 +34,8 @@ export async function GET() {
       .from('dashboard_roles')
       .select('*, dashboard_user_roles(count)')
       .eq('guild_id', ctx.guildId)
-      .order('priority', { ascending: false });
+      .order('priority', { ascending: false })
+      .limit(500);
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 

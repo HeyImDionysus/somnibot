@@ -12,6 +12,7 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Fishing');
 
@@ -117,12 +118,12 @@ export function invalidateFishingCache(): void {
 
 export class FishingManager {
   private guild: Guild;
-  private supabase: any;
+  private supabase: SupabaseClient;
   private valkey: any;
   private configCache: FishingConfig | null = null;
   private speciesCache: FishSpecies[] | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;

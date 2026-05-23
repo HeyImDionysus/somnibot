@@ -26,7 +26,8 @@ export async function GET(req: NextRequest) {
     .from('webhook_events')
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
-    .order('processed_at', { ascending: false });
+    .order('processed_at', { ascending: false })
+    .limit(500);
 
   if (result) {
     query = query.eq('result', result);

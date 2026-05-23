@@ -222,7 +222,7 @@ export class DiagnosticsService {
     // Cleanup old metrics periodically (every ~10 snapshots ≈ 10 min)
     if (Math.random() < 0.1) {
       try {
-        await (this.supabase as any).rpc('cleanup_old_health_metrics');
+        await this.supabase.rpc('cleanup_old_health_metrics');
       } catch {
         // Non-critical
       }
