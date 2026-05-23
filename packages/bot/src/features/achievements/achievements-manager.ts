@@ -25,7 +25,7 @@ export class AchievementsManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
@@ -34,15 +34,15 @@ export class AchievementsManager {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
 
-    const { data: allDefs } = await (this.supabase as any)
+    const { data: allDefs } = await this.supabase
       .from('economy_achievement_defs').select('*').eq('guild_id', guildId).order('created_at');
 
-    const { data: userAch } = await (this.supabase as any)
+    const { data: userAch } = await this.supabase
       .from('economy_user_achievements').select('achievement_id').eq('guild_id', guildId).eq('user_id', userId);
 
-    const unlockedIds = new Set((userAch ?? []).map((a: any) => a.achievement_id));
+    const unlockedIds = new Set((userAch ?? []).map((a: DbRow) => a.achievement_id));
 
-    const lines = (allDefs ?? []).map((d: any) => {
+    const lines = (allDefs ?? []).map((d: DbRow) => {
       const unlocked = unlockedIds.has(d.id);
       if (d.hidden && !unlocked) return `❓ *Hidden achievement*`;
       return `${unlocked ? '✅' : '⬜'} ${d.badge_emoji} **${d.name}** — ${d.description}`;
@@ -62,7 +62,7 @@ export class AchievementsManager {
     const config = await this.getConfig(guildId);
     if (!config?.economy_achievements_enabled) return null;
 
-    const { data: defs } = await (this.supabase as any)
+    const { data: defs } = await this.supabase
       .from('economy_achievement_defs')
       .select('*')
       .eq('guild_id', guildId)
@@ -72,7 +72,7 @@ export class AchievementsManager {
       if (currentValue < def.condition_value) continue;
 
       // Check if already unlocked
-      const { data: existing } = await (this.supabase as any)
+      const { data: existing } = await this.supabase
         .from('economy_user_achievements')
         .select('id')
         .eq('guild_id', guildId)
@@ -83,12 +83,12 @@ export class AchievementsManager {
 
       if (existing) continue;
 
-      await (this.supabase as any).from('economy_user_achievements').insert({
+      await this.supabase.from('economy_user_achievements').insert({
         guild_id: guildId, user_id: userId, achievement_id: def.id,
       });
 
       if (def.reward_currency > 0) {
-        const { error: rewardErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: rewardErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: userId, p_amount: def.reward_currency,
         });
         if (rewardErr) log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
@@ -112,9 +112,9 @@ export class AchievementsManager {
 
     // Check level + net worth requirements
     const [{ data: wallet }, { data: memberLevel }] = await Promise.all([
-      (this.supabase as any)
+      this.supabase
         .from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', userId).single(),
-      (this.supabase as any)
+      this.supabase
         .from('member_levels').select('level').eq('guild_id', guildId).eq('member_id', userId).single(),
     ]);
 
@@ -140,7 +140,7 @@ export class AchievementsManager {
     }
 
     // Get or create prestige record
-    const { data: existing } = await (this.supabase as any)
+    const { data: existing } = await this.supabase
       .from('economy_prestige').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
 
     const currentLevel = existing?.prestige_level ?? 0;
@@ -149,19 +149,19 @@ export class AchievementsManager {
     const newMultiplier = (existing?.multiplier_pct ?? 0) + multiplierGain;
 
     // Reset wallet and bank
-    await (this.supabase as any).from('economy_wallets')
+    await this.supabase.from('economy_wallets')
       .update({ wallet: 0, bank: 0 }).eq('guild_id', guildId).eq('user_id', userId);
 
     // Upsert prestige record
     if (existing) {
-      await (this.supabase as any).from('economy_prestige').update({
+      await this.supabase.from('economy_prestige').update({
         prestige_level: newLevel,
         total_resets: existing.total_resets + 1,
         multiplier_pct: newMultiplier,
         last_prestige: new Date().toISOString(),
       }).eq('id', existing.id);
     } else {
-      await (this.supabase as any).from('economy_prestige').insert({
+      await this.supabase.from('economy_prestige').insert({
         guild_id: guildId,
         user_id: userId,
         prestige_level: newLevel,

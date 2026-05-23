@@ -40,6 +40,7 @@ export async function GET(
       .select('*')
       .eq('incident_id', id)
       .order('created_at', { ascending: true });
+      .limit(500)
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ success: true, data });

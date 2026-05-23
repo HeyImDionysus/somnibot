@@ -28,6 +28,7 @@ export async function GET(
     .eq('product_id', productId)
     .eq('guild_id', guildId)
     .order('sort_order', { ascending: true });
+    .limit(500)
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

@@ -22,11 +22,11 @@ export class ProfilesManager {
   clearCache(): void { this.cache.clear(); }
 
   private async getOrCreateProfile(guildId: string, userId: string): Promise<any> {
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('economy_profiles').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
     if (data) return data;
 
-    const { data: created } = await (this.supabase as any)
+    const { data: created } = await this.supabase
       .from('economy_profiles').insert({ guild_id: guildId, user_id: userId }).select().single();
     return created;
   }
@@ -41,7 +41,7 @@ export class ProfilesManager {
     // The old code had a non-atomic read-modify-write fallback that could lose
     // concurrent increments; the RPC has existed since V40 so the fallback was
     // dead code that only hid failures.
-    const { error: viewErr } = await (this.supabase as any).rpc('increment_profile_views', {
+    const { error: viewErr } = await this.supabase.rpc('increment_profile_views', {
       p_guild_id: guildId,
       p_user_id: target.id,
     });
@@ -49,10 +49,10 @@ export class ProfilesManager {
 
     // Fetch wallet, pet, prestige, achievements in parallel
     const [walletRes, petRes, prestigeRes, achRes] = await Promise.all([
-      (this.supabase as any).from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', target.id).single(),
-      (this.supabase as any).from('economy_pets').select('name, pet_type, level, prestige').eq('guild_id', guildId).eq('user_id', target.id).single(),
-      (this.supabase as any).from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single(),
-      (this.supabase as any).from('economy_user_achievements').select('*', { count: 'exact', head: true }).eq('guild_id', guildId).eq('user_id', target.id),
+      this.supabase.from('economy_wallets').select('wallet, bank').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      this.supabase.from('economy_pets').select('name, pet_type, level, prestige').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      this.supabase.from('economy_prestige').select('prestige_level, multiplier_pct').eq('guild_id', guildId).eq('user_id', target.id).single(),
+      this.supabase.from('economy_user_achievements').select('*', { count: 'exact', head: true }).eq('guild_id', guildId).eq('user_id', target.id),
     ]);
     const wallet = walletRes.data;
     const pet = petRes.data;
@@ -109,7 +109,7 @@ export class ProfilesManager {
     const guildId = interaction.guildId!;
     await this.getOrCreateProfile(guildId, interaction.user.id);
 
-    await (this.supabase as any).from('economy_profiles')
+    await this.supabase.from('economy_profiles')
       .update({ title, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
 
@@ -121,7 +121,7 @@ export class ProfilesManager {
     const guildId = interaction.guildId!;
     await this.getOrCreateProfile(guildId, interaction.user.id);
 
-    await (this.supabase as any).from('economy_profiles')
+    await this.supabase.from('economy_profiles')
       .update({ bio, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId).eq('user_id', interaction.user.id);
 

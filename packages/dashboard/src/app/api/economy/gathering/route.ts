@@ -39,6 +39,7 @@ export async function GET() {
       .select('*')
       .eq('guild_id', ctx.guildId)
       .order('source_type')
+      .limit(500)
       .order('rarity')
       .order('item_name');
 

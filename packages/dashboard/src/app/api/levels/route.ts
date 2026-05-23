@@ -52,6 +52,7 @@ export async function GET(req: NextRequest) {
       .select('member_id, xp, level, total_messages, voice_minutes', { count: 'exact' })
       .eq('guild_id', guildId)
       .order('xp', { ascending: false })
+      .limit(500)
       .range(offset, offset + pageSize - 1);
 
     return NextResponse.json({
@@ -77,11 +78,13 @@ export async function GET(req: NextRequest) {
       .select('*')
       .eq('guild_id', guildId)
       .order('level', { ascending: true }),
+      .limit(500)
     supabase
       .from('xp_multipliers')
       .select('*')
       .eq('guild_id', guildId)
       .order('multiplier', { ascending: false }),
+      .limit(500)
   ]);
 
   return NextResponse.json({

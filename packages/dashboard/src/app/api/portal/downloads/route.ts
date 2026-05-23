@@ -52,6 +52,7 @@ export async function GET(request: NextRequest) {
           .select('*')
           .in('product_id', productIds)
           .order('sort_order', { ascending: true })
+          .limit(500)
       : { data: [] };
 
     // Group files by product_id

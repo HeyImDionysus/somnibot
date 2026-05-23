@@ -33,6 +33,7 @@ export async function GET(req: NextRequest) {
     .eq('revoked', false)
     .gt('expires_at', new Date().toISOString())
     .order('created_at', { ascending: false });
+    .limit(500)
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

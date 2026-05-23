@@ -24,6 +24,7 @@ export async function GET() {
       .select('*, dashboard_roles(name, description, permissions, priority)')
       .eq('guild_id', ctx.guildId)
       .order('assigned_at', { ascending: false });
+      .limit(500)
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 

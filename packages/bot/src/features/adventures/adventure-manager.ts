@@ -22,6 +22,8 @@ import type {
   AdventureSceneLoot,
 } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient, DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Adventures');
 
@@ -395,12 +397,12 @@ export function getAdventureManager(): AdventureManager | null {
 
 export class AdventureManager {
   private guild: Guild;
-  private supabase: any;
-  private valkey: any;
+  private supabase: SupabaseClient;
+  private valkey: Record<string, unknown> | null;
   private configCache: AdventureConfig | null = null;
   private adventureCache: Adventure[] | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: Record<string, unknown> | null) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
@@ -469,7 +471,7 @@ export class AdventureManager {
 
       if (data) {
         const sceneRows = def.scenes.map((s, i) => ({
-          adventure_id: (data as any).id,
+          adventure_id: (data as DbRow).id,
           scene_index: i,
           text: s.text,
           choices: s.choices,
@@ -623,7 +625,7 @@ export class AdventureManager {
       };
     }
 
-    const sessionId = (session as any)?.id ?? null;
+    const sessionId = (session as DbRow)?.id ?? null;
 
     // Build embed + buttons
     const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0);
@@ -643,7 +645,7 @@ export class AdventureManager {
       .eq('id', sessionId)
       .single();
 
-    if (!session || (session as any).status !== 'active') {
+    if (!session || (session as DbRow).status !== 'active') {
       await interaction.reply({ content: '❌ This adventure has ended.', ephemeral: true });
       return;
     }
@@ -771,7 +773,7 @@ export class AdventureManager {
     const adv = advData as Adventure;
     const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length);
 
-    const updatePayload: any = { embeds: [embed], components: [] as any[] };
+    const updatePayload: DbRow = { embeds: [embed], components: [] as DbRow[] };
     if (row) updatePayload.components = [row];
     await interaction.update(updatePayload);
   }

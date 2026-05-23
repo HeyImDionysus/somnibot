@@ -11,6 +11,8 @@ import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient, DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Gathering');
 
@@ -121,7 +123,7 @@ export class GatheringManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -267,7 +269,7 @@ export class GatheringManager {
       user_id: userId,
       type: 'gather',
       amount: totalValue,
-      balance_after: (gatherWallet as any)?.wallet ?? 0,
+      balance_after: (gatherWallet as DbRow)?.wallet ?? 0,
       description: `${SOURCE_CONFIG[sourceType].pastVerb} ${quantity}x ${picked.item_name}`,
     });
 
@@ -341,7 +343,7 @@ export class GatheringManager {
     let bestInvId: string | null = null;
     let bestDurability: number | null = null;
 
-    for (const inv of items as any[]) {
+    for (const inv of items as DbRow[]) {
       const effect = inv.economy_items?.use_effect;
       if (!effect || typeof effect !== 'object') continue;
       if ((effect as Record<string, unknown>).type !== toolEffect) continue;

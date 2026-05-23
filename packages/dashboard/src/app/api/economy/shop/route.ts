@@ -47,6 +47,7 @@ export async function GET() {
       .select('*')
       .eq('guild_id', ctx.guildId)
       .order('sort_order', { ascending: true })
+      .limit(500)
       .order('created_at', { ascending: true });
 
     if (error) {
