@@ -6,6 +6,9 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AuditSvc');
 
 export interface AuditEntry {
   guildId: string;
@@ -44,11 +47,11 @@ export async function writeAuditLog(
     });
 
     if (error) {
-      console.error('[Audit] Failed to write audit log:', error.message);
+      log.error('Failed to write audit log:', error.message);
     }
   } catch (err) {
     // Never let audit logging failures crash the bot
-    console.error('[Audit] Exception writing audit log:', err);
+    log.error('Exception writing audit log:', { error: String(err) });
   }
 }
 
@@ -83,9 +86,9 @@ export async function writeAuditBatch(
 
     const { error } = await supabase.from('audit_logs').insert(rows);
     if (error) {
-      console.error('[Audit] Failed to write audit batch:', error.message);
+      log.error('Failed to write audit batch:', error.message);
     }
   } catch (err) {
-    console.error('[Audit] Exception writing audit batch:', err);
+    log.error('Exception writing audit batch:', { error: String(err) });
   }
 }

@@ -22,7 +22,9 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+
+const log = createLogger('Tickets');
 
 // ── Ticket Number ────────────────────────────────────────
 
@@ -133,7 +135,7 @@ export async function createTicket(
       permissionOverwrites,
     });
   } catch (err) {
-    console.error('[Tickets] Failed to create ticket channel:', err);
+    log.error('Failed to create ticket channel:', { error: String(err) });
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
   }
 
@@ -189,7 +191,7 @@ export async function createTicket(
     .single();
 
   if (dbError || !ticket) {
-    console.error('[Tickets] Failed to save ticket:', dbError?.message);
+    log.error('Failed to save ticket:', dbError?.message);
     // Clean up the channel
     await channel.delete().catch(() => { /* channel may already be deleted */ });
     return { error: 'Failed to save ticket to database.' };
@@ -204,7 +206,7 @@ export async function createTicket(
     panelId: panel.id,
   });
 
-  console.log(`[Tickets] Created ticket #${ticketNumber} for ${member.user.tag} in ${channel.name}`);
+  log.info(`Created ticket #${ticketNumber} for ${member.user.tag} in ${channel.name}`);
   return { channel, ticket: ticket as DbTicket };
 }
 
@@ -252,7 +254,7 @@ export async function claimTicket(
     panelId: claimed.panel_id,
   });
 
-  console.log(`[Tickets] Ticket #${ticketNumber} claimed by ${claimedById}`);
+  log.info(`Ticket #${ticketNumber} claimed by ${claimedById}`);
   return { success: true };
 }
 
@@ -363,10 +365,10 @@ export async function closeTicket(
         .single();
 
       if (panel?.closed_category_id) {
-        await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch((e: unknown) => { console.warn('[Tickets] Failed to move channel:', (e as Error)?.message ?? e); });
+        await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch((e: unknown) => { log.warn('Failed to move channel:', (e as Error)?.message ?? e); });
       }
     } catch (err) {
-      console.error('[Tickets] Failed to lock channel:', err);
+      log.error('Failed to lock channel:', { error: String(err) });
     }
   }
 
@@ -379,7 +381,7 @@ export async function closeTicket(
     panelId: ticket.panel_id,
   });
 
-  console.log(`[Tickets] Ticket #${ticketNumber} closed by ${closedById}`);
+  log.info(`Ticket #${ticketNumber} closed by ${closedById}`);
   return { success: true, ticket: { ...ticket, status: 'closed', closed_by: closedById } as DbTicket };
 }
 
@@ -436,7 +438,7 @@ export async function reopenTicket(
         .single();
 
       if (panel?.open_category_id) {
-        await channel.setParent(panel.open_category_id, { lockPermissions: false }).catch((e: unknown) => { console.warn('[Tickets] Failed to move channel:', (e as Error)?.message ?? e); });
+        await channel.setParent(panel.open_category_id, { lockPermissions: false }).catch((e: unknown) => { log.warn('Failed to move channel:', (e as Error)?.message ?? e); });
       }
 
       const reopenEmbed = new EmbedBuilder()
@@ -447,7 +449,7 @@ export async function reopenTicket(
 
       await channel.send({ embeds: [reopenEmbed] });
     } catch (err) {
-      console.error('[Tickets] Failed to unlock channel:', err);
+      log.error('Failed to unlock channel:', { error: String(err) });
     }
   }
 
@@ -459,7 +461,7 @@ export async function reopenTicket(
     panelId: ticket.panel_id,
   });
 
-  console.log(`[Tickets] Ticket #${ticketNumber} reopened by ${reopenedById}`);
+  log.info(`Ticket #${ticketNumber} reopened by ${reopenedById}`);
   return { success: true };
 }
 
@@ -493,11 +495,11 @@ export async function deleteTicket(
     try {
       await channel.delete('Ticket deleted');
     } catch (err) {
-      console.error('[Tickets] Failed to delete channel:', err);
+      log.error('Failed to delete channel:', { error: String(err) });
     }
   }
 
-  console.log(`[Tickets] Ticket #${ticketNumber} deleted`);
+  log.info(`Ticket #${ticketNumber} deleted`);
   return { success: true };
 }
 

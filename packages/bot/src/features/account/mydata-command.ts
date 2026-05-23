@@ -13,6 +13,9 @@ import {
   AttachmentBuilder,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MyData');
 
 // ── Command builder ───────────────────────────────────────
 
@@ -72,7 +75,7 @@ export async function handleMyDataCommand(
       });
     }
   } catch (err) {
-    console.error('[/mydata] Failed to export data:', err);
+    log.error('Failed to export data:', { error: String(err) });
     await interaction.editReply({
       content: '❌ Something went wrong exporting your data. Please try again later.',
     });

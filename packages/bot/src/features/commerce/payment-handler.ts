@@ -18,6 +18,9 @@ import {
   type Guild,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('PaymentHandler');
 
 const HOT_PINK = 0xFF1493;
 
@@ -131,7 +134,7 @@ export async function handleBuyButton(
       .single();
 
     if (custErr || !newCustomer) {
-      console.error('[Commerce] Failed to create customer:', custErr?.message);
+      log.error('Failed to create customer:', custErr?.message);
       await interaction.editReply({ content: '❌ Failed to process. Please try again.' });
       return;
     }
@@ -188,7 +191,7 @@ export async function handleBuyButton(
 
     if (!orderRes.ok) {
       const err = await orderRes.text();
-      console.error('[Commerce] PayPal order creation failed:', err);
+      log.error('PayPal order creation failed:', { error: String(err) });
       await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
       return;
     }
@@ -282,7 +285,7 @@ export async function handleBuyButton(
 
     if (!subRes.ok) {
       const err = await subRes.text();
-      console.error('[Commerce] PayPal subscription creation failed:', err);
+      log.error('PayPal subscription creation failed:', { error: String(err) });
       await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
       return;
     }

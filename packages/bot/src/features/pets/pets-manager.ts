@@ -15,6 +15,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Pets');
 
 let _manager: PetsManager | null = null;
 export function registerPetsManager(mgr: PetsManager): void { _manager = mgr; }
@@ -64,11 +67,11 @@ export class PetsManager {
     // Initial decay after 5 minutes (let bot fully boot) — tracked for cleanup
     this.initialDelayTimer = setTimeout(() => {
       this.initialDelayTimer = null;
-      this.runDecayCycle(guildId).catch(console.error);
+      this.runDecayCycle(guildId).catch((e) => log.error("Unhandled error", { error: String(e) }));
     }, 5 * 60 * 1000);
 
     this.decayTimer = setInterval(() => {
-      this.runDecayCycle(guildId).catch(console.error);
+      this.runDecayCycle(guildId).catch((e) => log.error("Unhandled error", { error: String(e) }));
     }, intervalMs);
   }
 
@@ -141,9 +144,9 @@ export class PetsManager {
         }
       }
 
-      console.log(`[PetDecay] Processed ${pets.length} pets (decay=${decayRate}, guild=${guildId})`);
+      log.info(`Processed ${pets.length} pets (decay=${decayRate}, guild=${guildId})`);
     } catch (err) {
-      console.error('[PetDecay] Decay cycle error:', err);
+      log.error('Decay cycle error:', { error: String(err) });
     }
   }
 
@@ -241,10 +244,10 @@ export class PetsManager {
     });
 
     if (insertErr) {
-      console.error('[Pets] buyPet insert failed — refunding:', insertErr.message);
+      log.error('buyPet insert failed — refunding:', insertErr.message);
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: price,
-      }).catch((e: unknown) => { console.warn('[Pets] Operation failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -295,7 +298,7 @@ export class PetsManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -383,7 +386,7 @@ export class PetsManager {
       // Refund since training failed
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-      }).catch((e: unknown) => { console.warn('[Pets] Operation failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -392,7 +395,7 @@ export class PetsManager {
     if (tr.leveled_up) desc += `\n🎉 *Level up! Now level ${tr.new_level}!*`;
     if (tr.stat_bonus) desc += `\n⭐ +1 ${tr.stat_bonus}!`;
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder().setTitle('💪 Training Complete!').setDescription(desc).setColor(0x57F287)],
@@ -457,13 +460,13 @@ export class PetsManager {
     });
     // V49-L3: Surface payout failure to the user instead of silently swallowing
     const payoutWarning = payoutErr ? '\n⚠️ *Reward payout failed — contact an admin.*' : '';
-    if (payoutErr) console.error('[Pets] battlePet payout failed:', payoutErr.message);
+    if (payoutErr) log.error('battlePet payout failed:', payoutErr.message);
 
     // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
     for (const uid of [interaction.user.id, opponent.id]) {
       await (this.supabase as any).rpc('economy_pet_add_xp', {
         p_guild_id: guildId, p_user_id: uid, p_xp: 10,
-      }).catch((err: Error) => console.error('[Pets] pet XP increment failed:', err.message));
+      }).catch((err: Error) => log.error('pet XP increment failed:', err.message));
     }
 
     await interaction.reply({

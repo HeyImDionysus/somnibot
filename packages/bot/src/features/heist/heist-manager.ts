@@ -15,6 +15,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Heist');
 
 // ── Module-level state ────────────────────────────────────
 
@@ -205,7 +208,7 @@ export class HeistManager {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
       });
       if (refundErr) {
-        console.error('[Heist] CRITICAL: heist insert failed AND refund failed', {
+        log.error('CRITICAL: heist insert failed AND refund failed', {
           guildId, userId, entryFee, heistErr, refundErr,
         });
       }
@@ -232,11 +235,11 @@ export class HeistManager {
       role,
     });
     if (initInsertErr) {
-      console.error('[Heist] Failed to insert initiator participant:', initInsertErr.message);
+      log.error('Failed to insert initiator participant:', initInsertErr.message);
       // Refund entry fee
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      }).catch((e: unknown) => { console.warn('[Heist] Operation failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
       return;
     }
@@ -246,7 +249,7 @@ export class HeistManager {
       try {
         await this.resolveHeist(guildId, heist.id, interaction.channelId);
       } catch (err) {
-        console.error(`[Heist] Failed to resolve heist ${heist.id} in guild ${guildId}:`, err);
+        log.error(`Failed to resolve heist ${heist.id} in guild ${guildId}:`, err);
       }
     }, joinWindowSecs * 1000);
     this.resolveTimers.set(heist.id, timer);
@@ -342,11 +345,11 @@ export class HeistManager {
       role,
     });
     if (partInsertErr) {
-      console.error('[Heist] Failed to insert participant:', partInsertErr.message);
+      log.error('Failed to insert participant:', partInsertErr.message);
       // Refund entry fee
       await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      }).catch((e: unknown) => { console.warn('[Heist] Operation failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
       return;
     }
@@ -356,7 +359,7 @@ export class HeistManager {
       p_heist_id: heist.id, p_user_id: userId,
     });
     if (appendErr) {
-      console.error('[Heist] array_append_heist_participant failed:', appendErr.message);
+      log.error('array_append_heist_participant failed:', appendErr.message);
       // Fallback: direct update (awaited this time)
       await (this.supabase as any).from('economy_heists').update({
         participants: [...(heist.participants as string[]), userId],
@@ -373,7 +376,7 @@ export class HeistManager {
 
     const displayChance = Math.min(95, (config.economy_heist_success_base_pct ?? 40) + (actualCount - 1) * 7 + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0));
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -485,7 +488,7 @@ export class HeistManager {
         const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
         });
-        if (refundErr) console.error(`[Heist] Failed to refund ${uid}:`, refundErr.message);
+        if (refundErr) log.error(`Failed to refund ${uid}:`, refundErr.message);
       }
 
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
@@ -524,7 +527,7 @@ export class HeistManager {
           p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
         });
         if (payErr) {
-          console.error(`[Heist] Failed to pay ${uid}:`, payErr.message);
+          log.error(`Failed to pay ${uid}:`, payErr.message);
           failedPayouts.push(uid);
           // Mark participant with payout_failed for reconciliation
           await (this.supabase as any).from('economy_heist_participants')
@@ -620,7 +623,7 @@ export class HeistManager {
           try {
             await this.resolveHeist(guildId, heist.id, channelId);
           } catch (err) {
-            console.error(`[Heist] Failed to resolve pending heist ${heist.id} in guild ${guildId}:`, err);
+            log.error(`Failed to resolve pending heist ${heist.id} in guild ${guildId}:`, err);
           }
         }, remaining);
         this.resolveTimers.set(heist.id, timer);

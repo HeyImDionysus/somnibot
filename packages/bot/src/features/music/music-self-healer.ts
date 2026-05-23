@@ -1,3 +1,6 @@
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MusicSelfHeal');
 /**
  * Music Self-Healer — monitors failure rates and applies recovery strategies.
  *
@@ -98,7 +101,7 @@ export class MusicSelfHealer {
     const providers: SearchProvider[] = ['ytsearch', 'ytmsearch', 'scsearch'];
     const currentIdx = providers.indexOf(this.currentSearchProvider);
     this.currentSearchProvider = providers[(currentIdx + 1) % providers.length]!;
-    console.log(`[MusicSelfHealer] Switched search provider to: ${this.currentSearchProvider}`);
+    log.info(`Switched search provider to: ${this.currentSearchProvider}`);
     return this.currentSearchProvider;
   }
 

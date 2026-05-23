@@ -10,6 +10,9 @@
 
 import type { Guild } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Reconciliation');
 
 interface ReconciliationFindings {
   entitlements_checked: number;
@@ -49,7 +52,7 @@ export async function runReconciliation(
     .single();
 
   const runId = run?.id;
-  console.log(`[Reconciliation] Starting ${trigger} run ${runId ?? 'unknown'}`);
+  log.info(`Starting ${trigger} run ${runId ?? 'unknown'}`);
 
   try {
     // ── 1. Check active entitlements → Discord roles ──
@@ -205,7 +208,7 @@ export async function runReconciliation(
         .eq('id', runId);
     }
 
-    console.log(
+    log.info(
       `[Reconciliation] Completed: ${findings.entitlements_checked} checked, ` +
       `${findings.roles_regranted} roles re-granted, ` +
       `${findings.grace_periods_expired} grace periods expired, ` +
@@ -213,7 +216,7 @@ export async function runReconciliation(
     );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[Reconciliation] Error: ${errMsg}`);
+    log.error(`Error: ${errMsg}`);
     findings.errors.push(errMsg);
 
     if (runId) {
@@ -243,11 +246,11 @@ export function scheduleReconciliation(
 
   // Run once on startup (after a short delay for bot to fully initialize)
   setTimeout(() => {
-    runReconciliation(guild, supabase, 'startup').catch(console.error);
+    runReconciliation(guild, supabase, 'startup').catch((e) => log.error("Unhandled error", { error: String(e) }));
   }, 30_000);
 
   // Then every 6 hours
   return setInterval(() => {
-    runReconciliation(guild, supabase, 'scheduled').catch(console.error);
+    runReconciliation(guild, supabase, 'scheduled').catch((e) => log.error("Unhandled error", { error: String(e) }));
   }, SIX_HOURS);
 }

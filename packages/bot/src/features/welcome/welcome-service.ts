@@ -21,6 +21,9 @@ import {
   type WelcomeVariables,
 } from './welcome-variables.js';
 import { getMemberNumber } from './member-service.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Welcome');
 
 // ── Default Messages ──────────────────────────────────────────
 const DEFAULT_WELCOME_MESSAGE =
@@ -78,7 +81,7 @@ async function sendWelcomeChannelMessage(
   try {
     const channel = member.guild.channels.cache.get(config.welcome_channel_id!) as TextChannel | undefined;
     if (!channel?.isTextBased()) {
-      console.warn('[Welcome] Welcome channel not found or not text-based:', config.welcome_channel_id);
+      log.warn('Welcome channel not found or not text-based:', config.welcome_channel_id);
       return;
     }
 
@@ -103,15 +106,15 @@ async function sendWelcomeChannelMessage(
           new AttachmentBuilder(cardBuffer, { name: 'welcome-card.png' }),
         );
       } catch (err) {
-        console.error('[Welcome] Failed to generate welcome card:', err);
+        log.error('Failed to generate welcome card:', { error: String(err) });
         // Continue without card — message still goes out
       }
     }
 
     await channel.send({ content: messageText, files });
-    console.log(`[Welcome] Channel message sent for ${member.user.tag}`);
+    log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
-    console.error('[Welcome] Failed to send channel message:', err);
+    log.error('Failed to send channel message:', { error: String(err) });
   }
 }
 
@@ -130,10 +133,10 @@ async function sendWelcomeDM(
     );
 
     await member.send(messageText);
-    console.log(`[Welcome] DM sent to ${member.user.tag}`);
+    log.info(`DM sent to ${member.user.tag}`);
   } catch (err) {
     // DMs can fail if user has them disabled — not an error
-    console.warn(`[Welcome] Could not DM ${member.user.tag} (DMs may be disabled)`);
+    log.warn(`Could not DM ${member.user.tag} (DMs may be disabled)`);
   }
 }
 
@@ -148,15 +151,15 @@ async function applyAutoRoles(
     try {
       const role = member.guild.roles.cache.get(roleId);
       if (!role) {
-        console.warn(`[Welcome] Auto-role ${roleId} not found, skipping`);
+        log.warn(`Auto-role ${roleId} not found, skipping`);
         continue;
       }
       if (member.roles.cache.has(roleId)) continue; // Already has it
 
       await member.roles.add(role, 'SomniBot welcome auto-role');
-      console.log(`[Welcome] Auto-role "${role.name}" granted to ${member.user.tag}`);
+      log.info(`Auto-role "${role.name}" granted to ${member.user.tag}`);
     } catch (err) {
-      console.error(`[Welcome] Failed to grant auto-role ${roleId}:`, err);
+      log.error(`Failed to grant auto-role ${roleId}:`, err);
     }
   }
 }

@@ -13,6 +13,9 @@ import {
 import type { SomniClient } from '../../client.js';
 import { closeTicket, addUserToTicket, removeUserFromTicket } from './ticket-service.js';
 import { generateTranscript } from './transcript-generator.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('TicketCmds');
 
 // ── Command Definition ───────────────────────────────────
 
@@ -86,7 +89,7 @@ export async function handleTicketCommand(
       // Generate transcript before closing
       const transcriptResult = await generateTranscript(guild, ticket, client.supabase);
       if (!transcriptResult.success) {
-        console.warn('[Tickets] Transcript generation failed during close:', transcriptResult.error);
+        log.warn('Transcript generation failed during close:', transcriptResult.error);
       }
 
       const result = await closeTicket(

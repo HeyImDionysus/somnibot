@@ -10,6 +10,9 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Gathering');
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -286,7 +289,7 @@ export class GatheringManager {
       .setTimestamp();
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'gather').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'gather').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed,
@@ -371,7 +374,7 @@ export class GatheringManager {
       p_quantity: quantity,
     });
     if (error) {
-      console.error('[Gathering] addToInventory failed:', error.message);
+      log.error('addToInventory failed:', error.message);
       return false;
     }
     return true;
@@ -384,7 +387,7 @@ export class GatheringManager {
       p_amount: amount,
     });
     if (error) {
-      console.error(`[Gathering] economy_add_balance failed for ${userId}:`, error.message);
+      log.error(`economy_add_balance failed for ${userId}:`, error.message);
       return false;
     }
     return true;

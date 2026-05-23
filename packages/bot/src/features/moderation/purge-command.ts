@@ -15,6 +15,9 @@ import {
   type Collection,
   type Message,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('PurgeCmd');
 
 export function buildPurgeCommand() {
   return new SlashCommandBuilder()
@@ -101,7 +104,7 @@ export async function handlePurgeCommand(
       `✅ Deleted **${deleted.size}** message${deleted.size !== 1 ? 's' : ''}${filterDesc.length > 0 ? ` (${filterDesc.join(', ')})` : ''}.`,
     );
   } catch (err) {
-    console.error('[Purge] Failed to bulk delete:', err);
+    log.error('Failed to bulk delete:', { error: String(err) });
     await interaction.editReply('❌ Failed to delete messages. Check bot permissions.');
   }
 }

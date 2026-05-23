@@ -6,7 +6,9 @@
 import type { Message, Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
-import { calculateLevel, randomXp, LEVEL_CONFIG } from '@somnibot/shared';
+import { calculateLevel, randomXp, LEVEL_CONFIG , createLogger } from '@somnibot/shared';
+
+const log = createLogger('XPTracker');
 
 export interface LevelConfig {
   levels_enabled: boolean;
@@ -216,13 +218,13 @@ export async function processMessageXp(
   });
 
   if (rpcError) {
-    console.error('[XP] increment_member_xp RPC failed:', rpcError.message);
+    log.error('increment_member_xp RPC failed:', rpcError.message);
     return { granted: false, newXp: 0, oldLevel: 0, newLevel: 0, leveledUp: false };
   }
 
   // Fallback: RPC returned null (should not happen if migration is applied)
   if (!result) {
-    console.warn('[XP] increment_member_xp returned null — applying non-atomic fallback');
+    log.warn('increment_member_xp returned null — applying non-atomic fallback');
     const { data: existing } = await supabase
       .from('member_levels')
       .select('xp, level, total_messages')
@@ -306,13 +308,13 @@ export async function grantVoiceXp(
   });
 
   if (rpcError) {
-    console.error('[XP] increment_member_xp RPC failed (voice):', rpcError.message);
+    log.error('increment_member_xp RPC failed (voice):', rpcError.message);
     return { granted: false };
   }
 
   // Fallback: RPC returned null (should not happen if migration is applied)
   if (!result) {
-    console.warn('[XP] increment_member_xp returned null (voice) — applying non-atomic fallback');
+    log.warn('increment_member_xp returned null (voice) — applying non-atomic fallback');
     const { data: existing } = await supabase
       .from('member_levels')
       .select('xp, level, voice_minutes')

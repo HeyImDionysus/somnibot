@@ -7,6 +7,9 @@
 import type { Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Entitlement');
 
 export interface EntitlementGrantOptions {
   customerId: string;
@@ -58,7 +61,7 @@ export class EntitlementService {
       .single();
 
     if (error || !entitlement) {
-      console.error('[Commerce] Failed to create entitlement:', error?.message);
+      log.error('Failed to create entitlement:', error?.message);
       return null;
     }
 
@@ -90,7 +93,7 @@ export class EntitlementService {
       },
     });
 
-    console.log(`[Commerce] Entitlement granted: ${entitlement.id} for ${opts.discordId}`);
+    log.info(`Entitlement granted: ${entitlement.id} for ${opts.discordId}`);
     return entitlement.id;
   }
 
@@ -112,7 +115,7 @@ export class EntitlementService {
       .single();
 
     if (!ent) {
-      console.error('[Commerce] Entitlement not found:', entitlementId);
+      log.error('Entitlement not found:', entitlementId);
       return false;
     }
 
@@ -138,7 +141,7 @@ export class EntitlementService {
       .eq('guild_id', guildId);
 
     if (error) {
-      console.error('[Commerce] Failed to revoke entitlement:', error.message);
+      log.error('Failed to revoke entitlement:', error.message);
       return false;
     }
 
@@ -190,7 +193,7 @@ export class EntitlementService {
       details: { discordId, reason, productId: ent.product_id },
     });
 
-    console.log(`[Commerce] Entitlement revoked: ${entitlementId} (${reason})`);
+    log.info(`Entitlement revoked: ${entitlementId} (${reason})`);
     return true;
   }
 
@@ -213,11 +216,11 @@ export class EntitlementService {
       .eq('guild_id', guildId);
 
     if (error) {
-      console.error('[Commerce] Failed to suspend entitlement:', error.message);
+      log.error('Failed to suspend entitlement:', error.message);
       return false;
     }
 
-    console.log(`[Commerce] Entitlement suspended (grace until ${gracePeriodEnds.toISOString()}): ${entitlementId}`);
+    log.info(`Entitlement suspended (grace until ${gracePeriodEnds.toISOString()}): ${entitlementId}`);
     return true;
   }
 
@@ -247,7 +250,7 @@ export class EntitlementService {
       .eq('guild_id', guildId);
 
     if (error) {
-      console.error('[Commerce] Failed to reactivate entitlement:', error.message);
+      log.error('Failed to reactivate entitlement:', error.message);
       return false;
     }
 
@@ -262,7 +265,7 @@ export class EntitlementService {
       await this.grantRoles(customer.discord_id, ent.granted_role_ids ?? []);
     }
 
-    console.log(`[Commerce] Entitlement reactivated: ${entitlementId}`);
+    log.info(`Entitlement reactivated: ${entitlementId}`);
     return true;
   }
 
@@ -278,7 +281,7 @@ export class EntitlementService {
         }
       }
     } catch (err) {
-      console.error(`[Commerce] Failed to grant roles to ${discordId}:`, err);
+      log.error(`Failed to grant roles to ${discordId}:`, err);
     }
   }
 
@@ -292,7 +295,7 @@ export class EntitlementService {
         }
       }
     } catch (err) {
-      console.error(`[Commerce] Failed to revoke roles from ${discordId}:`, err);
+      log.error(`Failed to revoke roles from ${discordId}:`, err);
     }
   }
 }

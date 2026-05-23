@@ -12,7 +12,7 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { InfractionType, EscalationStep } from '@somnibot/shared';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
 import {
   createInfraction,
   getMemberInfractions,
@@ -22,6 +22,8 @@ import {
 } from './infraction-service.js';
 import { executeEscalation, getEscalationAction } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
+
+const log = createLogger('ModCommands');
 
 // ── Command Builders ──────────────────────────────────────
 
@@ -502,7 +504,7 @@ export async function handleBanCommand(
           .update({ status: 'suspended', updated_at: new Date().toISOString() })
           .eq('id', ent.id);
       }
-      console.log(`[Moderation] Suspended ${entitlements.length} entitlement(s) for banned user ${member.id}`);
+      log.info(`Suspended ${entitlements.length} entitlement(s) for banned user ${member.id}`);
     }
   }
 

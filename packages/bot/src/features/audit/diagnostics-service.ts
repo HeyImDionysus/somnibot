@@ -13,6 +13,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { SomniClient } from '../../client.js';
 import { AlertManager, type AlertThresholds } from './alert-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Diagnostics');
 
 export class DiagnosticsService {
   private client: SomniClient;
@@ -44,7 +47,7 @@ export class DiagnosticsService {
       void this.writeSnapshot();
     }, 60_000);
 
-    console.log('[DiagnosticsService] ✅ Started — writing health snapshots every 60s (with alerts)');
+    log.info('Started — writing health snapshots every 60s (with alerts)');
   }
 
   /**
@@ -55,7 +58,7 @@ export class DiagnosticsService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    console.log('[DiagnosticsService] Stopped');
+    log.info('Stopped');
   }
 
   /**
@@ -153,7 +156,7 @@ export class DiagnosticsService {
         .upsert(snapshot, { onConflict: 'guild_id,type' });
 
       if (error) {
-        console.error('[DiagnosticsService] Failed to write snapshot:', error.message);
+        log.error('Failed to write snapshot:', error.message);
       }
 
       // Evaluate alert thresholds
@@ -168,7 +171,7 @@ export class DiagnosticsService {
       // V53 Phase 2: Write latency metrics for sparkline trends
       await this.writeHealthMetrics(valkeyConnected);
     } catch (err) {
-      console.error('[DiagnosticsService] Snapshot error:', err);
+      log.error('Snapshot error:', { error: String(err) });
     }
   }
 
@@ -212,7 +215,7 @@ export class DiagnosticsService {
       try {
         await this.supabase.from('health_metrics').insert(metrics);
       } catch (err) {
-        console.warn('[DiagnosticsService] Failed to write health metrics:', err instanceof Error ? err.message : err);
+        log.warn('Failed to write health metrics:', err instanceof Error ? err.message : err);
       }
     }
 

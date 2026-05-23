@@ -18,6 +18,9 @@ import {
   type VoiceChannel,
 } from 'discord.js';
 import type { TempChannelManager } from './temp-channel-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('TempChannelCmds');
 
 export function buildTempChannelCommands() {
   const voiceCmd = new SlashCommandBuilder()
@@ -190,7 +193,7 @@ export async function handleTempChannelCommand(
       }
     }
   } catch (err) {
-    console.error('[TempChannels] Command error:', err);
+    log.error('Command error:', { error: String(err) });
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({ content: '❌ An error occurred while processing the command.', ephemeral: true });
     }
