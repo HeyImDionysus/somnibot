@@ -16,6 +16,7 @@ import {
 } from '../features/moderation/commands.js';
 import { handleHelpCommand, handleHelpCategorySelect } from '../features/help/index.js';
 import { handleForgetMeCommand } from '../features/privacy/forgetme-command.js';
+import { handlePrivacyCommand } from '../features/privacy/privacy-command.js';
 import { handleMyDataCommand } from '../features/account/mydata-command.js';
 import { handleTutorialCommand } from '../features/tutorial/tutorial-command.js';
 import {
@@ -819,6 +820,9 @@ export function registerEvents(client: SomniClient): void {
           case 'forgetme':
             await handleForgetMeCommand(interaction, client.supabase, interaction.guildId!);
             return;
+          case 'privacy':
+            await handlePrivacyCommand(interaction);
+            return;
           case 'mydata':
             await handleMyDataCommand(interaction);
             return;
@@ -1144,6 +1148,61 @@ export function registerEvents(client: SomniClient): void {
       console.error('[Events] Ticket inactivity check error:', err);
     }
   }, 30 * 60 * 1000);
+
+  // ── Data Retention Cron (every 6 hours) ─────────────
+  // Audit V2 Finding 13.3 — Prune old audit logs, expired portal sessions,
+  // and processed webhook events to comply with data retention policy.
+  setInterval(async () => {
+    try {
+      await pruneExpiredData(client.supabase, client.guildId);
+    } catch (err) {
+      console.error('[Events] Data retention prune error:', err);
+    }
+  }, 6 * 60 * 60 * 1000);
+}
+
+/**
+ * Prune expired data for data retention compliance.
+ * - Audit logs older than 90 days
+ * - Expired portal sessions
+ * - Processed webhook events older than 30 days
+ */
+async function pruneExpiredData(
+  supabase: import('@supabase/supabase-js').SupabaseClient,
+  guildId: string,
+): Promise<void> {
+  const now = new Date();
+
+  // 1. Audit logs older than 90 days
+  const auditCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const { count: auditCount } = await supabase
+    .from('audit_logs')
+    .delete({ count: 'exact' })
+    .eq('guild_id', guildId)
+    .lt('created_at', auditCutoff);
+
+  // 2. Expired portal sessions
+  const { count: sessionCount } = await supabase
+    .from('portal_sessions')
+    .delete({ count: 'exact' })
+    .eq('guild_id', guildId)
+    .lt('expires_at', now.toISOString());
+
+  // 3. Processed webhook events older than 30 days
+  const webhookCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { count: webhookCount } = await supabase
+    .from('webhook_events')
+    .delete({ count: 'exact' })
+    .eq('guild_id', guildId)
+    .in('status', ['processed', 'ignored'])
+    .lt('created_at', webhookCutoff);
+
+  const total = (auditCount ?? 0) + (sessionCount ?? 0) + (webhookCount ?? 0);
+  if (total > 0) {
+    console.log(
+      `[Retention] Pruned ${auditCount ?? 0} audit logs, ${sessionCount ?? 0} expired sessions, ${webhookCount ?? 0} webhook events`,
+    );
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────

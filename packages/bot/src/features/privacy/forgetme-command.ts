@@ -204,6 +204,9 @@ function formatTableName(table: string): string {
     member_levels: '📊 Level/XP Data',
     members: '👤 Member Record',
     tickets_anonymized: '🎫 Tickets (anonymized)',
+    poll_votes: '🗳️ Poll Votes',
+    economy_pet_battles_anonymized: '⚔️ Pet Battles (anonymized)',
+    infractions_anonymized: '⚖️ Infractions (anonymized)',
   };
   return map[table] ?? table;
 }

@@ -4,11 +4,14 @@
  * POST: Upload a file to Supabase Storage and link to product
  * GET: List files for a product
  * DELETE: Remove a file from storage and database
+ *
+ * Audit V2 Finding 3.4 — Added Zod validation on POST FormData fields
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes } from 'crypto';
+import { z } from 'zod';
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -62,17 +65,41 @@ export async function POST(req: NextRequest) {
 
   const formData = await req.formData();
   const file = formData.get('file') as File | null;
-  const productId = formData.get('product_id') as string | null;
-  const displayName = formData.get('display_name') as string | null;
-  const description = formData.get('description') as string | null;
-  const version = formData.get('version') as string | null;
 
-  if (!file || !productId) {
+  // Validate text fields with Zod
+  const fileUploadSchema = z.object({
+    product_id: z.string().uuid(),
+    display_name: z.string().max(255).optional().nullable(),
+    description: z.string().max(2000).optional().nullable(),
+    version: z.string().max(50).regex(/^[\d]+\.[\d]+\.[\d]+.*$/, 'Must be a semver string (e.g. 1.0.0)').optional().nullable(),
+  });
+
+  const fieldResult = fileUploadSchema.safeParse({
+    product_id: formData.get('product_id'),
+    display_name: formData.get('display_name'),
+    description: formData.get('description'),
+    version: formData.get('version'),
+  });
+
+  if (!file || !fieldResult.success) {
     return NextResponse.json(
-      { success: false, error: 'Missing file or product_id' },
+      {
+        success: false,
+        error: !file
+          ? 'Missing file'
+          : 'Validation failed',
+        details: !file
+          ? undefined
+          : fieldResult.error?.issues.map((i) => ({
+              path: i.path.join('.'),
+              message: i.message,
+            })),
+      },
       { status: 400 },
     );
   }
+
+  const { product_id: productId, display_name: displayName, description, version } = fieldResult.data;
 
   // Verify product exists and belongs to this guild
   const { data: product } = await supabase
