@@ -22,6 +22,8 @@ import type {
   DesiredCategory,
 } from '@somnibot/shared';
 import { checkBotRolePosition, checkBotPermissions } from '../guards/bot-role-guard.js';
+import type { DbRow } from '@somnibot/shared';
+
 
 // ============================================================
 // Types
@@ -176,11 +178,11 @@ export async function deployServerState(
         let purgedCount = 0;
         for (const [, channel] of textChannels) {
           try {
-            const messages = await (channel as any).messages.fetch({ limit: 100 });
-            const botMessages = messages.filter((m: any) => m.author.id === botId);
+            const messages = await (channel as DbRow).messages.fetch({ limit: 100 });
+            const botMessages = messages.filter((m: DbRow) => m.author.id === botId);
             for (const [, msg] of botMessages) {
               try {
-                await (msg as any).delete();
+                await (msg as DbRow).delete();
                 purgedCount++;
                 await sleep(300);
               } catch { /* skip undeletable messages */ }
@@ -418,7 +420,7 @@ export async function deployServerState(
       try {
         const staffCatId = categoryKeyToDiscordId.get('cat-staff');
         if (staffCatId) {
-          await (modOnlyChannel as any).setParent(staffCatId, {
+          await (modOnlyChannel as DbRow).setParent(staffCatId, {
             reason: 'SomniBot deployment — organize community channel',
           });
           actions.push({

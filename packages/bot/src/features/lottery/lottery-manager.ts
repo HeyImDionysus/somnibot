@@ -10,6 +10,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Lottery');
 
@@ -127,7 +129,7 @@ export class LotteryManager {
       // No entries — reset (cancel the drawing, start fresh)
       const drawing = await this.getActiveDrawing(guildId);
       if (drawing) {
-        await (this.supabase as any)
+        await this.supabase
           .from('economy_lottery_drawings')
           .update({ status: 'cancelled', drawn_at: new Date().toISOString() })
           .eq('id', drawing.id);
@@ -150,13 +152,13 @@ export class LotteryManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
 
   private async getActiveDrawing(guildId: string): Promise<any | null> {
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('economy_lottery_drawings')
       .select('*')
       .eq('guild_id', guildId)
@@ -170,7 +172,7 @@ export class LotteryManager {
   private async ensureActiveDrawing(guildId: string): Promise<any> {
     let drawing = await this.getActiveDrawing(guildId);
     if (!drawing) {
-      const { data } = await (this.supabase as any)
+      const { data } = await this.supabase
         .from('economy_lottery_drawings')
         .insert({ guild_id: guildId, status: 'active', jackpot: 0 })
         .select()
@@ -201,7 +203,7 @@ export class LotteryManager {
     const totalCost = count * ticketPrice;
 
     // Check balance
-    const { data: wallet } = await (this.supabase as any)
+    const { data: wallet } = await this.supabase
       .from('economy_wallets')
       .select('wallet')
       .eq('guild_id', guildId)
@@ -220,7 +222,7 @@ export class LotteryManager {
     }
 
     // Check existing tickets
-    const { data: existingTickets } = await (this.supabase as any)
+    const { data: existingTickets } = await this.supabase
       .from('economy_lottery_tickets')
       .select('id')
       .eq('drawing_id', drawing.id)
@@ -237,7 +239,7 @@ export class LotteryManager {
     }
 
     // Deduct balance — bail if insufficient funds
-    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
     });
     if (debitErr) {
@@ -260,12 +262,12 @@ export class LotteryManager {
       ticket_number: Math.floor(Math.random() * 10000),
     }));
 
-    const { error: ticketsErr } = await (this.supabase as any)
+    const { error: ticketsErr } = await this.supabase
       .from('economy_lottery_tickets')
       .insert(tickets);
     if (ticketsErr) {
       log.error('ticket insert failed, refunding user:', ticketsErr.message);
-      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
       });
       if (refundErr) {
@@ -281,7 +283,7 @@ export class LotteryManager {
     }
 
     // Atomically increment jackpot to prevent TOCTOU race
-    const { data: newJackpot, error: jackpotErr } = await (this.supabase as any).rpc('lottery_increment_jackpot', {
+    const { data: newJackpot, error: jackpotErr } = await this.supabase.rpc('lottery_increment_jackpot', {
       p_drawing_id: drawing.id, p_amount: totalCost,
     });
     if (jackpotErr) {
@@ -289,13 +291,13 @@ export class LotteryManager {
       // deleting just-inserted tickets and refunding the user so the
       // pool stays consistent with what was paid in.
       log.error('jackpot increment failed, rolling back tickets:', jackpotErr.message);
-      await (this.supabase as any)
+      await this.supabase
         .from('economy_lottery_tickets')
         .delete()
         .eq('drawing_id', drawing.id)
         .eq('user_id', userId)
         .in('ticket_number', tickets.map((t) => t.ticket_number));
-      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
       });
       if (refundErr) {
@@ -343,12 +345,12 @@ export class LotteryManager {
       return;
     }
 
-    const { data: tickets } = await (this.supabase as any)
+    const { data: tickets } = await this.supabase
       .from('economy_lottery_tickets')
       .select('user_id')
       .eq('drawing_id', drawing.id);
 
-    const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
+    const uniquePlayers = new Set((tickets ?? []).map((t: DbRow) => t.user_id));
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -375,7 +377,7 @@ export class LotteryManager {
     // idempotent: a manual /lottery draw racing the scheduler could
     // award two payouts. The RPC returns the drawing iff it was still
     // 'active', so exactly one caller will proceed.
-    const { data: claimed, error: claimErr } = await (this.supabase as any).rpc(
+    const { data: claimed, error: claimErr } = await this.supabase.rpc(
       'lottery_claim_drawing',
       { p_drawing_id: drawing.id },
     );
@@ -391,7 +393,7 @@ export class LotteryManager {
 
     const jackpotSnapshot: number = claimedRow.jackpot ?? drawing.jackpot ?? 0;
 
-    const { data: tickets } = await (this.supabase as any)
+    const { data: tickets } = await this.supabase
       .from('economy_lottery_tickets')
       .select('*')
       .eq('drawing_id', drawing.id);
@@ -400,7 +402,7 @@ export class LotteryManager {
       // No tickets — revert the claim so the scheduled "no entries"
       // path can flip it to 'cancelled' (the executeDrawAndAnnounce
       // caller expects status='active' to update).
-      await (this.supabase as any)
+      await this.supabase
         .from('economy_lottery_drawings')
         .update({ status: 'active' })
         .eq('id', drawing.id);
@@ -412,7 +414,7 @@ export class LotteryManager {
 
     // Award jackpot BEFORE flipping to 'drawn' so a payout failure
     // doesn't leave the winner unpaid + the drawing permanently closed.
-    const { error: jackpotErr } = await (this.supabase as any).rpc('economy_add_balance', {
+    const { error: jackpotErr } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: guildId,
       p_user_id: winnerTicket.user_id,
       p_amount: jackpotSnapshot,
@@ -422,7 +424,7 @@ export class LotteryManager {
       // Revert to 'active' so the next scheduled tick retries the draw
       // (and the same winner won't necessarily be picked, but the pool
       // is preserved and no one is silently shortchanged).
-      await (this.supabase as any)
+      await this.supabase
         .from('economy_lottery_drawings')
         .update({ status: 'active' })
         .eq('id', drawing.id);
@@ -430,7 +432,7 @@ export class LotteryManager {
     }
 
     // Close drawing — finalize from 'drawing' to 'drawn'.
-    await (this.supabase as any)
+    await this.supabase
       .from('economy_lottery_drawings')
       .update({
         status: 'drawn',

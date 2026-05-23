@@ -10,7 +10,7 @@ export async function GET() {
   const supabase = createAdminSupabase();
 
   // Get recent heists (last 50)
-  const { data, error } = await (supabase as any)
+  const { data, error } = await (supabase as Record<string, unknown>)
     .from('economy_heists')
     .select('*, economy_heist_participants(*)')
     .eq('guild_id', auth.guildId)

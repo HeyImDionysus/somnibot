@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
     .select('*')
     .eq('guild_id', guildId)
     .order('price_cents', { ascending: true });
+    .limit(500)
 
   if (productId) {
     query = query.eq('product_id', productId);

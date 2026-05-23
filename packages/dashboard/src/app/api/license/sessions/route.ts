@@ -45,6 +45,7 @@ export async function GET(req: NextRequest) {
     .select('*')
     .eq('license_key_id', keyId)
     .order('last_seen_at', { ascending: false });
+    .limit(500)
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

@@ -16,6 +16,8 @@ import type { DbGuildConfig } from '@somnibot/shared';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Heist');
 
@@ -79,7 +81,7 @@ export class HeistManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
@@ -112,7 +114,7 @@ export class HeistManager {
     }
 
     // Check cooldown (DB fallback — covers case where Valkey was unavailable at last resolve)
-    const { data: recent } = await (this.supabase as any)
+    const { data: recent } = await this.supabase
       .from('economy_heists')
       .select('resolved_at')
       .eq('guild_id', guildId)
@@ -135,7 +137,7 @@ export class HeistManager {
     }
 
     // Check no active heist
-    const { data: active } = await (this.supabase as any)
+    const { data: active } = await this.supabase
       .from('economy_heists')
       .select('id')
       .eq('guild_id', guildId)
@@ -153,7 +155,7 @@ export class HeistManager {
 
     // Check balance for entry fee
     const entryFee = config.economy_heist_entry_fee ?? 100;
-    const { data: wallet } = await (this.supabase as any)
+    const { data: wallet } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', userId).single();
 
@@ -166,7 +168,7 @@ export class HeistManager {
     }
 
     // Deduct entry fee (atomic — raises on insufficient balance)
-    const { error: feeErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: feeErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
     if (feeErr) {
@@ -187,7 +189,7 @@ export class HeistManager {
     // `uniq_active_heist_per_guild` makes the loser's INSERT fail with
     // 23505. We refund their entry fee and surface a clean error so
     // they aren't charged for a heist they didn't get to start.
-    const { data: heist, error: heistErr } = await (this.supabase as any)
+    const { data: heist, error: heistErr } = await this.supabase
       .from('economy_heists')
       .insert({
         guild_id: guildId,
@@ -202,9 +204,9 @@ export class HeistManager {
       .single();
 
     if (heistErr || !heist) {
-      const code = (heistErr as any)?.code;
+      const code = (heistErr as DbRow)?.code;
       // Always refund the entry fee — we charged it before the insert.
-      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
       });
       if (refundErr) {
@@ -228,7 +230,7 @@ export class HeistManager {
 
     // V53-C10: Add initiator as participant — check error, refund if insert fails
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    const { error: initInsertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: initInsertErr } = await this.supabase.from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
@@ -237,7 +239,7 @@ export class HeistManager {
     if (initInsertErr) {
       log.error('Failed to insert initiator participant:', initInsertErr.message);
       // Refund entry fee
-      await (this.supabase as any).rpc('economy_add_balance', {
+      await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
       }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
@@ -283,7 +285,7 @@ export class HeistManager {
     }
 
     // Find active recruiting heist
-    const { data: heist } = await (this.supabase as any)
+    const { data: heist } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
@@ -315,7 +317,7 @@ export class HeistManager {
 
     // Check balance for entry fee
     const entryFee = config.economy_heist_entry_fee ?? 100;
-    const { data: wallet } = await (this.supabase as any)
+    const { data: wallet } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', userId).single();
 
@@ -328,7 +330,7 @@ export class HeistManager {
     }
 
     // Deduct fee (atomic — raises on insufficient balance)
-    const { error: joinFeeErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: joinFeeErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
     });
     if (joinFeeErr) {
@@ -338,7 +340,7 @@ export class HeistManager {
 
     // V53-C8: Add participant — check insert, refund entry fee on failure
     const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
-    const { error: partInsertErr } = await (this.supabase as any).from('economy_heist_participants').insert({
+    const { error: partInsertErr } = await this.supabase.from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
       user_id: userId,
@@ -347,7 +349,7 @@ export class HeistManager {
     if (partInsertErr) {
       log.error('Failed to insert participant:', partInsertErr.message);
       // Refund entry fee
-      await (this.supabase as any).rpc('economy_add_balance', {
+      await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
       }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
@@ -355,20 +357,20 @@ export class HeistManager {
     }
 
     // V53-C9: Atomic array_append — await and check; refund + remove participant on failure
-    const { error: appendErr } = await (this.supabase as any).rpc('array_append_heist_participant', {
+    const { error: appendErr } = await this.supabase.rpc('array_append_heist_participant', {
       p_heist_id: heist.id, p_user_id: userId,
     });
     if (appendErr) {
       log.error('array_append_heist_participant failed:', appendErr.message);
       // Fallback: direct update (awaited this time)
-      await (this.supabase as any).from('economy_heists').update({
+      await this.supabase.from('economy_heists').update({
         participants: [...(heist.participants as string[]), userId],
         success_chance: Math.min(95, heist.success_chance + 7),
       }).eq('id', heist.id);
     }
 
     // Re-read actual participant count for accurate display
-    const { count: crewCount } = await (this.supabase as any)
+    const { count: crewCount } = await this.supabase
       .from('economy_heist_participants')
       .select('id', { count: 'exact', head: true })
       .eq('heist_id', heist.id);
@@ -393,7 +395,7 @@ export class HeistManager {
   async viewHeist(interaction: ChatInputCommandInteraction): Promise<void> {
     const guildId = interaction.guildId!;
 
-    const { data: heist } = await (this.supabase as any)
+    const { data: heist } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
@@ -404,7 +406,7 @@ export class HeistManager {
 
     if (!heist) {
       // Show last completed heist
-      const { data: last } = await (this.supabase as any)
+      const { data: last } = await this.supabase
         .from('economy_heists')
         .select('*')
         .eq('guild_id', guildId)
@@ -458,7 +460,7 @@ export class HeistManager {
   private async resolveHeist(guildId: string, heistId: string, channelId: string): Promise<void> {
     this.resolveTimers.delete(heistId);
 
-    const { data: heist } = await (this.supabase as any)
+    const { data: heist } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('id', heistId)
@@ -470,22 +472,22 @@ export class HeistManager {
     const minParticipants = config?.economy_heist_min_participants ?? 2;
 
     // Use the join table as source of truth (immune to array TOCTOU race)
-    const { data: partRows } = await (this.supabase as any)
+    const { data: partRows } = await this.supabase
       .from('economy_heist_participants')
       .select('user_id')
       .eq('heist_id', heistId);
-    const participants = (partRows ?? []).map((r: any) => r.user_id as string);
+    const participants = (partRows ?? []).map((r: DbRow) => r.user_id as string);
 
     // Not enough participants — cancel
     if (participants.length < minParticipants) {
-      await (this.supabase as any).from('economy_heists')
+      await this.supabase.from('economy_heists')
         .update({ status: 'cancelled', resolved_at: new Date().toISOString() })
         .eq('id', heistId);
 
       // Refund entry fees
       const entryFee = config?.economy_heist_entry_fee ?? 100;
       for (const uid of participants) {
-        const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
         });
         if (refundErr) log.error(`Failed to refund ${uid}:`, refundErr.message);
@@ -507,7 +509,7 @@ export class HeistManager {
     }
 
     // Mark as in_progress
-    await (this.supabase as any).from('economy_heists')
+    await this.supabase.from('economy_heists')
       .update({ status: 'in_progress' })
       .eq('id', heistId);
 
@@ -523,36 +525,36 @@ export class HeistManager {
       // V53-C11: Track payout failures individually so they can be reconciled
       const failedPayouts: string[] = [];
       for (const uid of participants) {
-        const { error: payErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
         });
         if (payErr) {
           log.error(`Failed to pay ${uid}:`, payErr.message);
           failedPayouts.push(uid);
           // Mark participant with payout_failed for reconciliation
-          await (this.supabase as any).from('economy_heist_participants')
+          await this.supabase.from('economy_heist_participants')
             .update({ payout: 0, payout_failed: true })
             .eq('heist_id', heistId)
             .eq('user_id', uid);
         } else {
-          await (this.supabase as any).from('economy_heist_participants')
+          await this.supabase.from('economy_heist_participants')
             .update({ payout: perPerson })
             .eq('heist_id', heistId)
             .eq('user_id', uid);
         }
       }
 
-      await (this.supabase as any).from('economy_heists')
+      await this.supabase.from('economy_heists')
         .update({ status: 'success', resolved_at: new Date().toISOString() })
         .eq('id', heistId);
 
-      const { data: partData } = await (this.supabase as any)
+      const { data: partData } = await this.supabase
         .from('economy_heist_participants')
         .select('user_id, role')
         .eq('heist_id', heistId);
 
       const crewList = (partData ?? [])
-        .map((p: any) => {
+        .map((p: DbRow) => {
           const isFailed = failedPayouts.includes(p.user_id);
           return isFailed
             ? `• <@${p.user_id}> — **${p.role}** (⚠️ payout failed — contact admin)`
@@ -577,7 +579,7 @@ export class HeistManager {
       }
     } else {
       // Failed — entry fees are lost
-      await (this.supabase as any).from('economy_heists')
+      await this.supabase.from('economy_heists')
         .update({ status: 'failed', resolved_at: new Date().toISOString() })
         .eq('id', heistId);
 
@@ -602,7 +604,7 @@ export class HeistManager {
 
   /** Re-schedule pending heists on bot restart */
   async resumePendingHeists(guildId: string): Promise<void> {
-    const { data: pending } = await (this.supabase as any)
+    const { data: pending } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)

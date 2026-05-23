@@ -47,6 +47,7 @@ export async function GET(request: NextRequest) {
       .select('*, incident_events(count)', { count: 'exact' })
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
+      .limit(500)
       .range((page - 1) * pageSize, page * pageSize - 1);
 
     if (status) {

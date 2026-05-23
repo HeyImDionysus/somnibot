@@ -3,6 +3,8 @@
  */
 import { SlashCommandBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { AdventureManager } from './adventure-manager.js';
+import type { DbRow } from '@somnibot/shared';
+
 
 export function buildAdventureCommands(): Record<string, SlashCommandBuilder> {
   return {
@@ -44,7 +46,7 @@ export async function handleAdventureCommand(
       adventureType,
     );
 
-    const replyPayload: any = { embeds: [embed] };
+    const replyPayload: DbRow = { embeds: [embed] };
     if (row) replyPayload.components = [row];
     await interaction.editReply(replyPayload);
   }

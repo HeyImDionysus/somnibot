@@ -5,6 +5,8 @@ import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import type { DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Quests');
 
@@ -26,7 +28,7 @@ export class QuestsManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
@@ -43,7 +45,7 @@ export class QuestsManager {
 
     // Get active quests — daily from today, weekly from this week's Monday
     const weekStart = getWeekStart().toISOString();
-    const { data: progress } = await (this.supabase as any)
+    const { data: progress } = await this.supabase
       .from('economy_quest_progress')
       .select('*, template:economy_quest_templates(*)')
       .eq('guild_id', guildId)
@@ -61,7 +63,7 @@ export class QuestsManager {
     // Also ensure weekly quests are assigned (they reset weekly, not daily)
     await this.assignWeeklyQuests(guildId, userId).catch((e: unknown) => { log.warn('Weekly quest assignment failed:', (e as Error)?.message ?? e); });
 
-    const lines = progress.map((p: any) => {
+    const lines = progress.map((p: DbRow) => {
       const t = p.template;
       const status = p.claimed ? '✅' : p.completed ? '🎁' : '📋';
       return `${status} **${t?.title ?? 'Quest'}** — ${p.progress}/${t?.target_count ?? 1}${p.completed && !p.claimed ? ' *(claim available!)*' : ''}`;
@@ -83,7 +85,7 @@ export class QuestsManager {
     // V49-C1: Atomic claim — RPC flips claimed=true only for rows still
     // unclaimed, returning only the rows it actually flipped.  Two concurrent
     // calls cannot both claim the same quest.
-    const { data: claimed } = await (this.supabase as any).rpc('economy_quest_atomic_claim', {
+    const { data: claimed } = await this.supabase.rpc('economy_quest_atomic_claim', {
       p_guild_id: guildId,
       p_user_id: userId,
     });
@@ -101,14 +103,14 @@ export class QuestsManager {
     }
 
     if (totalCurrency > 0) {
-      const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCurrency,
       });
       if (payoutErr) {
         log.error('claimQuests payout failed — reverting claimed status:', payoutErr.message);
         // Revert: un-claim the quests so the user can retry
         for (const row of claimed) {
-          await (this.supabase as any).from('economy_quest_progress')
+          await this.supabase.from('economy_quest_progress')
             .update({ claimed: false }).eq('id', row.id).catch((e: unknown) => { log.warn('Reset claimed status failed:', (e as Error)?.message ?? e); });
         }
         await interaction.reply({
@@ -132,7 +134,7 @@ export class QuestsManager {
   async trackProgress(guildId: string, userId: string, actionType: string, amount: number = 1): Promise<void> {
     // V49-C2: Fetch matching quest IDs, then use atomic RPC to increment.
     // The old read-modify-write pattern lost increments under concurrency.
-    const { data: active } = await (this.supabase as any)
+    const { data: active } = await this.supabase
       .from('economy_quest_progress')
       .select('id, template:economy_quest_templates(action_type)')
       .eq('guild_id', guildId)
@@ -141,7 +143,7 @@ export class QuestsManager {
 
     for (const p of active ?? []) {
       if ((p.template as any)?.action_type === actionType) {
-        await (this.supabase as any).rpc('economy_quest_increment_progress', {
+        await this.supabase.rpc('economy_quest_increment_progress', {
           p_id: p.id,
           p_amount: amount,
         }).catch((err: Error) => log.error('increment_progress failed:', err.message));
@@ -154,7 +156,7 @@ export class QuestsManager {
     await this.seedDefaultTemplates(guildId);
 
     const count = config.economy_daily_quest_count ?? 3;
-    const { data: templates } = await (this.supabase as any)
+    const { data: templates } = await this.supabase
       .from('economy_quest_templates')
       .select('*')
       .eq('guild_id', guildId)
@@ -167,7 +169,7 @@ export class QuestsManager {
     // duplicate assignments from concurrent /quests calls.
     const shuffled = templates.sort(() => Math.random() - 0.5).slice(0, count);
     const today = new Date().toISOString().slice(0, 10);
-    const rows = shuffled.map((t: any) => ({
+    const rows = shuffled.map((t: DbRow) => ({
       guild_id: guildId,
       user_id: userId,
       template_id: t.id,
@@ -175,7 +177,7 @@ export class QuestsManager {
       assigned_date: today,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress')
+    await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
@@ -188,20 +190,20 @@ export class QuestsManager {
 
     // Check if user already has weekly quests this week
     const monday = getWeekStart();
-    const { data: existing } = await (this.supabase as any)
+    const { data: existing } = await this.supabase
       .from('economy_quest_progress')
       .select('id, template:economy_quest_templates(quest_type)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .gte('assigned_at', monday.toISOString());
 
-    const weeklyExisting = (existing ?? []).filter((p: any) => p.template?.quest_type === 'weekly');
+    const weeklyExisting = (existing ?? []).filter((p: DbRow) => p.template?.quest_type === 'weekly');
     if (weeklyExisting.length >= weeklyCount) return;
 
     // Seed defaults if needed
     await this.seedDefaultTemplates(guildId);
 
-    const { data: templates } = await (this.supabase as any)
+    const { data: templates } = await this.supabase
       .from('economy_quest_templates')
       .select('*')
       .eq('guild_id', guildId)
@@ -211,15 +213,15 @@ export class QuestsManager {
     if (!templates || templates.length === 0) return;
 
     const needed = weeklyCount - weeklyExisting.length;
-    const usedIds = new Set(weeklyExisting.map((p: any) => p.template_id));
-    const available = templates.filter((t: any) => !usedIds.has(t.id));
+    const usedIds = new Set(weeklyExisting.map((p: DbRow) => p.template_id));
+    const available = templates.filter((t: DbRow) => !usedIds.has(t.id));
     const shuffled = available.sort(() => Math.random() - 0.5).slice(0, needed);
 
     if (shuffled.length === 0) return;
 
     // V49-M5: ON CONFLICT DO NOTHING — idempotent under concurrent calls.
     const mondayStr = monday.toISOString().slice(0, 10);
-    const rows = shuffled.map((t: any) => ({
+    const rows = shuffled.map((t: DbRow) => ({
       guild_id: guildId,
       user_id: userId,
       template_id: t.id,
@@ -227,7 +229,7 @@ export class QuestsManager {
       assigned_date: mondayStr,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress')
+    await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
@@ -243,7 +245,7 @@ export class QuestsManager {
 
         // Clean up old unclaimed weekly progress (older than 1 week)
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        await (this.supabase as any)
+        await this.supabase
           .from('economy_quest_progress')
           .delete()
           .eq('guild_id', guildId)
@@ -266,7 +268,7 @@ export class QuestsManager {
   /** Seed default quest templates via DB function. */
   private async seedDefaultTemplates(guildId: string): Promise<void> {
     try {
-      await (this.supabase as any).rpc('seed_default_quest_templates', { p_guild_id: guildId });
+      await this.supabase.rpc('seed_default_quest_templates', { p_guild_id: guildId });
     } catch {
       // Ignore — function may not exist yet or templates already seeded
     }

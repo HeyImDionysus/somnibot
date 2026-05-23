@@ -3,10 +3,16 @@
  * POST /api/reconciliation — Trigger a manual reconciliation run.
  *
  * Phase B.4: Admin-only.
+ * V3 Audit: Added Zod validation for POST body.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { z } from 'zod';
+
+const reconciliationTriggerSchema = z.object({
+  trigger: z.enum(['manual', 'scheduled']).default('manual'),
+}).strict().optional();
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -15,7 +21,6 @@ export async function GET() {
 
   const supabase = createAdminSupabase();
 
-  // Get the last 20 reconciliation runs for this guild
   const { data: runs } = await supabase
     .from('reconciliation_runs')
     .select('*')
@@ -23,7 +28,6 @@ export async function GET() {
     .order('started_at', { ascending: false })
     .limit(20);
 
-  // Get summary stats
   const lastCompleted = runs?.find(r => r.status === 'completed');
   const lastFailed = runs?.find(r => r.status === 'failed');
   const isRunning = runs?.some(r => r.status === 'running');
@@ -46,6 +50,24 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
+  // Validate optional body
+  let trigger = 'manual';
+  try {
+    const text = await req.text();
+    if (text.trim()) {
+      const parsed = reconciliationTriggerSchema.safeParse(JSON.parse(text));
+      if (!parsed.success) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid request body', details: parsed.error.issues },
+          { status: 400 },
+        );
+      }
+      trigger = parsed.data?.trigger ?? 'manual';
+    }
+  } catch {
+    // Empty body is fine — default to manual trigger
+  }
+
   // Check if a run is already in progress for this guild
   const { data: running } = await supabase
     .from('reconciliation_runs')
@@ -65,7 +87,7 @@ export async function POST(req: NextRequest) {
   await supabase.from('bot_action_queue').insert({
     guild_id: guildId,
     action: 'run_reconciliation',
-    payload: { trigger: 'manual' },
+    payload: { trigger },
     status: 'pending',
   });
 
