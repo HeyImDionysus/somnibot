@@ -7,8 +7,19 @@
  * DELETE: Revoke one or all sessions for a customer
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody } from '@/lib/api/validation';
+
+const sessionDeleteSchema = z.object({
+  customer_id: z.string().min(1, 'customer_id is required'),
+  session_id: z.string().uuid().optional(),
+  revoke_all: z.boolean().optional(),
+}).refine(
+  (d) => d.revoke_all || d.session_id,
+  { message: 'Either session_id or revoke_all is required' },
+);
 
 const MAX_CONCURRENT_SESSIONS = 3;
 
@@ -51,16 +62,9 @@ export async function DELETE(req: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await req.json().catch(() => ({}));
-  const { customer_id, session_id, revoke_all } = body as {
-    customer_id?: string;
-    session_id?: string;
-    revoke_all?: boolean;
-  };
-
-  if (!customer_id) {
-    return NextResponse.json({ success: false, error: 'customer_id required' }, { status: 400 });
-  }
+  const parsed = await parseBody(req, sessionDeleteSchema);
+  if (!parsed.ok) return parsed.response;
+  const { customer_id, session_id, revoke_all } = parsed.data;
 
   const supabase = createAdminSupabase();
 
@@ -79,15 +83,11 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: true, message: 'All sessions revoked' });
   }
 
-  if (!session_id) {
-    return NextResponse.json({ success: false, error: 'session_id or revoke_all required' }, { status: 400 });
-  }
-
-  // Revoke a single session
+  // Revoke a single session (session_id guaranteed by Zod refinement)
   const { error } = await supabase
     .from('portal_sessions')
     .update({ revoked: true })
-    .eq('id', session_id)
+    .eq('id', session_id!)
     .eq('guild_id', guildId)
     .eq('customer_id', customer_id);
 

@@ -7,8 +7,29 @@
  * PUT: Save config + steps (upsert)
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { parseBody } from '@/lib/api/validation';
+
+const tutorialPutSchema = z.object({
+  config: z.object({
+    enabled: z.boolean(),
+    auto_trigger: z.boolean(),
+    trigger_mode: z.string().min(1),
+  }),
+  steps: z.array(
+    z.object({
+      id: z.string().optional(),
+      step_order: z.number().int().min(0),
+      title: z.string().min(1).max(200),
+      description: z.string().max(2000),
+      image_url: z.string().url().nullable().optional(),
+      built_in_key: z.string().nullable().optional(),
+      enabled: z.boolean(),
+    }),
+  ),
+});
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -42,19 +63,9 @@ export async function PUT(req: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const body = await req.json();
-  const { config, steps } = body as {
-    config: { enabled: boolean; auto_trigger: boolean; trigger_mode: string };
-    steps: Array<{
-      id: string;
-      step_order: number;
-      title: string;
-      description: string;
-      image_url: string | null;
-      built_in_key: string | null;
-      enabled: boolean;
-    }>;
-  };
+  const parsed = await parseBody(req, tutorialPutSchema);
+  if (!parsed.ok) return parsed.response;
+  const { config, steps } = parsed.data;
 
   const supabase = createAdminSupabase();
 

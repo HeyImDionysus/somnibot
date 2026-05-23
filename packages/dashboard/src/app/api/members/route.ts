@@ -6,6 +6,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
@@ -28,7 +29,10 @@ export async function GET(req: NextRequest) {
     .range(offset, offset + limit - 1);
 
   if (search) {
-    query = query.or(`username.ilike.%${search}%,display_name.ilike.%${search}%,discord_id.eq.${search}`);
+    const s = sanitizeSearch(search);
+    if (s) {
+      query = query.or(`username.ilike.%${s}%,display_name.ilike.%${s}%,discord_id.eq.${s}`);
+    }
   }
 
   const { data: members, count, error } = await query;
