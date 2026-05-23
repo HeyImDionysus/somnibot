@@ -4,9 +4,6 @@
  * Architecture doc §31.2 — container with accent color, order details, license key.
  */
 import {
-import { createLogger } from '@somnibot/shared';
-
-const log = createLogger('ReceiptBuilder');
   ContainerBuilder,
   SectionBuilder,
   SeparatorBuilder,
@@ -15,6 +12,9 @@ const log = createLogger('ReceiptBuilder');
   EmbedBuilder,
   type User,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ReceiptBuilder');
 
 const HOT_PINK = 0xFF1493;
 

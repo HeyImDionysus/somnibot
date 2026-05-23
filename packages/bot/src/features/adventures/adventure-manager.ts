@@ -17,12 +17,13 @@ import {
 } from 'discord.js';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import type {
-
-const log = createLogger('Adventures');
   AdventureChoice,
   AdventureEndingType,
   AdventureSceneLoot,
 } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Adventures');
 
 // ── Local Types ───────────────────────────────────────────
 

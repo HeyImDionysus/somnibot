@@ -9,9 +9,6 @@
  */
 
 import {
-import { createLogger } from '@somnibot/shared';
-
-const log = createLogger('InteractionHandler');
   CommandInteraction,
   ButtonInteraction,
   ModalSubmitInteraction,
@@ -21,6 +18,9 @@ const log = createLogger('InteractionHandler');
   type Interaction,
   EmbedBuilder,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('InteractionHandler');
 
 export type AnyRepliableInteraction =
   | CommandInteraction

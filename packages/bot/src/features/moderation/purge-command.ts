@@ -8,9 +8,6 @@
  */
 
 import {
-import { createLogger } from '@somnibot/shared';
-
-const log = createLogger('PurgeCmd');
   SlashCommandBuilder,
   PermissionFlagsBits,
   type ChatInputCommandInteraction,
@@ -18,6 +15,9 @@ const log = createLogger('PurgeCmd');
   type Collection,
   type Message,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('PurgeCmd');
 
 export function buildPurgeCommand() {
   return new SlashCommandBuilder()

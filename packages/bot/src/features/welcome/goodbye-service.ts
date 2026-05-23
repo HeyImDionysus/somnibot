@@ -9,12 +9,13 @@
 import type { GuildMember, PartialGuildMember, TextChannel } from 'discord.js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import {
-
-const log = createLogger('Goodbye');
   buildWelcomeVariables,
   formatDuration,
   interpolateMessage,
 } from './welcome-variables.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Goodbye');
 
 const DEFAULT_GOODBYE_MESSAGE =
   '{user.name} left. They were with us for {duration}. 👋';
