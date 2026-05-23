@@ -12,7 +12,14 @@ const compat = new FlatCompat({
 /** @type {import('eslint').Linter.Config[]} */
 const config = [
   ...compat.extends('next/core-web-vitals'),
-  ...tseslint.configs.recommended,
+  {
+    // Register the typescript-eslint plugin so existing
+    // eslint-disable comments referencing @typescript-eslint/* rules
+    // resolve without error, but don't enable any rules from it.
+    plugins: {
+      '@typescript-eslint': tseslint.plugin,
+    },
+  },
   {
     ignores: ['.next/', 'node_modules/', 'out/'],
   },
