@@ -2,37 +2,21 @@
  * Bulk Member Operations API — Execute bulk actions on selected members.
  *
  * V53 Phase 4 (Finding 4.4 — S-3)
+ * Audit V2 Finding 3.4 — Added Zod validation via parseBody
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-
-type BulkAction = 'assign_role' | 'remove_role' | 'reset_economy' | 'export' | 'send_dm';
-
-interface BulkRequest {
-  member_ids: string[];
-  action: BulkAction;
-  params?: Record<string, unknown>;
-}
+import { parseBody, schemas } from '@/lib/api/validation';
 
 export async function POST(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 
   const { guildId } = auth.ctx;
-  const body = (await req.json()) as BulkRequest;
-  const { member_ids, action, params } = body;
-
-  if (!member_ids?.length || member_ids.length > 200) {
-    return NextResponse.json(
-      { error: 'Provide 1–200 member IDs' },
-      { status: 400 },
-    );
-  }
-
-  if (!action) {
-    return NextResponse.json({ error: 'Action required' }, { status: 400 });
-  }
+  const parsed = await parseBody(req, schemas.bulk.memberOperation);
+  if (!parsed.ok) return parsed.response;
+  const { member_ids, action, params } = parsed.data;
 
   const admin = createAdminSupabase();
 

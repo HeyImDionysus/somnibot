@@ -545,6 +545,17 @@ const productFileCreate = z.object({
   sort_order: z.number().int().min(0).max(999).optional(),
 });
 
+// ── Bulk member operation schemas ───────────────────
+// Audit V2 Finding 3.4 — Input validation on members/bulk
+
+const bulkAction = z.enum(['assign_role', 'remove_role', 'reset_economy', 'export', 'send_dm']);
+
+const bulkMemberOperation = z.object({
+  member_ids: z.array(snowflake).min(1).max(200),
+  action: bulkAction,
+  params: z.record(z.unknown()).optional(),
+});
+
 // ── Infraction schemas ──────────────────────────────
 
 const infractionCreate = z.object({
@@ -677,6 +688,9 @@ export const schemas = {
   },
   productFile: {
     create: productFileCreate,
+  },
+  bulk: {
+    memberOperation: bulkMemberOperation,
   },
   infraction: {
     create: infractionCreate,
