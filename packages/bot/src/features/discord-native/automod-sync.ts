@@ -11,6 +11,9 @@
 import { Guild, AutoModerationRuleManager, AutoModerationActionType, AutoModerationRuleTriggerType, AutoModerationRuleEventType } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AutoModSync');
 
 /**
  * Matches the actual `automod_rules` DB schema.
@@ -63,22 +66,22 @@ export class AutoModSync {
     this.eventBus.on('config.changed', (event) => {
       if (event.data.section === 'moderation') {
         this.syncRules().catch((err) =>
-          console.error('[AutoModSync] Sync failed:', err),
+          log.error('Sync failed:', { error: String(err) }),
         );
       }
     });
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
-      console.error('[AutoModSync] Initial sync failed:', err),
+      log.error('Initial sync failed:', { error: String(err) }),
     );
 
     // Periodic sync every 15 minutes as safety net
     this.syncInterval = setInterval(() => {
-      this.syncRules().catch((e: unknown) => { console.warn('[AutoMod] Sync failed:', (e as Error)?.message ?? e); });
+      this.syncRules().catch((e: unknown) => { log.warn('Sync failed:', (e as Error)?.message ?? e); });
     }, 15 * 60 * 1000);
 
-    console.log('[AutoModSync] ✅ AutoMod sync service started');
+    log.info('AutoMod sync service started');
   }
 
   stop(): void {
@@ -99,7 +102,7 @@ export class AutoModSync {
       .eq('sync_to_discord', true);
 
     if (error || !dbRules) {
-      console.warn('[AutoModSync] Failed to fetch rules from DB:', error?.message);
+      log.warn('Failed to fetch rules from DB:', error?.message);
       return;
     }
 
@@ -108,7 +111,7 @@ export class AutoModSync {
     try {
       existingRules = await this.guild.autoModerationRules.fetch();
     } catch (err) {
-      console.warn('[AutoModSync] Cannot fetch Discord AutoMod rules (missing perms?):', err);
+      log.warn('Cannot fetch Discord AutoMod rules (missing perms?):', { error: String(err) });
       return;
     }
 
@@ -177,10 +180,10 @@ export class AutoModSync {
           });
         }
       } catch (err) {
-        console.error(`[AutoModSync] Failed to sync rule "${rule.name}":`, err);
+        log.error(`Failed to sync rule "${rule.name}":`, err);
       }
     }
 
-    console.log(`[AutoModSync] Synced ${dbRules.length} rules to Discord AutoMod`);
+    log.info(`Synced ${dbRules.length} rules to Discord AutoMod`);
   }
 }

@@ -23,17 +23,29 @@ const LEVEL_ORDER: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, erro
 const isProduction = process.env.NODE_ENV === 'production';
 const minLevel: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? (isProduction ? 'info' : 'debug');
 
+/** Accepted log data — objects are spread, primitives/errors are wrapped automatically. */
+export type LogData = Record<string, unknown> | unknown;
+
 export interface Logger {
-  debug(msg: string, data?: Record<string, unknown>): void;
-  info(msg: string, data?: Record<string, unknown>): void;
-  warn(msg: string, data?: Record<string, unknown>): void;
-  error(msg: string, data?: Record<string, unknown>): void;
+  debug(msg: string, data?: LogData): void;
+  info(msg: string, data?: LogData): void;
+  warn(msg: string, data?: LogData): void;
+  error(msg: string, data?: LogData): void;
   /** Create a child logger with extra default fields */
   child(fields: Record<string, unknown>): Logger;
 }
 
 function shouldLog(level: LogLevel): boolean {
   return LEVEL_ORDER[level] >= LEVEL_ORDER[minLevel];
+}
+
+/** Normalize any log data into a plain object. */
+function normalizeData(data: LogData | undefined): Record<string, unknown> | undefined {
+  if (data === undefined || data === null) return undefined;
+  if (data instanceof Error) return { error: data.message, stack: data.stack };
+  if (typeof data === 'object' && !Array.isArray(data)) return data as Record<string, unknown>;
+  if (Array.isArray(data)) return { items: data };
+  return { value: data };
 }
 
 function formatJson(level: LogLevel, service: string, msg: string, data?: Record<string, unknown>, fields?: Record<string, unknown>): string {
@@ -54,7 +66,8 @@ function formatDev(level: LogLevel, service: string, msg: string, data?: Record<
 }
 
 function createLoggerInternal(service: string, parentFields?: Record<string, unknown>): Logger {
-  const write = (level: LogLevel, msg: string, data?: Record<string, unknown>) => {
+  const write = (level: LogLevel, msg: string, rawData?: LogData) => {
+    const data = normalizeData(rawData);
     if (!shouldLog(level)) return;
     const output = isProduction
       ? formatJson(level, service, msg, data, parentFields)

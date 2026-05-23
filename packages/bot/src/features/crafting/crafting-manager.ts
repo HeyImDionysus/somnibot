@@ -9,6 +9,9 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Crafting');
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -211,7 +214,7 @@ export class CraftingManager {
             p_user_id: userId,
             p_item_id: c.itemId,
             p_quantity: c.qty,
-          }).catch((e: unknown) => { console.warn('[Crafting] Operation failed:', (e as Error)?.message ?? e); });
+          }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
         }
         return {
           embed: new EmbedBuilder()
@@ -240,7 +243,7 @@ export class CraftingManager {
           p_user_id: userId,
           p_item_id: c.itemId,
           p_quantity: c.qty,
-        }).catch((e: unknown) => { console.warn('[Crafting] Operation failed:', (e as Error)?.message ?? e); });
+        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       }
       return {
         embed: new EmbedBuilder()
@@ -264,7 +267,7 @@ export class CraftingManager {
     });
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed: new EmbedBuilder()
@@ -403,7 +406,7 @@ export class CraftingManager {
       p_quantity: quantity,
     });
     if (error) {
-      console.error('[Crafting] addToInventory failed:', error.message);
+      log.error('addToInventory failed:', error.message);
       return false;
     }
     return true;

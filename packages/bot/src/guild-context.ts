@@ -69,7 +69,10 @@ export class GuildContext {
     }
   }
 
-  /** Destroy context — clean up timers, managers */
+  /** Destroy context — clean up timers, managers.
+   *  Note: For full cleanup including service shutdown, use
+   *  destroyGuildServices() from guild-init.ts before calling this.
+   */
   destroy(): void {
     this.managers.clear();
   }

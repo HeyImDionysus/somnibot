@@ -31,6 +31,9 @@ import {
 import { executeWelcomeFlow } from './welcome-service.js';
 import { executeGoodbyeFlow } from './goodbye-service.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Onboarding');
 
 /**
  * Get the guild config, cached in Valkey for 60s.
@@ -56,7 +59,7 @@ async function getGuildConfig(
     .maybeSingle();
 
   if (error || !data) {
-    console.error('[Onboarding] Could not load guild config:', error?.message);
+    log.error('Could not load guild config:', error?.message);
     return null;
   }
 
@@ -77,7 +80,7 @@ export async function handleMemberJoin(
   client: SomniClient,
   member: GuildMember,
 ): Promise<void> {
-  console.log(`[Onboarding] Member joined: ${member.user.tag}`);
+  log.info(`Member joined: ${member.user.tag}`);
 
   const config = await getGuildConfig(client, member.guild.id);
   if (!config) return;
@@ -96,7 +99,7 @@ export async function handleMemberJoin(
   });
 
   if (lookup.isReturning) {
-    console.log(`[Onboarding] Returning member detected: ${member.user.tag}`);
+    log.info(`Returning member detected: ${member.user.tag}`);
 
     // V53 B-4: Unsuspend economy wallet for returning members
     try {
@@ -105,7 +108,7 @@ export async function handleMemberJoin(
         p_user_id: member.id,
       });
     } catch (err) {
-      console.warn('[Onboarding] Failed to unsuspend economy:', (err as Error)?.message ?? err);
+      log.warn('Failed to unsuspend economy:', (err as Error)?.message ?? err);
     }
 
     // Returning members skip onboarding — they already completed it
@@ -113,9 +116,9 @@ export async function handleMemberJoin(
     if (config.member_role_id) {
       try {
         await member.roles.add(config.member_role_id, 'Returning member — auto-granted');
-        console.log(`[Onboarding] Member role granted to returning member ${member.user.tag}`);
+        log.info(`Member role granted to returning member ${member.user.tag}`);
       } catch (err) {
-        console.error(`[Onboarding] Failed to grant Member role:`, err);
+        log.error(`Failed to grant Member role:`, err);
       }
     }
 
@@ -173,7 +176,7 @@ export async function handleMemberUpdate(
     newMember.flags?.has(GuildMemberFlags.CompletedOnboarding) === true;
 
   if (wasOnboarding && isCompleted) {
-    console.log(`[Onboarding] ${newMember.user.tag} completed onboarding`);
+    log.info(`${newMember.user.tag} completed onboarding`);
 
     const config = await getGuildConfig(client, newMember.guild.id);
     if (!config) return;
@@ -188,7 +191,7 @@ export async function handleMemberUpdate(
           config.member_role_id,
           'Completed Discord onboarding',
         );
-        console.log(`[Onboarding] Member role granted to ${newMember.user.tag}`);
+        log.info(`Member role granted to ${newMember.user.tag}`);
 
         // Fire verified event
         client.eventBus.emit('member.verified', newMember.guild.id, {
@@ -213,7 +216,7 @@ export async function handleMemberUpdate(
           details: { username: newMember.user.tag },
         });
       } catch (err) {
-        console.error('[Onboarding] Failed to grant Member role:', err);
+        log.error('Failed to grant Member role:', { error: String(err) });
       }
     }
 
@@ -257,12 +260,12 @@ export async function handleMemberLeave(
   client: SomniClient,
   member: GuildMember | PartialGuildMember,
 ): Promise<void> {
-  console.log(`[Onboarding] Member left: ${member.user?.tag ?? member.id}`);
+  log.info(`Member left: ${member.user?.tag ?? member.id}`);
 
   // Record leave (preserves roles for returning member detection)
   if (member.partial) {
     // Partial member — limited data available
-    console.warn('[Onboarding] Partial member leave — limited data stored');
+    log.warn('Partial member leave — limited data stored');
   } else {
     await recordMemberLeave(client.supabase, member as GuildMember);
   }
@@ -313,11 +316,11 @@ async function restorePreviousRoles(
       await member.roles.add(role, 'Returning member — restoring previous role');
       restored++;
     } catch (err) {
-      console.warn(`[Onboarding] Could not restore role ${roleId}:`, err);
+      log.warn(`Could not restore role ${roleId}:`, err);
     }
   }
   if (restored > 0) {
-    console.log(`[Onboarding] Restored ${restored} role(s) for ${member.user.tag}`);
+    log.info(`Restored ${restored} role(s) for ${member.user.tag}`);
   }
 }
 
@@ -366,10 +369,10 @@ async function restoreLevelRoles(
     }
 
     if (restored > 0) {
-      console.log(`[Onboarding] Restored ${restored} level reward role(s) for ${member.user.tag}`);
+      log.info(`Restored ${restored} level reward role(s) for ${member.user.tag}`);
     }
   } catch (err) {
-    console.error('[Onboarding] Error restoring level roles:', err);
+    log.error('Error restoring level roles:', { error: String(err) });
   }
 }
 
@@ -389,7 +392,7 @@ async function applyInterestRoles(
   // natively. The mapping is used to document the relationship for the dashboard.
   //
   // If Discord exposes selection data in a future API update, we'll populate this.
-  console.log(`[Onboarding] Interest role mapping available (${Object.keys(mapping).length} entries)`);
+  log.info(`Interest role mapping available (${Object.keys(mapping).length} entries)`);
 }
 
 /**

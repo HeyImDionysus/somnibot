@@ -14,6 +14,9 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MessageLog');
 
 interface MessageLogConfig {
   message_log_enabled: boolean;
@@ -95,7 +98,7 @@ export async function logMessageEdit(
   try {
     await logChannel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('[MessageLog] Failed to log edit:', err);
+    log.error('Failed to log edit:', { error: String(err) });
   }
 }
 
@@ -141,7 +144,7 @@ export async function logMessageDelete(
   try {
     await logChannel.send({ embeds: [embed] });
   } catch (err) {
-    console.error('[MessageLog] Failed to log delete:', err);
+    log.error('Failed to log delete:', { error: String(err) });
   }
 }
 

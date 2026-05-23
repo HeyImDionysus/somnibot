@@ -21,6 +21,9 @@ import type {
   AdventureEndingType,
   AdventureSceneLoot,
 } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Adventures');
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -604,7 +607,7 @@ export class AdventureManager {
           p_guild_id: this.guild.id,
           p_user_id: userId,
           p_amount: config.economy_adventure_ticket_cost,
-        }).catch((e: unknown) => { console.warn('[Adventure] Operation failed:', (e as Error)?.message ?? e); });
+        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       }
 
       // Duplicate key → another concurrent command won the race
@@ -840,7 +843,7 @@ export class AdventureManager {
         p_amount: currency,
       });
       if (payErr) {
-        console.error('[Adventures] endSession payout failed:', payErr.message);
+        log.error('endSession payout failed:', payErr.message);
         // Mark the session so admins can identify failed payouts and retry
         await this.supabase
           .from('economy_adventure_sessions')
@@ -867,7 +870,7 @@ export class AdventureManager {
           p_quantity: item.qty,
         });
         if (lootErr) {
-          console.error('[Adventures] loot upsert failed:', lootErr.message);
+          log.error('loot upsert failed:', lootErr.message);
           lootFailed = true;
         }
       }
@@ -878,10 +881,10 @@ export class AdventureManager {
       await this.supabase.from('economy_adventure_sessions')
         .update({ loot_failed: true })
         .eq('id', session.id)
-        .catch((e: unknown) => { console.warn('[Adventure] Operation failed:', (e as Error)?.message ?? e); });
+        .catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     }
 
     // Quest progress — count completed adventures
-    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
   }
 }

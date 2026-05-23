@@ -4,6 +4,9 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Achievements');
 
 let _manager: AchievementsManager | null = null;
 export function registerAchievementsManager(mgr: AchievementsManager): void { _manager = mgr; }
@@ -88,7 +91,7 @@ export class AchievementsManager {
         const { error: rewardErr } = await (this.supabase as any).rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: userId, p_amount: def.reward_currency,
         });
-        if (rewardErr) console.error(`[Achievements] Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
+        if (rewardErr) log.error(`Failed to award ${def.reward_currency} to ${userId}:`, rewardErr.message);
       }
 
       return def.name;

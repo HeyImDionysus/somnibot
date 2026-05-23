@@ -1,5 +1,8 @@
 import Valkey from 'iovalkey';
 import { getConfig } from '../config.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Valkey');
 
 let _client: Valkey | null = null;
 
@@ -15,15 +18,15 @@ export function getValkey(): Valkey {
     maxRetriesPerRequest: 3,
     retryStrategy(times: number) {
       const delay = Math.min(times * 200, 5000);
-      console.log(`[Valkey] Reconnecting in ${delay}ms (attempt ${times})`);
+      log.info(`Reconnecting in ${delay}ms (attempt ${times})`);
       return delay;
     },
     lazyConnect: true,
   });
 
-  _client.on('connect', () => console.log('[Valkey] Connected'));
-  _client.on('error', (err) => console.error('[Valkey] Error:', err.message));
-  _client.on('close', () => console.log('[Valkey] Connection closed'));
+  _client.on('connect', () => log.info('Connected'));
+  _client.on('error', (err) => log.error('Error:', err.message));
+  _client.on('close', () => log.info('Connection closed'));
 
   return _client;
 }
@@ -34,5 +37,5 @@ export function getValkey(): Valkey {
 export async function connectValkey(): Promise<void> {
   const client = getValkey();
   await client.connect();
-  console.log('[Valkey] Ready');
+  log.info('Ready');
 }

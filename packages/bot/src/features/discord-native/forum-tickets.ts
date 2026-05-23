@@ -20,6 +20,9 @@ import {
   GuildForumTag,
 } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ForumTickets');
 
 export interface ForumTicketConfig {
   forum_channel_id: string;
@@ -60,7 +63,7 @@ export class ForumTicketService {
 
     const forumChannel = this.guild.channels.cache.get(forumConfig.forum_channel_id);
     if (!forumChannel || forumChannel.type !== ChannelType.GuildForum) {
-      console.error(`[ForumTickets] Channel ${forumConfig.forum_channel_id} is not a forum channel`);
+      log.error(`Channel ${forumConfig.forum_channel_id} is not a forum channel`);
       return null;
     }
 
@@ -154,13 +157,13 @@ export class ForumTicketService {
         .single();
 
       if (error) {
-        console.error('[ForumTickets] DB insert failed:', error.message);
+        log.error('DB insert failed:', error.message);
         return null;
       }
 
       return { threadId: thread.id, ticketId: ticket.id };
     } catch (err) {
-      console.error('[ForumTickets] Failed to create forum ticket:', err);
+      log.error('Failed to create forum ticket:', { error: String(err) });
       return null;
     }
   }
@@ -218,7 +221,7 @@ export class ForumTicketService {
 
       return true;
     } catch (err) {
-      console.error(`[ForumTickets] Failed to close forum ticket ${ticketId}:`, err);
+      log.error(`Failed to close forum ticket ${ticketId}:`, err);
       return false;
     }
   }

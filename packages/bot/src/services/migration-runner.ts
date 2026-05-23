@@ -13,6 +13,9 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('MigrationRunner');
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -135,7 +138,7 @@ async function ensureTrackingTable(
 ): Promise<boolean> {
   const result = await executeSql(supabaseUrl, serviceRoleKey, BOOTSTRAP_SQL, '_bootstrap');
   if (!result.success) {
-    console.warn('[Migration] Could not create tracking table:', result.error);
+    log.warn('Could not create tracking table:', result.error);
     return false;
   }
   return true;
@@ -203,14 +206,14 @@ export async function runMigrations(): Promise<MigrationResult> {
   const serviceRoleKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!supabaseUrl || !serviceRoleKey) {
-    console.log('[Migration] ⏭️  Skipping — SUPABASE_URL or SUPABASE_SECRET_KEY not set');
+    log.info('⏭️  Skipping — SUPABASE_URL or SUPABASE_SECRET_KEY not set');
     return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
   }
 
   // Bootstrap tracking table
   const bootstrapped = await ensureTrackingTable(supabaseUrl, serviceRoleKey);
   if (!bootstrapped) {
-    console.warn('[Migration] ⚠️  Could not bootstrap tracking table — falling back to legacy check');
+    log.warn('️  Could not bootstrap tracking table — falling back to legacy check');
     return await runLegacyMigrations(supabaseUrl, serviceRoleKey);
   }
 
@@ -223,7 +226,7 @@ export async function runMigrations(): Promise<MigrationResult> {
   try {
     migrationsDir = findMigrationsDir();
   } catch (err) {
-    console.error('[Migration] ❌', err);
+    log.error('', { error: String(err) });
     return { ran: false, applied: [], skipped: [], errors: [(err as Error).message], checksumDrift: [] };
   }
 
@@ -231,7 +234,7 @@ export async function runMigrations(): Promise<MigrationResult> {
     .filter((f) => f.endsWith('.sql'))
     .sort();
 
-  console.log(`[Migration] Found ${files.length} migration files, ${appliedMap.size} already applied`);
+  log.info(`Found ${files.length} migration files, ${appliedMap.size} already applied`);
 
   const result: MigrationResult = {
     ran: false,
@@ -250,7 +253,7 @@ export async function runMigrations(): Promise<MigrationResult> {
     if (existing) {
       // Already applied — check for checksum drift
       if (existing.checksum !== checksum) {
-        console.warn(`[Migration] ⚠️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
+        log.warn(`️  Checksum drift: ${file} (applied: ${existing.checksum.slice(0, 8)}… current: ${checksum.slice(0, 8)}…)`);
         result.checksumDrift.push(file);
       }
       result.skipped.push(file);
@@ -258,7 +261,7 @@ export async function runMigrations(): Promise<MigrationResult> {
     }
 
     // Run this migration
-    console.log(`[Migration] Running ${file}...`);
+    log.info(`Running ${file}...`);
     result.ran = true;
     const startMs = Date.now();
 
@@ -268,23 +271,23 @@ export async function runMigrations(): Promise<MigrationResult> {
     if (execResult.success) {
       result.applied.push(file);
       await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, true);
-      console.log(`[Migration] ✅ ${file} (${durationMs}ms)`);
+      log.info(`${file} (${durationMs}ms)`);
     } else {
       result.errors.push(`${file}: ${execResult.error}`);
       await recordMigration(supabaseUrl, serviceRoleKey, file, checksum, durationMs, false);
-      console.error(`[Migration] ❌ ${file}: ${execResult.error}`);
+      log.error(`${file}: ${execResult.error}`);
       break; // Stop on first error — migrations are ordered
     }
   }
 
   if (result.applied.length > 0) {
-    console.log(`[Migration] ✅ Applied ${result.applied.length} new migration(s)`);
+    log.info(`Applied ${result.applied.length} new migration(s)`);
   } else if (result.errors.length === 0) {
-    console.log('[Migration] ✅ Database is up to date');
+    log.info('Database is up to date');
   }
 
   if (result.checksumDrift.length > 0) {
-    console.warn(`[Migration] ⚠️  ${result.checksumDrift.length} file(s) changed after being applied — review manually`);
+    log.warn(`️  ${result.checksumDrift.length} file(s) changed after being applied — review manually`);
   }
 
   return result;
@@ -309,7 +312,7 @@ async function runLegacyMigrations(
   });
 
   if (res.ok) {
-    console.log('[Migration] ✅ Database already initialized (legacy check) — skipping');
+    log.info('Database already initialized (legacy check) — skipping');
     return { ran: false, applied: [], skipped: [], errors: [], checksumDrift: [] };
   }
 
@@ -332,10 +335,10 @@ async function runLegacyMigrations(
 
     if (execResult.success) {
       result.applied.push(file);
-      console.log(`[Migration] ✅ ${file}`);
+      log.info(`${file}`);
     } else {
       result.errors.push(`${file}: ${execResult.error}`);
-      console.error(`[Migration] ❌ ${file}: ${execResult.error}`);
+      log.error(`${file}: ${execResult.error}`);
       break;
     }
   }

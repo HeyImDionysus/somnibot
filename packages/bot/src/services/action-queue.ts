@@ -25,6 +25,9 @@ import { writeAuditLog } from './audit.js';
 import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ActionQueue');
 
 // ============================================================
 // Types
@@ -358,7 +361,7 @@ async function addRoleToDesiredState(
     p_role: role,
   });
   if (error) {
-    console.error('[ActionQueue] desired_state_add_role RPC failed:', error.message);
+    log.error('desired_state_add_role RPC failed:', error.message);
   }
 }
 
@@ -384,7 +387,7 @@ async function updateRoleInDesiredState(
     p_updates: roleUpdates,
   });
   if (error) {
-    console.error('[ActionQueue] desired_state_update_role RPC failed:', error.message);
+    log.error('desired_state_update_role RPC failed:', error.message);
   }
 }
 
@@ -399,7 +402,7 @@ async function removeRoleFromDesiredState(
     p_template_key: templateKey,
   });
   if (error) {
-    console.error('[ActionQueue] desired_state_remove_role RPC failed:', error.message);
+    log.error('desired_state_remove_role RPC failed:', error.message);
   }
 }
 
@@ -547,7 +550,7 @@ async function handleSendEmbed(
   const embed = buildEmbedFromConfig(data as EmbedConfig, guild);
   const sent = await channel.send({ embeds: [embed] });
 
-  console.log(`[ActionQueue] Embed "${data.name ?? embedId}" sent to #${channel.name}`);
+  log.info(`Embed "${data.name ?? embedId}" sent to #${channel.name}`);
   return { success: true, data: { messageId: sent.id, channelId, embedName: data.name } };
 }
 
@@ -608,7 +611,7 @@ async function handleTestWelcome(
   const label = type === 'goodbye' ? '👋 Goodbye' : '🎉 Welcome';
   const sent = await channel.send(`**[TEST ${label} Preview]**\n${messageText}`);
 
-  console.log(`[ActionQueue] Test ${type} message sent to #${channel.name}`);
+  log.info(`Test ${type} message sent to #${channel.name}`);
   return { success: true, data: { messageId: sent.id, channelId, type } };
 }
 
@@ -648,9 +651,9 @@ async function handleRevokeRoles(
     }
   }
 
-  console.log(`[ActionQueue] Revoked ${removed.length} roles from ${discordId} (${reason})`);
+  log.info(`Revoked ${removed.length} roles from ${discordId} (${reason})`);
   if (failed.length > 0) {
-    console.warn(`[ActionQueue] Failed to revoke ${failed.length} roles from ${discordId}:`, failed);
+    log.warn(`Failed to revoke ${failed.length} roles from ${discordId}:`, failed);
   }
 
   return {
@@ -704,7 +707,7 @@ async function handleMarketItemReconcile(
     return { success: false, error: `Inventory return still failing: ${error.message}` };
   }
 
-  console.log(`[ActionQueue] market_item_reconcile: returned ${quantity}x ${payload.item_name ?? itemId} to ${userId}`);
+  log.info(`market_item_reconcile: returned ${quantity}x ${payload.item_name ?? itemId} to ${userId}`);
   return { success: true, data: { userId, itemId, quantity } };
 }
 
@@ -750,16 +753,16 @@ async function processAction(
     { p_action_id: action.id },
   );
   if (claimErr) {
-    console.error(`[ActionQueue] Claim RPC failed for ${action.id}:`, claimErr.message);
+    log.error(`Claim RPC failed for ${action.id}:`, claimErr.message);
     return;
   }
   const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
   if (!claimedRow) {
-    console.log(`[ActionQueue] Skipping ${action.id} — already claimed by another worker`);
+    log.info(`Skipping ${action.id} — already claimed by another worker`);
     return;
   }
 
-  console.log(`[ActionQueue] Processing: ${action.action} (${action.id})`);
+  log.info(`Processing: ${action.action} (${action.id})`);
 
   const handler = ACTION_HANDLERS[action.action];
   let result: ActionResult;
@@ -776,7 +779,7 @@ async function processAction(
       result = await handler(guild, supabase, action.payload);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[ActionQueue] Error processing ${action.action}:`, msg);
+      log.error(`Error processing ${action.action}:`, msg);
       result = { success: false, error: msg };
     }
   }
@@ -812,7 +815,7 @@ async function processAction(
     await writeGuildSnapshot(guild, supabase);
   }
 
-  console.log(
+  log.info(
     `[ActionQueue] ${result.success ? '✅' : '❌'} ${action.action}: ` +
       (result.success ? JSON.stringify(result.data) : result.error),
   );
@@ -848,7 +851,7 @@ async function recoverStaleActions(
     },
   );
   if (error) {
-    console.error('[ActionQueue] Stale recovery failed:', error.message);
+    log.error('Stale recovery failed:', error.message);
     return;
   }
   const rows: Array<{ id: string; action: string; was_failed: boolean }> = recovered ?? [];
@@ -858,7 +861,7 @@ async function recoverStaleActions(
   const failedCount = failedRows.length;
   const requeuedCount = rows.length - failedCount;
   if (failedCount > 0) {
-    console.warn(`[ActionQueue] DLQ: ${failedCount} action(s) failed after exhausting retries`);
+    log.warn(`DLQ: ${failedCount} action(s) failed after exhausting retries`);
     // V53 Phase 2: Write failed actions to DLQ table for dashboard visibility
     for (const row of failedRows) {
       try {
@@ -880,12 +883,12 @@ async function recoverStaleActions(
           });
         }
       } catch (dlqErr) {
-        console.error(`[ActionQueue] Failed to write DLQ entry for ${row.id}:`, dlqErr);
+        log.error(`Failed to write DLQ entry for ${row.id}:`, dlqErr);
       }
     }
   }
   if (requeuedCount > 0) {
-    console.log(`[ActionQueue] Re-queued ${requeuedCount} stale action(s) for processing`);
+    log.info(`Re-queued ${requeuedCount} stale action(s) for processing`);
     // The recovery RPC flipped them back to 'pending', but Realtime only
     // fires on INSERT — re-fetch and feed them through processAction so
     // they get picked up immediately on this worker instead of waiting
@@ -907,7 +910,7 @@ export async function startActionQueueListener(
   guild: Guild,
   supabase: SupabaseClient,
 ): Promise<void> {
-  console.log('[ActionQueue] Starting action queue listener');
+  log.info('Starting action queue listener');
 
   // V48-C3: before processing pending rows, recover anything stuck in
   // 'processing' from a previous bot crash. This is the DLQ-equivalent —
@@ -924,7 +927,7 @@ export async function startActionQueueListener(
     .order('created_at', { ascending: true });
 
   if (pending && pending.length > 0) {
-    console.log(`[ActionQueue] Processing ${pending.length} pending action(s)`);
+    log.info(`Processing ${pending.length} pending action(s)`);
     for (const action of pending) {
       await processAction(guild, supabase, action as ActionRow);
     }
@@ -934,7 +937,7 @@ export async function startActionQueueListener(
   // long-running deployments don't accumulate stuck rows).
   setInterval(() => {
     recoverStaleActions(guild, supabase).catch((err) => {
-      console.error('[ActionQueue] Stale recovery sweep error:', err);
+      log.error('Stale recovery sweep error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS).unref?.();
 
@@ -957,8 +960,8 @@ export async function startActionQueueListener(
       },
     )
     .subscribe((status) => {
-      console.log(`[ActionQueue] Realtime subscription: ${status}`);
+      log.info(`Realtime subscription: ${status}`);
     });
 
-  console.log('[ActionQueue] Action queue listener active');
+  log.info('Action queue listener active');
 }

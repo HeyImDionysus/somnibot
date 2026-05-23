@@ -10,7 +10,7 @@
 import type { GuildMember } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { EscalationStep, InfractionType } from '@somnibot/shared';
-import { DEFAULT_ESCALATION_CHAIN } from '@somnibot/shared';
+import { DEFAULT_ESCALATION_CHAIN , createLogger } from '@somnibot/shared';
 import {
   createInfraction,
   getActiveWarningCount,
@@ -19,6 +19,8 @@ import {
 } from './infraction-service.js';
 import { postModLogEntry } from './mod-log.js';
 import { writeAuditLog } from '../../services/audit.js';
+
+const log = createLogger('Escalation');
 
 /**
  * Determine the escalation action for a given active warning count.
@@ -123,7 +125,7 @@ export async function executeEscalation(
           channelId: config.modLogChannelId,
         });
 
-        console.log(`[Moderation] Escalation: muted ${member.user.tag} for ${step.durationMinutes}m`);
+        log.info(`Escalation: muted ${member.user.tag} for ${step.durationMinutes}m`);
         return { action: 'mute', durationMinutes: step.durationMinutes };
       }
 
@@ -159,7 +161,7 @@ export async function executeEscalation(
           channelId: config.modLogChannelId,
         });
 
-        console.log(`[Moderation] Escalation: kicked ${member.user.tag}`);
+        log.info(`Escalation: kicked ${member.user.tag}`);
         return { action: 'kick' };
       }
 
@@ -198,12 +200,12 @@ export async function executeEscalation(
           channelId: config.modLogChannelId,
         });
 
-        console.log(`[Moderation] Escalation: banned ${member.user.tag}`);
+        log.info(`Escalation: banned ${member.user.tag}`);
         return { action: 'ban' };
       }
     }
   } catch (err) {
-    console.error(`[Moderation] Escalation failed for ${member.user.tag}:`, err);
+    log.error(`Escalation failed for ${member.user.tag}:`, err);
 
     await writeAuditLog(client.supabase, {
       guildId: member.guild.id,
@@ -299,13 +301,13 @@ async function suspendEntitlements(
     if (error) {
       // Table might not exist yet (pre-commerce phase)
       if (error.code !== '42P01') {
-        console.error('[Moderation] Failed to suspend entitlements:', error.message);
+        log.error('Failed to suspend entitlements:', error.message);
       }
       return;
     }
 
     if (data && data.length > 0) {
-      console.log(`[Moderation] Suspended ${data.length} entitlement(s) for banned member ${memberId}`);
+      log.info(`Suspended ${data.length} entitlement(s) for banned member ${memberId}`);
     }
   } catch {
     // Commerce tables may not exist yet

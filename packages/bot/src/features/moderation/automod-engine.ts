@@ -23,6 +23,9 @@ import type {
   EscalationStep,
 } from '@somnibot/shared';
 import { executeAutoModAction } from './automod-actions.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AutoModEngine');
 
 const RULES_CACHE_KEY = 'automod:rules';
 const RULES_CACHE_TTL = 60; // seconds
@@ -52,7 +55,7 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
     .eq('enabled', true);
 
   if (error) {
-    console.error('[AutoMod] Failed to load rules:', error.message);
+    log.error('Failed to load rules:', error.message);
     return [];
   }
 
@@ -222,7 +225,7 @@ function checkWordFilter(
           // Reject patterns with known catastrophic-backtracking shapes:
           // nested quantifiers like (a+)+, (.*)*, (\w+\s?)*, etc.
           if (/(\(.*[+*].*\))[+*]/.test(word) || /(\.\*){2,}/.test(word)) {
-            console.warn(`[AutoMod] Rejected unsafe regex pattern: "${word}"`);
+            log.warn(`Rejected unsafe regex pattern: "${word}"`);
             break;
           }
 
@@ -233,7 +236,7 @@ function checkWordFilter(
           const start = Date.now();
           const matched = regex.test(content);
           if (Date.now() - start > 50) {
-            console.warn(`[AutoMod] Regex pattern "${word}" took >50ms — skipping for safety`);
+            log.warn(`Regex pattern "${word}" took >50ms — skipping for safety`);
             break;
           }
 

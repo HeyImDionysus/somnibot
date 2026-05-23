@@ -3,6 +3,9 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbAutomation } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AutomationLoader');
 
 export interface LoadedAutomation {
   id: string;
@@ -57,7 +60,7 @@ export class AutomationLoader {
       .eq('guild_id', this.guildId);
 
     if (error) {
-      console.error('[AutomationLoader] Failed to load automations:', error.message);
+      log.error('Failed to load automations:', error.message);
       return;
     }
 
@@ -66,7 +69,7 @@ export class AutomationLoader {
       this.automations.set(row.id, toLoaded(row));
     }
 
-    console.log(`[AutomationLoader] Loaded ${this.automations.size} automations`);
+    log.info(`Loaded ${this.automations.size} automations`);
   }
 
   /**
@@ -89,13 +92,13 @@ export class AutomationLoader {
             const oldRow = payload.old as { id?: string };
             if (oldRow.id) {
               this.automations.delete(oldRow.id);
-              console.log(`[AutomationLoader] Automation deleted: ${oldRow.id}`);
+              log.info(`Automation deleted: ${oldRow.id}`);
             }
           } else {
             // INSERT or UPDATE
             const newRow = payload.new as DbAutomation;
             this.automations.set(newRow.id, toLoaded(newRow));
-            console.log(`[AutomationLoader] Automation ${eventType === 'INSERT' ? 'created' : 'updated'}: ${newRow.name}`);
+            log.info(`Automation ${eventType === 'INSERT' ? 'created' : 'updated'}: ${newRow.name}`);
           }
           this.onChange?.();
         },

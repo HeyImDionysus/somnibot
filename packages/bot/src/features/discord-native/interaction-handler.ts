@@ -18,6 +18,9 @@ import {
   type Interaction,
   EmbedBuilder,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('InteractionHandler');
 
 export type AnyRepliableInteraction =
   | CommandInteraction
@@ -63,7 +66,7 @@ export function safeInteractionHandler(
 
       await handler(interaction);
     } catch (err) {
-      console.error(`[InteractionHandler:${options.name}] Error:`, err);
+      log.error(`[InteractionHandler:${options.name}] Error:`, err);
 
       const errorEmbed = new EmbedBuilder()
         .setTitle('❌ Something went wrong')
@@ -86,7 +89,7 @@ export function safeInteractionHandler(
         }
       } catch {
         // Can't reply at all — interaction expired
-        console.error(`[InteractionHandler:${options.name}] Failed to send error reply`);
+        log.error(`[InteractionHandler:${options.name}] Failed to send error reply`);
       }
     } finally {
       if (deferTimer) clearTimeout(deferTimer);
@@ -131,7 +134,7 @@ export async function withEphemeralProgress<T>(
   } catch (err) {
     const errorMsg = options.errorMessage ?? '❌ Something went wrong. Please try again.';
     await interaction.editReply({ content: errorMsg }).catch(() => { /* interaction may have expired */ });
-    console.error('[EphemeralProgress] Operation failed:', err);
+    log.error('Operation failed:', { error: String(err) });
     return null;
   }
 }
@@ -157,7 +160,7 @@ export function withCooldown(
       await interaction.reply({
         content: `⏳ Please wait ${seconds}s before using this again.`,
         ephemeral: true,
-      }).catch((e: unknown) => { console.warn('[Silent] Suppressed error:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Suppressed error:', (e as Error)?.message ?? e); });
       return;
     }
 

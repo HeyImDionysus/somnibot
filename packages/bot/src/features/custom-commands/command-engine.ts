@@ -13,6 +13,9 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { DbCustomCommand } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('CommandEngine');
 
 const COOLDOWN_PREFIX = 'cmd:cooldown';
 
@@ -52,7 +55,7 @@ export async function loadCustomCommands(
   commandRegistry.clear();
 
   if (!data || data.length === 0) {
-    console.log('[CustomCommands] No custom commands found');
+    log.info('No custom commands found');
     return;
   }
 
@@ -119,13 +122,13 @@ export async function loadCustomCommands(
           .update({ discord_command_id: result.id })
           .eq('id', cmd.id);
       } catch (err) {
-        console.error(`[CustomCommands] Failed to register "${cmd.name}":`, err);
+        log.error(`Failed to register "${cmd.name}":`, err);
       }
     }
 
-    console.log(`[CustomCommands] Registered ${data.length} custom commands`);
+    log.info(`Registered ${data.length} custom commands`);
   } catch (err) {
-    console.error('[CustomCommands] Failed to register commands:', err);
+    log.error('Failed to register commands:', { error: String(err) });
   }
 }
 
@@ -301,7 +304,7 @@ export async function handleCustomCommand(
         }
       }
     } catch (err) {
-      console.error(`[CustomCommands] Action ${action.type} failed:`, err);
+      log.error(`Action ${action.type} failed:`, err);
     }
   }
 
