@@ -30,12 +30,15 @@ export async function GET(req: NextRequest) {
       admin.rpc('economy_feature_participation', { p_guild_id: guildId, p_days: Math.min(days, 7) }),
     ]);
 
-  // Current circulation snapshot (V5 audit 4.2 — use RPC instead of fetching all rows)
-  const { data: walletStats } = await admin.rpc('economy_wallet_stats', { p_guild_id: guildId });
+  // Current circulation snapshot
+  const { data: circulationSnap } = await admin
+    .from('economy_wallets')
+    .select('wallet, bank')
+    .eq('guild_id', guildId)
+    .eq('suspended', false);
 
-  const stats = walletStats?.[0] ?? { total_wallet: 0, total_bank: 0, active_wallets: 0 };
-  const totalWallet = stats.total_wallet ?? 0;
-  const totalBank = stats.total_bank ?? 0;
+  const totalWallet = (circulationSnap ?? []).reduce((s, r) => s + (r.wallet ?? 0), 0);
+  const totalBank = (circulationSnap ?? []).reduce((s, r) => s + (r.bank ?? 0), 0);
 
   return NextResponse.json({
     success: true,
@@ -44,7 +47,7 @@ export async function GET(req: NextRequest) {
       total_wallet: totalWallet,
       total_bank: totalBank,
       total: totalWallet + totalBank,
-      active_wallets: stats.active_wallets ?? 0,
+      active_wallets: circulationSnap?.length ?? 0,
     },
     daily_totals: dailyTotals.data ?? [],
     tx_volume: txVolume.data ?? [],

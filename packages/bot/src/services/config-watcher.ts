@@ -258,15 +258,11 @@ export class ConfigWatcher {
 
   private async reloadReactionRoles(): Promise<void> {
     await this.valkey.del(`reaction-roles:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
-    // Delete all individual reaction role cache keys for this guild (SCAN instead of KEYS — V5 audit 6.1)
-    try {
-      let cursor = '0';
-      do {
-        const [next, batch] = await this.valkey.scan(cursor, 'MATCH', `rr:${this.guild.id}:*`, 'COUNT', '100');
-        cursor = next;
-        if (batch.length > 0) await this.valkey.del(...batch);
-      } while (cursor !== '0');
-    } catch (e: unknown) { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); }
+    // Delete all individual reaction role cache keys for this guild
+    const keys = await this.valkey.keys(`rr:${this.guild.id}:*`).catch(() => [] as string[]);
+    if (keys.length > 0) {
+      await this.valkey.del(...keys).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    }
     log.info('Reaction roles reloaded');
   }
 
