@@ -201,7 +201,7 @@ export default function OnboardingPage() {
               Discord Onboarding
             </h2>
             <p className="mt-1 text-sm text-discord-text-muted">
-              Uses Discord's native onboarding (rules acceptance, customization questions).
+              Uses Discord&apos;s native onboarding (rules acceptance, customization questions).
               When a member completes it, the bot detects the completion flag and grants the Member role.
             </p>
           </div>

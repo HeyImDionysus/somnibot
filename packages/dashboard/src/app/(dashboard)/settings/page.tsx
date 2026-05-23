@@ -313,10 +313,6 @@ export default function SettingsPage() {
     }
   };
 
-  if (loading) {
-    return <ConfigSkeleton />;
-  }
-
   // ── Bot Presence (custom_bot_statuses) ────
   const [customStatuses, setCustomStatuses] = useState<string[]>([]);
   const [statusesLoading, setStatusesLoading] = useState(true);
@@ -338,6 +334,10 @@ export default function SettingsPage() {
       }
     })();
   }, []);
+
+  if (loading) {
+    return <ConfigSkeleton />;
+  }
 
   const addStatus = () => {
     if (customStatuses.length >= 20) return;
