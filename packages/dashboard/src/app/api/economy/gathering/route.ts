@@ -27,7 +27,17 @@ const lootEntrySchema = z.object({
   sell_value: z.number().int().min(0).max(1000000).optional(),
   gives_item_id: z.string().uuid().nullable().optional(),
   active: z.boolean().optional(),
-});
+}).refine(
+  // FIX #11: Cross-validate min_qty ≤ max_qty to prevent random(10, 5)
+  // which may return 0 or error depending on the implementation.
+  (data) => {
+    if (data.min_qty !== undefined && data.max_qty !== undefined) {
+      return data.min_qty <= data.max_qty;
+    }
+    return true;
+  },
+  { message: 'min_qty must be less than or equal to max_qty', path: ['min_qty'] },
+);
 
 export async function GET() {
   try {

@@ -111,10 +111,13 @@ export async function PUT(req: NextRequest) {
 
   updates.updated_at = new Date().toISOString();
 
+  // FIX #10: Use upsert instead of update — new guilds may not have a
+  // guild_config row yet, causing .update().single() to fail with a
+  // Supabase error. Upsert ensures the row is created if missing.
+  updates.guild_id = guildId;
   const { data, error } = await supabase
     .from('guild_config')
-    .update(updates)
-    .eq('guild_id', guildId)
+    .upsert(updates, { onConflict: 'guild_id' })
     .select()
     .single();
 

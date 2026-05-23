@@ -81,7 +81,13 @@ export async function POST(req: NextRequest) {
       trigger = parsed.data?.trigger ?? 'manual';
     }
   } catch {
-    // Empty body is fine — default to manual trigger
+    // FIX #3: Malformed JSON should return 400, not silently fall through.
+    // Empty body is fine (handled above via text.trim() check), but if
+    // text was non-empty and JSON.parse threw, the body is malformed.
+    return NextResponse.json(
+      { success: false, error: 'Malformed request body — invalid JSON' },
+      { status: 400 },
+    );
   }
 
   // Enqueue a reconciliation action for the bot to pick up
