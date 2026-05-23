@@ -97,6 +97,10 @@ export class PetsManager {
 
       if (!pets || pets.length === 0) return;
 
+      // V5 audit 4.3 — compute new values, batch UPDATE, then notify
+      const now = new Date().toISOString();
+      const petUpdates: Array<{ id: string; hunger: number; happiness: number; energy: number; status: string; oldStatus: string; userId: string; name: string }> = [];
+
       for (const pet of pets) {
         const newHunger = Math.max(0, pet.hunger - decayRate);
         const newHappiness = Math.max(0, pet.happiness - Math.floor(decayRate * 0.8));
@@ -112,30 +116,39 @@ export class PetsManager {
           newStatus = 'happy';
         }
 
-        await this.supabase.from('economy_pets').update({
-          hunger: newHunger,
-          happiness: newHappiness,
-          energy: newEnergy,
-          status: newStatus,
-          updated_at: new Date().toISOString(),
-        }).eq('id', pet.id);
+        petUpdates.push({ id: pet.id, hunger: newHunger, happiness: newHappiness, energy: newEnergy, status: newStatus, oldStatus: pet.status, userId: pet.user_id, name: pet.name });
+      }
 
-        // Notify owner if pet is getting low and wasn't already sad/sick
-        if (shouldNotify && this.client && pet.status === 'happy' && (newStatus === 'sad' || newStatus === 'sick')) {
+      // Batch updates via Promise.allSettled to avoid serial N+1
+      await Promise.allSettled(
+        petUpdates.map((u) =>
+          this.supabase.from('economy_pets').update({
+            hunger: u.hunger,
+            happiness: u.happiness,
+            energy: u.energy,
+            status: u.status,
+            updated_at: now,
+          }).eq('id', u.id),
+        ),
+      );
+
+      // Notify owners whose pets transitioned from happy to sad/sick
+      for (const u of petUpdates) {
+        if (shouldNotify && this.client && u.oldStatus === 'happy' && (u.status === 'sad' || u.status === 'sick')) {
           try {
-            const user = await this.client.users.fetch(pet.user_id).catch(() => null);
+            const user = await this.client.users.fetch(u.userId).catch(() => null);
             if (user) {
-              const emoji = newStatus === 'sick' ? '🤒' : '😢';
+              const emoji = u.status === 'sick' ? '🤒' : '😢';
               await user.send({
                 embeds: [new EmbedBuilder()
-                  .setTitle(`${emoji} ${pet.name} needs attention!`)
+                  .setTitle(`${emoji} ${u.name} needs attention!`)
                   .setDescription(
-                    `Your pet is feeling **${newStatus}**!\n\n` +
-                    `🍖 Hunger: **${newHunger}/100**\n` +
-                    `😄 Happiness: **${newHappiness}/100**\n\n` +
+                    `Your pet is feeling **${u.status}**!\n\n` +
+                    `🍖 Hunger: **${u.hunger}/100**\n` +
+                    `😄 Happiness: **${u.happiness}/100**\n\n` +
                     `Use \`/pet feed\` and \`/pet play\` to cheer them up!`
                   )
-                  .setColor(newStatus === 'sick' ? 0xED4245 : 0xFEE75C)],
+                  .setColor(u.status === 'sick' ? 0xED4245 : 0xFEE75C)],
               }).catch(() => { /* DM may be disabled */ }); // Ignore DM failures (user may have DMs disabled)
             }
           } catch {

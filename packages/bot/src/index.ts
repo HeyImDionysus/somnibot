@@ -7,6 +7,7 @@ import { startDeployListener } from './deploy/deploy-listener.js';
 import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
+import { startHealthServer, stopHealthServer } from './services/health-server.js';
 import { EmbedBuilder } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -76,6 +77,9 @@ async function main(): Promise<void> {
   // 5. Login
   log.info('Connecting to Discord gateway...');
   await client.login(config.DISCORD_TOKEN);
+
+  // 5.5. Start health check HTTP server (V5 audit remediation — Finding 9.1)
+  startHealthServer(client);
 
   // 6. Post-ready initialization
   client.once('ready', async () => {
@@ -239,6 +243,9 @@ async function main(): Promise<void> {
 
     // Disconnect Discord gateway
     client.destroy();
+
+    // Stop health check server
+    stopHealthServer();
 
     // Close Valkey connection
     await client.valkey.quit().catch(() => { /* intentionally silent */ });
