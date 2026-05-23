@@ -82,8 +82,17 @@ export async function handleButtonRoleInteraction(
     .eq('role_id', roleId)
     .maybeSingle();
 
+  // FIX #12: Guard against null btnRole — if no row exists (deleted panel,
+  // missing config), the handler must bail out instead of proceeding to
+  // toggle the role, which would let users give themselves any role ID
+  // embedded in old button messages.
+  if (!btnRole) {
+    await interaction.reply({ content: '❌ This role button is no longer configured.', ephemeral: true });
+    return true;
+  }
+
   // Respect the active flag — disabled button roles should not toggle
-  if (btnRole && btnRole.active === false) {
+  if (btnRole.active === false) {
     await interaction.reply({ content: '❌ This role button is currently disabled.', ephemeral: true });
     return true;
   }

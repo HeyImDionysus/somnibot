@@ -5,7 +5,6 @@
  */
 import {
   REST,
-  Routes,
   ChatInputCommandInteraction,
   EmbedBuilder,
   type Guild,
@@ -39,13 +38,20 @@ interface CustomCommandAction {
 const commandRegistry = new Map<string, DbCustomCommand>();
 
 /**
- * Load all custom commands from Supabase and register with Discord.
+ * Load all custom commands from Supabase into the in-memory registry
+ * and return their JSON bodies for inclusion in the bulk PUT.
+ *
+ * FIX #15: Previously registered custom commands via individual POST,
+ * but registerGuildCommands() then did a bulk PUT with only built-in
+ * commands — overwriting custom commands on every restart. Now we
+ * return the command JSON so it's merged into allCommands before the
+ * single bulk PUT.
  */
 export async function loadCustomCommands(
   supabase: SupabaseClient,
   guild: Guild,
-  rest: REST,
-): Promise<void> {
+  _rest: REST,
+): Promise<{ name: string; description: string; type: number }[]> {
   const { data } = await supabase
     .from('custom_commands')
     .select('*')
@@ -56,80 +62,23 @@ export async function loadCustomCommands(
 
   if (!data || data.length === 0) {
     log.info('No custom commands found');
-    return;
+    return [];
   }
 
-  // Register each command with Discord
-  const commands = (data as DbCustomCommand[]).map((cmd) => ({
-    name: cmd.name,
-    description: cmd.description || 'Custom command',
-  }));
-
-  // Note: we only register the custom commands, not overwrite ALL guild commands.
-  // We need to merge with existing commands.
-  // For safety, store in registry and handle via interaction handler.
+  // Populate in-memory registry for the interaction handler
   for (const cmd of data as DbCustomCommand[]) {
     commandRegistry.set(cmd.name, cmd);
   }
 
-  // Bulk register custom commands (append to existing)
-  try {
-    // Get existing commands
-    const existingCommands = await rest.get(
-      Routes.applicationGuildCommands(guild.client.user!.id, guild.id),
-    ) as Array<{ id: string; name: string }>;
+  // Return command JSON bodies for the bulk PUT (merged into allCommands)
+  const commandBodies = (data as DbCustomCommand[]).map((cmd) => ({
+    name: cmd.name,
+    description: cmd.description || 'Custom command',
+    type: 1 as const, // CHAT_INPUT
+  }));
 
-    // Filter out old custom commands (ones that are in our registry but not in new data)
-    const builtInNames = new Set(['ticket', 'rank', 'leaderboard']);
-    const customExisting = existingCommands.filter(
-      (c) => !builtInNames.has(c.name) && !commandRegistry.has(c.name),
-    );
-
-    // Delete stale custom commands
-    for (const stale of customExisting) {
-      // Only delete if we know it was a custom command (has a discord_command_id)
-      const wasCustom = (data as DbCustomCommand[]).some(
-        (d) => d.discord_command_id === stale.id,
-      );
-      if (!wasCustom) continue;
-
-      try {
-        await rest.delete(
-          Routes.applicationGuildCommand(guild.client.user!.id, guild.id, stale.id),
-        );
-      } catch {
-        // Ignore deletion failures
-      }
-    }
-
-    // Register new custom commands
-    for (const cmd of data as DbCustomCommand[]) {
-      try {
-        const result = await rest.post(
-          Routes.applicationGuildCommands(guild.client.user!.id, guild.id),
-          {
-            body: {
-              name: cmd.name,
-              description: cmd.description || 'Custom command',
-              type: 1, // CHAT_INPUT
-            },
-          },
-        ) as { id: string };
-
-        // Update discord_command_id in database
-        await supabase
-          .from('custom_commands')
-          .update({ discord_command_id: result.id })
-          .eq('id', cmd.id);
-      } catch (err) {
-        log.error(`Failed to register "${cmd.name}":`, err);
-      }
-    }
-
-    log.info(`Registered ${data.length} custom commands`);
-  } catch (err) {
-    log.error('Failed to register commands:', { error: String(err) });
-  }
+  log.info(`Loaded ${data.length} custom commands into registry`);
+  return commandBodies;
 }
 
 /**

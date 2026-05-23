@@ -1062,15 +1062,15 @@ export class EconomyManager {
       log.error('buyItem inventory upsert failed', { detail: invErr.message });
       // Refund payment
       await this.creditWallet(userId, totalCost);
-      // Restore stock if limited
+      // FIX #5: Restore stock using the correct economy_increment_stock RPC.
+      // Previously used economy_upsert_inventory with p_user_id='shop' which
+      // writes to inventory instead of restoring economy_items.stock. Stock
+      // was permanently lost on any failed purchase.
       if (item.stock != null) {
-        await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
-          p_guild_id: this.guild.id,
-          p_user_id: 'shop',
+        await Promise.resolve(this.supabase.rpc('economy_increment_stock', {
           p_item_id: itemId,
           p_quantity: quantity,
         })).catch((err: unknown) => {
-          // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
           log.error('CRITICAL: buyItem stock restore failed', { itemId, quantity, detail: err });
         });
       }
