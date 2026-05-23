@@ -6,7 +6,7 @@
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 
 const ALLOWED_TABLES = new Set([
   'tickets',
