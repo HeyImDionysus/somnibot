@@ -18,7 +18,7 @@ export class QuestsManager {
   private configCache = new Map<string, DbGuildConfig>();
 
   constructor(supabase: SupabaseClient) {
-    this.supabase = supabase as any;
+    this.supabase = supabase;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -26,7 +26,7 @@ export class QuestsManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
@@ -43,7 +43,7 @@ export class QuestsManager {
 
     // Get active quests — daily from today, weekly from this week's Monday
     const weekStart = getWeekStart().toISOString();
-    const { data: progress } = await (this.supabase as any)
+    const { data: progress } = await this.supabase
       .from('economy_quest_progress')
       .select('*, template:economy_quest_templates(*)')
       .eq('guild_id', guildId)
@@ -83,7 +83,7 @@ export class QuestsManager {
     // V49-C1: Atomic claim — RPC flips claimed=true only for rows still
     // unclaimed, returning only the rows it actually flipped.  Two concurrent
     // calls cannot both claim the same quest.
-    const { data: claimed } = await (this.supabase as any).rpc('economy_quest_atomic_claim', {
+    const { data: claimed } = await this.supabase.rpc('economy_quest_atomic_claim', {
       p_guild_id: guildId,
       p_user_id: userId,
     });
@@ -101,14 +101,14 @@ export class QuestsManager {
     }
 
     if (totalCurrency > 0) {
-      const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCurrency,
       });
       if (payoutErr) {
         log.error('claimQuests payout failed — reverting claimed status:', payoutErr.message);
         // Revert: un-claim the quests so the user can retry
         for (const row of claimed) {
-          await (this.supabase as any).from('economy_quest_progress')
+          await this.supabase.from('economy_quest_progress')
             .update({ claimed: false }).eq('id', row.id).catch((e: unknown) => { log.warn('Reset claimed status failed:', (e as Error)?.message ?? e); });
         }
         await interaction.reply({
@@ -132,7 +132,7 @@ export class QuestsManager {
   async trackProgress(guildId: string, userId: string, actionType: string, amount: number = 1): Promise<void> {
     // V49-C2: Fetch matching quest IDs, then use atomic RPC to increment.
     // The old read-modify-write pattern lost increments under concurrency.
-    const { data: active } = await (this.supabase as any)
+    const { data: active } = await this.supabase
       .from('economy_quest_progress')
       .select('id, template:economy_quest_templates(action_type)')
       .eq('guild_id', guildId)
@@ -141,7 +141,7 @@ export class QuestsManager {
 
     for (const p of active ?? []) {
       if ((p.template as any)?.action_type === actionType) {
-        await (this.supabase as any).rpc('economy_quest_increment_progress', {
+        await this.supabase.rpc('economy_quest_increment_progress', {
           p_id: p.id,
           p_amount: amount,
         }).catch((err: Error) => log.error('increment_progress failed:', err.message));
@@ -154,7 +154,7 @@ export class QuestsManager {
     await this.seedDefaultTemplates(guildId);
 
     const count = config.economy_daily_quest_count ?? 3;
-    const { data: templates } = await (this.supabase as any)
+    const { data: templates } = await this.supabase
       .from('economy_quest_templates')
       .select('*')
       .eq('guild_id', guildId)
@@ -175,7 +175,7 @@ export class QuestsManager {
       assigned_date: today,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress')
+    await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
@@ -188,7 +188,7 @@ export class QuestsManager {
 
     // Check if user already has weekly quests this week
     const monday = getWeekStart();
-    const { data: existing } = await (this.supabase as any)
+    const { data: existing } = await this.supabase
       .from('economy_quest_progress')
       .select('id, template:economy_quest_templates(quest_type)')
       .eq('guild_id', guildId)
@@ -201,7 +201,7 @@ export class QuestsManager {
     // Seed defaults if needed
     await this.seedDefaultTemplates(guildId);
 
-    const { data: templates } = await (this.supabase as any)
+    const { data: templates } = await this.supabase
       .from('economy_quest_templates')
       .select('*')
       .eq('guild_id', guildId)
@@ -227,7 +227,7 @@ export class QuestsManager {
       assigned_date: mondayStr,
     }));
 
-    await (this.supabase as any).from('economy_quest_progress')
+    await this.supabase.from('economy_quest_progress')
       .upsert(rows, { onConflict: 'guild_id,user_id,template_id,assigned_date', ignoreDuplicates: true });
   }
 
@@ -243,7 +243,7 @@ export class QuestsManager {
 
         // Clean up old unclaimed weekly progress (older than 1 week)
         const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        await (this.supabase as any)
+        await this.supabase
           .from('economy_quest_progress')
           .delete()
           .eq('guild_id', guildId)
@@ -266,7 +266,7 @@ export class QuestsManager {
   /** Seed default quest templates via DB function. */
   private async seedDefaultTemplates(guildId: string): Promise<void> {
     try {
-      await (this.supabase as any).rpc('seed_default_quest_templates', { p_guild_id: guildId });
+      await this.supabase.rpc('seed_default_quest_templates', { p_guild_id: guildId });
     } catch {
       // Ignore — function may not exist yet or templates already seeded
     }

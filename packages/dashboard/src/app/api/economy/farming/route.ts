@@ -35,6 +35,7 @@ export async function GET() {
       .select('*')
       .eq('guild_id', ctx.guildId)
       .order('sort_order')
+      .limit(500)
       .order('name');
 
     if (error) {

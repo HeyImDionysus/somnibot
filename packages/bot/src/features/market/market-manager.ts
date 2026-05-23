@@ -10,6 +10,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Market');
 
@@ -49,11 +50,11 @@ export function invalidateMarketCache(): void {
 
 export class MarketManager {
   private guild: Guild;
-  private supabase: any;
+  private supabase: SupabaseClient;
   private valkey: any;
   private configCache: MarketConfig | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;

@@ -27,6 +27,7 @@ export async function GET() {
     .select('*')
     .eq('guild_id', auth.guildId)
     .order('created_at', { ascending: true });
+    .limit(500)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ data });
 }

@@ -39,6 +39,7 @@ export async function GET(req: NextRequest) {
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('timestamp', { ascending: false });
+    .limit(500)
 
   if (category) {
     query = query.eq('category', category);

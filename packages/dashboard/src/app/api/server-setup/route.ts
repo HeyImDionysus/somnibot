@@ -48,6 +48,7 @@ export async function GET() {
     .select('*')
     .eq('guild_id', guildId)
     .order('created_at', { ascending: true });
+    .limit(500)
 
   // Get channel templates
   const { data: channelTemplates } = await admin
@@ -55,6 +56,7 @@ export async function GET() {
     .select('*')
     .eq('guild_id', guildId)
     .order('created_at', { ascending: true });
+    .limit(500)
 
   const isDeployed = desiredState?.applied_at !== null && desiredState?.applied_at !== undefined;
   const hasDesiredState = desiredState?.roles && desiredState.roles.length > 0;

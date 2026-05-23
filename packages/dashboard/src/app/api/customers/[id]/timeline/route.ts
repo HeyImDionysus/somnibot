@@ -45,6 +45,7 @@ export async function GET(
       .select('*, products(name)')
       .eq('customer_id', id)
       .order('created_at', { ascending: false });
+      .limit(500)
 
     for (const o of orders || []) {
       timeline.push({
@@ -64,6 +65,7 @@ export async function GET(
       .select('*, products(name)')
       .eq('customer_id', id)
       .order('created_at', { ascending: false });
+      .limit(500)
 
     for (const e of entitlements || []) {
       timeline.push({
@@ -113,6 +115,7 @@ export async function GET(
       .eq('guild_id', ctx.guildId)
       .eq('creator_id', customer.discord_id)
       .order('created_at', { ascending: false });
+      .limit(500)
 
     for (const t of tickets || []) {
       timeline.push({
@@ -133,6 +136,7 @@ export async function GET(
       .eq('guild_id', ctx.guildId)
       .eq('member_id', customer.discord_id)
       .order('created_at', { ascending: false });
+      .limit(500)
 
     for (const inf of infractions || []) {
       timeline.push({

@@ -22,6 +22,7 @@ import type {
   AdventureSceneLoot,
 } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Adventures');
 
@@ -395,12 +396,12 @@ export function getAdventureManager(): AdventureManager | null {
 
 export class AdventureManager {
   private guild: Guild;
-  private supabase: any;
+  private supabase: SupabaseClient;
   private valkey: any;
   private configCache: AdventureConfig | null = null;
   private adventureCache: Adventure[] | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;

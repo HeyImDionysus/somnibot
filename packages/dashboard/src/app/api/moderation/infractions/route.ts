@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
+    .limit(500)
     .range(offset, offset + limit - 1);
 
   if (memberId) {

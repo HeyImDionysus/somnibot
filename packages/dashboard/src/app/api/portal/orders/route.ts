@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
       .select('*, products(name, type), payments(id, amount_cents, currency, status, provider, created_at)')
       .eq('customer_id', session.customer_id)
       .order('created_at', { ascending: false });
+      .limit(500)
 
     return NextResponse.json({ success: true, data: orders || [] });
   } catch (e) {
