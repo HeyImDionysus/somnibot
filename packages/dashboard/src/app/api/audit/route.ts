@@ -38,7 +38,8 @@ export async function GET(req: NextRequest) {
     .from('audit_logs')
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
-    .order('timestamp', { ascending: false });
+    .order('timestamp', { ascending: false })
+    .limit(500);
 
   if (category) {
     query = query.eq('category', category);

@@ -11,6 +11,7 @@ import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Gathering');
 
@@ -121,7 +122,7 @@ export class GatheringManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 

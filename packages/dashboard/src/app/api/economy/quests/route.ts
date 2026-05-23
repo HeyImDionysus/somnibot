@@ -27,7 +27,8 @@ export async function GET() {
     .from('economy_quest_templates')
     .select('*')
     .eq('guild_id', auth.guildId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .limit(500);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ data });
 }

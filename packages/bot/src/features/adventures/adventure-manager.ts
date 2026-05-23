@@ -22,6 +22,7 @@ import type {
   AdventureSceneLoot,
 } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Adventures');
 
@@ -395,12 +396,12 @@ export function getAdventureManager(): AdventureManager | null {
 
 export class AdventureManager {
   private guild: Guild;
-  private supabase: any;
+  private supabase: SupabaseClient;
   private valkey: any;
   private configCache: AdventureConfig | null = null;
   private adventureCache: Adventure[] | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
@@ -603,11 +604,11 @@ export class AdventureManager {
     if (sessErr) {
       // V49-L4: Refund ticket cost on session creation failure
       if (config.economy_adventure_ticket_cost > 0) {
-        await this.supabase.rpc('economy_add_balance', {
+        await Promise.resolve(this.supabase.rpc('economy_add_balance', {
           p_guild_id: this.guild.id,
           p_user_id: userId,
           p_amount: config.economy_adventure_ticket_cost,
-        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+        })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       }
 
       // Duplicate key → another concurrent command won the race
@@ -878,9 +879,9 @@ export class AdventureManager {
 
     // Mark session with loot_failed so reconciliation / owner can investigate
     if (lootFailed) {
-      await this.supabase.from('economy_adventure_sessions')
+      await Promise.resolve(this.supabase.from('economy_adventure_sessions')
         .update({ loot_failed: true })
-        .eq('id', session.id)
+        .eq('id', session.id))
         .catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     }
 

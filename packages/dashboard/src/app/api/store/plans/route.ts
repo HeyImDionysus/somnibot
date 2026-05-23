@@ -26,7 +26,8 @@ export async function GET(req: NextRequest) {
     .from('plans')
     .select('*')
     .eq('guild_id', guildId)
-    .order('price_cents', { ascending: true });
+    .order('price_cents', { ascending: true })
+    .limit(500);
 
   if (productId) {
     query = query.eq('product_id', productId);

@@ -32,7 +32,8 @@ export async function GET() {
     .select('*')
     .eq('guild_id', ctx.guildId)
     .order('rarity')
-    .order('name');
+    .order('name')
+    .limit(500);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ data });

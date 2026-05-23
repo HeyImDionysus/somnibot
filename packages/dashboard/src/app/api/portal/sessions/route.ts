@@ -32,7 +32,8 @@ export async function GET(req: NextRequest) {
     .eq('customer_id', customerId)
     .eq('revoked', false)
     .gt('expires_at', new Date().toISOString())
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(500);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
