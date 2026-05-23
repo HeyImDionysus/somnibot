@@ -13,6 +13,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -87,6 +88,9 @@ export async function GET() {
 // ============================================================
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -131,6 +135,9 @@ export async function POST(request: NextRequest) {
 // ============================================================
 
 export async function PATCH(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -175,6 +182,9 @@ export async function PATCH(request: NextRequest) {
 // ============================================================
 
 export async function DELETE(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

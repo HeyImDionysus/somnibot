@@ -9,6 +9,7 @@ services:
       - ./services/lavalink/application.yml:/opt/Lavalink/application.yml
     environment:
       - _JAVA_OPTIONS=-Xmx512m
+      - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:?Set LAVALINK_PASSWORD in .env}
 
   valkey:
     image: valkey/valkey:7.2-alpine
@@ -18,7 +19,7 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - valkey-data:/data
-    command: valkey-server --save 60 1 --loglevel warning
+    command: valkey-server --save 60 1 --loglevel warning --requirepass ${VALKEY_PASSWORD:-}
 
 volumes:
   valkey-data:

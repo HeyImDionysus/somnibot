@@ -8,9 +8,10 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const itemSchema = z.object({
   name: z.string().min(1).max(64),
@@ -56,12 +57,16 @@ export async function GET() {
 
     return NextResponse.json({ success: true, data: data ?? [] });
   } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to load shop items';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const body = await request.json();
@@ -101,6 +106,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const body = await request.json();
@@ -137,6 +145,9 @@ export async function PATCH(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const { searchParams } = new URL(request.url);
@@ -161,6 +172,7 @@ export async function DELETE(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to delete item';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }

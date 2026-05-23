@@ -5,20 +5,47 @@ services:
       dockerfile: packages/bot/Dockerfile
     restart: unless-stopped
     depends_on:
-      - lavalink
-      - valkey
+      lavalink:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
     env_file: .env
+    healthcheck:
+      test: ["CMD", "bun", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   dashboard:
     build:
       context: .
       dockerfile: packages/dashboard/Dockerfile
     restart: unless-stopped
-    ports:
-      - "3000:3000"
     depends_on:
-      - valkey
+      valkey:
+        condition: service_healthy
     env_file: .env
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./services/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
 
   lavalink:
     image: ghcr.io/lavalink-devs/lavalink:4
@@ -27,13 +54,27 @@ services:
       - ./services/lavalink/application.yml:/opt/Lavalink/application.yml
     environment:
       - _JAVA_OPTIONS=-Xmx512m
+      - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:?Set LAVALINK_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:2333/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   valkey:
     image: valkey/valkey:7.2-alpine
     restart: unless-stopped
     volumes:
       - valkey-data:/data
-    command: valkey-server --save 60 1 --loglevel warning
+    command: valkey-server --save 60 1 --loglevel warning --requirepass ${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "valkey-cli", "-a", "${VALKEY_PASSWORD}", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
 volumes:
   valkey-data:
+  caddy-data:
+  caddy-config:

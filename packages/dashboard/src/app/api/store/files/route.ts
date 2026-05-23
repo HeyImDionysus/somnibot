@@ -12,6 +12,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -48,6 +49,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -183,6 +187,9 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

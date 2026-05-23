@@ -108,7 +108,13 @@ contextBridge.exposeInMainWorld('somnibot', {
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),
 
   // Links
-  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+  openExternal: (url: string) => {
+    // V5 Audit §10.2 — Only allow https:// URLs to prevent protocol abuse
+    if (!url.startsWith('https://')) {
+      return Promise.reject(new Error('Only https:// URLs are allowed'));
+    }
+    return ipcRenderer.invoke('open-external', url);
+  },
 
   // Events — process status
   onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => {
