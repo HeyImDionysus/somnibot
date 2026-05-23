@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function GET(
   _req: NextRequest,
@@ -55,6 +56,9 @@ export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ productId: string }> },
 ) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

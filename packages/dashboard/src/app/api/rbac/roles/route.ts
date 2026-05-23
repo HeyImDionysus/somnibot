@@ -6,9 +6,10 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const rbacRoleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -47,6 +48,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_team');
     const parsed = await parseBody(request, rbacRoleCreate);
@@ -76,6 +80,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PATCH(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_team');
     const parsed = await parseBody(request, rbacRoleUpdate);
@@ -120,6 +127,9 @@ export async function PATCH(request: NextRequest) {
 }
 
 export async function DELETE(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_team');
     const { searchParams } = new URL(request.url);

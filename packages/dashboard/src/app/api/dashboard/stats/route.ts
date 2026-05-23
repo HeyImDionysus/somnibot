@@ -11,7 +11,7 @@
  */
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 
 export async function GET() {
   try {

@@ -9,7 +9,7 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 
 export async function GET(request: NextRequest) {
   try {
@@ -50,6 +50,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to load transactions';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }

@@ -1,8 +1,13 @@
 /**
  * RBAC helper — resolves the current user's dashboard permissions.
  * Used by API routes and server components for authorization.
+ *
+ * V5 Audit §1.1 — requirePermission now throws typed AuthError with
+ * proper HTTP status codes (401/403) instead of generic Error that
+ * resulted in 500 responses.
  */
 
+import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
 import type { DashboardPermission } from '@somnibot/shared';
@@ -13,6 +18,30 @@ export interface AuthContext {
   guildId: string;
   isOwner: boolean;
   permissions: DashboardPermission[];
+}
+
+/**
+ * Typed auth error with HTTP status code.
+ * Route handlers can check `instanceof AuthError` to return proper responses.
+ */
+export class AuthError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'AuthError';
+    this.status = status;
+  }
+}
+
+/**
+ * Convert an AuthError (or any error) to a NextResponse.
+ * Use in catch blocks to return proper 401/403 instead of 500.
+ */
+export function authErrorResponse(err: unknown): NextResponse {
+  if (err instanceof AuthError) {
+    return NextResponse.json({ error: err.message }, { status: err.status });
+  }
+  return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
 }
 
 /**
@@ -116,17 +145,20 @@ export async function getAuthContext(): Promise<AuthContext | null> {
 }
 
 /**
- * Require specific permission. Returns auth context or throws.
+ * Require specific permission. Returns auth context or throws AuthError.
+ *
+ * Throws AuthError(401) if unauthenticated, AuthError(403) if lacking permission.
+ * Callers should catch with `authErrorResponse()` for proper HTTP status codes.
  */
 export async function requirePermission(
   permission: DashboardPermission | null,
 ): Promise<AuthContext> {
   const ctx = await getAuthContext();
-  if (!ctx) throw new Error('Unauthorized');
+  if (!ctx) throw new AuthError('Unauthorized', 401);
 
   if (permission === null) return ctx;
   if (ctx.permissions.includes('dashboard.full_access')) return ctx;
-  if (!ctx.permissions.includes(permission)) throw new Error('Forbidden');
+  if (!ctx.permissions.includes(permission)) throw new AuthError('Forbidden', 403);
 
   return ctx;
 }

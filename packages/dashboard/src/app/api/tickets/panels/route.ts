@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const ticketPanelUpdate = z.object({
@@ -52,6 +53,9 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -124,6 +128,9 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
@@ -176,6 +183,9 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

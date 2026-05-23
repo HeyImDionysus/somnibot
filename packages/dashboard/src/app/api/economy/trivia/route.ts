@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
-import { requirePermission } from '@/lib/rbac';
+import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const triviaQuestionSchema = z.object({
   id: z.string().uuid().optional(),
@@ -31,6 +32,9 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const raw = await request.json();
@@ -61,6 +65,9 @@ export async function POST(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const raw = await request.json();
@@ -93,6 +100,9 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const { searchParams } = new URL(request.url);

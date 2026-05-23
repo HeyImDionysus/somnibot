@@ -8,8 +8,12 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function POST(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'bulk');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
 

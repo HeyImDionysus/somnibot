@@ -4,6 +4,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function DELETE(
   _req: NextRequest,
