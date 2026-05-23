@@ -77,7 +77,7 @@ export async function handleXpAdminCommand(
 
   const sub = interaction.options.getSubcommand();
   const targetUser = interaction.options.getUser('user', true);
-  const guildId = client.guildId;
+  const guildId = interaction.guildId!;
 
   switch (sub) {
     case 'add': {

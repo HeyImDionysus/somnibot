@@ -231,7 +231,7 @@ export async function handleSetupModal(
 
   // Enable feature flag if applicable
   if (step.enableFlag) {
-    await enableFeatureFlag(client.supabase, client.guildId, step.enableFlag);
+    await enableFeatureFlag(client.supabase, interaction.guildId!, step.enableFlag);
   }
 
   // Mark step as configured

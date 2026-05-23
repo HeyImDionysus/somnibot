@@ -86,7 +86,7 @@ async function handleRankView(
   await interaction.deferReply();
 
   const targetUser = interaction.options.getUser('user') ?? interaction.user;
-  const guildId = client.guildId;
+  const guildId = interaction.guildId!;
 
   // Fetch user data
   const { data: levelData } = await client.supabase
@@ -146,7 +146,7 @@ async function handleRankCustomize(
   await interaction.deferReply({ ephemeral: true });
 
   const userId = interaction.user.id;
-  const guildId = client.guildId;
+  const guildId = interaction.guildId!;
 
   const reset = interaction.options.getBoolean('reset');
   const preview = interaction.options.getBoolean('preview');
@@ -239,7 +239,7 @@ export async function handleLeaderboardCommand(
 ): Promise<void> {
   await interaction.deferReply();
 
-  const guildId = client.guildId;
+  const guildId = interaction.guildId!;
   const pageSize = 10;
 
   // Fetch first page

@@ -9,6 +9,8 @@ export interface PlatformEvent<T extends string = string, D = unknown> {
   guildId: string;
   timestamp: number;
   data: D;
+  /** Automation chain depth — tracks how many automations deep this event is. */
+  _chainDepth?: number;
 }
 
 // ============================================================

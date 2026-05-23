@@ -20,14 +20,13 @@ export async function handleRoleCreate(
   client: SomniClient,
   role: Role,
 ): Promise<void> {
-  if (role.guild.id !== client.guildId) return;
   if (role.managed) return; // Bot/integration roles are expected
 
   // Check if this role is tracked in our ID map (created by deployer)
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
     .select('template_key')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', role.guild.id)
     .eq('discord_id', role.id)
     .maybeSingle();
 
@@ -45,9 +44,9 @@ export async function handleRoleCreate(
     suggestedAction: 'accept',
   };
 
-  await recordDrift(client, [driftItem]);
+  await recordDrift(client, role.guild.id, [driftItem]);
 
-  client.eventBus.emit('drift.detected', client.guildId, {
+  client.eventBus.emit('drift.detected', role.guild.id, {
     driftCount: 1,
     criticalCount: 0,
     autoRepaired: false,
@@ -63,7 +62,6 @@ export async function handleRoleUpdate(
   oldRole: Role,
   newRole: Role,
 ): Promise<void> {
-  if (newRole.guild.id !== client.guildId) return;
 
   // Check @everyone specifically
   if (newRole.id === newRole.guild.id) {
@@ -80,17 +78,17 @@ export async function handleRoleUpdate(
         suggestedAction: 'repair',
       };
 
-      await recordDrift(client, [driftItem]);
+      await recordDrift(client, newRole.guild.id, [driftItem]);
 
       // Auto-repair @everyone if configured
-      const config = await getSyncConfig(client);
+      const config = await getSyncConfig(client, newRole.guild.id);
       if (config.autoRepairEveryone) {
         try {
           await newRole.setPermissions(0n, 'SomniBot auto-repair — @everyone must be 0');
           console.log('[Sync:Drift] Auto-repaired @everyone permissions to 0');
 
           await writeAuditLog(client.supabase, {
-            guildId: client.guildId,
+            guildId: newRole.guild.id,
             actorType: 'bot',
             actorId: 'sync-engine',
             action: 'drift.auto_repair',
@@ -107,7 +105,7 @@ export async function handleRoleUpdate(
         }
       }
 
-      client.eventBus.emit('drift.detected', client.guildId, {
+      client.eventBus.emit('drift.detected', newRole.guild.id, {
         driftCount: 1,
         criticalCount: 1,
         autoRepaired: config.autoRepairEveryone,
@@ -122,7 +120,7 @@ export async function handleRoleUpdate(
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
     .select('template_key')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', newRole.guild.id)
     .eq('discord_id', newRole.id)
     .maybeSingle();
 
@@ -175,15 +173,15 @@ export async function handleRoleUpdate(
     suggestedAction: 'repair',
   };
 
-  await recordDrift(client, [driftItem]);
+  await recordDrift(client, newRole.guild.id, [driftItem]);
 
   // Auto-repair if configured
-  const config = await getSyncConfig(client);
+  const config = await getSyncConfig(client, newRole.guild.id);
   if (config.autoRepair) {
     await autoRepairRole(client, newRole, mapping.template_key);
   }
 
-  client.eventBus.emit('drift.detected', client.guildId, {
+  client.eventBus.emit('drift.detected', newRole.guild.id, {
     driftCount: 1,
     criticalCount: 0,
     autoRepaired: config.autoRepair,
@@ -198,14 +196,13 @@ export async function handleRoleDelete(
   client: SomniClient,
   role: Role,
 ): Promise<void> {
-  if (role.guild.id !== client.guildId) return;
   if (role.managed) return;
 
   // Check if this role was tracked
   const { data: mapping } = await client.supabase
     .from('discord_id_map')
     .select('template_key')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', role.guild.id)
     .eq('discord_id', role.id)
     .maybeSingle();
 
@@ -223,9 +220,9 @@ export async function handleRoleDelete(
     suggestedAction: 'repair',
   };
 
-  await recordDrift(client, [driftItem]);
+  await recordDrift(client, role.guild.id, [driftItem]);
 
-  client.eventBus.emit('drift.detected', client.guildId, {
+  client.eventBus.emit('drift.detected', role.guild.id, {
     driftCount: 1,
     criticalCount: 0,
     autoRepaired: false,
@@ -233,7 +230,7 @@ export async function handleRoleDelete(
   });
 
   await writeAuditLog(client.supabase, {
-    guildId: client.guildId,
+    guildId: role.guild.id,
     actorType: 'system',
     actorId: 'sync-engine',
     action: 'drift.role_deleted',
@@ -252,8 +249,8 @@ interface SyncConfigLocal {
   autoRepairEveryone: boolean;
 }
 
-async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
-  const cacheKey = `sync_config:${client.guildId}`;
+async function getSyncConfig(client: SomniClient, guildId: string): Promise<SyncConfigLocal> {
+  const cacheKey = `sync_config:${guildId}`;
 
   try {
     const cached = await client.valkey.get(cacheKey);
@@ -263,7 +260,7 @@ async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
   const { data } = await client.supabase
     .from('guild_config')
     .select('sync_auto_repair, sync_auto_repair_everyone')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   const config: SyncConfigLocal = {
@@ -284,13 +281,14 @@ async function getSyncConfig(client: SomniClient): Promise<SyncConfigLocal> {
  */
 async function recordDrift(
   client: SomniClient,
+  guildId: string,
   newItems: DriftItem[],
 ): Promise<void> {
   // Get current drift details
   const { data: current } = await client.supabase
     .from('guild_desired_state')
     .select('drift_details')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   const existingItems: DriftItem[] = Array.isArray(current?.drift_details)
@@ -317,7 +315,7 @@ async function recordDrift(
       drift_details: merged,
       last_sync_at: new Date().toISOString(),
     })
-    .eq('guild_id', client.guildId);
+    .eq('guild_id', guildId);
 }
 
 /**
@@ -334,7 +332,7 @@ async function autoRepairRole(
     const { data: desired } = await client.supabase
       .from('guild_desired_state')
       .select('roles')
-      .eq('guild_id', client.guildId)
+      .eq('guild_id', role.guild.id)
       .maybeSingle();
 
     if (!desired?.roles) return;
@@ -359,7 +357,7 @@ async function autoRepairRole(
     console.log(`[Sync:Drift] Auto-repaired role "${role.name}"`);
 
     await writeAuditLog(client.supabase, {
-      guildId: client.guildId,
+      guildId: role.guild.id,
       actorType: 'bot',
       actorId: 'sync-engine',
       action: 'drift.auto_repair',

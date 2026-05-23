@@ -15,6 +15,8 @@ export const AUTOMATION_LIMITS = {
   MAX_FIRES_PER_USER_PER_MINUTE: 5,
   DM_COOLDOWN_SECONDS: 300,
   ROLE_GRANT_DELAY_MS: 1000,
+  /** Maximum depth of automation chain reactions (e.g., action triggers another automation). */
+  MAX_CHAIN_DEPTH: 3,
 } as const;
 
 // ============================================================
