@@ -329,7 +329,7 @@ export class EconomyManager {
 
     if (error) {
       // RPC raises exception on insufficient funds
-      log.warn('debitWallet RPC failed (likely insufficient funds'):', error.message);
+      log.warn('debitWallet RPC failed (likely insufficient funds)', { detail: error.message });
       return null;
     }
 
