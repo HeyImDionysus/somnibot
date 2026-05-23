@@ -51,7 +51,7 @@ export class GiveawayManager {
     // Check every 30 seconds for giveaways that need to end
     this.checkTimer = setInterval(() => {
       this.checkExpired().catch((err) => {
-        log.error('Check error:', err);
+        log.error('Check error:', { error: String(err) });
       });
     }, 30_000);
 

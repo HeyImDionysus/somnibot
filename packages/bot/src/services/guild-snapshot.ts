@@ -249,7 +249,7 @@ export async function writeGuildSnapshot(
     }
     memberSnapshots = snapshots;
   } catch (err) {
-    log.warn('Failed to fetch members for snapshot:', err);
+    log.warn('Failed to fetch members for snapshot:', { error: String(err) });
   }
 
   // ── Write to Supabase ──
@@ -304,12 +304,12 @@ export function startPeriodicSnapshots(
 ): NodeJS.Timeout {
   // Immediate first write
   writeGuildSnapshot(guild, supabase).catch((err) =>
-    log.error('Initial snapshot failed:', err),
+    log.error('Initial snapshot failed:', { error: String(err) }),
   );
 
   return setInterval(() => {
     writeGuildSnapshot(guild, supabase).catch((err) =>
-      log.error('Periodic snapshot failed:', err),
+      log.error('Periodic snapshot failed:', { error: String(err) }),
     );
   }, intervalMs);
 }

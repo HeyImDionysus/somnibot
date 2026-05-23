@@ -11,6 +11,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Fishing');
 

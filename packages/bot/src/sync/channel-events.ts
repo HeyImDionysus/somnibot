@@ -11,6 +11,7 @@ import { ChannelType, type GuildChannel, type DMChannel, type NonThreadGuildBase
 import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ChannelEvents');
 

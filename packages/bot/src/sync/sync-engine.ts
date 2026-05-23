@@ -106,7 +106,7 @@ export async function runSyncCycle(
       repaired++;
       log.info('Auto-repaired @everyone permissions to 0');
     } catch (err) {
-      log.error('Failed to auto-repair @everyone:', err);
+      log.error('Failed to auto-repair @everyone:', { error: String(err) });
     }
   }
 
@@ -226,7 +226,7 @@ export function startSyncScheduler(
         );
       }
     } catch (err) {
-      log.error('Cycle error:', err);
+      log.error('Cycle error:', { error: String(err) });
     } finally {
       running = false;
     }

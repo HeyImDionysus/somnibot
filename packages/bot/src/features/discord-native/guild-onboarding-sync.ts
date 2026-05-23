@@ -48,7 +48,7 @@ export class GuildOnboardingSync {
     this.eventBus.on('config.changed' as never, ((data: { section?: string }) => {
       if (data.section === 'onboarding' || data.section === 'welcome') {
         this.syncOnboarding().catch((err) =>
-          log.error('Sync failed:', err),
+          log.error('Sync failed:', { error: String(err) }),
         );
       }
     }) as never);
@@ -102,7 +102,7 @@ export class GuildOnboardingSync {
 
       log.info(`Synced ${prompts.length} onboarding prompts to Discord`);
     } catch (err) {
-      log.error('Failed to sync onboarding:', err);
+      log.error('Failed to sync onboarding:', { error: String(err) });
     }
   }
 }

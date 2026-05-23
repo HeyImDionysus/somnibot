@@ -98,7 +98,7 @@ export async function logMessageEdit(
   try {
     await logChannel.send({ embeds: [embed] });
   } catch (err) {
-    log.error('Failed to log edit:', err);
+    log.error('Failed to log edit:', { error: String(err) });
   }
 }
 
@@ -144,7 +144,7 @@ export async function logMessageDelete(
   try {
     await logChannel.send({ embeds: [embed] });
   } catch (err) {
-    log.error('Failed to log delete:', err);
+    log.error('Failed to log delete:', { error: String(err) });
   }
 }
 

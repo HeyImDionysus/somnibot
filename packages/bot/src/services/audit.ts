@@ -51,7 +51,7 @@ export async function writeAuditLog(
     }
   } catch (err) {
     // Never let audit logging failures crash the bot
-    log.error('Exception writing audit log:', err);
+    log.error('Exception writing audit log:', { error: String(err) });
   }
 }
 
@@ -89,6 +89,6 @@ export async function writeAuditBatch(
       log.error('Failed to write audit batch:', error.message);
     }
   } catch (err) {
-    log.error('Exception writing audit batch:', err);
+    log.error('Exception writing audit batch:', { error: String(err) });
   }
 }

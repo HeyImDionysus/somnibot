@@ -11,6 +11,7 @@ import { ChannelType, type Guild, type GuildChannelTypes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DriftItem } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('RepairActions');
 

@@ -33,7 +33,7 @@ export class GiveawayFulfillmentService {
   start(): void {
     this.eventBus.on('giveaway.ended', (event) => {
       this.handleGiveawayEnded(event.data).catch((err) => {
-        log.error('Error handling giveaway end:', err);
+        log.error('Error handling giveaway end:', { error: String(err) });
       });
     });
     log.info('Service started — listening for giveaway.ended');

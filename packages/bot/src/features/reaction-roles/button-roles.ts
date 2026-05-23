@@ -154,7 +154,7 @@ export async function handleButtonRoleInteraction(
       });
     }
   } catch (err) {
-    log.error('Failed to toggle role:', err);
+    log.error('Failed to toggle role:', { error: String(err) });
     await interaction.reply({
       content: '❌ Failed to update your role. The role may be higher than my highest role.',
       ephemeral: true,

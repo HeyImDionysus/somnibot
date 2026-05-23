@@ -165,7 +165,7 @@ async function handleActivate(
         }
       }
     } catch (err) {
-      log.error('Failed to grant roles on activation:', err);
+      log.error('Failed to grant roles on activation:', { error: String(err) });
     }
   }
 

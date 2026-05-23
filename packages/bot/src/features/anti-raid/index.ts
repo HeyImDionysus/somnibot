@@ -125,7 +125,7 @@ export async function processAntiRaid(
       await logRaidEvent(guild, config, embed);
       return true;
     } catch (err) {
-      log.error('Failed to kick young account:', err);
+      log.error('Failed to kick young account:', { error: String(err) });
     }
   }
 

@@ -10,6 +10,7 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Gathering');
 

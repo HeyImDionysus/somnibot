@@ -15,6 +15,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Pets');
 
@@ -145,7 +146,7 @@ export class PetsManager {
 
       log.info(`Processed ${pets.length} pets (decay=${decayRate}, guild=${guildId})`);
     } catch (err) {
-      log.error('Decay cycle error:', err);
+      log.error('Decay cycle error:', { error: String(err) });
     }
   }
 

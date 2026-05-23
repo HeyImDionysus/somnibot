@@ -191,7 +191,7 @@ export async function handleBuyButton(
 
     if (!orderRes.ok) {
       const err = await orderRes.text();
-      log.error('PayPal order creation failed:', err);
+      log.error('PayPal order creation failed:', { error: String(err) });
       await interaction.editReply({ content: '❌ Failed to create payment. Please try again.' });
       return;
     }
@@ -285,7 +285,7 @@ export async function handleBuyButton(
 
     if (!subRes.ok) {
       const err = await subRes.text();
-      log.error('PayPal subscription creation failed:', err);
+      log.error('PayPal subscription creation failed:', { error: String(err) });
       await interaction.editReply({ content: '❌ Failed to create subscription. Please try again.' });
       return;
     }

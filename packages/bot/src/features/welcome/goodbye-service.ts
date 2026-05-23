@@ -58,6 +58,6 @@ export async function executeGoodbyeFlow(
     await channel.send(messageText);
     log.info(`Message sent for ${member.user?.tag ?? member.id}`);
   } catch (err) {
-    log.error('Failed to send goodbye message:', err);
+    log.error('Failed to send goodbye message:', { error: String(err) });
   }
 }

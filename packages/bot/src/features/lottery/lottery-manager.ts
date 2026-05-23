@@ -9,6 +9,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Lottery');
 
@@ -95,7 +96,7 @@ export class LotteryManager {
       // Time to draw!
       await this.executeDrawAndAnnounce(guildId, config);
     } catch (err) {
-      log.error('checkAndDraw error:', err);
+      log.error('checkAndDraw error:', { error: String(err) });
     }
   }
 

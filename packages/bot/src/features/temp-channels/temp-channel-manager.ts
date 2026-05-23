@@ -163,7 +163,7 @@ export class TempChannelManager {
           });
           textChannelId = tc.id;
         } catch (err) {
-          log.error('Failed to create text channel:', err);
+          log.error('Failed to create text channel:', { error: String(err) });
         }
       }
 
@@ -184,7 +184,7 @@ export class TempChannelManager {
 
       log.info(`Created "${vc.name}" for ${member.user.username}`);
     } catch (err) {
-      log.error('Failed to create temp channel:', err);
+      log.error('Failed to create temp channel:', { error: String(err) });
     }
   }
 
@@ -228,7 +228,7 @@ export class TempChannelManager {
           await this.deleteChannel(channelId);
         }
       } catch (err) {
-        log.error('Keep-alive cleanup error:', err);
+        log.error('Keep-alive cleanup error:', { error: String(err) });
       }
       this.keepAliveTimers.delete(channelId);
     }, keepAliveMs);
@@ -287,7 +287,7 @@ export class TempChannelManager {
           DeafenMembers: true,
         });
       } catch (err) {
-        log.error('Failed to update permissions:', err);
+        log.error('Failed to update permissions:', { error: String(err) });
       }
     }
 

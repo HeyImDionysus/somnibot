@@ -23,6 +23,7 @@ import type {
   EscalationStep,
 } from '@somnibot/shared';
 import { executeAutoModAction } from './automod-actions.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AutoModEngine');
 

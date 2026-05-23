@@ -158,9 +158,9 @@ export class ScheduledMessageRunner {
 
     // Initial alignment
     setTimeout(() => {
-      this.tick().catch((err) => log.error('Tick error:', err));
+      this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
       this.timer = setInterval(() => {
-        this.tick().catch((err) => log.error('Tick error:', err));
+        this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
       }, 60_000);
     }, msToNextMinute);
 

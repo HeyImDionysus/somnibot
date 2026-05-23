@@ -4,6 +4,7 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Achievements');
 

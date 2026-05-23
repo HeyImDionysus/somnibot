@@ -52,7 +52,7 @@ export class StatsChannelManager {
     // Schedule periodic updates
     this.timer = setInterval(() => {
       this.updateAll().catch((err) => {
-        log.error('Update error:', err);
+        log.error('Update error:', { error: String(err) });
       });
     }, this.intervalMs);
 

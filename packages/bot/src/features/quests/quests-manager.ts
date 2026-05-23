@@ -4,6 +4,7 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Quests');
 
@@ -251,7 +252,7 @@ export class QuestsManager {
 
         log.info(`Weekly quest cleanup done for guild ${guildId}`);
       } catch (err) {
-        log.error('Weekly reset error:', err);
+        log.error('Weekly reset error:', { error: String(err) });
       }
     }, 60 * 60 * 1000); // Check every hour
   }

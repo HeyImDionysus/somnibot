@@ -108,7 +108,7 @@ export async function handleLevelUp(
         await textChannel.send(content);
       }
     } catch (err) {
-      log.error('Failed to send level-up announcement:', err);
+      log.error('Failed to send level-up announcement:', { error: String(err) });
     }
   }
 }

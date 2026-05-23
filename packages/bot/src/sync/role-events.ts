@@ -12,6 +12,7 @@ import type { Role } from 'discord.js';
 import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity, DriftType } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('RoleEvents');
 
@@ -103,7 +104,7 @@ export async function handleRoleUpdate(
             },
           });
         } catch (err) {
-          log.error('[Sync:Drift] Failed to auto-repair @everyone:', err);
+          log.error('[Sync:Drift] Failed to auto-repair @everyone:', { error: String(err) });
         }
       }
 

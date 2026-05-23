@@ -11,6 +11,7 @@ import type { TextChannel, Message, Collection, Snowflake, Guild, AttachmentBuil
 import { AttachmentBuilder as DiscordAttachmentBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicket, DbTicketPanel } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Transcript');
 
@@ -399,7 +400,7 @@ export async function generateTranscript(
     log.info(`Transcript generated for ticket #${ticket.ticket_number} (${messages.length} messages)`);
     return { success: true, html };
   } catch (err) {
-    log.error('Transcript generation failed:', err);
+    log.error('Transcript generation failed:', { error: String(err) });
     return { success: false, error: 'Transcript generation failed.' };
   }
 }

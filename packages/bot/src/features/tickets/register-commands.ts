@@ -37,6 +37,6 @@ export async function registerTicketCommands(client: SomniClient): Promise<void>
 
     log.info('/ticket slash command registered');
   } catch (err) {
-    log.error('Failed to register ticket commands:', err);
+    log.error('Failed to register ticket commands:', { error: String(err) });
   }
 }

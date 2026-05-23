@@ -23,6 +23,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import type Valkey from 'iovalkey';
 import type { PlatformEvent, PlatformEventMap } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('CrossFeatureBridge');
 
@@ -232,7 +233,7 @@ export class CrossFeatureBridge {
           log.info(`Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
         }
       } catch (err) {
-        log.error('Milestone bonus failed:', err);
+        log.error('Milestone bonus failed:', { error: String(err) });
       }
     });
 
@@ -273,7 +274,7 @@ export class CrossFeatureBridge {
           // User may have DMs disabled — that's fine
         });
       } catch (err) {
-        log.error('Satisfaction survey failed:', err);
+        log.error('Satisfaction survey failed:', { error: String(err) });
       }
     });
 
@@ -319,7 +320,7 @@ export class CrossFeatureBridge {
           log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
         }
       } catch (err) {
-        log.error('Role grant from purchase failed:', err);
+        log.error('Role grant from purchase failed:', { error: String(err) });
       }
     });
 
@@ -380,7 +381,7 @@ export class CrossFeatureBridge {
         }
       }
     } catch (err) {
-      log.error('Failed to remove giveaway entries:', err);
+      log.error('Failed to remove giveaway entries:', { error: String(err) });
     }
   }
 
@@ -420,7 +421,7 @@ export class CrossFeatureBridge {
         }
       }
     } catch (err) {
-      log.error('Failed to clean up member economy:', err);
+      log.error('Failed to clean up member economy:', { error: String(err) });
     }
   }
 
@@ -437,7 +438,7 @@ export class CrossFeatureBridge {
         .eq('creator_id', userId)
         .eq('status', 'open');
     } catch (err) {
-      log.error('Failed to close user tickets:', err);
+      log.error('Failed to close user tickets:', { error: String(err) });
     }
   }
 }

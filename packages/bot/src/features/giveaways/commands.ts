@@ -164,7 +164,7 @@ export async function handleGiveawayCommand(
       }
     }
   } catch (err) {
-    log.error('Command error:', err);
+    log.error('Command error:', { error: String(err) });
     const content = '❌ An error occurred.';
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content });

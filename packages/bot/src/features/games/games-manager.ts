@@ -13,6 +13,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Games');
 
@@ -164,7 +165,7 @@ export class GamesManager {
       p_amount: amount,
     });
     if (error) {
-      log.error('economy_increment_daily_loss failed:', error);
+      log.error('economy_increment_daily_loss failed:', { error: String(error) });
     }
   }
 
@@ -513,7 +514,7 @@ export class GamesManager {
             }
           }
         } catch (err) {
-          log.error('Blackjack button handler error:', err);
+          log.error('Blackjack button handler error:', { error: String(err) });
           collector.stop('error');
         }
       });
@@ -524,7 +525,7 @@ export class GamesManager {
           try {
             await this.resolveBlackjackTimeout(interaction, guildId, userId, playerHand, dealerHand, deck, currentBet, doubled);
           } catch (err) {
-            log.error('Blackjack timeout resolution error:', err);
+            log.error('Blackjack timeout resolution error:', { error: String(err) });
           }
         }
       });

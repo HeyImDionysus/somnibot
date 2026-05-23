@@ -17,6 +17,7 @@ import { deployServerState, type DeployOptions, type DeployResult } from './depl
 import { writeAuditLog, writeAuditBatch } from '../services/audit.js';
 import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 import type { DesiredState, DesiredRole, DesiredChannel, DesiredCategory } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('DeployListener');
 

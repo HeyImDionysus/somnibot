@@ -31,6 +31,7 @@ import {
 import { executeWelcomeFlow } from './welcome-service.js';
 import { executeGoodbyeFlow } from './goodbye-service.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Onboarding');
 
@@ -215,7 +216,7 @@ export async function handleMemberUpdate(
           details: { username: newMember.user.tag },
         });
       } catch (err) {
-        log.error('Failed to grant Member role:', err);
+        log.error('Failed to grant Member role:', { error: String(err) });
       }
     }
 
@@ -371,7 +372,7 @@ async function restoreLevelRoles(
       log.info(`Restored ${restored} level reward role(s) for ${member.user.tag}`);
     }
   } catch (err) {
-    log.error('Error restoring level roles:', err);
+    log.error('Error restoring level roles:', { error: String(err) });
   }
 }
 

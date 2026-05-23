@@ -141,7 +141,7 @@ export function registerEvents(client: SomniClient): void {
         await handleMemberJoin(client, member);
       }
     } catch (err) {
-      log.error(' guildMemberAdd handler error:', err);
+      log.error(' guildMemberAdd handler error:', { error: String(err) });
     }
   });
 
@@ -149,7 +149,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleMemberLeave(client, member);
     } catch (err) {
-      log.error(' guildMemberRemove handler error:', err);
+      log.error(' guildMemberRemove handler error:', { error: String(err) });
     }
   });
 
@@ -157,7 +157,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleMemberUpdate(client, oldMember, newMember);
     } catch (err) {
-      log.error(' guildMemberUpdate handler error:', err);
+      log.error(' guildMemberUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -166,7 +166,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleCreate(client, role);
     } catch (err) {
-      log.error(' roleCreate handler error:', err);
+      log.error(' roleCreate handler error:', { error: String(err) });
     }
   });
 
@@ -174,7 +174,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleUpdate(client, oldRole, newRole);
     } catch (err) {
-      log.error(' roleUpdate handler error:', err);
+      log.error(' roleUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -182,7 +182,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleDelete(client, role);
     } catch (err) {
-      log.error(' roleDelete handler error:', err);
+      log.error(' roleDelete handler error:', { error: String(err) });
     }
   });
 
@@ -192,7 +192,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelCreate(client, channel);
     } catch (err) {
-      log.error(' channelCreate handler error:', err);
+      log.error(' channelCreate handler error:', { error: String(err) });
     }
   });
 
@@ -201,7 +201,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel);
     } catch (err) {
-      log.error(' channelUpdate handler error:', err);
+      log.error(' channelUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -210,7 +210,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelDelete(client, channel);
     } catch (err) {
-      log.error(' channelDelete handler error:', err);
+      log.error(' channelDelete handler error:', { error: String(err) });
     }
   });
 
@@ -225,7 +225,7 @@ export function registerEvents(client: SomniClient): void {
       const handled = await processMessage(client, message, modConfig);
       if (handled) return; // Message was deleted/actioned by auto-mod
     } catch (err) {
-      log.error(' Auto-mod error:', err);
+      log.error(' Auto-mod error:', { error: String(err) });
     }
 
     // Phase 8: Emit message.sent event for automations
@@ -248,7 +248,7 @@ export function registerEvents(client: SomniClient): void {
       | undefined;
     if (engine) {
       engine.processMessageEvent(messageEvent, message).catch((err) => {
-        log.error(' Automation message processing error:', err);
+        log.error(' Automation message processing error:', { error: String(err) });
       });
     }
 
@@ -276,7 +276,7 @@ export function registerEvents(client: SomniClient): void {
         }
       }
     } catch (err) {
-      log.error(' XP processing error:', err);
+      log.error(' XP processing error:', { error: String(err) });
     }
 
     // Phase 15: Economy chat income (runs alongside XP — separate cooldown)
@@ -286,7 +286,7 @@ export function registerEvents(client: SomniClient): void {
         await econMgr.processChatIncome(message.author.id, message.channelId);
       }
     } catch (err) {
-      log.error(' Economy chat income error:', err);
+      log.error(' Economy chat income error:', { error: String(err) });
     }
 
     // Quest progress: 'chat' activity tracking
@@ -320,7 +320,7 @@ export function registerEvents(client: SomniClient): void {
         );
         if (handled) return; // Was a reaction role interaction
       } catch (err) {
-        log.error(' Reaction role add error:', err);
+        log.error(' Reaction role add error:', { error: String(err) });
       }
     }
 
@@ -349,7 +349,7 @@ export function registerEvents(client: SomniClient): void {
         | undefined;
       if (engine) {
         engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
-          log.error(' Automation reaction processing error:', err);
+          log.error(' Automation reaction processing error:', { error: String(err) });
         });
       }
     }
@@ -361,7 +361,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleStarboardReaction(reaction, user, client.supabase, reaction.message.guild!.id);
     } catch (err) {
-      log.error(' Starboard reaction error:', err);
+      log.error(' Starboard reaction error:', { error: String(err) });
     }
   });
 
@@ -383,7 +383,7 @@ export function registerEvents(client: SomniClient): void {
           client.eventBus,
         );
       } catch (err) {
-        log.error(' Reaction role remove error:', err);
+        log.error(' Reaction role remove error:', { error: String(err) });
       }
     }
   });
@@ -393,7 +393,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await logMessageEdit(client, oldMessage, newMessage);
     } catch (err) {
-      log.error(' messageUpdate log error:', err);
+      log.error(' messageUpdate log error:', { error: String(err) });
     }
   });
 
@@ -401,7 +401,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await logMessageDelete(client, message);
     } catch (err) {
-      log.error(' messageDelete log error:', err);
+      log.error(' messageDelete log error:', { error: String(err) });
     }
   });
 
@@ -420,7 +420,7 @@ export function registerEvents(client: SomniClient): void {
       const affectedChannelId = oldState.channelId ?? newState.channelId;
       if (affectedChannelId) {
         musicPlayer.handleVoiceStateChange(affectedChannelId).catch((err) => {
-          log.error(' Music voice state handler error:', err);
+          log.error(' Music voice state handler error:', { error: String(err) });
         });
       }
     }
@@ -429,7 +429,7 @@ export function registerEvents(client: SomniClient): void {
     const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
     if (tempMgr) {
       handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
-        log.error(' Temp channel voice handler error:', err);
+        log.error(' Temp channel voice handler error:', { error: String(err) });
       });
     }
 
@@ -1085,7 +1085,7 @@ export function registerEvents(client: SomniClient): void {
         }
       }
     } catch (err) {
-      log.error(' Interaction handler error:', err);
+      log.error(' Interaction handler error:', { error: String(err) });
       try {
         if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
           await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
@@ -1098,7 +1098,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Error Handling ─────────────────────────────────────
   client.on('error', (error) => {
-    log.error(' Client error:', error);
+    log.error(' Client error:', { error: String(error) });
   });
 
   client.on('warn', (info) => {

@@ -18,6 +18,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('TicketPanels');
 
@@ -143,7 +144,7 @@ export async function postPanel(
     log.info(`Panel "${panel.name}" posted in #${channel.name} (${message.id})`);
     return { success: true, messageId: message.id };
   } catch (err) {
-    log.error('Failed to post panel:', err);
+    log.error('Failed to post panel:', { error: String(err) });
     return { success: false, error: 'Failed to post panel message.' };
   }
 }

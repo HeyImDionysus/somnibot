@@ -937,7 +937,7 @@ export async function startActionQueueListener(
   // long-running deployments don't accumulate stuck rows).
   setInterval(() => {
     recoverStaleActions(guild, supabase).catch((err) => {
-      log.error('Stale recovery sweep error:', err);
+      log.error('Stale recovery sweep error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS).unref?.();
 

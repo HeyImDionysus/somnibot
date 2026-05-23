@@ -29,6 +29,7 @@ import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { createTicket, claimTicket, closeTicket, reopenTicket, deleteTicket } from './ticket-service.js';
 import { generateTranscript } from './transcript-generator.js';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('TicketInteractions');
 

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { PlatformEventMap, PlatformEventType, PlatformEvent } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('EventBus');
 

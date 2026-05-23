@@ -171,7 +171,7 @@ export class DiagnosticsService {
       // V53 Phase 2: Write latency metrics for sparkline trends
       await this.writeHealthMetrics(valkeyConnected);
     } catch (err) {
-      log.error('Snapshot error:', err);
+      log.error('Snapshot error:', { error: String(err) });
     }
   }
 

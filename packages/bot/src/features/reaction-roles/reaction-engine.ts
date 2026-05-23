@@ -8,6 +8,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { DbReactionRole } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ReactionEngine');
 
@@ -154,7 +155,7 @@ export async function handleReactionAdd(
           try {
             await member.roles.remove(gc.role_id, 'Exclusive reaction role group');
           } catch (err) {
-            log.error('Failed to remove exclusive group role:', err);
+            log.error('Failed to remove exclusive group role:', { error: String(err) });
           }
         }
       }

@@ -226,7 +226,7 @@ export async function runMigrations(): Promise<MigrationResult> {
   try {
     migrationsDir = findMigrationsDir();
   } catch (err) {
-    log.error('', err);
+    log.error('', { error: String(err) });
     return { ran: false, applied: [], skipped: [], errors: [(err as Error).message], checksumDrift: [] };
   }
 

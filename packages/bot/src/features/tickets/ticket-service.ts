@@ -23,6 +23,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, DbTicket, TicketTypeConfig } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Tickets');
 
@@ -135,7 +136,7 @@ export async function createTicket(
       permissionOverwrites,
     });
   } catch (err) {
-    log.error('Failed to create ticket channel:', err);
+    log.error('Failed to create ticket channel:', { error: String(err) });
     return { error: 'Failed to create ticket channel. Check bot permissions.' };
   }
 
@@ -368,7 +369,7 @@ export async function closeTicket(
         await channel.setParent(panel.closed_category_id, { lockPermissions: false }).catch((e: unknown) => { log.warn('Failed to move channel:', (e as Error)?.message ?? e); });
       }
     } catch (err) {
-      log.error('Failed to lock channel:', err);
+      log.error('Failed to lock channel:', { error: String(err) });
     }
   }
 
@@ -449,7 +450,7 @@ export async function reopenTicket(
 
       await channel.send({ embeds: [reopenEmbed] });
     } catch (err) {
-      log.error('Failed to unlock channel:', err);
+      log.error('Failed to unlock channel:', { error: String(err) });
     }
   }
 
@@ -495,7 +496,7 @@ export async function deleteTicket(
     try {
       await channel.delete('Ticket deleted');
     } catch (err) {
-      log.error('Failed to delete channel:', err);
+      log.error('Failed to delete channel:', { error: String(err) });
     }
   }
 

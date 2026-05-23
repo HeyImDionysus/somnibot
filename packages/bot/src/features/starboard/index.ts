@@ -183,7 +183,7 @@ export async function handleStarboardReaction(
         });
       }
     } catch (err) {
-      log.error('Failed to post to starboard channel:', err);
+      log.error('Failed to post to starboard channel:', { error: String(err) });
     }
   }
 }

@@ -12,6 +12,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { PlatformEvent } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AuditService');
 

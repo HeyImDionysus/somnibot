@@ -13,6 +13,7 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { DbCustomCommand } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('CommandEngine');
 
@@ -127,7 +128,7 @@ export async function loadCustomCommands(
 
     log.info(`Registered ${data.length} custom commands`);
   } catch (err) {
-    log.error('Failed to register commands:', err);
+    log.error('Failed to register commands:', { error: String(err) });
   }
 }
 

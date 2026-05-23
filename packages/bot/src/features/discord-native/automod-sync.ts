@@ -66,14 +66,14 @@ export class AutoModSync {
     this.eventBus.on('config.changed', (event) => {
       if (event.data.section === 'moderation') {
         this.syncRules().catch((err) =>
-          log.error('Sync failed:', err),
+          log.error('Sync failed:', { error: String(err) }),
         );
       }
     });
 
     // Initial sync on startup
     this.syncRules().catch((err) =>
-      log.error('Initial sync failed:', err),
+      log.error('Initial sync failed:', { error: String(err) }),
     );
 
     // Periodic sync every 15 minutes as safety net
@@ -111,7 +111,7 @@ export class AutoModSync {
     try {
       existingRules = await this.guild.autoModerationRules.fetch();
     } catch (err) {
-      log.warn('Cannot fetch Discord AutoMod rules (missing perms?):', err);
+      log.warn('Cannot fetch Discord AutoMod rules (missing perms?):', { error: String(err) });
       return;
     }
 

@@ -19,6 +19,7 @@ import {
 } from './infraction-service.js';
 import { postModLogEntry } from './mod-log.js';
 import { writeAuditLog } from '../../services/audit.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Escalation');
 

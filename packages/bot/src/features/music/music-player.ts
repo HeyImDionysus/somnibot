@@ -723,7 +723,7 @@ export class MusicPlayerManager {
   private setupPlayerEvents(player: Player): void {
     player.on('start', () => {
       this.sendNowPlaying(this.guild.id).catch((err) => {
-        log.error('Failed to send now-playing:', err);
+        log.error('Failed to send now-playing:', { error: String(err) });
       });
       this.clearInactivityTimer(this.guild.id);
 

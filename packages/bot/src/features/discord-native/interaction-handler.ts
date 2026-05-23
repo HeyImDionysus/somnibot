@@ -134,7 +134,7 @@ export async function withEphemeralProgress<T>(
   } catch (err) {
     const errorMsg = options.errorMessage ?? '❌ Something went wrong. Please try again.';
     await interaction.editReply({ content: errorMsg }).catch(() => { /* interaction may have expired */ });
-    log.error('Operation failed:', err);
+    log.error('Operation failed:', { error: String(err) });
     return null;
   }
 }

@@ -24,7 +24,7 @@ export class MusicStatusReporter {
     this.report().catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     this.timer = setInterval(() => {
       this.report().catch((err) => {
-        log.error('Error:', err);
+        log.error('Error:', { error: String(err) });
       });
     }, intervalMs);
     log.info('Started (15s interval)');

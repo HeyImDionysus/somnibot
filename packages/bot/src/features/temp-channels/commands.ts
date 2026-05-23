@@ -193,7 +193,7 @@ export async function handleTempChannelCommand(
       }
     }
   } catch (err) {
-    log.error('Command error:', err);
+    log.error('Command error:', { error: String(err) });
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({ content: '❌ An error occurred while processing the command.', ephemeral: true });
     }

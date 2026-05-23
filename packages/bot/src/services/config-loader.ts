@@ -118,7 +118,7 @@ export async function loadConfigFromDatabase(): Promise<number> {
 
     return loaded;
   } catch (err) {
-    log.warn('Error loading config from database (non-fatal):', err);
+    log.warn('Error loading config from database (non-fatal):', { error: String(err) });
     return 0;
   }
 }
@@ -205,7 +205,7 @@ export async function syncConfigToDatabase(): Promise<number> {
     log.info(`Synced ${rows.length} config value(s) to instance_settings`);
     return rows.length;
   } catch (err) {
-    log.warn('Error syncing config to DB (non-fatal):', err);
+    log.warn('Error syncing config to DB (non-fatal):', { error: String(err) });
     return 0;
   }
 }

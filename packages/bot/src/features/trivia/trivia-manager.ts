@@ -14,6 +14,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig, TriviaDifficulty } from '@somnibot/shared';
 import type { Redis } from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Trivia');
 

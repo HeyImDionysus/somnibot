@@ -3,6 +3,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbAutomation } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AutomationLoader');
 

@@ -103,7 +103,7 @@ export async function startVoiceXpTicker(
         }
       }
     } catch (err) {
-      log.error('Tick error:', err);
+      log.error('Tick error:', { error: String(err) });
     }
   }, intervalMs);
 

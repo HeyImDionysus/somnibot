@@ -75,7 +75,7 @@ export async function handleMyDataCommand(
       });
     }
   } catch (err) {
-    log.error('Failed to export data:', err);
+    log.error('Failed to export data:', { error: String(err) });
     await interaction.editReply({
       content: '❌ Something went wrong exporting your data. Please try again later.',
     });

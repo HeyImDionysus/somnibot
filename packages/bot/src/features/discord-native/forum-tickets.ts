@@ -163,7 +163,7 @@ export class ForumTicketService {
 
       return { threadId: thread.id, ticketId: ticket.id };
     } catch (err) {
-      log.error('Failed to create forum ticket:', err);
+      log.error('Failed to create forum ticket:', { error: String(err) });
       return null;
     }
   }

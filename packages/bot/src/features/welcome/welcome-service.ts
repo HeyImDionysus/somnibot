@@ -21,6 +21,7 @@ import {
   type WelcomeVariables,
 } from './welcome-variables.js';
 import { getMemberNumber } from './member-service.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Welcome');
 
@@ -105,7 +106,7 @@ async function sendWelcomeChannelMessage(
           new AttachmentBuilder(cardBuffer, { name: 'welcome-card.png' }),
         );
       } catch (err) {
-        log.error('Failed to generate welcome card:', err);
+        log.error('Failed to generate welcome card:', { error: String(err) });
         // Continue without card — message still goes out
       }
     }
@@ -113,7 +114,7 @@ async function sendWelcomeChannelMessage(
     await channel.send({ content: messageText, files });
     log.info(`Channel message sent for ${member.user.tag}`);
   } catch (err) {
-    log.error('Failed to send channel message:', err);
+    log.error('Failed to send channel message:', { error: String(err) });
   }
 }
 

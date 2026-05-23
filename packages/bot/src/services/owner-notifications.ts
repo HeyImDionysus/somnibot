@@ -158,7 +158,7 @@ export class OwnerNotificationService {
           await (channel as { send: (opts: unknown) => Promise<unknown> }).send({ embeds: [discordEmbed] });
         }
       } catch (err) {
-        log.error('Failed to send to admin channel:', err);
+        log.error('Failed to send to admin channel:', { error: String(err) });
       }
     }
 
@@ -168,7 +168,7 @@ export class OwnerNotificationService {
         const owner = await this.client.users.fetch(this.config.ownerDiscordId);
         await owner.send({ embeds: [discordEmbed] });
       } catch (err) {
-        log.error('Failed to DM owner:', err);
+        log.error('Failed to DM owner:', { error: String(err) });
       }
     }
   }

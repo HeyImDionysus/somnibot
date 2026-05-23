@@ -11,6 +11,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { GuildMember } from 'discord.js';
 import type { DbMember } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('MemberService');
 

@@ -22,6 +22,7 @@ import {
 } from './infraction-service.js';
 import { executeEscalation, getEscalationAction } from './escalation.js';
 import { postModLogEntry } from './mod-log.js';
+import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ModCommands');
 
