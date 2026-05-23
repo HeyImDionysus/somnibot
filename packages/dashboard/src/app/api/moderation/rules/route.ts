@@ -22,7 +22,8 @@ export async function GET() {
     .from('automod_rules')
     .select('*')
     .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .limit(500);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

@@ -22,7 +22,8 @@ export async function GET() {
     .from('custom_commands')
     .select('*')
     .eq('guild_id', guildId)
-    .order('name', { ascending: true });
+    .order('name', { ascending: true })
+    .limit(500);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

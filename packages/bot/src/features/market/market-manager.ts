@@ -10,6 +10,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Market');
 
@@ -49,11 +50,11 @@ export function invalidateMarketCache(): void {
 
 export class MarketManager {
   private guild: Guild;
-  private supabase: any;
+  private supabase: SupabaseClient;
   private valkey: any;
   private configCache: MarketConfig | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
@@ -159,12 +160,12 @@ export class MarketManager {
 
     if (insertErr) {
       log.error('Listing insert failed — refunding inventory:', insertErr.message);
-      await this.supabase.rpc('economy_upsert_inventory', {
+      await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_item_id: invEntry.item_id,
         p_quantity: quantity,
-      }).catch((err: unknown) => {
+      })).catch((err: unknown) => {
         // V53-L1: Log inventory refund failures — if this fails, items are permanently lost
         log.error(`CRITICAL: createListing refund failed for user ${userId}, item ${invEntry.item_id} qty ${quantity}:`, err);
       });
@@ -337,10 +338,10 @@ export class MarketManager {
 
     if (debitErr) {
       // Refund listing remaining since we already decremented it
-      await this.supabase.rpc('economy_market_buy_revert', {
+      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription(`❌ You need **${totalCost.toLocaleString()}** coins but don't have enough.`)
         .setColor(0xff0000);
@@ -355,16 +356,16 @@ export class MarketManager {
     if (payErr) {
       log.error(`economy_add_balance failed for seller ${listing.seller_id} — refunding buyer:`, payErr.message);
       // Refund buyer
-      await this.supabase.rpc('economy_add_balance', {
+      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_amount: totalCost,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
       // Restore listing quantity
-      await this.supabase.rpc('economy_market_buy_revert', {
+      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription('❌ Purchase failed — your coins have been refunded.')
         .setColor(0xff0000);
@@ -380,20 +381,20 @@ export class MarketManager {
     if (invErr) {
       log.error(`inventory upsert failed for buyer ${userId} — refunding:`, invErr.message);
       // Refund buyer and claw back seller payment
-      await this.supabase.rpc('economy_add_balance', {
+      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_amount: totalCost,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      await this.supabase.rpc('economy_subtract_balance', {
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      await Promise.resolve(this.supabase.rpc('economy_subtract_balance', {
         p_guild_id: this.guild.id,
         p_user_id: listing.seller_id,
         p_amount: sellerEarnings,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
-      await this.supabase.rpc('economy_market_buy_revert', {
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      await Promise.resolve(this.supabase.rpc('economy_market_buy_revert', {
         p_listing_id: listing.id,
         p_quantity: buyQty,
-      }).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.error('Refund/revert failed:', (e as Error)?.message ?? e); });
       return new EmbedBuilder()
         .setDescription('❌ Failed to add items to your inventory — your coins have been refunded.')
         .setColor(0xff0000);
