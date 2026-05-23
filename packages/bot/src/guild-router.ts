@@ -18,6 +18,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from './services/event-bus.js';
 import { GuildContext } from './guild-context.js';
+import { destroyGuildServices } from './guild-init.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('GuildRouter');
@@ -107,11 +108,14 @@ export class GuildRouter {
   }
 
   /**
-   * Remove and destroy a guild context (e.g., bot removed from guild).
+   * Remove and destroy a guild context (e.g., bot removed from guild, or idle eviction).
+   * Calls destroyGuildServices() first to stop per-guild timers, music players,
+   * economy managers, etc., then ctx.destroy() for generic manager cleanup.
    */
   remove(guildId: string): void {
     const ctx = this.contexts.get(guildId);
     if (ctx) {
+      destroyGuildServices(ctx);
       ctx.destroy();
       this.contexts.delete(guildId);
       this.lastAccess.delete(guildId);
@@ -127,6 +131,7 @@ export class GuildRouter {
       this.evictionTimer = null;
     }
     for (const ctx of this.contexts.values()) {
+      destroyGuildServices(ctx);
       ctx.destroy();
     }
     this.contexts.clear();
