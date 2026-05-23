@@ -45,9 +45,8 @@ export async function POST(req: NextRequest) {
     if (rateLimited) return rateLimited;
 
     const auth = await requirePermission('dashboard.manage_economy');
-    const body = await req.json();
-    const parsed = achSchema.safeParse(body);
-    if (!parsed.success) return NextResponse.json({ error: parsed.error.message }, { status: 400 });
+    const parsed = await parseBody(req, achSchema);
+    if (!parsed.ok) return parsed.response;
 
     const supabase = createAdminSupabase();
     const { data, error } = await supabase
@@ -70,9 +69,9 @@ export async function PUT(req: NextRequest) {
     if (rateLimited) return rateLimited;
 
     const auth = await requirePermission('dashboard.manage_economy');
-    const body = await req.json();
-    const parsed = achSchema.safeParse(body);
-    if (!parsed.success || !parsed.data.id) return NextResponse.json({ error: 'Invalid data' }, { status: 400 });
+    const parsed = await parseBody(req, achSchema);
+    if (!parsed.ok) return parsed.response;
+    if (!parsed.data.id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
 
     const supabase = createAdminSupabase();
     const { id, ...rest } = parsed.data;
