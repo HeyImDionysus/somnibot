@@ -28,6 +28,7 @@ import { buildPurgeCommand } from './features/moderation/purge-command.js';
 import { buildXpAdminCommands } from './features/levels/admin-commands.js';
 import { buildHelpCommand } from './features/help/index.js';
 import { buildForgetMeCommand } from './features/privacy/forgetme-command.js';
+import { buildPrivacyCommand } from './features/privacy/privacy-command.js';
 import { buildMyDataCommand } from './features/account/mydata-command.js';
 import { buildTutorialCommand } from './features/tutorial/tutorial-command.js';
 import { buildContextMenuCommands, BotPresenceManager } from './features/discord-ux/index.js';
@@ -953,13 +954,16 @@ async function main(): Promise<void> {
         allCommands.push(setupCmd.toJSON());
         const forgetMeCmd = buildForgetMeCommand();
         allCommands.push(forgetMeCmd.toJSON());
+        // Audit V2 Finding 13.2: /privacy command
+        const privacyCmd = buildPrivacyCommand();
+        allCommands.push(privacyCmd.toJSON());
         // V53 Phase 3: /mydata command
         const myDataCmd = buildMyDataCommand();
         allCommands.push(myDataCmd.toJSON());
         // V53 Phase 3: /tutorial command
         const tutorialCmd = buildTutorialCommand();
         allCommands.push(tutorialCmd.toJSON());
-        console.log('[Boot] ✅ /help, /setup, /forgetme, /mydata, and /tutorial commands queued');
+        console.log('[Boot] ✅ /help, /setup, /forgetme, /privacy, /mydata, and /tutorial commands queued');
 
         // 14c: Queue context menu commands (View Profile, Warn User, View Purchases, Create Ticket, Report Message)
         const contextMenuCmds = buildContextMenuCommands();
