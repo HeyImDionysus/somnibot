@@ -119,7 +119,8 @@ export async function GET() {
       .from('economy_role_income')
       .select('*')
       .eq('guild_id', ctx.guildId)
-      .order('amount', { ascending: false });
+      .order('amount', { ascending: false })
+      .limit(500);
 
     return NextResponse.json({
       success: true,

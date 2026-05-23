@@ -138,7 +138,8 @@ export async function POST(request: NextRequest) {
         .eq('customer_id', customer.id)
         .eq('revoked', false)
         .gt('expires_at', new Date().toISOString())
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true })
+        .limit(500);
 
       if (activeSessions && activeSessions.length >= MAX_CONCURRENT_SESSIONS) {
         // Revoke oldest sessions to make room
