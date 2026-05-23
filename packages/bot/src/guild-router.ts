@@ -22,9 +22,20 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('GuildRouter');
 
+/**
+ * V5 Audit [14.2]: Idle timeout for guild contexts. Guilds with no events
+ * for this duration are eligible for eviction to bound memory usage.
+ * On next event, the context is re-created via the existing lazy-init path.
+ */
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const EVICTION_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
+
 export class GuildRouter {
   private contexts = new Map<string, GuildContext>();
   private initializing = new Map<string, Promise<GuildContext>>();
+  /** Tracks last-access time per guild for LRU eviction */
+  private lastAccess = new Map<string, number>();
+  private evictionTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private client: Client,
@@ -32,7 +43,10 @@ export class GuildRouter {
     private valkey: Valkey,
     private eventBus: PlatformEventBus,
     private initCallback?: (ctx: GuildContext) => Promise<void>,
-  ) {}
+  ) {
+    // Start periodic eviction of idle guild contexts
+    this.evictionTimer = setInterval(() => this.evictIdle(), EVICTION_CHECK_INTERVAL_MS);
+  }
 
   /**
    * Get or create a GuildContext for the given guild ID.
@@ -40,6 +54,9 @@ export class GuildRouter {
    * the same initialization promise.
    */
   async getContext(guildId: string): Promise<GuildContext> {
+    // V5 Audit [14.2]: Update last-access timestamp for LRU eviction
+    this.lastAccess.set(guildId, Date.now());
+
     const existing = this.contexts.get(guildId);
     if (existing) return existing;
 
@@ -97,6 +114,7 @@ export class GuildRouter {
     if (ctx) {
       ctx.destroy();
       this.contexts.delete(guildId);
+      this.lastAccess.delete(guildId);
     }
   }
 
@@ -104,10 +122,36 @@ export class GuildRouter {
    * Destroy all contexts (shutdown).
    */
   destroyAll(): void {
+    if (this.evictionTimer) {
+      clearInterval(this.evictionTimer);
+      this.evictionTimer = null;
+    }
     for (const ctx of this.contexts.values()) {
       ctx.destroy();
     }
     this.contexts.clear();
+    this.lastAccess.clear();
+  }
+
+  /**
+   * V5 Audit [14.2]: Evict idle guild contexts that haven't received
+   * any events within IDLE_TIMEOUT_MS. Contexts are re-created lazily
+   * on next event via getContext().
+   */
+  private evictIdle(): void {
+    const now = Date.now();
+    const toEvict: string[] = [];
+
+    for (const [guildId, lastTime] of this.lastAccess) {
+      if (now - lastTime > IDLE_TIMEOUT_MS && this.contexts.has(guildId)) {
+        toEvict.push(guildId);
+      }
+    }
+
+    for (const guildId of toEvict) {
+      log.info('Evicting idle guild context', { guildId, idleMinutes: Math.round(IDLE_TIMEOUT_MS / 60_000) });
+      this.remove(guildId);
+    }
   }
 
   private async initContext(guildId: string): Promise<GuildContext> {
