@@ -130,6 +130,13 @@ async function main(): Promise<void> {
   client.once('ready', async () => {
     console.log('[Boot] Discord ready — initializing systems...');
 
+    // ── Primary Guild Boot ─────────────────────────────────
+    // The boot sequence below initializes feature managers for the primary
+    // guild (client.guildId). For multi-guild support, the GuildRouter
+    // handles additional guilds via lazy initialization in its initCallback.
+    // Event handlers (handler.ts) already accept events from ANY guild
+    // the bot is in, not just the primary one.
+
     // Auto-detect guild ID if not set
     if (!client.guildId) {
       const guilds = client.guilds.cache;

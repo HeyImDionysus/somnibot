@@ -24,7 +24,7 @@ const CONFIG_TTL = 60_000;
 let _configCache: MessageLogConfig | null = null;
 let _configCacheTime = 0;
 
-async function loadConfig(client: SomniClient): Promise<MessageLogConfig> {
+async function loadConfig(client: SomniClient, guildId: string): Promise<MessageLogConfig> {
   const now = Date.now();
   if (_configCache && now - _configCacheTime < CONFIG_TTL) {
     return _configCache;
@@ -33,7 +33,7 @@ async function loadConfig(client: SomniClient): Promise<MessageLogConfig> {
   const { data } = await client.supabase
     .from('guild_config')
     .select('message_log_enabled, message_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', guildId)
     .maybeSingle();
 
   _configCache = {
@@ -59,10 +59,10 @@ export async function logMessageEdit(
 ): Promise<void> {
   // Ignore bot messages, embeds-only changes, and non-guild messages
   if (newMessage.author?.bot) return;
-  if (!newMessage.guild || newMessage.guild.id !== client.guildId) return;
+  if (!newMessage.guild) return;
   if (oldMessage.content === newMessage.content) return; // Embed update, not a content edit
 
-  const config = await loadConfig(client);
+  const config = await loadConfig(client, newMessage.guild.id);
   if (!config.message_log_enabled || !config.message_log_channel_id) return;
 
   const logChannel = newMessage.guild.channels.cache.get(config.message_log_channel_id) as TextChannel | undefined;
@@ -108,9 +108,9 @@ export async function logMessageDelete(
 ): Promise<void> {
   // Ignore bot messages and non-guild messages
   if (message.author?.bot) return;
-  if (!message.guild || message.guild.id !== client.guildId) return;
+  if (!message.guild) return;
 
-  const config = await loadConfig(client);
+  const config = await loadConfig(client, message.guild.id);
   if (!config.message_log_enabled || !config.message_log_channel_id) return;
 
   // Don't log deletions in the log channel itself
