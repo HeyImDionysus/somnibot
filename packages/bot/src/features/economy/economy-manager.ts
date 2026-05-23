@@ -12,6 +12,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Economy');
 
@@ -164,7 +165,7 @@ export class EconomyManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client (economy tables not in generated schema yet)
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -192,35 +193,37 @@ export class EconomyManager {
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
+    // Cast — generic Supabase types don't include column names without codegen
+    const cfg = data as Record<string, unknown> | null;
     this.configCache = {
-      economy_enabled: data?.economy_enabled ?? false,
-      currency_name: data?.currency_name ?? 'Coins',
-      currency_emoji: data?.currency_emoji ?? '🪙',
-      economy_starting_balance: data?.economy_starting_balance ?? 0,
-      economy_daily_amount: data?.economy_daily_amount ?? 500,
-      economy_weekly_amount: data?.economy_weekly_amount ?? 3500,
-      economy_monthly_amount: data?.economy_monthly_amount ?? 15000,
-      economy_streak_bonus_pct: data?.economy_streak_bonus_pct ?? 5,
-      economy_work_cooldown_seconds: data?.economy_work_cooldown_seconds ?? 1800,
-      economy_work_min: data?.economy_work_min ?? 100,
-      economy_work_max: data?.economy_work_max ?? 500,
-      economy_crime_success_pct: data?.economy_crime_success_pct ?? 40,
-      economy_crime_fine_pct: data?.economy_crime_fine_pct ?? 50,
-      economy_crime_min: data?.economy_crime_min ?? 200,
-      economy_crime_max: data?.economy_crime_max ?? 1000,
-      economy_chat_income_enabled: data?.economy_chat_income_enabled ?? false,
-      economy_chat_income_min: data?.economy_chat_income_min ?? 5,
-      economy_chat_income_max: data?.economy_chat_income_max ?? 15,
-      economy_chat_income_cooldown_seconds: data?.economy_chat_income_cooldown_seconds ?? 60,
-      economy_rob_enabled: data?.economy_rob_enabled ?? true,
-      economy_rob_success_pct: data?.economy_rob_success_pct ?? 35,
-      economy_rob_fine_pct: data?.economy_rob_fine_pct ?? 50,
-      economy_heist_enabled: data?.economy_heist_enabled ?? true,
-      economy_passive_mode_allowed: data?.economy_passive_mode_allowed ?? true,
-      economy_pay_tax_pct: data?.economy_pay_tax_pct ?? 0,
-      economy_max_wallet: data?.economy_max_wallet ?? 0,
-      economy_max_bank: data?.economy_max_bank ?? 0,
-      economy_log_channel_id: data?.economy_log_channel_id ?? null,
+      economy_enabled: cfg?.economy_enabled ?? false,
+      currency_name: cfg?.currency_name ?? 'Coins',
+      currency_emoji: cfg?.currency_emoji ?? '🪙',
+      economy_starting_balance: cfg?.economy_starting_balance ?? 0,
+      economy_daily_amount: cfg?.economy_daily_amount ?? 500,
+      economy_weekly_amount: cfg?.economy_weekly_amount ?? 3500,
+      economy_monthly_amount: cfg?.economy_monthly_amount ?? 15000,
+      economy_streak_bonus_pct: cfg?.economy_streak_bonus_pct ?? 5,
+      economy_work_cooldown_seconds: cfg?.economy_work_cooldown_seconds ?? 1800,
+      economy_work_min: cfg?.economy_work_min ?? 100,
+      economy_work_max: cfg?.economy_work_max ?? 500,
+      economy_crime_success_pct: cfg?.economy_crime_success_pct ?? 40,
+      economy_crime_fine_pct: cfg?.economy_crime_fine_pct ?? 50,
+      economy_crime_min: cfg?.economy_crime_min ?? 200,
+      economy_crime_max: cfg?.economy_crime_max ?? 1000,
+      economy_chat_income_enabled: cfg?.economy_chat_income_enabled ?? false,
+      economy_chat_income_min: cfg?.economy_chat_income_min ?? 5,
+      economy_chat_income_max: cfg?.economy_chat_income_max ?? 15,
+      economy_chat_income_cooldown_seconds: cfg?.economy_chat_income_cooldown_seconds ?? 60,
+      economy_rob_enabled: cfg?.economy_rob_enabled ?? true,
+      economy_rob_success_pct: cfg?.economy_rob_success_pct ?? 35,
+      economy_rob_fine_pct: cfg?.economy_rob_fine_pct ?? 50,
+      economy_heist_enabled: cfg?.economy_heist_enabled ?? true,
+      economy_passive_mode_allowed: cfg?.economy_passive_mode_allowed ?? true,
+      economy_pay_tax_pct: cfg?.economy_pay_tax_pct ?? 0,
+      economy_max_wallet: cfg?.economy_max_wallet ?? 0,
+      economy_max_bank: cfg?.economy_max_bank ?? 0,
+      economy_log_channel_id: cfg?.economy_log_channel_id ?? null,
     };
     this.configCacheTime = now;
     return this.configCache;
@@ -1061,12 +1064,12 @@ export class EconomyManager {
       await this.creditWallet(userId, totalCost);
       // Restore stock if limited
       if (item.stock != null) {
-        await this.supabase.rpc('economy_upsert_inventory', {
+        await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: 'shop',
           p_item_id: itemId,
           p_quantity: quantity,
-        }).catch((err: unknown) => {
+        })).catch((err: unknown) => {
           // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
           log.error('CRITICAL: buyItem stock restore failed', { itemId, quantity, detail: err });
         });
@@ -1150,12 +1153,12 @@ export class EconomyManager {
     const updated = await this.creditWallet(userId, totalValue);
     if (!updated) {
       // Restore the decremented items
-      await this.supabase.rpc('economy_upsert_inventory', {
+      await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_item_id: itemId,
         p_quantity: quantity,
-      }).catch((err: unknown) => {
+      })).catch((err: unknown) => {
         // V53-L1: Log item restore failures — if this fails, items are permanently lost
         log.error('CRITICAL: sellItem item restore failed', { userId, itemId, quantity, detail: err });
       });

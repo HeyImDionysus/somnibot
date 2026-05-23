@@ -26,7 +26,8 @@ export async function GET(request: NextRequest) {
     .from('action_queue_dlq')
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
-    .order('failed_at', { ascending: false });
+    .order('failed_at', { ascending: false })
+    .limit(500);
 
   if (filter === 'pending') {
     query = query.eq('acknowledged', false).eq('retried', false);

@@ -39,7 +39,8 @@ export async function GET(
       .from('incident_events')
       .select('*')
       .eq('incident_id', id)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true })
+      .limit(500);
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ success: true, data });

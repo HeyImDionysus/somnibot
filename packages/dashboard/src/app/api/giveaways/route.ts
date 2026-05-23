@@ -22,7 +22,8 @@ export async function GET() {
     .from('giveaways')
     .select('*')
     .eq('guild_id', guildId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(500);
 
   if (error) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });

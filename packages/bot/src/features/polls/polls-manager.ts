@@ -29,7 +29,7 @@ export class PollsManager {
   private configCache = new Map<string, DbGuildConfig>();
 
   constructor(supabase: SupabaseClient) {
-    this.supabase = supabase as any;
+    this.supabase = supabase;
   }
 
   clearCache(): void { this.configCache.clear(); }
@@ -37,7 +37,7 @@ export class PollsManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
@@ -64,7 +64,7 @@ export class PollsManager {
     }
 
     // Create poll
-    const { data: poll } = await (this.supabase as any)
+    const { data: poll } = await this.supabase
       .from('polls')
       .insert({
         guild_id: guildId,
@@ -88,7 +88,7 @@ export class PollsManager {
       sort_order: i,
     }));
 
-    const { data: insertedOptions } = await (this.supabase as any)
+    const { data: insertedOptions } = await this.supabase
       .from('poll_options')
       .insert(optionRows)
       .select();
@@ -126,7 +126,7 @@ export class PollsManager {
 
     // Store message ID
     const reply = await interaction.fetchReply();
-    await (this.supabase as any)
+    await this.supabase
       .from('polls')
       .update({ message_id: reply.id })
       .eq('id', poll.id);
@@ -140,7 +140,7 @@ export class PollsManager {
     const userId = buttonInteraction.user.id;
 
     // Check poll exists and is active
-    const { data: poll } = await (this.supabase as any)
+    const { data: poll } = await this.supabase
       .from('polls')
       .select('*')
       .eq('id', pollId)
@@ -156,7 +156,7 @@ export class PollsManager {
       // if the user has no existing vote on this poll. The previous
       // read-then-write pattern let concurrent clicks both pass the
       // "already voted?" check and insert duplicate votes.
-      const { data: voteRows, error: voteErr } = await (this.supabase as any).rpc('poll_vote_single', {
+      const { data: voteRows, error: voteErr } = await this.supabase.rpc('poll_vote_single', {
         p_poll_id: pollId,
         p_option_id: optionId,
         p_user_id: userId,
@@ -186,7 +186,7 @@ export class PollsManager {
 
     // Multi-vote polls: check if already voted for this specific option
     // The uniq_poll_vote_per_option unique index is the authoritative gate.
-    const { error: insertErr } = await (this.supabase as any)
+    const { error: insertErr } = await this.supabase
       .from('poll_votes')
       .insert({
         poll_id: pollId,
@@ -210,7 +210,7 @@ export class PollsManager {
   }
 
   async closePoll(interaction: ChatInputCommandInteraction, pollId: string): Promise<void> {
-    const { data: poll } = await (this.supabase as any)
+    const { data: poll } = await this.supabase
       .from('polls')
       .select('*')
       .eq('id', pollId)
@@ -228,7 +228,7 @@ export class PollsManager {
 
     // V47-L2: gate the status flip on the current status so concurrent /poll close
     // (or a retry after a deferred reply) cannot reset closed_at or re-post results.
-    const { data: closedRows } = await (this.supabase as any)
+    const { data: closedRows } = await this.supabase
       .from('polls')
       .update({ status: 'closed', closed_at: new Date().toISOString() })
       .eq('id', pollId)
@@ -241,7 +241,7 @@ export class PollsManager {
     }
 
     // Get results
-    const { data: options } = await (this.supabase as any)
+    const { data: options } = await this.supabase
       .from('poll_options')
       .select('*')
       .eq('poll_id', pollId)
@@ -250,9 +250,10 @@ export class PollsManager {
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
     const results: string[] = [];
 
-    for (let i = 0; i < (options ?? []).length; i++) {
-      const opt = options[i];
-      const { count } = await (this.supabase as any)
+    const safeOptions = options ?? [];
+    for (let i = 0; i < safeOptions.length; i++) {
+      const opt = safeOptions[i];
+      const { count } = await this.supabase
         .from('poll_votes')
         .select('*', { count: 'exact', head: true })
         .eq('option_id', opt.id);
@@ -287,7 +288,7 @@ export class PollsManager {
       return;
     }
 
-    const { data: prediction } = await (this.supabase as any)
+    const { data: prediction } = await this.supabase
       .from('predictions')
       .insert({
         guild_id: guildId,
@@ -309,7 +310,7 @@ export class PollsManager {
       sort_order: i,
     }));
 
-    const { data: insertedOptions } = await (this.supabase as any)
+    const { data: insertedOptions } = await this.supabase
       .from('prediction_options')
       .insert(optionRows)
       .select();
@@ -330,7 +331,7 @@ export class PollsManager {
     await interaction.reply({ embeds: [embed] });
 
     const reply = await interaction.fetchReply();
-    await (this.supabase as any)
+    await this.supabase
       .from('predictions')
       .update({ message_id: reply.id })
       .eq('id', prediction.id);
@@ -345,7 +346,7 @@ export class PollsManager {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
 
-    const { data: prediction } = await (this.supabase as any)
+    const { data: prediction } = await this.supabase
       .from('predictions')
       .select('*')
       .eq('id', predictionId)
@@ -357,7 +358,7 @@ export class PollsManager {
     }
 
     // Check for existing bet
-    const { data: existingBet } = await (this.supabase as any)
+    const { data: existingBet } = await this.supabase
       .from('prediction_bets')
       .select('id')
       .eq('prediction_id', predictionId)
@@ -371,7 +372,7 @@ export class PollsManager {
     }
 
     // Get option
-    const { data: options } = await (this.supabase as any)
+    const { data: options } = await this.supabase
       .from('prediction_options')
       .select('*')
       .eq('prediction_id', predictionId)
@@ -383,7 +384,7 @@ export class PollsManager {
     }
 
     // Check balance
-    const { data: wallet } = await (this.supabase as any)
+    const { data: wallet } = await this.supabase
       .from('economy_wallets')
       .select('wallet')
       .eq('guild_id', guildId)
@@ -399,7 +400,7 @@ export class PollsManager {
     // constraint is the authoritative gate. Only debit after the row is owned
     // by this user — otherwise a concurrent /predict bet from the same user
     // would silently consume their coins on the losing race.
-    const { data: insertedBet, error: insertErr } = await (this.supabase as any)
+    const { data: insertedBet, error: insertErr } = await this.supabase
       .from('prediction_bets')
       .insert({
         prediction_id: predictionId,
@@ -422,12 +423,12 @@ export class PollsManager {
     }
 
     // Deduct balance — bet is already locked in.
-    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: amount,
     });
     if (debitErr) {
       // Roll back the bet so we don't credit the user with a free bet.
-      await (this.supabase as any)
+      await this.supabase
         .from('prediction_bets')
         .delete()
         .eq('id', insertedBet.id);
@@ -440,7 +441,7 @@ export class PollsManager {
     // but the predictions.total_pool snapshot would be short, and
     // resolvePrediction would under-pay every winner. On failure,
     // refund the user and delete the bet so the books reconcile.
-    const { data: newPool, error: poolErr } = await (this.supabase as any).rpc(
+    const { data: newPool, error: poolErr } = await this.supabase.rpc(
       'economy_increment_prediction_pool',
       { p_prediction_id: predictionId, p_amount: amount },
     );
@@ -449,7 +450,7 @@ export class PollsManager {
       // Compensate: re-credit and delete the bet so we don't keep a
       // ghost bet that resolvePrediction will try to pay out of a pool
       // that doesn't include it.
-      const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: amount,
       });
       if (refundErr) {
@@ -457,7 +458,7 @@ export class PollsManager {
           predictionId, userId, amount, poolErr: poolErr.message, refundErr: refundErr.message,
         });
       }
-      await (this.supabase as any)
+      await this.supabase
         .from('prediction_bets')
         .delete()
         .eq('id', insertedBet.id);
@@ -486,7 +487,7 @@ export class PollsManager {
   ): Promise<void> {
     const guildId = interaction.guildId!;
 
-    const { data: prediction } = await (this.supabase as any)
+    const { data: prediction } = await this.supabase
       .from('predictions')
       .select('*')
       .eq('id', predictionId)
@@ -502,7 +503,7 @@ export class PollsManager {
       return;
     }
 
-    const { data: options } = await (this.supabase as any)
+    const { data: options } = await this.supabase
       .from('prediction_options')
       .select('*')
       .eq('prediction_id', predictionId)
@@ -519,7 +520,7 @@ export class PollsManager {
     // total_pool only when the status was still open/locked — otherwise
     // it returns no rows and we bail out without paying anyone. This
     // makes resolve idempotent against concurrent / retried clicks.
-    const { data: resolveRows, error: resolveErr } = await (this.supabase as any)
+    const { data: resolveRows, error: resolveErr } = await this.supabase
       .rpc('predictions_resolve_atomic', {
         p_prediction_id: predictionId,
         p_winning_option_id: winningOption.id,
@@ -539,7 +540,7 @@ export class PollsManager {
     const finalTotalPool: number = resolved.total_pool ?? 0;
 
     // Get all bets (after the status flip — no new bets can land now)
-    const { data: allBets } = await (this.supabase as any)
+    const { data: allBets } = await this.supabase
       .from('prediction_bets')
       .select('*')
       .eq('prediction_id', predictionId);
@@ -563,14 +564,14 @@ export class PollsManager {
     if (winningBets.length === 0) {
       for (const bet of allBetsArr) {
         if (bet.payout != null) continue;
-        const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: bet.user_id, p_amount: bet.amount,
         });
         if (refundErr) {
           log.error(`Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
           continue;
         }
-        await (this.supabase as any)
+        await this.supabase
           .from('prediction_bets')
           .update({ payout: bet.amount })
           .eq('id', bet.id);
@@ -586,7 +587,7 @@ export class PollsManager {
         const share = totalWinnerPool > 0 ? bet.amount / totalWinnerPool : 0;
         const payout = Math.floor(finalTotalPool * share);
 
-        const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
         });
         if (payoutErr) {
@@ -594,7 +595,7 @@ export class PollsManager {
           continue;
         }
 
-        await (this.supabase as any)
+        await this.supabase
           .from('prediction_bets')
           .update({ payout })
           .eq('id', bet.id);

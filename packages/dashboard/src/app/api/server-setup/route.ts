@@ -47,14 +47,16 @@ export async function GET() {
     .from('role_templates')
     .select('*')
     .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .limit(500);
 
   // Get channel templates
   const { data: channelTemplates } = await admin
     .from('channel_templates')
     .select('*')
     .eq('guild_id', guildId)
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .limit(500);
 
   const isDeployed = desiredState?.applied_at !== null && desiredState?.applied_at !== undefined;
   const hasDesiredState = desiredState?.roles && desiredState.roles.length > 0;

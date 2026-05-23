@@ -7,6 +7,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { z } from 'zod';
+
+const reconciliationTriggerSchema = z.object({
+  trigger: z.enum(['manual', 'scheduled']).default('manual'),
+}).strict().optional();
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -61,11 +66,29 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Validate optional body
+  let trigger = 'manual';
+  try {
+    const text = await req.text();
+    if (text.trim()) {
+      const parsed = reconciliationTriggerSchema.safeParse(JSON.parse(text));
+      if (!parsed.success) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid request body', details: parsed.error.issues },
+          { status: 400 },
+        );
+      }
+      trigger = parsed.data?.trigger ?? 'manual';
+    }
+  } catch {
+    // Empty body is fine — default to manual trigger
+  }
+
   // Enqueue a reconciliation action for the bot to pick up
   await supabase.from('bot_action_queue').insert({
     guild_id: guildId,
     action: 'run_reconciliation',
-    payload: { trigger: 'manual' },
+    payload: { trigger },
     status: 'pending',
   });
 
