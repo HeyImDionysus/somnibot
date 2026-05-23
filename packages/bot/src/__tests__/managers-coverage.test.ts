@@ -217,12 +217,12 @@ describe('AdventureManager', () => {
 
 describe('GamesManager', () => {
   it('constructs without error', () => {
-    const mgr = new GamesManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new GamesManager(makeSupabase());
     expect(mgr).toBeDefined();
   });
 
   it('register + invalidate works', () => {
-    const mgr = new GamesManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new GamesManager(makeSupabase());
     registerGamesManager(mgr);
     invalidateGamesCache();
     expect(true).toBe(true);
@@ -231,18 +231,18 @@ describe('GamesManager', () => {
 
 describe('HeistManager', () => {
   it('constructs without error', () => {
-    const mgr = new HeistManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
     expect(mgr).toBeDefined();
   });
 
   it('register + get pattern works', () => {
-    const mgr = new HeistManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
     registerHeistManager(mgr);
     expect(getHeistManager()).toBe(mgr);
   });
 
   it('invalidateCache does not throw', () => {
-    const mgr = new HeistManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
     registerHeistManager(mgr);
     invalidateHeistCache();
     expect(true).toBe(true);
@@ -251,28 +251,28 @@ describe('HeistManager', () => {
 
 describe('PollsManager', () => {
   it('constructs without error', () => {
-    const mgr = new PollsManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new PollsManager(makeSupabase());
     expect(mgr).toBeDefined();
   });
 });
 
 describe('PetsManager', () => {
   it('constructs without error', () => {
-    const mgr = new PetsManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new PetsManager(makeSupabase(), {} as any, makeValkey());
     expect(mgr).toBeDefined();
   });
 });
 
 describe('LotteryManager', () => {
   it('constructs without error', () => {
-    const mgr = new LotteryManager({} as any, makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new LotteryManager(makeSupabase(), {} as any);
     expect(mgr).toBeDefined();
   });
 });
 
 describe('GiveawayManager', () => {
   it('constructs without error', () => {
-    const mgr = new GiveawayManager(makeGuild(), makeSupabase(), makeValkey());
+    const mgr = new GiveawayManager(makeGuild(), makeSupabase(), makeValkey(), {} as any);
     expect(mgr).toBeDefined();
   });
 });
