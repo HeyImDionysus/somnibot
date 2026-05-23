@@ -110,11 +110,13 @@ export async function invalidateThemeCache(
   if (featureKey) {
     await valkey.del(`${CACHE_PREFIX}:${guildId}:${featureKey}`);
   } else {
-    // Invalidate all for this guild
-    const keys = await valkey.keys(`${CACHE_PREFIX}:${guildId}:*`);
-    if (keys.length > 0) {
-      await valkey.del(...keys);
-    }
+    // Invalidate all for this guild (SCAN instead of KEYS — V5 audit 6.1)
+    let cursor = '0';
+    do {
+      const [next, batch] = await valkey.scan(cursor, 'MATCH', `${CACHE_PREFIX}:${guildId}:*`, 'COUNT', '100');
+      cursor = next;
+      if (batch.length > 0) await valkey.del(...batch);
+    } while (cursor !== '0');
   }
 }
 
