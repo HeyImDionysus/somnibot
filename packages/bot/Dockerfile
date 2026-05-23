@@ -4,7 +4,10 @@
 # ============================================================
 
 # --- Stage 1: Install & Build ---
-FROM node:22-alpine AS builder
+# FIX #13: Use node:22-slim (glibc) instead of node:22-alpine (musl)
+# to match the glibc-based oven/bun:1-slim runtime. Native addons
+# compiled for musl (e.g. @napi-rs/canvas) crash on glibc runtime.
+FROM node:22-slim AS builder
 
 WORKDIR /app
 

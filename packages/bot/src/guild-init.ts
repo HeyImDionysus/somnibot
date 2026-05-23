@@ -230,7 +230,11 @@ export async function initGuildFeatures(
     await loadReactionRoles(supabase, valkey, guildId);
 
     const rest = new REST({ version: '10' }).setToken(client.env.DISCORD_TOKEN);
-    await loadCustomCommands(supabase, guild, rest);
+    // FIX #15: loadCustomCommands now returns command JSON bodies to merge
+    // into allCommands so the bulk PUT includes them (instead of separate
+    // POST calls that get overwritten by the bulk PUT on every restart).
+    const customCmdBodies = await loadCustomCommands(supabase, guild, rest);
+    for (const body of customCmdBodies) allCommands.push(body);
     guildLog.info('Levels, reaction roles, custom commands loaded');
   } catch (err) {
     guildLog.error('Levels/reaction roles init error', { error: String(err) });

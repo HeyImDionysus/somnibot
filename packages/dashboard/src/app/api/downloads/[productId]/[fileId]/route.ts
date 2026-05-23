@@ -21,7 +21,9 @@ export async function GET(
   const supabase = createAdminSupabase();
 
   // ── Auth: require a valid portal token ──
-  const token = req.headers.get('x-portal-token');
+  // FIX #1: Accept token via query param as fallback for <a href> downloads
+  // (browser navigation can't send custom headers on anchor clicks)
+  const token = req.headers.get('x-portal-token') || req.nextUrl.searchParams.get('token');
   if (!token) {
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
   }
