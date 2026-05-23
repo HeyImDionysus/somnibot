@@ -5,6 +5,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -173,6 +174,9 @@ export async function GET() {
  * PUT /api/settings — Save settings for a section.
  */
 export async function PUT(request: Request) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   try {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
