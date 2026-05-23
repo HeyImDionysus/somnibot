@@ -10,7 +10,9 @@ import { EmbedBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
-import { SOMNI_PALETTE } from '@somnibot/shared';
+import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+
+const log = createLogger('GiveawayFulfillment');
 
 export class GiveawayFulfillmentService {
   private guild: Guild;
@@ -31,10 +33,10 @@ export class GiveawayFulfillmentService {
   start(): void {
     this.eventBus.on('giveaway.ended', (event) => {
       this.handleGiveawayEnded(event.data).catch((err) => {
-        console.error('[GiveawayFulfillment] Error handling giveaway end:', err);
+        log.error('Error handling giveaway end:', { error: String(err) });
       });
     });
-    console.log('[GiveawayFulfillment] Service started — listening for giveaway.ended');
+    log.info('Service started — listening for giveaway.ended');
   }
 
   private async handleGiveawayEnded(data: {
@@ -49,7 +51,7 @@ export class GiveawayFulfillmentService {
     const title = data.title;
 
     if (!winnerIds || winnerIds.length === 0) {
-      console.log(`[GiveawayFulfillment] No winners for giveaway ${giveawayId} — skipping`);
+      log.info(`No winners for giveaway ${giveawayId} — skipping`);
       return;
     }
 
@@ -60,7 +62,7 @@ export class GiveawayFulfillmentService {
 
     // If there's no product prize, we're done
     if (!prizeProductId) {
-      console.log(`[GiveawayFulfillment] Giveaway ${giveawayId} has no product prize — DMs sent`);
+      log.info(`Giveaway ${giveawayId} has no product prize — DMs sent`);
       return;
     }
 
@@ -72,11 +74,11 @@ export class GiveawayFulfillmentService {
       .single();
 
     if (!product) {
-      console.error(`[GiveawayFulfillment] Product ${prizeProductId} not found — cannot fulfill`);
+      log.error(`Product ${prizeProductId} not found — cannot fulfill`);
       return;
     }
 
-    console.log(`[GiveawayFulfillment] Fulfilling ${winnerIds.length} winner(s) for "${product.name}"`);
+    log.info(`Fulfilling ${winnerIds.length} winner(s) for "${product.name}"`);
 
     let fulfilled = 0;
     for (const winnerId of winnerIds) {
@@ -111,7 +113,7 @@ export class GiveawayFulfillmentService {
         }
 
         if (!customerId) {
-          console.error(`[GiveawayFulfillment] Could not find/create customer for ${winnerId}`);
+          log.error(`Could not find/create customer for ${winnerId}`);
           continue;
         }
 
@@ -130,14 +132,14 @@ export class GiveawayFulfillmentService {
 
         if (entitlementId) {
           fulfilled++;
-          console.log(`[GiveawayFulfillment] ✅ Granted "${product.name}" to ${winnerId}`);
+          log.info(`Granted "${product.name}" to ${winnerId}`);
         }
       } catch (err) {
-        console.error(`[GiveawayFulfillment] Failed to fulfill for ${winnerId}:`, err);
+        log.error(`Failed to fulfill for ${winnerId}:`, err);
       }
     }
 
-    console.log(`[GiveawayFulfillment] Fulfilled ${fulfilled}/${winnerIds.length} winners for giveaway ${giveawayId}`);
+    log.info(`Fulfilled ${fulfilled}/${winnerIds.length} winners for giveaway ${giveawayId}`);
   }
 
   /**
@@ -163,7 +165,7 @@ export class GiveawayFulfillmentService {
       await member.send({ embeds: [embed] });
     } catch {
       // DMs may be disabled — not an error
-      console.warn(`[GiveawayFulfillment] Could not DM winner ${winnerId}`);
+      log.warn(`Could not DM winner ${winnerId}`);
     }
   }
 }

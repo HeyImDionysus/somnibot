@@ -48,6 +48,9 @@ import { invalidateQuestsCache } from '../features/quests/index.js';
 import { invalidateAchievementsCache } from '../features/achievements/index.js';
 import { invalidateProfilesCache } from '../features/profiles/index.js';
 import { invalidateHeistCache } from '../features/heist/index.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ConfigWatcher');
 
 interface ConfigCache {
   guildConfig: Record<string, unknown> | null;
@@ -80,11 +83,11 @@ export class ConfigWatcher {
       // while still processing different sections that arrive close together.
       const lastReload = this.cache.sectionLastReload.get(section) ?? 0;
       if (now - lastReload < this.reloadCooldownMs) {
-        console.log(`[ConfigWatcher] Skipping reload (cooldown) — section: ${section}`);
+        log.info(`Skipping reload (cooldown) — section: ${section}`);
         return;
       }
 
-      console.log(`[ConfigWatcher] Config changed: ${section} (by ${event.data.changedBy})`);
+      log.info(`Config changed: ${section} (by ${event.data.changedBy})`);
       this.cache.sectionLastReload.set(section, now);
 
       try {
@@ -154,7 +157,7 @@ export class ConfigWatcher {
             invalidateAchievementsCache();
             invalidateProfilesCache();
             invalidateHeistCache();
-            console.log('[ConfigWatcher] Economy/Gathering/Crafting/Farming config cache invalidated');
+            log.info('Economy/Gathering/Crafting/Farming config cache invalidated');
             break;
           case 'all':
             await this.reloadAll();
@@ -165,11 +168,11 @@ export class ConfigWatcher {
             break;
         }
       } catch (err) {
-        console.error(`[ConfigWatcher] Failed to reload ${section}:`, err);
+        log.error(`Failed to reload ${section}:`, err);
       }
     });
 
-    console.log('[ConfigWatcher] Watching for config changes');
+    log.info('Watching for config changes');
   }
 
   // ── Section Reloaders ──────────────────────────────────
@@ -189,108 +192,108 @@ export class ConfigWatcher {
         JSON.stringify(data),
         'EX',
         300, // 5 min TTL
-      ).catch((e: unknown) => { console.warn('[Silent] Suppressed error:', (e as Error)?.message ?? e); });
-      console.log('[ConfigWatcher] ✅ Guild config reloaded');
+      ).catch((e: unknown) => { log.warn('Suppressed error:', (e as Error)?.message ?? e); });
+      log.info('Guild config reloaded');
     }
   }
 
   private async reloadModeration(): Promise<void> {
     // Guild config already loaded by reloadAll() caller
     // Clear cached automod rules
-    await this.valkey.del('automod:rules').catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.valkey.del('automod:rules').catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Clear cached infraction config
-    await this.valkey.del(`infraction:config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Moderation config reloaded');
+    await this.valkey.del(`infraction:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Moderation config reloaded');
   }
 
   private async reloadLevels(): Promise<void> {
     // Guild config already loaded by reloadAll() caller
     // Clear cached level config (Valkey)
-    await this.valkey.del(`levels:config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    await this.valkey.del(`levels:rewards:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.valkey.del(`levels:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.valkey.del(`levels:rewards:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Clear in-memory caches in xp-tracker (config, multipliers, rewards)
     invalidateLevelCaches();
-    console.log('[ConfigWatcher] ✅ Levels config reloaded');
+    log.info('Levels config reloaded');
   }
 
   private async reloadWelcome(): Promise<void> {
     // Guild config already loaded by reloadAll() caller
     // Clear cached welcome messages
-    await this.valkey.del(`welcome:config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Welcome config reloaded');
+    await this.valkey.del(`welcome:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Welcome config reloaded');
   }
 
   private async reloadCommerce(): Promise<void> {
     // Clear cached product data
-    await this.valkey.del(`commerce:products:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Commerce config reloaded');
+    await this.valkey.del(`commerce:products:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Commerce config reloaded');
   }
 
   private async reloadMusic(skipGuildConfig = false): Promise<void> {
     if (!skipGuildConfig) await this.reloadGuildConfig();
-    await this.valkey.del(`music:config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Music config reloaded');
+    await this.valkey.del(`music:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Music config reloaded');
   }
 
   private async reloadTickets(): Promise<void> {
     // Clear cached ticket panel data
-    await this.valkey.del(`tickets:panels:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Tickets config reloaded');
+    await this.valkey.del(`tickets:panels:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Tickets config reloaded');
   }
 
   private async reloadAutomations(): Promise<void> {
     // Automations are loaded from DB on each event via AutomationEngine
     // Just clear any cached rules
-    await this.valkey.del(`automations:rules:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Automations config reloaded');
+    await this.valkey.del(`automations:rules:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Automations config reloaded');
   }
 
   private async reloadOnboarding(skipGuildConfig = false): Promise<void> {
     if (!skipGuildConfig) await this.reloadGuildConfig();
-    await this.valkey.del(`onboarding:config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.valkey.del(`onboarding:config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Also invalidate the guild_config cache used by the onboarding handler
-    await this.valkey.del(`guild_config:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Onboarding config reloaded');
+    await this.valkey.del(`guild_config:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Onboarding config reloaded');
   }
 
   private async reloadReactionRoles(): Promise<void> {
-    await this.valkey.del(`reaction-roles:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
+    await this.valkey.del(`reaction-roles:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     // Delete all individual reaction role cache keys for this guild
     const keys = await this.valkey.keys(`rr:${this.guild.id}:*`).catch(() => [] as string[]);
     if (keys.length > 0) {
-      await this.valkey.del(...keys).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
+      await this.valkey.del(...keys).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
     }
-    console.log('[ConfigWatcher] ✅ Reaction roles reloaded');
+    log.info('Reaction roles reloaded');
   }
 
   private async reloadGiveaways(): Promise<void> {
-    await this.valkey.del(`giveaways:active:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Giveaways config reloaded');
+    await this.valkey.del(`giveaways:active:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Giveaways config reloaded');
   }
 
   private async reloadTempChannels(): Promise<void> {
-    await this.valkey.del(`temp-channels:hubs:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Temp channels config reloaded');
+    await this.valkey.del(`temp-channels:hubs:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Temp channels config reloaded');
   }
 
   private async reloadScheduledMessages(): Promise<void> {
-    await this.valkey.del(`scheduled-messages:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Scheduled messages config reloaded');
+    await this.valkey.del(`scheduled-messages:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Scheduled messages config reloaded');
   }
 
   private async reloadCustomCommands(): Promise<void> {
-    await this.valkey.del(`custom-commands:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Custom commands config reloaded');
+    await this.valkey.del(`custom-commands:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Custom commands config reloaded');
   }
 
   private async reloadStatsChannels(): Promise<void> {
-    await this.valkey.del(`stats-channels:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Stats channels config reloaded');
+    await this.valkey.del(`stats-channels:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Stats channels config reloaded');
   }
 
   private async reloadEmbeds(): Promise<void> {
-    await this.valkey.del(`embeds:${this.guild.id}`).catch((e: unknown) => { console.warn('[Cache] Valkey operation failed:', (e as Error)?.message ?? e); });
-    console.log('[ConfigWatcher] ✅ Embeds config reloaded');
+    await this.valkey.del(`embeds:${this.guild.id}`).catch((e: unknown) => { log.warn('Valkey operation failed:', (e as Error)?.message ?? e); });
+    log.info('Embeds config reloaded');
   }
 
   private async reloadAll(): Promise<void> {
@@ -332,7 +335,7 @@ export class ConfigWatcher {
     invalidateAchievementsCache();
     invalidateProfilesCache();
     invalidateHeistCache();
-    console.log('[ConfigWatcher] ✅ Full config reload complete (incl. economy caches)');
+    log.info('Full config reload complete (incl. economy caches)');
   }
 
   /**

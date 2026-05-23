@@ -10,6 +10,9 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ScheduledRunner');
 
 interface ScheduledMessage {
   id: string;
@@ -146,7 +149,7 @@ export class ScheduledMessageRunner {
     await this.loadSchedules();
 
     if (this.schedules.length === 0) {
-      console.log('[ScheduledMessages] No active schedules');
+      log.info('No active schedules');
     }
 
     // Check every 60 seconds (aligned to minute boundary)
@@ -155,13 +158,13 @@ export class ScheduledMessageRunner {
 
     // Initial alignment
     setTimeout(() => {
-      this.tick().catch((err) => console.error('[ScheduledMessages] Tick error:', err));
+      this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
       this.timer = setInterval(() => {
-        this.tick().catch((err) => console.error('[ScheduledMessages] Tick error:', err));
+        this.tick().catch((err) => log.error('Tick error:', { error: String(err) }));
       }, 60_000);
     }, msToNextMinute);
 
-    console.log(`[ScheduledMessages] Started with ${this.schedules.length} schedules`);
+    log.info(`Started with ${this.schedules.length} schedules`);
   }
 
   async reload(): Promise<void> {
@@ -215,7 +218,7 @@ export class ScheduledMessageRunner {
 
         await this.sendMessage(schedule);
       } catch (err) {
-        console.error(`[ScheduledMessages] Error for schedule ${schedule.id}:`, err);
+        log.error(`Error for schedule ${schedule.id}:`, err);
       }
     }
   }
@@ -223,7 +226,7 @@ export class ScheduledMessageRunner {
   private async sendMessage(schedule: ScheduledMessage): Promise<void> {
     const channel = this.guild.channels.cache.get(schedule.channel_id) as TextChannel | undefined;
     if (!channel || !channel.isTextBased()) {
-      console.warn(`[ScheduledMessages] Channel ${schedule.channel_id} not found`);
+      log.warn(`Channel ${schedule.channel_id} not found`);
       return;
     }
 
@@ -278,6 +281,6 @@ export class ScheduledMessageRunner {
       })
       .eq('id', schedule.id);
 
-    console.log(`[ScheduledMessages] Sent "${schedule.name}" to #${channel.name}`);
+    log.info(`Sent "${schedule.name}" to #${channel.name}`);
   }
 }

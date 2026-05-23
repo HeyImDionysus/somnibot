@@ -13,6 +13,9 @@ import { eventBus } from './services/event-bus.js';
 import { getConfig, type BotEnv } from './config.js';
 import { GuildRouter } from './guild-router.js';
 import type { GuildContext } from './guild-context.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Client');
 
 /**
  * SomniClient — extends discord.js Client with platform infrastructure.
@@ -96,19 +99,19 @@ export class SomniClient extends Client {
     );
 
     this.shoukaku.on('ready', (name) => {
-      console.log(`[Shoukaku] Node "${name}" connected`);
+      log.info(`Node "${name}" connected`);
     });
 
     this.shoukaku.on('error', (name, error) => {
-      console.error(`[Shoukaku] Node "${name}" error:`, error);
+      log.error(`Node "${name}" error:`, error);
     });
 
     this.shoukaku.on('close', (name, code, reason) => {
-      console.warn(`[Shoukaku] Node "${name}" closed: ${code} — ${reason}`);
+      log.warn(`Node "${name}" closed: ${code} — ${reason}`);
     });
 
     this.shoukaku.on('disconnect', (name, count) => {
-      console.warn(`[Shoukaku] Node "${name}" disconnected, ${count} player(s) affected`);
+      log.warn(`Node "${name}" disconnected, ${count} player(s) affected`);
     });
   }
 }

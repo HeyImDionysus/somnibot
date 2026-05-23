@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
 import type { PlatformEventMap, PlatformEventType, PlatformEvent } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('EventBus');
 
 /**
  * Platform Event Bus — the central nervous system of SomniBot.
@@ -34,7 +37,7 @@ class PlatformEventBus {
       data,
     };
 
-    console.log(`[EventBus] ${type} in guild ${guildId}`);
+    log.info(`${type} in guild ${guildId}`);
     this.emitter.emit(type, event);
     // Also emit to a catch-all listener
     this.emitter.emit('*', event);

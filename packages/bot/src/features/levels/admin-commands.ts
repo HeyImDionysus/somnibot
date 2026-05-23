@@ -13,7 +13,9 @@ import {
   PermissionFlagsBits,
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
-import { calculateLevel } from '@somnibot/shared';
+import { calculateLevel , createLogger } from '@somnibot/shared';
+
+const log = createLogger('XPAdmin');
 
 /**
  * Build the /xp slash command with admin subcommands.
@@ -93,7 +95,7 @@ export async function handleXpAdminCommand(
       });
 
       if (rpcErr || !result) {
-        console.error('[XP Admin] increment_member_xp failed:', rpcErr?.message);
+        log.error('increment_member_xp failed:', rpcErr?.message);
         await interaction.editReply('❌ Failed to add XP. Please try again.');
         break;
       }
@@ -117,7 +119,7 @@ export async function handleXpAdminCommand(
       });
 
       if (rpcErr || !result) {
-        console.error('[XP Admin] increment_member_xp failed:', rpcErr?.message);
+        log.error('increment_member_xp failed:', rpcErr?.message);
         await interaction.editReply('❌ Failed to remove XP. Please try again.');
         break;
       }
@@ -149,7 +151,7 @@ export async function handleXpAdminCommand(
       );
 
       if (setErr) {
-        console.error('[XP Admin] set upsert failed:', setErr.message);
+        log.error('set upsert failed:', setErr.message);
         await interaction.editReply('❌ Failed to set XP. Please try again.');
         break;
       }
@@ -176,7 +178,7 @@ export async function handleXpAdminCommand(
       );
 
       if (resetErr) {
-        console.error('[XP Admin] reset upsert failed:', resetErr.message);
+        log.error('reset upsert failed:', resetErr.message);
         await interaction.editReply('❌ Failed to reset XP. Please try again.');
         break;
       }

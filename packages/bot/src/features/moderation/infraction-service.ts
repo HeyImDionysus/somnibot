@@ -9,6 +9,9 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { InfractionType } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('InfractionService');
 
 export interface CreateInfractionInput {
   guildId: string;
@@ -63,7 +66,7 @@ export async function createInfraction(
     .single();
 
   if (error) {
-    console.error('[Moderation] Failed to create infraction:', error.message);
+    log.error('Failed to create infraction:', error.message);
     return null;
   }
 
@@ -89,7 +92,7 @@ export async function getActiveWarningCount(
     .eq('pardoned', false);
 
   if (error) {
-    console.error('[Moderation] Failed to count warnings:', error.message);
+    log.error('Failed to count warnings:', error.message);
     return 0;
   }
 
@@ -113,7 +116,7 @@ export async function getActiveInfractionCount(
     .eq('pardoned', false);
 
   if (error) {
-    console.error('[Moderation] Failed to count infractions:', error.message);
+    log.error('Failed to count infractions:', error.message);
     return 0;
   }
 
@@ -138,7 +141,7 @@ export async function getMemberInfractions(
     .limit(limit);
 
   if (error) {
-    console.error('[Moderation] Failed to get member infractions:', error.message);
+    log.error('Failed to get member infractions:', error.message);
     return [];
   }
 
@@ -167,7 +170,7 @@ export async function pardonInfraction(
     .eq('guild_id', guildId);
 
   if (error) {
-    console.error('[Moderation] Failed to pardon infraction:', error.message);
+    log.error('Failed to pardon infraction:', error.message);
     return false;
   }
 
@@ -195,13 +198,13 @@ export async function expireInfractions(
     .select('id');
 
   if (error) {
-    console.error('[Moderation] Failed to expire infractions:', error.message);
+    log.error('Failed to expire infractions:', error.message);
     return 0;
   }
 
   const count = data?.length ?? 0;
   if (count > 0) {
-    console.log(`[Moderation] Expired ${count} infraction(s)`);
+    log.info(`Expired ${count} infraction(s)`);
   }
   return count;
 }

@@ -15,6 +15,9 @@
  *  - webhook_errors   — High webhook error rate
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AlertManager');
 
 // ── Threshold Configuration ─────────────────────────────────
 
@@ -152,7 +155,7 @@ export class AlertManager {
 
         this.activeAlerts.add(alert.alert_type);
       } catch (err) {
-        console.error(`[AlertManager] Failed to upsert alert ${alert.alert_type}:`, err);
+        log.error(`Failed to upsert alert ${alert.alert_type}:`, err);
       }
     }
 
@@ -173,7 +176,7 @@ export class AlertManager {
 
         this.activeAlerts.delete(alertType);
       } catch (err) {
-        console.error(`[AlertManager] Failed to resolve alert ${alertType}:`, err);
+        log.error(`Failed to resolve alert ${alertType}:`, err);
       }
     }
   }

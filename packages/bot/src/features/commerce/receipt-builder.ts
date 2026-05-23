@@ -12,6 +12,9 @@ import {
   EmbedBuilder,
   type User,
 } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ReceiptBuilder');
 
 const HOT_PINK = 0xFF1493;
 
@@ -166,7 +169,7 @@ export async function sendReceiptDM(
     await dm.send({ embeds: [embed] });
     return true;
   } catch (err) {
-    console.error(`[Commerce] Failed to DM receipt to ${user.id}:`, err);
+    log.error(`Failed to DM receipt to ${user.id}:`, err);
     return false;
   }
 }

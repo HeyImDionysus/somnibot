@@ -8,6 +8,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import type { DbReactionRole } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ReactionEngine');
 
 const CACHE_PREFIX = 'reactionRoles';
 const CACHE_TTL = 600; // 10 minutes
@@ -38,7 +41,7 @@ export async function loadReactionRoles(
     .eq('active', true);
 
   if (!data || data.length === 0) {
-    console.log('[ReactionRoles] No active reaction role configs found');
+    log.info('No active reaction role configs found');
     return;
   }
 
@@ -64,7 +67,7 @@ export async function loadReactionRoles(
     await valkey.set(cacheKey, JSON.stringify(cached), 'EX', CACHE_TTL);
   }
 
-  console.log(`[ReactionRoles] Cached ${data.length} reaction role configs`);
+  log.info(`Cached ${data.length} reaction role configs`);
 }
 
 /**
@@ -152,7 +155,7 @@ export async function handleReactionAdd(
           try {
             await member.roles.remove(gc.role_id, 'Exclusive reaction role group');
           } catch (err) {
-            console.error('[ReactionRoles] Failed to remove exclusive group role:', err);
+            log.error('Failed to remove exclusive group role:', { error: String(err) });
           }
         }
       }
@@ -191,9 +194,9 @@ export async function handleReactionAdd(
       roleName: guild.roles.cache.get(config.role_id)?.name ?? config.role_id,
       source: 'bot',
     });
-    console.log(`[ReactionRoles] Granted role ${config.role_id} to ${user.id}`);
+    log.info(`Granted role ${config.role_id} to ${user.id}`);
   } catch (err) {
-    console.error(`[ReactionRoles] Failed to grant role ${config.role_id}:`, err);
+    log.error(`Failed to grant role ${config.role_id}:`, err);
   }
 
   return true;
@@ -237,10 +240,10 @@ export async function handleReactionRemove(
         roleName: guild.roles.cache.get(config.role_id)?.name ?? config.role_id,
         source: 'bot',
       });
-      console.log(`[ReactionRoles] Removed role ${config.role_id} from ${user.id}`);
+      log.info(`Removed role ${config.role_id} from ${user.id}`);
     }
   } catch (err) {
-    console.error(`[ReactionRoles] Failed to remove role ${config.role_id}:`, err);
+    log.error(`Failed to remove role ${config.role_id}:`, err);
   }
 
   return true;

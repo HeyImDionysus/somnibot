@@ -23,6 +23,9 @@ import {
   type MessageActionRowComponentBuilder,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('ButtonRoles');
 
 interface ButtonRoleEntry {
   id: string;
@@ -139,7 +142,7 @@ export async function handleButtonRoleInteraction(
             .map((e) => e.role_id)
             .filter((rid) => member.roles.cache.has(rid));
           for (const rid of rolesToRemove) {
-            await member.roles.remove(rid, 'Button role exclusive group swap').catch((e: unknown) => { console.warn('[Discord] Role operation failed:', (e as Error)?.message ?? e); });
+            await member.roles.remove(rid, 'Button role exclusive group swap').catch((e: unknown) => { log.warn('Role operation failed:', (e as Error)?.message ?? e); });
           }
         }
       }
@@ -151,7 +154,7 @@ export async function handleButtonRoleInteraction(
       });
     }
   } catch (err) {
-    console.error('[ButtonRoles] Failed to toggle role:', err);
+    log.error('Failed to toggle role:', { error: String(err) });
     await interaction.reply({
       content: '❌ Failed to update your role. The role may be higher than my highest role.',
       ephemeral: true,

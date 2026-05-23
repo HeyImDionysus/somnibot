@@ -10,6 +10,9 @@ import {
   type VoiceChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('StatsManager');
 
 export interface StatsChannelConfig {
   id: string;
@@ -39,7 +42,7 @@ export class StatsChannelManager {
     await this.loadChannels();
 
     if (this.channels.length === 0) {
-      console.log('[StatsChannels] No stats channels configured');
+      log.info('No stats channels configured');
       return;
     }
 
@@ -49,11 +52,11 @@ export class StatsChannelManager {
     // Schedule periodic updates
     this.timer = setInterval(() => {
       this.updateAll().catch((err) => {
-        console.error('[StatsChannels] Update error:', err);
+        log.error('Update error:', { error: String(err) });
       });
     }, this.intervalMs);
 
-    console.log(`[StatsChannels] Started ${this.channels.length} stats channels (interval: ${this.intervalMs / 60000}m)`);
+    log.info(`Started ${this.channels.length} stats channels (interval: ${this.intervalMs / 60000}m)`);
   }
 
   async reload(): Promise<void> {
@@ -132,14 +135,14 @@ export class StatsChannelManager {
           .update({ last_value: value, last_updated_at: new Date().toISOString() })
           .eq('id', config.id);
       } catch (err) {
-        console.error(`[StatsChannels] Failed to update ${config.stat_type}:`, err);
+        log.error(`Failed to update ${config.stat_type}:`, err);
       }
     }
   }
 
   private async gatherStats(): Promise<Record<string, string>> {
     const guild = this.guild;
-    await guild.members.fetch().catch((e: unknown) => { console.warn('[Stats] Failed to fetch members:', (e as Error)?.message ?? e); }); // ensure cache is populated
+    await guild.members.fetch().catch((e: unknown) => { log.warn('Failed to fetch members:', (e as Error)?.message ?? e); }); // ensure cache is populated
 
     const totalMembers = guild.memberCount;
     const onlineMembers = guild.members.cache.filter(

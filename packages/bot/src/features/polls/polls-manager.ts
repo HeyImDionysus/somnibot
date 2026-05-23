@@ -12,6 +12,9 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Polls');
 
 // ── Module-level state ────────────────────────────────────
 
@@ -165,7 +168,7 @@ export class PollsManager {
           await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
           return;
         }
-        console.error('[Polls] poll_vote_single RPC error:', voteErr);
+        log.error('poll_vote_single RPC error:', voteErr);
         await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
         return;
       }
@@ -176,7 +179,7 @@ export class PollsManager {
         return;
       }
 
-      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
       await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
       return;
     }
@@ -196,12 +199,12 @@ export class PollsManager {
         await buttonInteraction.reply({ content: 'You already voted for this option!', ephemeral: true });
         return;
       }
-      console.error('[Polls] poll_votes insert error:', insertErr);
+      log.error('poll_votes insert error:', insertErr);
       await buttonInteraction.reply({ content: '❌ Failed to record vote — please try again.', ephemeral: true });
       return;
     }
 
-    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
   }
@@ -442,7 +445,7 @@ export class PollsManager {
       { p_prediction_id: predictionId, p_amount: amount },
     );
     if (poolErr) {
-      console.error('[Polls] economy_increment_prediction_pool failed:', poolErr.message);
+      log.error('economy_increment_prediction_pool failed:', poolErr.message);
       // Compensate: re-credit and delete the bet so we don't keep a
       // ghost bet that resolvePrediction will try to pay out of a pool
       // that doesn't include it.
@@ -450,7 +453,7 @@ export class PollsManager {
         p_guild_id: guildId, p_user_id: userId, p_amount: amount,
       });
       if (refundErr) {
-        console.error('[Polls] CRITICAL: pool RPC failed AND refund failed — manual reconcile required', {
+        log.error('CRITICAL: pool RPC failed AND refund failed — manual reconcile required', {
           predictionId, userId, amount, poolErr: poolErr.message, refundErr: refundErr.message,
         });
       }
@@ -564,7 +567,7 @@ export class PollsManager {
           p_guild_id: guildId, p_user_id: bet.user_id, p_amount: bet.amount,
         });
         if (refundErr) {
-          console.error(`[Polls] Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
+          log.error(`Failed to refund bettor ${bet.user_id} after zero-winner resolve:`, refundErr.message);
           continue;
         }
         await (this.supabase as any)
@@ -587,7 +590,7 @@ export class PollsManager {
           p_guild_id: guildId, p_user_id: bet.user_id, p_amount: payout,
         });
         if (payoutErr) {
-          console.error(`[Polls] Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
+          log.error(`Failed to pay prediction winner ${bet.user_id}:`, payoutErr.message);
           continue;
         }
 

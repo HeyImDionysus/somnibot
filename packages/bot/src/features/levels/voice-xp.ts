@@ -12,6 +12,9 @@ import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { loadLevelConfig, grantVoiceXp } from './xp-tracker.js';
 import { handleLevelUp } from './level-announcer.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('VoiceXP');
 
 /** Set of user IDs currently in non-AFK voice channels and not deafened/muted */
 const activeVoiceUsers = new Map<string, { channelId: string; roles: string[] }>();
@@ -63,7 +66,7 @@ export async function startVoiceXpTicker(
     }
   } catch { /* use default */ }
 
-  console.log(`[VoiceXP] Starting ticker (${intervalMs / 60_000}m interval)`);
+  log.info(`Starting ticker (${intervalMs / 60_000}m interval)`);
 
   const tickInterval = setInterval(async () => {
     try {
@@ -96,11 +99,11 @@ export async function startVoiceXpTicker(
             );
           }
         } catch (err) {
-          console.error(`[VoiceXP] Error granting XP to ${userId}:`, err);
+          log.error(`Error granting XP to ${userId}:`, err);
         }
       }
     } catch (err) {
-      console.error('[VoiceXP] Tick error:', err);
+      log.error('Tick error:', { error: String(err) });
     }
   }, intervalMs);
 
@@ -123,5 +126,5 @@ export async function initVoiceTracking(guild: Guild): Promise<void> {
     });
   }
 
-  console.log(`[VoiceXP] Initialized with ${activeVoiceUsers.size} active voice users`);
+  log.info(`Initialized with ${activeVoiceUsers.size} active voice users`);
 }

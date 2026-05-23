@@ -1,4 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
 import {
   handleMemberJoin,
@@ -114,45 +115,21 @@ import type { MarketManager } from '../features/market/market-manager.js';
  * Phase 8: Automation engine event wiring.
  * Phase 9: Levels/XP, reaction roles, custom commands.
  */
+const log = createLogger('Events');
+
 export function registerEvents(client: SomniClient): void {
   // Safety nets: prevent unhandled errors from crashing the bot silently
   process.on('unhandledRejection', (error) => {
-    console.error('[Events] Unhandled promise rejection:', error);
+    log.error('Unhandled promise rejection', { error: String(error) });
   });
 
   process.on('uncaughtException', (error) => {
-    console.error('[Events] Uncaught exception — process will continue but may be unstable:', error);
-    // Note: Node.js docs warn the process may be in an undefined state after
-    // an uncaught exception. In production, a process manager (PM2/Railway)
-    // should restart the process. We log here to preserve context.
+    log.error('Uncaught exception — process may be unstable', { error: String(error) });
   });
 
   // ── Ready ──────────────────────────────────────────────
   client.once('ready', async (readyClient) => {
-    console.log(`[Bot] Logged in as ${readyClient.user.tag}`);
-    console.log(`[Bot] Guild: ${client.guildId}`);
-    console.log(`[Bot] Gateway: ${readyClient.ws.ping}ms`);
-
-    const guild = readyClient.guilds.cache.get(client.guildId);
-    if (guild) {
-      const botMember = guild.members.me;
-      if (botMember) {
-        const highestRole = botMember.roles.highest;
-        console.log(`[Bot] Highest role: "${highestRole.name}" (position ${highestRole.position})`);
-
-        const sortedRoles = [...guild.roles.cache.values()]
-          .sort((a, b) => b.position - a.position);
-
-        const isTopRole = sortedRoles[0]?.id === highestRole.id ||
-          (sortedRoles[0]?.managed && sortedRoles[1]?.id === highestRole.id);
-
-        if (!isTopRole) {
-          console.warn('[Bot] ⚠️  Bot role is NOT in the #1 position. Features will be locked.');
-        } else {
-          console.log('[Bot] ✅ Bot role is in the correct position');
-        }
-      }
-    }
+    log.info('Logged in', { tag: readyClient.user.tag, gateway: `${readyClient.ws.ping}ms`, guilds: readyClient.guilds.cache.size });
   });
 
   // ── Guild Member Events (Phase 4: Onboarding + Welcome + Goodbye) ──
@@ -164,7 +141,7 @@ export function registerEvents(client: SomniClient): void {
         await handleMemberJoin(client, member);
       }
     } catch (err) {
-      console.error('[Events] guildMemberAdd handler error:', err);
+      log.error(' guildMemberAdd handler error:', { error: String(err) });
     }
   });
 
@@ -172,7 +149,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleMemberLeave(client, member);
     } catch (err) {
-      console.error('[Events] guildMemberRemove handler error:', err);
+      log.error(' guildMemberRemove handler error:', { error: String(err) });
     }
   });
 
@@ -180,7 +157,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleMemberUpdate(client, oldMember, newMember);
     } catch (err) {
-      console.error('[Events] guildMemberUpdate handler error:', err);
+      log.error(' guildMemberUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -189,7 +166,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleCreate(client, role);
     } catch (err) {
-      console.error('[Events] roleCreate handler error:', err);
+      log.error(' roleCreate handler error:', { error: String(err) });
     }
   });
 
@@ -197,7 +174,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleUpdate(client, oldRole, newRole);
     } catch (err) {
-      console.error('[Events] roleUpdate handler error:', err);
+      log.error(' roleUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -205,7 +182,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleRoleDelete(client, role);
     } catch (err) {
-      console.error('[Events] roleDelete handler error:', err);
+      log.error(' roleDelete handler error:', { error: String(err) });
     }
   });
 
@@ -215,7 +192,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelCreate(client, channel);
     } catch (err) {
-      console.error('[Events] channelCreate handler error:', err);
+      log.error(' channelCreate handler error:', { error: String(err) });
     }
   });
 
@@ -224,7 +201,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel);
     } catch (err) {
-      console.error('[Events] channelUpdate handler error:', err);
+      log.error(' channelUpdate handler error:', { error: String(err) });
     }
   });
 
@@ -233,7 +210,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleChannelDelete(client, channel);
     } catch (err) {
-      console.error('[Events] channelDelete handler error:', err);
+      log.error(' channelDelete handler error:', { error: String(err) });
     }
   });
 
@@ -244,11 +221,11 @@ export function registerEvents(client: SomniClient): void {
 
     // Auto-mod pipeline — runs before any other message processing
     try {
-      const modConfig = await loadModConfig(client);
+      const modConfig = await loadModConfig(client, message.guild.id);
       const handled = await processMessage(client, message, modConfig);
       if (handled) return; // Message was deleted/actioned by auto-mod
     } catch (err) {
-      console.error('[Events] Auto-mod error:', err);
+      log.error(' Auto-mod error:', { error: String(err) });
     }
 
     // Phase 8: Emit message.sent event for automations
@@ -271,7 +248,7 @@ export function registerEvents(client: SomniClient): void {
       | undefined;
     if (engine) {
       engine.processMessageEvent(messageEvent, message).catch((err) => {
-        console.error('[Events] Automation message processing error:', err);
+        log.error(' Automation message processing error:', { error: String(err) });
       });
     }
 
@@ -299,7 +276,7 @@ export function registerEvents(client: SomniClient): void {
         }
       }
     } catch (err) {
-      console.error('[Events] XP processing error:', err);
+      log.error(' XP processing error:', { error: String(err) });
     }
 
     // Phase 15: Economy chat income (runs alongside XP — separate cooldown)
@@ -309,14 +286,14 @@ export function registerEvents(client: SomniClient): void {
         await econMgr.processChatIncome(message.author.id, message.channelId);
       }
     } catch (err) {
-      console.error('[Events] Economy chat income error:', err);
+      log.error(' Economy chat income error:', { error: String(err) });
     }
 
     // Quest progress: 'chat' activity tracking
     try {
       const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
       if (qMgr) {
-        qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+        qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { log.warn(' trackProgress failed:', (e as Error)?.message ?? e); });
       }
     } catch {
       // Ignore quest tracking errors
@@ -343,7 +320,7 @@ export function registerEvents(client: SomniClient): void {
         );
         if (handled) return; // Was a reaction role interaction
       } catch (err) {
-        console.error('[Events] Reaction role add error:', err);
+        log.error(' Reaction role add error:', { error: String(err) });
       }
     }
 
@@ -372,7 +349,7 @@ export function registerEvents(client: SomniClient): void {
         | undefined;
       if (engine) {
         engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
-          console.error('[Events] Automation reaction processing error:', err);
+          log.error(' Automation reaction processing error:', { error: String(err) });
         });
       }
     }
@@ -384,7 +361,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await handleStarboardReaction(reaction, user, client.supabase, reaction.message.guild!.id);
     } catch (err) {
-      console.error('[Events] Starboard reaction error:', err);
+      log.error(' Starboard reaction error:', { error: String(err) });
     }
   });
 
@@ -406,7 +383,7 @@ export function registerEvents(client: SomniClient): void {
           client.eventBus,
         );
       } catch (err) {
-        console.error('[Events] Reaction role remove error:', err);
+        log.error(' Reaction role remove error:', { error: String(err) });
       }
     }
   });
@@ -416,7 +393,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await logMessageEdit(client, oldMessage, newMessage);
     } catch (err) {
-      console.error('[Events] messageUpdate log error:', err);
+      log.error(' messageUpdate log error:', { error: String(err) });
     }
   });
 
@@ -424,7 +401,7 @@ export function registerEvents(client: SomniClient): void {
     try {
       await logMessageDelete(client, message);
     } catch (err) {
-      console.error('[Events] messageDelete log error:', err);
+      log.error(' messageDelete log error:', { error: String(err) });
     }
   });
 
@@ -443,7 +420,7 @@ export function registerEvents(client: SomniClient): void {
       const affectedChannelId = oldState.channelId ?? newState.channelId;
       if (affectedChannelId) {
         musicPlayer.handleVoiceStateChange(affectedChannelId).catch((err) => {
-          console.error('[Events] Music voice state handler error:', err);
+          log.error(' Music voice state handler error:', { error: String(err) });
         });
       }
     }
@@ -452,7 +429,7 @@ export function registerEvents(client: SomniClient): void {
     const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
     if (tempMgr) {
       handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
-        console.error('[Events] Temp channel voice handler error:', err);
+        log.error(' Temp channel voice handler error:', { error: String(err) });
       });
     }
 
@@ -1108,7 +1085,7 @@ export function registerEvents(client: SomniClient): void {
         }
       }
     } catch (err) {
-      console.error('[Events] Interaction handler error:', err);
+      log.error(' Interaction handler error:', { error: String(err) });
       try {
         if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
           await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
@@ -1121,42 +1098,45 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Error Handling ─────────────────────────────────────
   client.on('error', (error) => {
-    console.error('[Bot] Client error:', error);
+    log.error(' Client error:', { error: String(error) });
   });
 
   client.on('warn', (info) => {
-    console.warn('[Bot] Warning:', info);
+    log.warn(' Warning:', info);
   });
 
-  // ── Infraction Expiry Cron (every 15 minutes) ─────────
+  // ── Infraction Expiry Cron (every 15 minutes) — multi-guild ──
   setInterval(async () => {
-    try {
-      await expireInfractions(client.supabase, client.guildId);
-    } catch (err) {
-      console.error('[Events] Infraction expiry error:', err);
+    for (const ctx of client.router.all()) {
+      try {
+        await expireInfractions(client.supabase, ctx.guildId);
+      } catch (err) {
+        log.error('Infraction expiry error', { guildId: ctx.guildId, error: String(err) });
+      }
     }
   }, 15 * 60 * 1000);
 
-  // ── Ticket Inactivity Check (every 30 minutes) ───────
+  // ── Ticket Inactivity Check (every 30 minutes) — multi-guild ──
   setInterval(async () => {
-    try {
-      const guild = client.guilds.cache.get(client.guildId);
-      if (guild) {
-        await checkInactiveTickets(client.supabase, guild, client.eventBus);
+    for (const ctx of client.router.all()) {
+      try {
+        await checkInactiveTickets(client.supabase, ctx.guild, client.eventBus);
+      } catch (err) {
+        log.error('Ticket inactivity check error', { guildId: ctx.guildId, error: String(err) });
       }
-    } catch (err) {
-      console.error('[Events] Ticket inactivity check error:', err);
     }
   }, 30 * 60 * 1000);
 
-  // ── Data Retention Cron (every 6 hours) ─────────────
+  // ── Data Retention Cron (every 6 hours) — multi-guild ──
   // Audit V2 Finding 13.3 — Prune old audit logs, expired portal sessions,
   // and processed webhook events to comply with data retention policy.
   setInterval(async () => {
-    try {
-      await pruneExpiredData(client.supabase, client.guildId);
-    } catch (err) {
-      console.error('[Events] Data retention prune error:', err);
+    for (const ctx of client.router.all()) {
+      try {
+        await pruneExpiredData(client.supabase, ctx.guildId);
+      } catch (err) {
+        log.error('Data retention prune error', { guildId: ctx.guildId, error: String(err) });
+      }
     }
   }, 6 * 60 * 60 * 1000);
 }
@@ -1199,47 +1179,50 @@ async function pruneExpiredData(
 
   const total = (auditCount ?? 0) + (sessionCount ?? 0) + (webhookCount ?? 0);
   if (total > 0) {
-    console.log(
-      `[Retention] Pruned ${auditCount ?? 0} audit logs, ${sessionCount ?? 0} expired sessions, ${webhookCount ?? 0} webhook events`,
-    );
+    log.info('Data pruned', {
+      guildId,
+      auditLogs: auditCount ?? 0,
+      sessions: sessionCount ?? 0,
+      webhookEvents: webhookCount ?? 0,
+    });
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────
 
-/** Cached moderation config to avoid DB hits per message. */
-let _modConfigCache: {
-  escalationChain: EscalationStep[];
-  infractionExpiryDays: number;
-  modLogChannelId: string | null;
-} | null = null;
-let _modConfigCacheTime = 0;
+/** Per-guild moderation config cache to avoid DB hits per message. */
+const _modConfigCache = new Map<string, {
+  data: { escalationChain: EscalationStep[]; infractionExpiryDays: number; modLogChannelId: string | null };
+  time: number;
+}>();
 const MOD_CONFIG_TTL = 60_000; // 1 minute
 
-async function loadModConfig(client: SomniClient): Promise<{
+async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
   escalationChain: EscalationStep[];
   infractionExpiryDays: number;
   modLogChannelId: string | null;
 }> {
+  const id = guildId ?? client.guildId;
   const now = Date.now();
-  if (_modConfigCache && now - _modConfigCacheTime < MOD_CONFIG_TTL) {
-    return _modConfigCache;
+  const cached = _modConfigCache.get(id);
+  if (cached && now - cached.time < MOD_CONFIG_TTL) {
+    return cached.data;
   }
 
   const { data } = await client.supabase
     .from('guild_config')
     .select('escalation_chain, infraction_expiry_days, mod_log_channel_id')
-    .eq('guild_id', client.guildId)
+    .eq('guild_id', id)
     .maybeSingle();
 
-  _modConfigCache = {
+  const result = {
     escalationChain: Array.isArray(data?.escalation_chain)
       ? (data.escalation_chain as EscalationStep[])
       : [],
     infractionExpiryDays: (data?.infraction_expiry_days as number) ?? 30,
     modLogChannelId: (data?.mod_log_channel_id as string) ?? null,
   };
-  _modConfigCacheTime = now;
+  _modConfigCache.set(id, { data: result, time: now });
 
-  return _modConfigCache;
+  return result;
 }

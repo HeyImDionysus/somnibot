@@ -11,6 +11,9 @@ import type { TextChannel, Message, Collection, Snowflake, Guild, AttachmentBuil
 import { AttachmentBuilder as DiscordAttachmentBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicket, DbTicketPanel } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Transcript');
 
 interface TranscriptMessage {
   author: {
@@ -78,7 +81,7 @@ async function fetchAllMessages(channel: TextChannel): Promise<TranscriptMessage
   }
 
   if (capped) {
-    console.warn(`[Transcript] Message cap reached (${TRANSCRIPT_MESSAGE_CAP}). Ticket channel ${channel.id} has more messages than included.`);
+    log.warn(`Message cap reached (${TRANSCRIPT_MESSAGE_CAP}). Ticket channel ${channel.id} has more messages than included.`);
   }
 
   // Reverse so oldest first
@@ -348,7 +351,7 @@ export async function generateTranscript(
     });
 
     if (dbError) {
-      console.error('[Tickets] Failed to save transcript:', dbError.message);
+      log.error('Failed to save transcript:', dbError.message);
       return { success: false, error: 'Failed to save transcript.' };
     }
 
@@ -390,14 +393,14 @@ export async function generateTranscript(
           files: [file],
         });
       } catch {
-        console.warn('[Tickets] Could not DM transcript to ticket creator');
+        log.warn('Could not DM transcript to ticket creator');
       }
     }
 
-    console.log(`[Tickets] Transcript generated for ticket #${ticket.ticket_number} (${messages.length} messages)`);
+    log.info(`Transcript generated for ticket #${ticket.ticket_number} (${messages.length} messages)`);
     return { success: true, html };
   } catch (err) {
-    console.error('[Tickets] Transcript generation failed:', err);
+    log.error('Transcript generation failed:', { error: String(err) });
     return { success: false, error: 'Transcript generation failed.' };
   }
 }

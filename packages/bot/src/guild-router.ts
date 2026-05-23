@@ -18,6 +18,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEventBus } from './services/event-bus.js';
 import { GuildContext } from './guild-context.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('GuildRouter');
 
 export class GuildRouter {
   private contexts = new Map<string, GuildContext>();
@@ -121,7 +124,7 @@ export class GuildRouter {
       await this.initCallback(ctx);
     }
 
-    console.log(`[GuildRouter] Initialized context for guild "${guild.name}" (${guildId})`);
+    log.info('Initialized context', { guild: guild.name, guildId });
     return ctx;
   }
 }

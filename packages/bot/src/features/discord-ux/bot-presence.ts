@@ -10,6 +10,9 @@
  */
 import { ActivityType, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('BotPresence');
 
 interface PresenceEntry {
   type: ActivityType;
@@ -39,7 +42,7 @@ export class BotPresenceManager {
     // Load custom statuses from config
     this.loadCustomStatuses();
 
-    console.log('[Presence] Bot presence rotation started');
+    log.info('Bot presence rotation started');
   }
 
   stop(): void {

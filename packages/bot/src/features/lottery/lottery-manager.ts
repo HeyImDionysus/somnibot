@@ -9,6 +9,9 @@ import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Lottery');
 
 // ── Module-level state ────────────────────────────────────
 
@@ -59,11 +62,11 @@ export class LotteryManager {
           try {
             await this.checkAndDraw(guildId);
           } catch (err) {
-            console.error(`[Lottery] Draw check error for guild ${guildId}:`, err);
+            log.error(`Draw check error for guild ${guildId}:`, err);
           }
         }, Math.min(intervalMs, 60 * 60 * 1000)); // Check at least every hour
       } catch (err) {
-        console.error(`[Lottery] Failed to initialize draw schedule for guild ${guildId}:`, err);
+        log.error(`Failed to initialize draw schedule for guild ${guildId}:`, err);
       }
     }, 60_000); // 1 minute after boot
   }
@@ -93,7 +96,7 @@ export class LotteryManager {
       // Time to draw!
       await this.executeDrawAndAnnounce(guildId, config);
     } catch (err) {
-      console.error('[Lottery] checkAndDraw error:', err);
+      log.error('checkAndDraw error:', { error: String(err) });
     }
   }
 
@@ -261,12 +264,12 @@ export class LotteryManager {
       .from('economy_lottery_tickets')
       .insert(tickets);
     if (ticketsErr) {
-      console.error('[Lottery] ticket insert failed, refunding user:', ticketsErr.message);
+      log.error('ticket insert failed, refunding user:', ticketsErr.message);
       const { error: refundErr } = await (this.supabase as any).rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
       });
       if (refundErr) {
-        console.error('[Lottery] CRITICAL: ticket insert failed AND refund failed', {
+        log.error('CRITICAL: ticket insert failed AND refund failed', {
           guildId, userId, totalCost, ticketsErr, refundErr,
         });
       }
@@ -285,7 +288,7 @@ export class LotteryManager {
       // Tickets exist but jackpot is short. Best-effort compensate by
       // deleting just-inserted tickets and refunding the user so the
       // pool stays consistent with what was paid in.
-      console.error('[Lottery] jackpot increment failed, rolling back tickets:', jackpotErr.message);
+      log.error('jackpot increment failed, rolling back tickets:', jackpotErr.message);
       await (this.supabase as any)
         .from('economy_lottery_tickets')
         .delete()
@@ -296,7 +299,7 @@ export class LotteryManager {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
       });
       if (refundErr) {
-        console.error('[Lottery] CRITICAL: jackpot increment failed AND refund failed', {
+        log.error('CRITICAL: jackpot increment failed AND refund failed', {
           guildId, userId, totalCost, jackpotErr, refundErr,
         });
       }
@@ -307,7 +310,7 @@ export class LotteryManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -377,12 +380,12 @@ export class LotteryManager {
       { p_drawing_id: drawing.id },
     );
     if (claimErr) {
-      console.error('[Lottery] lottery_claim_drawing failed:', claimErr.message);
+      log.error('lottery_claim_drawing failed:', claimErr.message);
       return null;
     }
     const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
     if (!claimedRow) {
-      console.log(`[Lottery] Skipping draw of ${drawing.id} — already claimed by another worker`);
+      log.info(`Skipping draw of ${drawing.id} — already claimed by another worker`);
       return null;
     }
 
@@ -415,7 +418,7 @@ export class LotteryManager {
       p_amount: jackpotSnapshot,
     });
     if (jackpotErr) {
-      console.error(`[Lottery] Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
+      log.error(`Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
       // Revert to 'active' so the next scheduled tick retries the draw
       // (and the same winner won't necessarily be picked, but the pool
       // is preserved and no one is silently shortchanged).

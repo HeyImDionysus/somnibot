@@ -18,6 +18,9 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('AntiRaid');
 
 interface AntiRaidConfig {
   anti_raid_enabled: boolean;
@@ -109,7 +112,7 @@ export async function processAntiRaid(
     try {
       await member.send({
         content: `⚠️ Your account is too new to join **${guild.name}**. Accounts must be at least ${config.anti_raid_account_age_days} day(s) old. Please try again later.`,
-      }).catch((e: unknown) => { console.warn('[AntiRaid] Action failed:', (e as Error)?.message ?? e); });
+      }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
       await member.kick(`Anti-raid: Account age ${Math.floor(accountAgeDays)}d < ${config.anti_raid_account_age_days}d minimum`);
 
@@ -122,7 +125,7 @@ export async function processAntiRaid(
       await logRaidEvent(guild, config, embed);
       return true;
     } catch (err) {
-      console.error('[AntiRaid] Failed to kick young account:', err);
+      log.error('Failed to kick young account:', { error: String(err) });
     }
   }
 
@@ -172,7 +175,7 @@ export async function processAntiRaid(
       if (action === 'kick' || action === 'ban') {
         await member.send({
           content: `⚠️ **${guild.name}** is currently experiencing a raid. Your join has been temporarily blocked. Please try again later.`,
-        }).catch((e: unknown) => { console.warn('[AntiRaid] Action failed:', (e as Error)?.message ?? e); });
+        }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
         if (action === 'ban') {
           await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: 0 });
@@ -193,7 +196,7 @@ export async function processAntiRaid(
       // Lockdown mode doesn't kick — it just logs (actual Discord lockdown
       // would require guild verification level changes which is a higher privilege)
     } catch (err) {
-      console.error(`[AntiRaid] Failed to ${config.anti_raid_action} during raid:`, err);
+      log.error(`Failed to ${config.anti_raid_action} during raid:`, err);
     }
   }
 

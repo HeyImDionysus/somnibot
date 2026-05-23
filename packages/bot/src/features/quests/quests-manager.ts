@@ -4,6 +4,9 @@
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Quests');
 
 let _manager: QuestsManager | null = null;
 export function registerQuestsManager(mgr: QuestsManager): void { _manager = mgr; }
@@ -56,7 +59,7 @@ export class QuestsManager {
     }
 
     // Also ensure weekly quests are assigned (they reset weekly, not daily)
-    await this.assignWeeklyQuests(guildId, userId).catch((e: unknown) => { console.warn('[Quest] Weekly quest assignment failed:', (e as Error)?.message ?? e); });
+    await this.assignWeeklyQuests(guildId, userId).catch((e: unknown) => { log.warn('Weekly quest assignment failed:', (e as Error)?.message ?? e); });
 
     const lines = progress.map((p: any) => {
       const t = p.template;
@@ -102,11 +105,11 @@ export class QuestsManager {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCurrency,
       });
       if (payoutErr) {
-        console.error('[Quests] claimQuests payout failed — reverting claimed status:', payoutErr.message);
+        log.error('claimQuests payout failed — reverting claimed status:', payoutErr.message);
         // Revert: un-claim the quests so the user can retry
         for (const row of claimed) {
           await (this.supabase as any).from('economy_quest_progress')
-            .update({ claimed: false }).eq('id', row.id).catch((e: unknown) => { console.warn('[Quest] Reset claimed status failed:', (e as Error)?.message ?? e); });
+            .update({ claimed: false }).eq('id', row.id).catch((e: unknown) => { log.warn('Reset claimed status failed:', (e as Error)?.message ?? e); });
         }
         await interaction.reply({
           embeds: [new EmbedBuilder()
@@ -141,7 +144,7 @@ export class QuestsManager {
         await (this.supabase as any).rpc('economy_quest_increment_progress', {
           p_id: p.id,
           p_amount: amount,
-        }).catch((err: Error) => console.error('[Quests] increment_progress failed:', err.message));
+        }).catch((err: Error) => log.error('increment_progress failed:', err.message));
       }
     }
   }
@@ -247,9 +250,9 @@ export class QuestsManager {
           .eq('claimed', false)
           .lt('assigned_at', oneWeekAgo);
 
-        console.log(`[Quests] Weekly quest cleanup done for guild ${guildId}`);
+        log.info(`Weekly quest cleanup done for guild ${guildId}`);
       } catch (err) {
-        console.error('[Quests] Weekly reset error:', err);
+        log.error('Weekly reset error:', { error: String(err) });
       }
     }, 60 * 60 * 1000); // Check every hour
   }

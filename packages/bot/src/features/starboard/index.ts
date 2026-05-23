@@ -18,6 +18,9 @@ import {
   type PartialUser,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Starboard');
 
 interface StarboardConfig {
   starboard_enabled: boolean;
@@ -180,7 +183,7 @@ export async function handleStarboardReaction(
         });
       }
     } catch (err) {
-      console.error('[Starboard] Failed to post to starboard channel:', err);
+      log.error('Failed to post to starboard channel:', { error: String(err) });
     }
   }
 }
