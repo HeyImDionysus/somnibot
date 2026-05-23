@@ -367,17 +367,22 @@ export class CrossFeatureBridge {
         .eq('guild_id', this.guild.id)
         .eq('status', 'active');
 
-      if (!giveaways) return;
+      if (!giveaways || giveaways.length === 0) return;
 
-      for (const g of giveaways) {
-        // Use atomic RPC to avoid read-modify-write race conditions
-        const { data } = await this.supabase.rpc('giveaway_remove_entry', {
-          p_giveaway_id: g.id,
-          p_user_id: userId,
-        });
+      // V5 audit 14.2 — batch RPC calls with Promise.allSettled instead of serial N+1
+      const results = await Promise.allSettled(
+        giveaways.map((g) =>
+          this.supabase.rpc('giveaway_remove_entry', {
+            p_giveaway_id: g.id,
+            p_user_id: userId,
+          }),
+        ),
+      );
 
-        if (data && data.length > 0) {
-          log.info(`Removed ${userId} from giveaway ${g.id} (${reason})`);
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === 'fulfilled' && r.value.data && r.value.data.length > 0) {
+          log.info(`Removed ${userId} from giveaway ${giveaways[i].id} (${reason})`);
         }
       }
     } catch (err) {
