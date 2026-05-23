@@ -56,10 +56,9 @@ export async function runReconciliation(
 
   try {
     // ── 1. Check active entitlements → Discord roles ──
-    // V5 audit 5.1/14.1 — JOIN instead of N+1 per-entitlement customer lookup
     const { data: activeEntitlements } = await supabase
       .from('entitlements')
-      .select('id, customer_id, granted_role_ids, product_id, customers(discord_id)')
+      .select('id, customer_id, granted_role_ids, product_id')
       .eq('guild_id', guild.id)
       .eq('status', 'active');
 
@@ -69,11 +68,17 @@ export async function runReconciliation(
         const roleIds = ent.granted_role_ids ?? [];
         if (!roleIds.length) continue;
 
-        const discordId = (ent.customers as unknown as { discord_id: string } | null)?.discord_id;
-        if (!discordId) continue;
+        // Get customer's Discord ID
+        const { data: customer } = await supabase
+          .from('customers')
+          .select('discord_id')
+          .eq('id', ent.customer_id)
+          .single();
+
+        if (!customer?.discord_id) continue;
 
         try {
-          const member = await guild.members.fetch(discordId);
+          const member = await guild.members.fetch(customer.discord_id);
 
           for (const roleId of roleIds) {
             if (!member.roles.cache.has(roleId)) {

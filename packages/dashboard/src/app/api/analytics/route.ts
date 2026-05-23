@@ -34,14 +34,12 @@ export async function GET(request: NextRequest) {
     const prevStart = new Date(startDate.getTime() - periodMs).toISOString();
 
     // ── Revenue metrics ────────────────────────────────
-    // V5 audit 7.1 — safety LIMIT caps on period-bounded queries
     const { data: currentOrders } = await admin
       .from('orders')
       .select('amount_cents, discount_cents, currency, status, source, created_at, product_id')
       .eq('guild_id', ctx.guildId)
       .gte('created_at', startIso)
-      .in('status', ['completed', 'refunded'])
-      .limit(10000);
+      .in('status', ['completed', 'refunded']);
 
     const { data: prevOrders } = await admin
       .from('orders')
@@ -49,8 +47,7 @@ export async function GET(request: NextRequest) {
       .eq('guild_id', ctx.guildId)
       .gte('created_at', prevStart)
       .lt('created_at', startIso)
-      .in('status', ['completed', 'refunded'])
-      .limit(10000);
+      .in('status', ['completed', 'refunded']);
 
     const completedOrders = (currentOrders || []).filter(o => o.status === 'completed');
     const refundedOrders = (currentOrders || []).filter(o => o.status === 'refunded');
@@ -81,8 +78,7 @@ export async function GET(request: NextRequest) {
     const { data: allCustomers } = await admin
       .from('customers')
       .select('id, total_spent_cents, first_purchase_at, created_at')
-      .eq('guild_id', ctx.guildId)
-      .limit(10000);
+      .eq('guild_id', ctx.guildId);
 
     const { count: newCustomersCount } = await admin
       .from('customers')
@@ -156,8 +152,7 @@ export async function GET(request: NextRequest) {
       .select('id, amount_cents, status, created_at')
       .eq('guild_id', ctx.guildId)
       .eq('status', 'failed')
-      .gte('created_at', startIso)
-      .limit(10000);
+      .gte('created_at', startIso);
 
     return NextResponse.json({
       success: true,
