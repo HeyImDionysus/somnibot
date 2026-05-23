@@ -30,16 +30,6 @@ const SLOT_PAYOUTS: Record<string, number> = {
   '💎': 10, '7️⃣': 7, '⭐': 5, '🔔': 4, '🍇': 3, '🍊': 2, '🍋': 1.5, '🍒': 1,
 };
 
-/**
- * Random integer in [min, max] range.
- *
- * Design decision: Math.random() is intentionally used for all virtual-currency
- * game outcomes. These games involve no real-money prizes — only server-scoped
- * virtual coins with no cash-out. crypto.getRandomValues() is reserved for
- * security-critical paths (license key generation — see key-generator.ts).
- * If real-value prizes are ever introduced, switch to CSPRNG.
- * (V5 audit finding 4.1 — documented)
- */
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }

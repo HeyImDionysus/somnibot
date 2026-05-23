@@ -541,10 +541,7 @@ const productFileCreate = z.object({
   file_path: z.string().max(512).optional(),
   external_url: urlString,
   file_size_bytes: z.number().int().min(0).optional(),
-  mime_type: z.string().max(128).regex(
-    /^(application\/(zip|x-zip-compressed|pdf|octet-stream|x-tar|gzip|json|xml)|text\/(plain|csv|html)|image\/(png|jpeg|gif|webp|svg\+xml)|audio\/(mpeg|ogg|wav)|video\/(mp4|webm))$/,
-    'Unsupported file type',
-  ).optional(),
+  mime_type: z.string().max(128).optional(),
   sort_order: z.number().int().min(0).max(999).optional(),
 });
 

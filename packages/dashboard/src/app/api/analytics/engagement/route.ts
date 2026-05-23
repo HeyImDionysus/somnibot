@@ -31,13 +31,11 @@ export async function GET(request: NextRequest) {
     const startIso = startDate.toISOString();
 
     // ── Moderation ─────────────────────────────────────
-    // V5 audit 7.1 — safety LIMIT caps on period-bounded queries
     const { data: infractions } = await admin
       .from('infractions')
       .select('type, created_at, active, pardoned')
       .eq('guild_id', ctx.guildId)
-      .gte('created_at', startIso)
-      .limit(10000);
+      .gte('created_at', startIso);
 
     const infractionsByType: Record<string, number> = {};
     const infractionsByDay: Record<string, number> = {};
@@ -56,8 +54,7 @@ export async function GET(request: NextRequest) {
       .from('tickets')
       .select('status, created_at, closed_at, message_count')
       .eq('guild_id', ctx.guildId)
-      .gte('created_at', startIso)
-      .limit(10000);
+      .gte('created_at', startIso);
 
     const totalTickets = tickets?.length ?? 0;
     const openTickets = tickets?.filter(t => t.status === 'open' || t.status === 'claimed').length ?? 0;
