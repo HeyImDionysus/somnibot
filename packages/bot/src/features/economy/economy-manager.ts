@@ -11,6 +11,9 @@ import type { Guild, TextChannel } from 'discord.js';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Economy');
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -231,19 +234,23 @@ export class EconomyManager {
   // ── Wallet operations ───────────────────────────────────
 
   async getOrCreateWallet(userId: string): Promise<WalletData> {
-    const { data: existing } = await this.supabase
+    const { data: existing, error: fetchErr } = await this.supabase
       .from('economy_wallets')
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
       .maybeSingle();
 
+    if (fetchErr) {
+      log.error('getOrCreateWallet fetch failed', { userId, detail: fetchErr.message });
+    }
+
     if (existing) return existing as WalletData;
 
     const cfg = await this.loadConfig();
     const startBal = cfg.economy_starting_balance;
 
-    const { data: created } = await this.supabase
+    const { data: created, error: upsertErr } = await this.supabase
       .from('economy_wallets')
       .upsert(
         {
@@ -260,6 +267,10 @@ export class EconomyManager {
       )
       .select('*')
       .single();
+
+    if (upsertErr) {
+      log.error('getOrCreateWallet upsert failed', { userId, detail: upsertErr.message });
+    }
 
     if (startBal > 0 && created) {
       await this.recordTransaction(userId, 'admin_add', startBal, startBal, 'Starting balance');
@@ -293,7 +304,7 @@ export class EconomyManager {
     });
 
     if (error) {
-      console.error('[Economy] creditWallet RPC error:', error);
+      log.error('creditWallet RPC error', { detail: error });
       return null;
     }
 
@@ -318,7 +329,7 @@ export class EconomyManager {
 
     if (error) {
       // RPC raises exception on insufficient funds
-      console.warn('[Economy] debitWallet RPC failed (likely insufficient funds):', error.message);
+      log.warn('debitWallet RPC failed (likely insufficient funds)', { detail: error.message });
       return null;
     }
 
@@ -558,7 +569,7 @@ export class EconomyManager {
 
     await this.recordTransaction(userId, 'work', amount, updated.wallet, `Worked: ${job}`);
     await this.logEconomyEvent(userId, 'work', amount);
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'work').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'work').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
     return {
       success: true,
@@ -597,7 +608,7 @@ export class EconomyManager {
 
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
       await this.logEconomyEvent(userId, 'crime (success)', amount);
-      getQuestsManager()?.trackProgress(this.guild.id, userId, 'crime').catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+      getQuestsManager()?.trackProgress(this.guild.id, userId, 'crime').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
       return {
         success: true,
@@ -749,7 +760,7 @@ export class EconomyManager {
     // unchecked and a DB error would silently eat the sender's coins.
     const receiverWallet = await this.creditWallet(receiverId, received);
     if (!receiverWallet) {
-      console.error(`[Economy] pay() creditWallet failed for receiver ${receiverId} — refunding sender ${senderId}`);
+      log.error(`pay() creditWallet failed for receiver ${receiverId} — refunding sender ${senderId}`);
       await this.creditWallet(senderId, amount);
       return { success: false, amount: 0, balance: await this.getOrCreateWallet(senderId), message: '❌ Payment failed — your coins have been refunded.' };
     }
@@ -869,7 +880,7 @@ export class EconomyManager {
       const updatedRobber = await this.creditWallet(robberId, stolen);
       if (!updatedRobber) {
         // Credit failed after debit — refund victim to avoid coin destruction
-        console.error(`[Economy] rob() creditWallet failed for robber ${robberId} — refunding victim ${victimId}`);
+        log.error(`rob() creditWallet failed for robber ${robberId} — refunding victim ${victimId}`);
         await this.creditWallet(victimId, stolen);
         return {
           success: false,
@@ -898,7 +909,7 @@ export class EconomyManager {
           const fineCredited = await this.creditWallet(victimId, fine);
           if (!fineCredited) {
             // Credit failed — refund the robber so coins aren't destroyed
-            console.error(`[Economy] rob() fine credit to victim ${victimId} failed — refunding robber ${robberId}`);
+            log.error(`rob() fine credit to victim ${victimId} failed — refunding robber ${robberId}`);
             await this.creditWallet(robberId, fine);
           }
         }
@@ -936,7 +947,7 @@ export class EconomyManager {
       .eq('user_id', userId);
 
     if (passiveErr) {
-      console.error('[Economy] togglePassive update failed:', passiveErr.message);
+      log.error('togglePassive update failed', { detail: passiveErr.message });
       return { enabled: !newState, message: '❌ Failed to toggle passive mode. Please try again.' };
     }
 
@@ -1045,7 +1056,7 @@ export class EconomyManager {
       p_durability: item.durability,
     });
     if (invErr) {
-      console.error('[Economy] buyItem inventory upsert failed:', invErr.message);
+      log.error('buyItem inventory upsert failed', { detail: invErr.message });
       // Refund payment
       await this.creditWallet(userId, totalCost);
       // Restore stock if limited
@@ -1057,7 +1068,7 @@ export class EconomyManager {
           p_quantity: quantity,
         }).catch((err: unknown) => {
           // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
-          console.error(`[Economy] CRITICAL: buyItem stock restore failed for item ${itemId} qty ${quantity}:`, err);
+          log.error('CRITICAL: buyItem stock restore failed', { itemId, quantity, detail: err });
         });
       }
       const w = await this.getOrCreateWallet(userId);
@@ -1070,13 +1081,13 @@ export class EconomyManager {
         const member = await this.guild.members.fetch(userId);
         await member.roles.add(item.grant_role_id, `Purchased ${item.name} from economy shop`);
       } catch (err) {
-        console.warn(`[Economy] Failed to grant role ${item.grant_role_id}:`, err);
+        log.warn('Failed to grant role', { roleId: item.grant_role_id, detail: err });
       }
     }
 
     await this.recordTransaction(userId, 'shop_buy', -totalCost, wallet.wallet, `Bought ${quantity}x ${item.name}`);
     await this.logEconomyEvent(userId, `bought ${quantity}x ${item.name}`, -totalCost);
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { console.warn('[Quest] trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager()?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
     return {
       success: true,
@@ -1146,7 +1157,7 @@ export class EconomyManager {
         p_quantity: quantity,
       }).catch((err: unknown) => {
         // V53-L1: Log item restore failures — if this fails, items are permanently lost
-        console.error(`[Economy] CRITICAL: sellItem item restore failed for user ${userId}, item ${itemId} qty ${quantity}:`, err);
+        log.error('CRITICAL: sellItem item restore failed', { userId, itemId, quantity, detail: err });
       });
       const wallet = await this.getOrCreateWallet(userId);
       return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit sale proceeds. Your items have been returned.' };
@@ -1252,7 +1263,7 @@ export class EconomyManager {
     metadata?: Record<string, unknown>,
   ): Promise<void> {
     try {
-      await this.supabase.from('economy_transactions').insert({
+      const { error } = await this.supabase.from('economy_transactions').insert({
         guild_id: this.guild.id,
         user_id: userId,
         type,
@@ -1261,8 +1272,11 @@ export class EconomyManager {
         description,
         metadata: metadata ?? null,
       });
+      if (error) {
+        log.error('Failed to record transaction', { userId, type, detail: error.message });
+      }
     } catch (err) {
-      console.error('[Economy] Failed to record transaction:', err);
+      log.error('Failed to record transaction (exception)', { detail: err });
     }
   }
 
