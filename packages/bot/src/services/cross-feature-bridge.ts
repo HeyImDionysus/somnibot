@@ -413,10 +413,12 @@ export class CrossFeatureBridge {
         };
         if (summary.listings_cancelled > 0 || summary.heists_forfeited > 0 || summary.wallet_suspended) {
           log.info(
-            `[CrossFeatureBridge] Economy cleanup for ${userId} (${reason}):`,
-            `${summary.listings_cancelled} listing(s) cancelled,`,
-            `${summary.heists_forfeited} heist(s) forfeited,`,
-            `wallet ${summary.wallet_suspended ? 'suspended' : 'already suspended/absent'}`,
+            `Economy cleanup for ${userId} (${reason})`,
+            {
+              listings_cancelled: summary.listings_cancelled,
+              heists_forfeited: summary.heists_forfeited,
+              wallet: summary.wallet_suspended ? 'suspended' : 'already suspended/absent',
+            },
           );
         }
       }

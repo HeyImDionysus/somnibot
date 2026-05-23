@@ -561,13 +561,13 @@ export function destroyGuildServices(ctx: GuildContext): void {
     services.guildOnboardingSync,
   ];
   for (const svc of stoppable) {
-    if (svc && typeof (svc as Record<string, unknown>).stop === 'function') {
+    if (svc && typeof (svc as unknown as Record<string, unknown>).stop === 'function') {
       (svc as { stop: () => void }).stop();
     }
   }
 
   // Music
-  if (services.musicPlayer && typeof (services.musicPlayer as Record<string, unknown>).shutdown === 'function') {
+  if (services.musicPlayer && typeof (services.musicPlayer as unknown as Record<string, unknown>).shutdown === 'function') {
     (services.musicPlayer as { shutdown: () => void }).shutdown();
   }
   if (services.musicStatusReporter) {
@@ -582,13 +582,13 @@ export function destroyGuildServices(ctx: GuildContext): void {
   const quests = ctx.getManager<QuestsManager>('quests');
   if (quests && typeof quests.stopResetTimer === 'function') quests.stopResetTimer();
   const games = ctx.getManager<GamesManager>('games');
-  if (games && typeof (games as Record<string, unknown>).stopDailyResetTimer === 'function') {
+  if (games && typeof (games as unknown as Record<string, unknown>).stopDailyResetTimer === 'function') {
     (games as { stopDailyResetTimer: () => void }).stopDailyResetTimer();
   }
   const heist = ctx.getManager<HeistManager>('heist');
   if (heist && typeof heist.cleanup === 'function') heist.cleanup();
   const trivia = ctx.getManager<TriviaManager>('trivia');
-  if (trivia && typeof (trivia as Record<string, unknown>).stopAll === 'function') {
+  if (trivia && typeof (trivia as unknown as Record<string, unknown>).stopAll === 'function') {
     (trivia as { stopAll: () => void }).stopAll();
   }
 

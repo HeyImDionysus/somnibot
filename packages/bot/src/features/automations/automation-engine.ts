@@ -16,7 +16,6 @@ import type { AlertService } from '../../services/alert-service.js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
 import { ExecutionLogger, type ExecutionResult } from './execution-logger.js';
-import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AutomationEngine');
 

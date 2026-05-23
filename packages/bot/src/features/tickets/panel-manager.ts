@@ -18,7 +18,6 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbTicketPanel, TicketTypeConfig } from '@somnibot/shared';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
-import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('TicketPanels');
 
