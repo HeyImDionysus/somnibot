@@ -29,6 +29,19 @@ const lootEntrySchema = z.object({
   active: z.boolean().optional(),
 });
 
+// FIX #11: Cross-validate min_qty ≤ max_qty on create. Separated from
+// the base schema so .partial() still works on PUT (updates). The refine
+// prevents random(10, 5) which may return 0 or error.
+const lootEntryCreateSchema = lootEntrySchema.refine(
+  (data) => {
+    if (data.min_qty !== undefined && data.max_qty !== undefined) {
+      return data.min_qty <= data.max_qty;
+    }
+    return true;
+  },
+  { message: 'min_qty must be less than or equal to max_qty', path: ['min_qty'] },
+);
+
 export async function GET() {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
@@ -58,7 +71,7 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const body = await request.json();
-    const parsed = lootEntrySchema.parse(body);
+    const parsed = lootEntryCreateSchema.parse(body);
 
     const admin = createAdminSupabase();
 
@@ -107,6 +120,15 @@ export async function PUT(request: NextRequest) {
     }
 
     const parsed = lootEntrySchema.partial().parse(fields);
+
+    // FIX #11: Also validate min ≤ max on updates when both are provided
+    if (parsed.min_qty !== undefined && parsed.max_qty !== undefined && parsed.min_qty > parsed.max_qty) {
+      return NextResponse.json(
+        { success: false, error: 'min_qty must be less than or equal to max_qty' },
+        { status: 400 },
+      );
+    }
+
     const admin = createAdminSupabase();
 
     const { data, error } = await admin

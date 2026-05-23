@@ -16,11 +16,18 @@ interface PortalData {
 /**
  * Build the Discord OAuth2 authorize URL for portal login.
  * Scopes: 'identify' only — we just need the user's Discord ID.
+ *
+ * FIX #2: Generate a random `state` parameter to prevent Login CSRF
+ * (session-swapping attacks). State is stored in sessionStorage and
+ * verified on callback.
  */
 function getDiscordOAuthUrl(): string {
   const clientId = process.env.NEXT_PUBLIC_DISCORD_APPLICATION_ID || '';
   const redirectUri = encodeURIComponent(`${window.location.origin}/portal`);
-  return `https://discord.com/oauth2/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&scope=identify`;
+  // Generate cryptographically random state for CSRF protection
+  const state = crypto.randomUUID();
+  sessionStorage.setItem('portal_oauth_state', state);
+  return `https://discord.com/oauth2/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&scope=identify&state=${encodeURIComponent(state)}`;
 }
 
 export default function PortalDashboard() {
@@ -35,6 +42,17 @@ export default function PortalDashboard() {
       const code = params.get('code');
 
       if (code) {
+        // FIX #2: Verify OAuth state parameter to prevent CSRF
+        const returnedState = params.get('state');
+        const storedState = sessionStorage.getItem('portal_oauth_state');
+        sessionStorage.removeItem('portal_oauth_state');
+
+        if (!returnedState || !storedState || returnedState !== storedState) {
+          setError('Login failed: invalid state. Please try again.');
+          setLoading(false);
+          return;
+        }
+
         // Exchange the code for a portal session
         try {
           const res = await fetch('/api/portal/auth', {

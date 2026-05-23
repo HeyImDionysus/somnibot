@@ -62,7 +62,11 @@ export async function GET(request: NextRequest) {
       filesByProduct.get(pid)!.push(f as Record<string, unknown>);
     }
 
-    // Build download list from entitled products
+    // FIX P2 + FIX #1: Build download list with proper download URLs.
+    // The portal UI renders files as <a href> links, which can't send
+    // custom headers. Generate download URLs with the token as a query
+    // param pointing to /api/downloads/[productId]/[fileId]?token=...
+    const portalToken = request.headers.get('x-portal-token') ?? '';
     const downloads = (entitlements || []).map((e) => {
       const product = (e as Record<string, unknown>).products as {
         id: string;
@@ -71,13 +75,20 @@ export async function GET(request: NextRequest) {
         type: string;
       } | null;
 
+      const rawFiles = product?.id ? filesByProduct.get(product.id) ?? [] : [];
+      const files = rawFiles.map((f) => ({
+        name: (f.file_name as string) || (f.name as string) || 'Download',
+        url: `/api/downloads/${product!.id}/${f.id}?token=${encodeURIComponent(portalToken)}`,
+        size: f.file_size as number | undefined,
+      }));
+
       return {
         entitlement_id: e.id,
         product_id: product?.id,
         product_name: product?.name || 'Unknown',
         product_type: product?.type,
         description: product?.description,
-        files: product?.id ? filesByProduct.get(product.id) ?? [] : [],
+        files,
         entitled_since: e.created_at,
       };
     });

@@ -62,7 +62,11 @@ export async function startVoiceXpTicker(
   try {
     const config = await loadLevelConfig(supabase, guild.id);
     if (config.voice_xp_interval_minutes && config.voice_xp_interval_minutes > 0) {
-      intervalMs = config.voice_xp_interval_minutes * 60 * 1000;
+      // FIX #14: Clamp to 1440 minutes (24h) to prevent 32-bit integer
+      // overflow in setTimeout/setInterval. Values > 35792 minutes overflow
+      // Node's 2^31-1 ms limit, causing immediate/negative-delay execution.
+      const clampedMinutes = Math.min(config.voice_xp_interval_minutes, 1440);
+      intervalMs = clampedMinutes * 60 * 1000;
     }
   } catch { /* use default */ }
 
