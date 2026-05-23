@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const sessionDeleteSchema = z.object({
   customer_id: z.string().min(1, 'customer_id is required'),
@@ -58,6 +59,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'write');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
