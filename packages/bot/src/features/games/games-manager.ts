@@ -77,7 +77,7 @@ export class GamesManager {
   private configCache = new Map<string, DbGuildConfig>();
 
   constructor(supabase: SupabaseClient) {
-    this.supabase = supabase as any;
+    this.supabase = supabase;
   }
 
   /**
@@ -92,13 +92,13 @@ export class GamesManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
 
   private async getBalance(guildId: string, userId: string): Promise<number> {
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('economy_wallets')
       .select('wallet')
       .eq('guild_id', guildId)
@@ -113,12 +113,12 @@ export class GamesManager {
    */
   private async adjustBalance(guildId: string, userId: string, amount: number): Promise<boolean> {
     if (amount >= 0) {
-      const { error } = await (this.supabase as any).rpc('economy_add_balance', {
+      const { error } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: amount,
       });
       if (error) { log.error('economy_add_balance failed:', error.message); return false; }
     } else {
-      const { error } = await (this.supabase as any).rpc('economy_subtract_balance', {
+      const { error } = await this.supabase.rpc('economy_subtract_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: Math.abs(amount),
       });
       if (error) { log.error('economy_subtract_balance failed:', error.message); return false; }
@@ -146,7 +146,7 @@ export class GamesManager {
     const limit = config.economy_daily_loss_limit ?? 0;
     if (limit <= 0) return true; // no limit
     // p_amount: 0 → read current total without incrementing
-    const { data: current } = await (this.supabase as any).rpc('economy_increment_daily_loss', {
+    const { data: current } = await this.supabase.rpc('economy_increment_daily_loss', {
       p_guild_id: guildId,
       p_user_id: userId,
       p_amount: 0,
@@ -159,7 +159,7 @@ export class GamesManager {
   // fails, the limit is bypassed on subsequent bets.
   private async addDailyLoss(guildId: string, userId: string, amount: number): Promise<void> {
     if (amount <= 0) return;
-    const { error } = await (this.supabase as any).rpc('economy_increment_daily_loss', {
+    const { error } = await this.supabase.rpc('economy_increment_daily_loss', {
       p_guild_id: guildId,
       p_user_id: userId,
       p_amount: amount,

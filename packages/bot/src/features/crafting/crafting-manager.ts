@@ -10,6 +10,7 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Crafting');
 
@@ -73,7 +74,7 @@ export class CraftingManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -209,12 +210,12 @@ export class CraftingManager {
       if (!result.success) {
         // Refund already-consumed materials
         for (const c of consumed) {
-          await this.supabase.rpc('economy_upsert_inventory', {
+          await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
             p_guild_id: this.guild.id,
             p_user_id: userId,
             p_item_id: c.itemId,
             p_quantity: c.qty,
-          }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+          })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
         }
         return {
           embed: new EmbedBuilder()
@@ -238,12 +239,12 @@ export class CraftingManager {
     if (!added) {
       // Refund all consumed materials (best-effort)
       for (const c of consumed) {
-        await this.supabase.rpc('economy_upsert_inventory', {
+        await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: userId,
           p_item_id: c.itemId,
           p_quantity: c.qty,
-        }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+        })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       }
       return {
         embed: new EmbedBuilder()

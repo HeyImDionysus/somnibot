@@ -53,7 +53,8 @@ export async function GET(
     .from('license_sessions')
     .select('*')
     .eq('license_key_id', data.id)
-    .order('last_seen_at', { ascending: false });
+    .order('last_seen_at', { ascending: false })
+    .limit(500);
 
   return NextResponse.json({
     success: true,

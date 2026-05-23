@@ -12,6 +12,7 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Economy');
 
@@ -164,7 +165,7 @@ export class EconomyManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client (economy tables not in generated schema yet)
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -192,6 +193,8 @@ export class EconomyManager {
       .eq('guild_id', this.guild.id)
       .maybeSingle();
 
+    // Cast to record — generic Supabase types don't include column names without codegen
+    const cfg = data as Record<string, unknown> | null;
     this.configCache = {
       economy_enabled: data?.economy_enabled ?? false,
       currency_name: data?.currency_name ?? 'Coins',
@@ -1061,12 +1064,12 @@ export class EconomyManager {
       await this.creditWallet(userId, totalCost);
       // Restore stock if limited
       if (item.stock != null) {
-        await this.supabase.rpc('economy_upsert_inventory', {
+        await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: 'shop',
           p_item_id: itemId,
           p_quantity: quantity,
-        }).catch((err: unknown) => {
+        })).catch((err: unknown) => {
           // V53-L1: Log stock restore failures — if this fails, stock is permanently decremented without a sale
           log.error('CRITICAL: buyItem stock restore failed', { itemId, quantity, detail: err });
         });
@@ -1150,12 +1153,12 @@ export class EconomyManager {
     const updated = await this.creditWallet(userId, totalValue);
     if (!updated) {
       // Restore the decremented items
-      await this.supabase.rpc('economy_upsert_inventory', {
+      await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
         p_guild_id: this.guild.id,
         p_user_id: userId,
         p_item_id: itemId,
         p_quantity: quantity,
-      }).catch((err: unknown) => {
+      })).catch((err: unknown) => {
         // V53-L1: Log item restore failures — if this fails, items are permanently lost
         log.error('CRITICAL: sellItem item restore failed', { userId, itemId, quantity, detail: err });
       });
