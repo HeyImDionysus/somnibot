@@ -274,12 +274,19 @@ async function handlePaymentCaptured(
   resource: Record<string, unknown>,
 ) {
   // Find the order by PayPal order ID (from custom_id in purchase_units)
+  // V5 Audit [2.1]: Support both short keys (g/p/c/d) and legacy long keys
   const customId = (resource as unknown as PayPalCaptureResource).custom_id;
   let meta: { guild_id: string; product_id: string; customer_id: string; discord_id: string } | null = null;
 
   if (customId) {
     try {
-      meta = JSON.parse(customId);
+      const raw = JSON.parse(customId);
+      // Normalize short-key format to long-key format
+      if (raw.g && raw.p && raw.c && raw.d) {
+        meta = { guild_id: raw.g, product_id: raw.p, customer_id: raw.c, discord_id: raw.d };
+      } else {
+        meta = raw;
+      }
     } catch {/* ignore */}
   }
 
@@ -315,6 +322,21 @@ async function handlePaymentCaptured(
   const paypalCaptureId = resource.id as string;
   const amountValue = (resource as unknown as PayPalCaptureResource).amount?.value;
   const amountCents = amountValue ? Math.round(parseFloat(amountValue) * 100) : order.amount_cents;
+
+  // V5 Audit [2.2]: Verify captured amount matches the pending order's expected price.
+  // If PayPal captures a different amount (e.g., manipulated checkout), log a critical
+  // warning. We still process the order to avoid losing the payment, but the mismatch
+  // is flagged for manual review.
+  if (amountValue && order.amount_cents > 0) {
+    const expectedCents = order.amount_cents;
+    if (amountCents !== expectedCents) {
+      console.error(
+        `[Webhook] AMOUNT MISMATCH: PayPal captured ${amountCents} cents but order ${order.id} ` +
+        `expected ${expectedCents} cents. Customer ${meta.customer_id}, product ${meta.product_id}. ` +
+        `Processing anyway — flag for manual review.`,
+      );
+    }
+  }
 
   // Mark order completed
   await supabase
@@ -436,7 +458,13 @@ async function handleSubscriptionActivated(
 
   let meta: { guild_id: string; product_id: string; plan_id: string; customer_id: string; discord_id: string };
   try {
-    meta = JSON.parse(customId);
+    const raw = JSON.parse(customId);
+    // V5 Audit [2.1]: Normalize short-key format from payment-handler
+    if (raw.g && raw.p && raw.c && raw.d) {
+      meta = { guild_id: raw.g, product_id: raw.p, plan_id: raw.pl ?? raw.plan_id ?? '', customer_id: raw.c, discord_id: raw.d };
+    } else {
+      meta = raw;
+    }
   } catch {
     console.error('[Webhook] Malformed custom_id in subscription event:', customId);
     return;

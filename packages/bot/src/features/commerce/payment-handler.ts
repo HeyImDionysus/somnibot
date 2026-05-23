@@ -163,11 +163,13 @@ export async function handleBuyButton(
             value: price,
           },
           description: product.name,
+          // V5 Audit [2.1]: Use short keys to stay well within PayPal's
+          // 127-character custom_id limit. Previous long keys totalled ~110 chars.
           custom_id: JSON.stringify({
-            guild_id: guildId,
-            product_id: productId,
-            customer_id: customerId,
-            discord_id: discordId,
+            g: guildId,
+            p: productId,
+            c: customerId,
+            d: discordId,
           }),
         },
       ],

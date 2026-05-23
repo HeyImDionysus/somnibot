@@ -1,15 +1,20 @@
 /**
- * Config Store — persistent credential storage using electron-store.
+ * Config Store — persistent credential storage using electron-store + safeStorage.
  *
  * Saves to:
  *   Windows:  %APPDATA%/SomniBot/config.json
  *   macOS:    ~/Library/Application Support/SomniBot/config.json
  *   Linux:    ~/.config/somnibot/config.json
  *
+ * Sensitive fields (tokens, secrets) are encrypted with the OS keychain
+ * via Electron's safeStorage API. Non-sensitive fields (window bounds,
+ * flags) are stored in plain JSON.
+ *
  * Only stores credentials — all bot/feature configuration lives in Supabase.
  */
 
 import Store from 'electron-store';
+import { safeStorage } from 'electron';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -63,19 +68,74 @@ const DEFAULTS: LauncherConfig = {
 const store = new Store<LauncherConfig>({
   name: 'config',
   defaults: DEFAULTS,
-  encryptionKey: 'somnibot-launcher-v1', // Basic obfuscation — not a security boundary
   clearInvalidConfig: true,
+  // V5 Audit [10.1]: Removed hardcoded encryptionKey. Sensitive fields are
+  // now encrypted individually via safeStorage (OS keychain).
 });
+
+/**
+ * Fields that contain secrets and must be encrypted via safeStorage.
+ * All other fields are stored as plain JSON (non-sensitive).
+ */
+const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
+  'discordToken',
+  'discordClientSecret',
+  'supabaseSecretKey',
+]);
+
+/**
+ * Encrypt a string using the OS keychain (DPAPI on Windows, Keychain on macOS,
+ * libsecret on Linux). Falls back to plaintext if safeStorage is unavailable
+ * (e.g., CI, headless Linux without a keyring).
+ */
+function encryptSensitive(value: string): string {
+  if (!value) return '';
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      return safeStorage.encryptString(value).toString('base64');
+    }
+  } catch {
+    // safeStorage not available — store plaintext (same as old behavior)
+  }
+  return value;
+}
+
+/**
+ * Decrypt a string that was encrypted via encryptSensitive().
+ * Handles both encrypted (base64 of safeStorage buffer) and legacy plaintext values.
+ */
+function decryptSensitive(stored: string): string {
+  if (!stored) return '';
+  try {
+    if (safeStorage.isEncryptionAvailable()) {
+      const buf = Buffer.from(stored, 'base64');
+      return safeStorage.decryptString(buf);
+    }
+  } catch {
+    // If decryption fails, the value is likely a legacy plaintext string
+    // (from before safeStorage migration). Return as-is.
+  }
+  return stored;
+}
+
+function getSensitive(key: keyof LauncherConfig): string {
+  const raw = store.get(key, '') as string;
+  return decryptSensitive(raw);
+}
+
+function setSensitive(key: keyof LauncherConfig, value: string): void {
+  store.set(key, encryptSensitive(value));
+}
 
 export function getConfig(): LauncherConfig {
   return {
-    discordToken: store.get('discordToken', ''),
+    discordToken: getSensitive('discordToken'),
     discordApplicationId: store.get('discordApplicationId', ''),
-    discordClientSecret: store.get('discordClientSecret', ''),
+    discordClientSecret: getSensitive('discordClientSecret'),
     discordGuildId: store.get('discordGuildId', ''),
     guilds: store.get('guilds', []),
     supabaseUrl: store.get('supabaseUrl', ''),
-    supabaseSecretKey: store.get('supabaseSecretKey', ''),
+    supabaseSecretKey: getSensitive('supabaseSecretKey'),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     windowBounds: store.get('windowBounds'),
     firstRunComplete: store.get('firstRunComplete', false),
@@ -87,7 +147,11 @@ export function getConfig(): LauncherConfig {
 export function saveConfig(config: Partial<LauncherConfig>): void {
   for (const [key, value] of Object.entries(config)) {
     if (value !== undefined) {
-      store.set(key as keyof LauncherConfig, value);
+      if (SENSITIVE_KEYS.has(key as keyof LauncherConfig) && typeof value === 'string') {
+        setSensitive(key as keyof LauncherConfig, value);
+      } else {
+        store.set(key as keyof LauncherConfig, value);
+      }
     }
   }
 }

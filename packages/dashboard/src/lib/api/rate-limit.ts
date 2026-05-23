@@ -236,14 +236,20 @@ export async function checkRateLimit(
     }
   }
 
-  // I-6: Log when falling back to in-memory rate limiting so operators know
-  // Valkey is down and rate limits are not shared across instances.
+  // V5 Audit [14.1]: In multi-instance deployments (Vercel, multiple Railway
+  // replicas), in-memory fallback means each instance has its own counter —
+  // an attacker can bypass limits by distributing requests. Log a critical
+  // warning and use a stricter in-memory budget (halved) to partially
+  // compensate. For truly critical endpoints (license, portal auth), the
+  // per-key and per-IP secondary checks still apply.
   if (!valkeyReady && !valkeyFailed) {
-    console.warn('[RateLimit] Valkey not ready — using in-memory fallback (not shared across instances)');
+    console.warn('[RateLimit] CRITICAL: Valkey not ready — using in-memory fallback with reduced limits (not shared across instances)');
   } else if (valkeyFailed) {
-    console.warn('[RateLimit] Valkey connection failed — using in-memory fallback (not shared across instances)');
+    console.warn('[RateLimit] CRITICAL: Valkey connection failed — using in-memory fallback with reduced limits (not shared across instances)');
   }
-  return checkRateLimitMemory(key, maxHits, windowMs);
+  // Halve the budget when running in degraded mode to reduce blast radius
+  const degradedMaxHits = Math.max(1, Math.floor(maxHits / 2));
+  return checkRateLimitMemory(key, degradedMaxHits, windowMs);
 }
 
 /**
