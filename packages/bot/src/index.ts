@@ -243,13 +243,23 @@ async function main(): Promise<void> {
       console.log('[Boot] ✅ Bot action queue listener started');
     }
 
+    // ── Pre-fetch guild config (single query replaces ~19 individual reads) ──
+    // Audit V2 Finding 5.2 — N+1 boot config optimization
+    const { data: guildCfg } = guild
+      ? await client.supabase
+          .from('guild_config')
+          .select('*')
+          .eq('guild_id', client.guildId)
+          .maybeSingle()
+      : { data: null };
+
+    if (guild && guildCfg) {
+      console.log('[Boot] ✅ Guild config pre-fetched (1 query instead of ~19)');
+    }
+
     // Start sync engine (Phase 5)
     if (guild) {
-      const { data: syncConfigData } = await client.supabase
-        .from('guild_config')
-        .select('sync_enabled, sync_interval_minutes, sync_auto_repair, sync_auto_repair_everyone')
-        .eq('guild_id', client.guildId)
-        .maybeSingle();
+      const syncConfigData = guildCfg;
 
       const syncConfig: SyncConfig = {
         enabled: syncConfigData?.sync_enabled ?? true,
@@ -341,11 +351,7 @@ async function main(): Promise<void> {
     if (guild) {
       try {
         // Load guild config for Phase 10 feature flags
-        const { data: guildConfig } = await client.supabase
-          .from('guild_config')
-          .select('temp_channels_enabled, stats_enabled, stats_update_interval_minutes, scheduled_messages_enabled, giveaways_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const guildConfig = guildCfg;
 
         // 10a: Temp Channels
         if (guildConfig?.temp_channels_enabled !== false) {
@@ -410,11 +416,7 @@ async function main(): Promise<void> {
     // Phase 11: Music System
     if (guild) {
       try {
-        const { data: musicConfig } = await client.supabase
-          .from('guild_config')
-          .select('music_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const musicConfig = guildCfg;
 
         if (musicConfig?.music_enabled !== false) {
           const musicPlayer = new MusicPlayerManager(
@@ -454,11 +456,7 @@ async function main(): Promise<void> {
     // Phase 12: Commerce & Universal Licensing
     if (guild) {
       try {
-        const { data: commerceConfig } = await client.supabase
-          .from('guild_config')
-          .select('paypal_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const commerceConfig = guildCfg;
 
         if (commerceConfig?.paypal_enabled !== false) {
           const entitlementService = new EntitlementService(
@@ -485,11 +483,7 @@ async function main(): Promise<void> {
     // Phase 15: Economy System (V31 — fake economy, NOT real money)
     if (guild) {
       try {
-        const { data: econConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const econConfig = guildCfg;
 
         if (econConfig?.economy_enabled) {
           const economyManager = new EconomyManager(
@@ -520,11 +514,7 @@ async function main(): Promise<void> {
     // Phase 15b: Gathering System (V31 — gathering loot, part of fake economy)
     if (guild) {
       try {
-        const { data: gatherConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_gathering_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const gatherConfig = guildCfg;
 
         if (gatherConfig?.economy_enabled && gatherConfig?.economy_gathering_enabled) {
           const gatheringManager = new GatheringManager(guild, client.supabase, client.valkey);
@@ -547,11 +537,7 @@ async function main(): Promise<void> {
     // Phase 15c: Crafting System (V31 — crafting recipes, part of fake economy)
     if (guild) {
       try {
-        const { data: craftConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_crafting_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const craftConfig = guildCfg;
 
         if (craftConfig?.economy_enabled && craftConfig?.economy_crafting_enabled) {
           const craftingManager = new CraftingManager(guild, client.supabase, client.valkey);
@@ -574,11 +560,7 @@ async function main(): Promise<void> {
     // Phase 15d: Farming System (V31 — farm grid + crops, part of fake economy)
     if (guild) {
       try {
-        const { data: farmConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_farming_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const farmConfig = guildCfg;
 
         if (farmConfig?.economy_enabled && farmConfig?.economy_farming_enabled) {
           const farmingManager = new FarmingManager(guild, client.supabase, client.valkey);
@@ -601,11 +583,7 @@ async function main(): Promise<void> {
     // Phase 15e: Fishing System (V31 — fishing mechanics, part of fake economy)
     if (guild) {
       try {
-        const { data: fishConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_fishing_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const fishConfig = guildCfg;
 
         if (fishConfig?.economy_enabled && fishConfig?.economy_fishing_enabled) {
           const fishingManager = new FishingManager(guild, client.supabase, client.valkey);
@@ -628,11 +606,7 @@ async function main(): Promise<void> {
     // Phase 15f: Adventures System (V31 — interactive story adventures, part of fake economy)
     if (guild) {
       try {
-        const { data: advConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_adventures_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const advConfig = guildCfg;
 
         if (advConfig?.economy_enabled && advConfig?.economy_adventures_enabled) {
           const adventureManager = new AdventureManager(guild, client.supabase, client.valkey);
@@ -655,11 +629,7 @@ async function main(): Promise<void> {
     // Phase 15g: Market System (V31 — peer-to-peer item trading, part of fake economy)
     if (guild) {
       try {
-        const { data: mktConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_market_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const mktConfig = guildCfg;
 
         if (mktConfig?.economy_enabled && mktConfig?.economy_market_enabled) {
           const marketManager = new MarketManager(guild, client.supabase, client.valkey);
@@ -682,11 +652,7 @@ async function main(): Promise<void> {
     // Phase 15h: Trivia System (V31 — trivia rounds with streaks + custom questions)
     if (guild) {
       try {
-        const { data: trivConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_trivia_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const trivConfig = guildCfg;
 
         if (trivConfig?.economy_enabled && trivConfig?.economy_trivia_enabled) {
           const triviaManager = new TriviaManager(client.supabase, client.valkey);
@@ -709,11 +675,7 @@ async function main(): Promise<void> {
     // Phase 15i: Mini-Games System (V31 — coinflip, slots, rps, dice, blackjack, etc.)
     if (guild) {
       try {
-        const { data: gamesConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_games_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const gamesConfig = guildCfg;
 
         if (gamesConfig?.economy_enabled && gamesConfig?.economy_games_enabled) {
           const gamesManager = new GamesManager(client.supabase);
@@ -736,11 +698,7 @@ async function main(): Promise<void> {
     // Phase 15j: Lottery System (V31 — ticket purchases + drawings)
     if (guild) {
       try {
-        const { data: lotConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, economy_lottery_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const lotConfig = guildCfg;
 
         if (lotConfig?.economy_enabled && lotConfig?.economy_lottery_enabled) {
           const lotteryManager = new LotteryManager(client.supabase, client);
@@ -766,11 +724,7 @@ async function main(): Promise<void> {
     // Phase 15k: Polls & Predictions System (V31 — free polls + prediction markets)
     if (guild) {
       try {
-        const { data: pollConfig } = await client.supabase
-          .from('guild_config')
-          .select('economy_enabled, polls_enabled, predictions_enabled')
-          .eq('guild_id', client.guildId)
-          .maybeSingle();
+        const pollConfig = guildCfg;
 
         if (pollConfig?.economy_enabled && (pollConfig?.polls_enabled || pollConfig?.predictions_enabled)) {
           const pollsManager = new PollsManager(client.supabase);
@@ -793,8 +747,7 @@ async function main(): Promise<void> {
     // Phase 15l: Pets System (V31 — virtual pets with care, battles, prestige)
     if (guild) {
       try {
-        const { data: petsCfg } = await client.supabase
-          .from('guild_config').select('economy_enabled, economy_pets_enabled').eq('guild_id', client.guildId).maybeSingle();
+        const petsCfg = guildCfg;
         if (petsCfg?.economy_enabled && petsCfg?.economy_pets_enabled) {
           const petsManager = new PetsManager(client.supabase, client, client.valkey);
           registerPetsManager(petsManager);
@@ -813,8 +766,7 @@ async function main(): Promise<void> {
     // Phase 15m: Quests System (V31 — daily/weekly quests with progress tracking)
     if (guild) {
       try {
-        const { data: questsCfg } = await client.supabase
-          .from('guild_config').select('economy_enabled, economy_quests_enabled').eq('guild_id', client.guildId).maybeSingle();
+        const questsCfg = guildCfg;
         if (questsCfg?.economy_enabled && questsCfg?.economy_quests_enabled) {
           const questsManager = new QuestsManager(client.supabase);
           registerQuestsManager(questsManager);
@@ -833,8 +785,7 @@ async function main(): Promise<void> {
     // Phase 15n: Achievements + Prestige (V31 — milestone badges + prestige resets)
     if (guild) {
       try {
-        const { data: achCfg } = await client.supabase
-          .from('guild_config').select('economy_enabled, economy_achievements_enabled, economy_prestige_enabled').eq('guild_id', client.guildId).maybeSingle();
+        const achCfg = guildCfg;
         if (achCfg?.economy_enabled && (achCfg?.economy_achievements_enabled || achCfg?.economy_prestige_enabled)) {
           const achManager = new AchievementsManager(client.supabase);
           registerAchievementsManager(achManager);
@@ -861,8 +812,7 @@ async function main(): Promise<void> {
     // Phase 15p: Heist System (V36 — multi-user cooperative heists)
     if (guild) {
       try {
-        const { data: heistCfg } = await client.supabase
-          .from('guild_config').select('economy_enabled, economy_heist_enabled').eq('guild_id', client.guildId).maybeSingle();
+        const heistCfg = guildCfg;
         if (heistCfg?.economy_enabled && heistCfg?.economy_heist_enabled) {
           const heistManager = new HeistManager(client.supabase, client);
           registerHeistManager(heistManager);

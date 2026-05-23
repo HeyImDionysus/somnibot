@@ -18,6 +18,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import { sendReceiptDM } from '../features/commerce/receipt-builder.js';
+import { createLogger } from '@somnibot/shared';
+
+const log = createLogger('Fulfillment');
 import { checkPurchaseVelocity, checkPaymentPattern, checkCriticalThreshold } from './fraud-detection.js';
 
 // ── Types ──────────────────────────────────────────────────
@@ -74,7 +77,9 @@ export class CommerceFulfillmentService {
       errors: [],
     };
 
-    console.log(`[Fulfillment] Processing ${payload.fulfillment_type} for ${payload.discord_id} — order ${payload.order_number}`);
+    // Audit V2 Finding 3.7 — Redact discord_id from logs (show last 4 chars only)
+    const redactedId = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
+    log.info('Processing fulfillment', { type: payload.fulfillment_type, user: redactedId, order: payload.order_number });
 
     try {
       switch (payload.fulfillment_type) {
@@ -102,7 +107,7 @@ export class CommerceFulfillmentService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       result.errors.push(`Fulfillment error: ${msg}`);
-      console.error(`[Fulfillment] Fatal error:`, err);
+      log.error('Fatal error in fulfillment pipeline', { detail: err });
     }
 
     // Audit log the fulfillment attempt
@@ -154,7 +159,7 @@ export class CommerceFulfillmentService {
 
     // 4. Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
-      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+      log.warn('Fraud check error (non-fatal)', { detail: err }),
     );
   }
 
@@ -198,7 +203,7 @@ export class CommerceFulfillmentService {
 
     // Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
-      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+      log.warn('Fraud check error (non-fatal)', { detail: err }),
     );
   }
 
@@ -321,10 +326,10 @@ export class CommerceFulfillmentService {
     // Check for payment pattern fraud (non-blocking)
     const fraudCtx = { supabase: this.supabase, guildId: payload.guild_id, eventBus: this.eventBus };
     checkPaymentPattern(fraudCtx, payload.customer_id, payload.discord_id).catch((err) =>
-      console.error('[Fulfillment] Fraud check error (non-fatal):', err),
+      log.warn('Fraud check error (non-fatal)', { detail: err }),
     );
     checkCriticalThreshold(fraudCtx).catch((err) =>
-      console.error('[Fulfillment] Critical threshold check error (non-fatal):', err),
+      log.warn('Critical threshold check error (non-fatal)', { detail: err }),
     );
 
     // DM warning
@@ -362,7 +367,8 @@ export class CommerceFulfillmentService {
         date: new Date(),
       });
     } catch (err) {
-      console.error(`[Fulfillment] Failed to send receipt to ${payload.discord_id}:`, err);
+      const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
+      log.error('Failed to send receipt', { user: redacted, detail: err });
       return false;
     }
   }
