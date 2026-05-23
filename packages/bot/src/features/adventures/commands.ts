@@ -44,7 +44,7 @@ export async function handleAdventureCommand(
       adventureType,
     );
 
-    const replyPayload: any = { embeds: [embed] };
+    const replyPayload: DbRow = { embeds: [embed] };
     if (row) replyPayload.components = [row];
     await interaction.editReply(replyPayload);
   }

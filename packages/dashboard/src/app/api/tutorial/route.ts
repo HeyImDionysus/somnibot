@@ -28,6 +28,7 @@ export async function GET() {
       .select('*')
       .eq('guild_id', guildId)
       .order('step_order', { ascending: true }),
+      .limit(500)
   ]);
 
   return NextResponse.json({

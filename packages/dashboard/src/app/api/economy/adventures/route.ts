@@ -33,6 +33,7 @@ export async function GET() {
     .select('*')
     .eq('guild_id', ctx.guildId)
     .order('adventure_type')
+    .limit(500)
     .order('name');
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

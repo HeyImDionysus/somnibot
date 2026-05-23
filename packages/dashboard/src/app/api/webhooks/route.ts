@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('processed_at', { ascending: false });
+    .limit(500)
 
   if (result) {
     query = query.eq('result', result);

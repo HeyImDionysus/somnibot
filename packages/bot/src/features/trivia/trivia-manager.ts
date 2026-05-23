@@ -99,7 +99,7 @@ export class TriviaManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
@@ -107,11 +107,11 @@ export class TriviaManager {
   private async getCustomQuestions(guildId: string): Promise<TriviaQuestion[]> {
     const cached = this.customQuestionCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('economy_trivia_questions')
       .select('*')
       .eq('guild_id', guildId);
-    const questions: TriviaQuestion[] = (data ?? []).map((q: any) => ({
+    const questions: TriviaQuestion[] = (data ?? []).map((q: DbRow) => ({
       question: q.question,
       correct: q.correct_answer,
       wrong: q.wrong_answers ?? [],
@@ -258,7 +258,7 @@ export class TriviaManager {
         const payout = Math.floor(basePayout * hardMult * streakBonus);
 
         // Award currency
-        const { error: triviaPayErr } = await (this.supabase as any).rpc('economy_add_balance', {
+        const { error: triviaPayErr } = await this.supabase.rpc('economy_add_balance', {
           p_guild_id: guildId,
           p_user_id: userId,
           p_amount: payout,

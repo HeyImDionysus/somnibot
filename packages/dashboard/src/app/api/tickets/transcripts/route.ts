@@ -58,6 +58,7 @@ export async function GET(req: NextRequest) {
     .select('id, guild_id, ticket_id, ticket_number, creator_id, closed_by_id, message_count, participant_ids, created_at', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
+    .limit(500)
     .range(offset, offset + limit - 1);
 
   // V53 Phase 3: Search by ticket number

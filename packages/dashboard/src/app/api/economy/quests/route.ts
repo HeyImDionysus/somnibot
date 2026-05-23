@@ -23,11 +23,12 @@ const questSchema = z.object({
 export async function GET() {
   const auth = await requirePermission('dashboard.manage_economy');
   const supabase = createAdminSupabase();
-  const { data, error } = await (supabase as any)
+  const { data, error } = await (supabase as Record<string, unknown>)
     .from('economy_quest_templates')
     .select('*')
     .eq('guild_id', auth.guildId)
     .order('created_at', { ascending: true });
+    .limit(500)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ data });
 }
@@ -39,7 +40,7 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: parsed.error.message }, { status: 400 });
 
   const supabase = createAdminSupabase();
-  const { data, error } = await (supabase as any)
+  const { data, error } = await (supabase as Record<string, unknown>)
     .from('economy_quest_templates')
     .insert({ ...parsed.data, guild_id: auth.guildId })
     .select()
@@ -57,7 +58,7 @@ export async function PUT(req: NextRequest) {
 
   const supabase = createAdminSupabase();
   const { id, ...rest } = parsed.data;
-  const { data, error } = await (supabase as any)
+  const { data, error } = await (supabase as Record<string, unknown>)
     .from('economy_quest_templates')
     .update(rest)
     .eq('id', id)
@@ -75,7 +76,7 @@ export async function DELETE(req: NextRequest) {
   if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400 });
 
   const supabase = createAdminSupabase();
-  const { error } = await (supabase as any)
+  const { error } = await (supabase as Record<string, unknown>)
     .from('economy_quest_templates')
     .delete()
     .eq('id', id)

@@ -54,6 +54,7 @@ export async function GET(
     .select('*')
     .eq('license_key_id', data.id)
     .order('last_seen_at', { ascending: false });
+    .limit(500)
 
   return NextResponse.json({
     success: true,

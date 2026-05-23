@@ -12,6 +12,8 @@ import { getQuestsManager } from '../quests/quests-manager.js';
 import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient } from '@somnibot/shared';
+
 
 const log = createLogger('Economy');
 
@@ -164,7 +166,7 @@ export class EconomyManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client (economy tables not in generated schema yet)
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 

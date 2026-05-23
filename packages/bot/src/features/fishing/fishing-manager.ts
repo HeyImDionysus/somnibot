@@ -12,6 +12,8 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient, DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Fishing');
 
@@ -117,12 +119,12 @@ export function invalidateFishingCache(): void {
 
 export class FishingManager {
   private guild: Guild;
-  private supabase: any;
-  private valkey: any;
+  private supabase: SupabaseClient;
+  private valkey: Record<string, unknown> | null;
   private configCache: FishingConfig | null = null;
   private speciesCache: FishSpecies[] | null = null;
 
-  constructor(guild: Guild, supabase: any, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: Record<string, unknown> | null) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
@@ -416,7 +418,7 @@ export class FishingManager {
       .eq('user_id', userId);
 
     const caught = new Map<string, { count: number; maxWeight: number }>();
-    for (const c of (catches ?? []) as any[]) {
+    for (const c of (catches ?? []) as DbRow[]) {
       const entry = caught.get(c.species_id) ?? { count: 0, maxWeight: 0 };
       entry.count++;
       entry.maxWeight = Math.max(entry.maxWeight, c.weight);

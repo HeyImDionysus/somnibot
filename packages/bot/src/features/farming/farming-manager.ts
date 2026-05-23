@@ -11,6 +11,8 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient, DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Farming');
 
@@ -71,7 +73,7 @@ export class FarmingManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -344,7 +346,7 @@ export class FarmingManager {
       user_id: userId,
       type: 'farm_harvest',
       amount: totalEarnings,
-      balance_after: (farmWallet as any)?.wallet ?? 0,
+      balance_after: (farmWallet as DbRow)?.wallet ?? 0,
       description: `Harvested ${harvested.length} crops`,
     });
 
@@ -517,7 +519,7 @@ export class FarmingManager {
 
     if (!items) return false;
 
-    const fert = (items as any[]).find((i) =>
+    const fert = (items as DbRow[]).find((i) =>
       ((i.economy_items as any)?.name ?? '').toLowerCase() === 'fertilizer'
     );
     if (!fert) return false;

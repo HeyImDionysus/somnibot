@@ -10,6 +10,8 @@ import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import type { SupabaseClient, DbRow } from '@somnibot/shared';
+
 
 const log = createLogger('Crafting');
 
@@ -73,7 +75,7 @@ export class CraftingManager {
   constructor(
     private guild: Guild,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped Supabase client
-    private supabase: any,
+    private supabase: SupabaseClient,
     private valkey: Valkey,
   ) {}
 
@@ -262,7 +264,7 @@ export class CraftingManager {
       user_id: userId,
       type: 'craft',
       amount: 0,
-      balance_after: (craftWallet as any)?.wallet ?? 0,
+      balance_after: (craftWallet as DbRow)?.wallet ?? 0,
       description: `Crafted ${recipe.output_qty}x ${recipe.name}`,
     });
 
@@ -364,7 +366,7 @@ export class CraftingManager {
       .gt('quantity', 0);
 
     if (!data) return [];
-    return (data as any[]).map((row) => ({
+    return (data as DbRow[]).map((row) => ({
       item_name: (row.economy_items as any)?.name ?? 'Unknown',
       quantity: row.quantity as number,
       item_id: row.item_id as string,
@@ -382,7 +384,7 @@ export class CraftingManager {
 
     if (!items) return { success: false, itemId: '' };
 
-    const match = (items as any[]).find((i) =>
+    const match = (items as DbRow[]).find((i) =>
       ((i.economy_items as any)?.name ?? '').toLowerCase() === itemName.toLowerCase()
     );
     if (!match) return { success: false, itemId: '' };

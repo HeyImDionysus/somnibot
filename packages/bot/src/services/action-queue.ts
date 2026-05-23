@@ -748,7 +748,7 @@ async function processAction(
   // pick up the same row, double-creating Discord entities, double-
   // fulfilling orders, or duplicating role revokes. The RPC returns
   // the row iff status was still 'pending' when this caller flipped it.
-  const { data: claimed, error: claimErr } = await (supabase as any).rpc(
+  const { data: claimed, error: claimErr } = await (supabase as DbRow).rpc(
     'bot_action_queue_claim',
     { p_action_id: action.id },
   );
@@ -842,7 +842,7 @@ async function recoverStaleActions(
   guild: Guild,
   supabase: SupabaseClient,
 ): Promise<void> {
-  const { data: recovered, error } = await (supabase as any).rpc(
+  const { data: recovered, error } = await (supabase as DbRow).rpc(
     'bot_action_queue_recover_stale',
     {
       p_guild_id: guild.id,

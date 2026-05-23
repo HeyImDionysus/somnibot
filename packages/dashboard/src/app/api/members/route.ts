@@ -25,6 +25,7 @@ export async function GET(req: NextRequest) {
     .select('id, discord_id, username, display_name, avatar_url, roles, joined_at, xp, level, wallet, bank, is_muted, is_banned, suspended', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('joined_at', { ascending: false })
+    .limit(500)
     .range(offset, offset + limit - 1);
 
   if (search) {
