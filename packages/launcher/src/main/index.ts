@@ -59,7 +59,9 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // Need node APIs in preload
+      // V5 Audit [10.2]: Enable Chromium sandbox. The preload script only uses
+      // contextBridge + ipcRenderer, both of which work in sandboxed mode.
+      sandbox: true,
     },
   });
 
@@ -179,8 +181,10 @@ function registerIpcHandlers(): void {
   });
 
   // ── External links ──
+  // V5 Audit [1.1]: Only allow https:// URLs to prevent protocol abuse.
+  // The open-dashboard handler has its own explicit http://localhost:3456 allowance.
   ipcMain.handle('open-external', (_event, url: string) => {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
+    if (url.startsWith('https://')) {
       shell.openExternal(url);
     }
   });

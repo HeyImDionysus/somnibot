@@ -17,6 +17,14 @@ export interface GuildConfig {
   [key: string]: unknown;
 }
 
+/**
+ * V5 Audit [6.1]: Interface for managers that hold timers, intervals,
+ * or other resources that must be released on guild context teardown.
+ */
+export interface Destroyable {
+  destroy(): void | Promise<void>;
+}
+
 export class GuildContext {
   public readonly guildId: string;
   public readonly guild: Guild;
@@ -69,11 +77,29 @@ export class GuildContext {
     }
   }
 
-  /** Destroy context — clean up timers, managers.
-   *  Note: For full cleanup including service shutdown, use
-   *  destroyGuildServices() from guild-init.ts before calling this.
+  /**
+   * Destroy context — clean up all managers, timers, and resources.
+   *
+   * V5 Audit [6.1]: Iterates all registered managers and calls destroy()
+   * on any that implement the Destroyable interface. This prevents timer
+   * and interval leaks when a guild context is torn down.
    */
   destroy(): void {
+    for (const [key, manager] of this.managers) {
+      try {
+        if (manager && typeof (manager as Destroyable).destroy === 'function') {
+          const result = (manager as Destroyable).destroy();
+          // If destroy() returns a promise, fire-and-forget with error logging
+          if (result && typeof (result as Promise<void>).catch === 'function') {
+            (result as Promise<void>).catch((err) => {
+              console.error(`[GuildContext] Error destroying manager "${key}":`, err);
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`[GuildContext] Error destroying manager "${key}":`, err);
+      }
+    }
     this.managers.clear();
   }
 }

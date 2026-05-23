@@ -318,11 +318,14 @@ export class EconomyManager {
   /**
    * Atomically debit a user's wallet via RPC. Fails if insufficient funds.
    * Uses economy_subtract_balance to avoid TOCTOU race conditions.
+   *
+   * V5 Audit [4.1]: Removed redundant JS-side balance check. The RPC itself
+   * enforces the constraint atomically — a JS-side check is misleading because
+   * another concurrent debit could change the balance between the read and the RPC.
    */
   async debitWallet(userId: string, amount: number): Promise<WalletData | null> {
     // Ensure wallet exists before RPC call
-    const wallet = await this.getOrCreateWallet(userId);
-    if (wallet.wallet < amount) return null;
+    await this.getOrCreateWallet(userId);
 
     const { error } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: this.guild.id,

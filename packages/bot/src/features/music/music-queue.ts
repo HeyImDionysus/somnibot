@@ -44,6 +44,13 @@ export interface GuildQueue {
   paused: boolean;
 }
 
+/**
+ * V5 Audit [12.1]: Maximum number of entries allowed in a single guild's queue.
+ * Prevents unbounded memory growth in Valkey (queue is serialized as JSON in
+ * a single key). 5,000 tracks ≈ ~2.5 MB serialized — well within limits.
+ */
+const MAX_QUEUE_SIZE = 5_000;
+
 // ── Valkey Key Helpers ────────────────────────────────────
 
 function queueKey(guildId: string): string {
@@ -108,11 +115,15 @@ export class MusicQueueManager {
 
   // ── Queue Operations ──────────────────────────────────
 
-  /** Add entries to the end of the queue. Returns updated queue. */
+  /** Add entries to the end of the queue. Returns updated queue.
+   *  V5 Audit [12.1]: Enforces MAX_QUEUE_SIZE — excess entries are silently trimmed. */
   async addEntries(guildId: string, entries: QueueEntry[]): Promise<GuildQueue | null> {
     const queue = await this.getQueue(guildId);
     if (!queue) return null;
-    queue.entries.push(...entries);
+    const available = MAX_QUEUE_SIZE - queue.entries.length;
+    if (available <= 0) return queue; // Queue is full
+    const toAdd = available >= entries.length ? entries : entries.slice(0, available);
+    queue.entries.push(...toAdd);
     await this.saveQueue(queue);
     return queue;
   }
