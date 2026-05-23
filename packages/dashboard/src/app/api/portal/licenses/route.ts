@@ -38,7 +38,8 @@ export async function GET(request: NextRequest) {
       .from('license_keys')
       .select('*, products(name, type), license_sessions(id, device_name, device_fingerprint, ip_address, active, first_seen_at, last_seen_at)')
       .eq('customer_id', session.customer_id)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(500);
 
     return NextResponse.json({ success: true, data: keys || [] });
   } catch (e) {

@@ -48,7 +48,7 @@ export class PetsManager {
   private initialDelayTimer: NodeJS.Timeout | null = null;
 
   constructor(supabase: SupabaseClient, client?: Client, valkey?: Redis) {
-    this.supabase = supabase as any;
+    this.supabase = supabase;
     this.client = client ?? null;
     this.valkey = valkey as Redis;
   }
@@ -90,7 +90,7 @@ export class PetsManager {
       const shouldNotify = config.economy_pet_notify_owner ?? true;
 
       // Get all pets for this guild
-      const { data: pets } = await (this.supabase as any)
+      const { data: pets } = await this.supabase
         .from('economy_pets')
         .select('id, guild_id, user_id, name, hunger, happiness, energy, status')
         .eq('guild_id', guildId);
@@ -112,7 +112,7 @@ export class PetsManager {
           newStatus = 'happy';
         }
 
-        await (this.supabase as any).from('economy_pets').update({
+        await this.supabase.from('economy_pets').update({
           hunger: newHunger,
           happiness: newHappiness,
           energy: newEnergy,
@@ -153,13 +153,13 @@ export class PetsManager {
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
     const cached = this.configCache.get(guildId);
     if (cached) return cached;
-    const { data } = await (this.supabase as any).from('guild_config').select('*').eq('guild_id', guildId).single();
+    const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
     if (data) this.configCache.set(guildId, data);
     return data;
   }
 
   private async getPet(guildId: string, userId: string): Promise<any> {
-    const { data } = await (this.supabase as any)
+    const { data } = await this.supabase
       .from('economy_pets').select('*').eq('guild_id', guildId).eq('user_id', userId).single();
     return data;
   }
@@ -220,7 +220,7 @@ export class PetsManager {
     }
 
     const price = PET_PRICES[petType] ?? 5000;
-    const { data: wallet } = await (this.supabase as any)
+    const { data: wallet } = await this.supabase
       .from('economy_wallets').select('wallet').eq('guild_id', guildId).eq('user_id', userId).single();
 
     if (!wallet || wallet.wallet < price) {
@@ -228,7 +228,7 @@ export class PetsManager {
       return;
     }
 
-    const { error: debitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: price,
     });
     if (debitErr) {
@@ -239,15 +239,15 @@ export class PetsManager {
     // V49-M6: Check insert result — if pet already exists (23505) or any
     // other error, refund the user.
     const info = PET_TYPES[petType] ?? { emoji: '🐾', desc: '' };
-    const { error: insertErr } = await (this.supabase as any).from('economy_pets').insert({
+    const { error: insertErr } = await this.supabase.from('economy_pets').insert({
       guild_id: guildId, user_id: userId, pet_type: petType, name: `${info.emoji} Pet`,
     });
 
     if (insertErr) {
       log.error('buyPet insert failed — refunding:', insertErr.message);
-      await (this.supabase as any).rpc('economy_add_balance', {
+      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: price,
-      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Failed to create pet — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -271,7 +271,7 @@ export class PetsManager {
     if (pet.hunger >= 100) { await interaction.reply({ content: '🍖 Your pet is already full!', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: feedWallet } = await (this.supabase as any)
+    const { data: feedWallet } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
 
@@ -280,7 +280,7 @@ export class PetsManager {
       return;
     }
 
-    const { error: feedDebitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: feedDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
     });
     if (feedDebitErr) {
@@ -289,7 +289,7 @@ export class PetsManager {
     }
 
     // Atomic feed — prevents TOCTOU race with decay timer
-    const { data: feedResult } = await (this.supabase as any).rpc('economy_pet_feed', {
+    const { data: feedResult } = await this.supabase.rpc('economy_pet_feed', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: 30,
     });
     const fr = feedResult as { success: boolean; old_hunger: number; new_hunger: number; status: string } | null;
@@ -327,7 +327,7 @@ export class PetsManager {
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
     // Atomic play — prevents TOCTOU race with decay timer
-    const { data: playResult } = await (this.supabase as any).rpc('economy_pet_play', {
+    const { data: playResult } = await this.supabase.rpc('economy_pet_play', {
       p_guild_id: guildId, p_user_id: interaction.user.id,
       p_happiness_gain: 25, p_energy_cost: 10,
     });
@@ -357,7 +357,7 @@ export class PetsManager {
     if (pet.level >= MAX_LEVEL) { await interaction.reply({ content: '🎓 Your pet is at max level! Try `/pet prestige`.', ephemeral: true }); return; }
 
     // Check balance before deducting
-    const { data: trainWallet } = await (this.supabase as any)
+    const { data: trainWallet } = await this.supabase
       .from('economy_wallets').select('wallet')
       .eq('guild_id', guildId).eq('user_id', interaction.user.id).single();
 
@@ -366,7 +366,7 @@ export class PetsManager {
       return;
     }
 
-    const { error: trainDebitErr } = await (this.supabase as any).rpc('economy_subtract_balance', {
+    const { error: trainDebitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
     });
     if (trainDebitErr) {
@@ -377,16 +377,16 @@ export class PetsManager {
     const xpGain = 20 + Math.floor(Math.random() * 15);
 
     // Atomic train — prevents TOCTOU race with decay timer on energy/xp/level
-    const { data: trainResult } = await (this.supabase as any).rpc('economy_pet_train', {
+    const { data: trainResult } = await this.supabase.rpc('economy_pet_train', {
       p_guild_id: guildId, p_user_id: interaction.user.id,
       p_xp_gain: xpGain, p_energy_cost: 20,
     });
     const tr = trainResult as { success: boolean; new_xp: number; new_level: number; leveled_up: boolean; new_energy: number; stat_bonus: string | null } | null;
     if (!tr?.success) {
       // Refund since training failed
-      await (this.supabase as any).rpc('economy_add_balance', {
+      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: interaction.user.id, p_amount: cost,
-      }).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
+      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
       await interaction.reply({ content: '❌ Training failed — your coins have been refunded.', ephemeral: true });
       return;
     }
@@ -408,7 +408,7 @@ export class PetsManager {
     const pet = await this.getPet(interaction.guildId!, interaction.user.id);
     if (!pet) { await interaction.reply({ content: '❌ You don\'t have a pet!', ephemeral: true }); return; }
 
-    await (this.supabase as any).from('economy_pets')
+    await this.supabase.from('economy_pets')
       .update({ name, updated_at: new Date().toISOString() }).eq('id', pet.id);
 
     await interaction.reply({ content: `✅ Your pet is now named **${name}**!` });
@@ -444,7 +444,7 @@ export class PetsManager {
     const iWin = myPower > theirPower;
     const reward = 100 + myPet.level * 10;
 
-    await (this.supabase as any).from('economy_pet_battles').insert({
+    await this.supabase.from('economy_pet_battles').insert({
       guild_id: guildId,
       challenger_id: interaction.user.id,
       defender_id: opponent.id,
@@ -455,7 +455,7 @@ export class PetsManager {
     });
 
     const battleWinnerId = iWin ? interaction.user.id : opponent.id;
-    const { error: payoutErr } = await (this.supabase as any).rpc('economy_add_balance', {
+    const { error: payoutErr } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: guildId, p_user_id: battleWinnerId, p_amount: reward,
     });
     // V49-L3: Surface payout failure to the user instead of silently swallowing
@@ -464,9 +464,9 @@ export class PetsManager {
 
     // XP for both — atomic increment via RPC (prevents TOCTOU race on stale xp value)
     for (const uid of [interaction.user.id, opponent.id]) {
-      await (this.supabase as any).rpc('economy_pet_add_xp', {
+      await Promise.resolve(this.supabase.rpc('economy_pet_add_xp', {
         p_guild_id: guildId, p_user_id: uid, p_xp: 10,
-      }).catch((err: Error) => log.error('pet XP increment failed:', err.message));
+      })).catch((err: Error) => log.error('pet XP increment failed:', err.message));
     }
 
     await interaction.reply({
@@ -498,7 +498,7 @@ export class PetsManager {
 
     // V49-M7: Atomic prestige — RPC only applies if level >= MAX_LEVEL,
     // preventing two concurrent prestige calls from both applying bonuses.
-    const { data: prestigeResult } = await (this.supabase as any).rpc('economy_pet_atomic_prestige', {
+    const { data: prestigeResult } = await this.supabase.rpc('economy_pet_atomic_prestige', {
       p_guild_id: guildId, p_user_id: interaction.user.id, p_max_level: MAX_LEVEL,
     });
 

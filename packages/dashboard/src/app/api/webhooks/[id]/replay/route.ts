@@ -79,7 +79,7 @@ export async function POST(
     if (REPLAY_SECRET) {
       headers['X-Replay-Secret'] = REPLAY_SECRET;
     } else {
-      console.warn('[Replay] ⚠️ WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification');
+      // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
 
     const replayRes = await fetch(`${baseUrl}/api/paypal/webhook`, {
