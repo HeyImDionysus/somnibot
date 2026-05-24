@@ -136,6 +136,9 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Run tests
         run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=60 --reporter=verbose
+      integration-test:
+    name: Integration Tests
+      
 
   # ──────────────────────────────────────────────────────────
   # Migration Lint
