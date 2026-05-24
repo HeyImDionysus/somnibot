@@ -282,7 +282,7 @@ describe('EventBus (real)', () => {
     const { eventBus } = await import('../services/event-bus.js');
     const handler = vi.fn();
     eventBus.on('test.event' as any, handler);
-    eventBus.emit('test.event' as any, { data: 'hello' } as any);
+    eventBus.emit('test.event' as any, 'guild1', { data: 'hello' } as any);
     expect(handler).toHaveBeenCalled();
   });
 });
