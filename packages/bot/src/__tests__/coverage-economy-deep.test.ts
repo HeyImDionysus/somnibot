@@ -103,6 +103,14 @@ function makeSupabase(overrides?: Record<string, any>) {
   chain.delete = () => chain;
   chain.match = () => chain;
   chain.range = () => chain;
+  chain.contains = () => chain;
+  chain.overlaps = () => chain;
+  chain.filter = () => chain;
+  chain.not = () => chain;
+  chain.or = () => chain;
+  chain.ilike = () => chain;
+  chain.like = () => chain;
+  chain.textSearch = () => chain;
   chain.single = async () => overrides?.single ?? { data: null, error: null };
   chain.maybeSingle = async () => overrides?.maybeSingle ?? { data: null, error: null };
   chain.rpc = vi.fn(async () => overrides?.rpc ?? { data: 100, error: null });
