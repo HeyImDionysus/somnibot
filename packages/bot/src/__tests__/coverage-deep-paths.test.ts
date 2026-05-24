@@ -42,7 +42,6 @@ vi.mock('discord.js', () => {
       map(fn: any) { return [...this.values()].map(fn); }
       find(fn: any) { return [...this.values()].find(fn); }
       first() { return [...this.values()][0]; }
-      size: 0
     },
     Events: { ClientReady: 'ready' },
     ComponentType: { Button: 2, StringSelect: 3 },
@@ -73,6 +72,72 @@ vi.mock('../services/event-bus.js', () => ({
 }));
 vi.mock('../services/valkey.js', () => ({ getValkey: vi.fn(() => ({})), connectValkey: vi.fn(async () => {}) }));
 vi.mock('../services/supabase.js', () => ({ getSupabase: vi.fn(() => ({})) }));
+
+// ConfigWatcher imports 20 invalidation functions
+vi.mock('../features/levels/index.js', () => ({ invalidateLevelCaches: vi.fn() }));
+vi.mock('../features/anti-raid/index.js', () => ({ invalidateAntiRaidCache: vi.fn() }));
+vi.mock('../features/starboard/index.js', () => ({ invalidateStarboardCache: vi.fn() }));
+vi.mock('../features/message-log/index.js', () => ({ invalidateMessageLogCache: vi.fn() }));
+vi.mock('../features/economy/index.js', () => ({ invalidateEconomyCache: vi.fn() }));
+vi.mock('../features/gathering/index.js', () => ({ invalidateGatheringCache: vi.fn() }));
+vi.mock('../features/crafting/index.js', () => ({ invalidateCraftingCache: vi.fn() }));
+vi.mock('../features/farming/index.js', () => ({ invalidateFarmingCache: vi.fn() }));
+vi.mock('../features/fishing/index.js', () => ({ invalidateFishingCache: vi.fn() }));
+vi.mock('../features/adventures/index.js', () => ({ invalidateAdventureCache: vi.fn() }));
+vi.mock('../features/market/index.js', () => ({ invalidateMarketCache: vi.fn() }));
+vi.mock('../features/trivia/index.js', () => ({ invalidateTriviaCache: vi.fn() }));
+vi.mock('../features/games/index.js', () => ({ invalidateGamesCache: vi.fn() }));
+vi.mock('../features/lottery/index.js', () => ({ invalidateLotteryCache: vi.fn() }));
+vi.mock('../features/polls/index.js', () => ({ invalidatePollsCache: vi.fn() }));
+vi.mock('../features/pets/index.js', () => ({ invalidatePetsCache: vi.fn() }));
+vi.mock('../features/quests/index.js', () => ({ invalidateQuestsCache: vi.fn() }));
+vi.mock('../features/achievements/index.js', () => ({ invalidateAchievementsCache: vi.fn() }));
+vi.mock('../features/profiles/index.js', () => ({ invalidateProfilesCache: vi.fn() }));
+vi.mock('../features/heist/index.js', () => ({ invalidateHeistCache: vi.fn() }));
+
+vi.mock('../services/alert-service.js', () => ({
+  AlertManager: class { check = vi.fn(); },
+  AlertService: class { constructor() {} start() {} stop() {} },
+}));
+
+// commerce-fulfillment deps
+vi.mock('../features/commerce/entitlement-service.js', () => ({
+  EntitlementService: class {
+    grant = vi.fn(async () => 'ent-1');
+  },
+}));
+vi.mock('../features/commerce/receipt-builder.js', () => ({
+  sendReceiptDM: vi.fn(async () => true),
+  buildReceiptEmbed: vi.fn(() => ({})),
+  buildReceiptComponents: vi.fn(() => null),
+}));
+vi.mock('../services/fraud-detection.js', () => ({
+  checkPurchaseVelocity: vi.fn(async () => ({ flagged: false })),
+  checkPaymentPattern: vi.fn(async () => ({ flagged: false })),
+  checkCriticalThreshold: vi.fn(async () => ({ flagged: false })),
+  checkDeviceAbuse: vi.fn(async () => ({ flagged: false })),
+}));
+vi.mock('../guards/bot-role-guard.js', () => ({
+  checkBotRolePosition: vi.fn(async () => ({ ok: true, message: '' })),
+  checkBotPermissions: vi.fn(() => ({ ok: true, missing: [] })),
+}));
+
+// deploy-listener deps
+vi.mock('../services/guild-snapshot.js', () => ({
+  writeGuildSnapshot: vi.fn(async () => {}),
+  startPeriodicSnapshots: vi.fn(() => null),
+}));
+
+// automation-engine deps
+vi.mock('../features/automations/automation-loader.js', () => ({
+  AutomationLoader: class { load = vi.fn(async () => []); },
+}));
+vi.mock('../features/automations/condition-evaluator.js', () => ({
+  evaluateConditions: vi.fn(async () => true),
+}));
+vi.mock('../features/automations/action-executor.js', () => ({
+  executeActions: vi.fn(async () => ({ success: true, results: [] })),
+}));
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
@@ -186,9 +251,10 @@ describe('sync-engine', () => {
   it('runSyncCycle returns SyncResult', async () => {
     const guild = makeGuild();
     const supa = makeSupa({ data: null, error: null });
-    const valkey = makeValkey();
+    const eventBus = makeEventBus();
+    const config = { autoRepair: false, intervalMs: 60000, maxDriftAge: 86400000 };
     try {
-      const result = await mod.runSyncCycle(guild, supa as any, valkey);
+      const result = await mod.runSyncCycle(guild, supa as any, eventBus, config as any);
       expect(result).toBeDefined();
     } catch {
       // Some internal errors are expected with mock data
@@ -216,14 +282,14 @@ describe('config-watcher', () => {
     expect(watcher).toBeDefined();
   });
 
-  it('start and stop', async () => {
+  it('start registers event listener', () => {
     const guild = makeGuild();
     const supa = makeSupa({ data: { features: {} }, error: null });
     const eventBus = makeEventBus();
     const valkey = makeValkey();
     const watcher = new mod.ConfigWatcher(guild, supa as any, eventBus, valkey);
-    await watcher.start();
-    watcher.stop();
+    watcher.start();
+    expect(eventBus.on).toHaveBeenCalledWith('config.changed', expect.any(Function));
   });
 });
 
@@ -279,13 +345,18 @@ describe('commerce-fulfillment', () => {
     expect(svc).toBeDefined();
   });
 
-  it('starts listening for events', () => {
+  it('fulfill returns result', async () => {
     const guild = makeGuild();
-    const supa = makeSupa();
+    const supa = makeSupa({ data: null, error: null });
     const eventBus = makeEventBus();
     const svc = new mod.CommerceFulfillmentService(guild, supa as any, eventBus);
-    svc.start();
-    expect(eventBus.on).toHaveBeenCalled();
+    const result = await svc.fulfill({
+      fulfillment_type: 'role_grant', guild_id: 'g1', customer_id: 'c1',
+      discord_id: 'u1', product_id: 'p1', product_name: 'Product', order_id: 'o1',
+      order_number: '1', amount_cents: 999, currency: 'usd',
+      granted_role_ids: ['r1'], granted_channel_ids: [], entitlement_type: 'one_time',
+    } as any);
+    expect(result).toBeDefined();
   });
 });
 
@@ -301,22 +372,22 @@ describe('sync/channel-events', () => {
   });
 
   it('handleChannelCreate', async () => {
+    const client: any = { supabase: makeSupa() };
     const channel: any = { id: 'ch1', name: 'new-channel', type: 0, guild: makeGuild(), guildId: 'g1' };
-    const supa = makeSupa();
-    try { await mod.handleChannelCreate(channel, supa as any); } catch {}
+    try { await mod.handleChannelCreate(client, channel); } catch {}
   });
 
   it('handleChannelUpdate', async () => {
+    const client: any = { supabase: makeSupa() };
     const oldChannel: any = { id: 'ch1', name: 'old-name', type: 0, guild: makeGuild(), guildId: 'g1' };
     const newChannel: any = { id: 'ch1', name: 'new-name', type: 0, guild: makeGuild(), guildId: 'g1' };
-    const supa = makeSupa();
-    try { await mod.handleChannelUpdate(oldChannel, newChannel, supa as any); } catch {}
+    try { await mod.handleChannelUpdate(client, oldChannel, newChannel); } catch {}
   });
 
   it('handleChannelDelete', async () => {
+    const client: any = { supabase: makeSupa() };
     const channel: any = { id: 'ch1', name: 'deleted', type: 0, guild: makeGuild(), guildId: 'g1' };
-    const supa = makeSupa();
-    try { await mod.handleChannelDelete(channel, supa as any); } catch {}
+    try { await mod.handleChannelDelete(client, channel); } catch {}
   });
 });
 
@@ -332,22 +403,22 @@ describe('sync/role-events', () => {
   });
 
   it('handleRoleCreate', async () => {
-    const role: any = { id: 'r1', name: 'New Role', guild: makeGuild() };
-    const supa = makeSupa();
-    try { await mod.handleRoleCreate(role, supa as any); } catch {}
+    const client: any = { supabase: makeSupa() };
+    const role: any = { id: 'r1', name: 'New Role', managed: false, guild: makeGuild() };
+    try { await mod.handleRoleCreate(client, role); } catch {}
   });
 
   it('handleRoleUpdate', async () => {
+    const client: any = { supabase: makeSupa() };
     const oldRole: any = { id: 'r1', name: 'Old', guild: makeGuild() };
     const newRole: any = { id: 'r1', name: 'New', guild: makeGuild() };
-    const supa = makeSupa();
-    try { await mod.handleRoleUpdate(oldRole, newRole, supa as any); } catch {}
+    try { await mod.handleRoleUpdate(client, oldRole, newRole); } catch {}
   });
 
   it('handleRoleDelete', async () => {
+    const client: any = { supabase: makeSupa() };
     const role: any = { id: 'r1', name: 'Deleted', guild: makeGuild() };
-    const supa = makeSupa();
-    try { await mod.handleRoleDelete(role, supa as any); } catch {}
+    try { await mod.handleRoleDelete(client, role); } catch {}
   });
 });
 
@@ -362,17 +433,13 @@ describe('automation-engine', () => {
     mod = await import('../features/automations/automation-engine.js');
   });
 
-  it('constructs', () => {
+  it('constructs AutomationEngine', () => {
     const guild = makeGuild();
     const supa = makeSupa();
     const eventBus = makeEventBus();
     const valkey = makeValkey();
-    try {
-      const engine = new (mod as any).AutomationEngine(guild, supa, eventBus, valkey);
-      expect(engine).toBeDefined();
-    } catch {
-      // May not have default export
-    }
+    const engine = new mod.AutomationEngine(guild, supa as any, valkey, eventBus);
+    expect(engine).toBeDefined();
   });
 });
 
@@ -538,8 +605,10 @@ describe('modal-handlers', () => {
       reply: vi.fn(async () => {}), deferReply: vi.fn(async () => {}),
       fields: { getTextInputValue: vi.fn(() => 'test') },
     };
-    const client: any = { supabase: makeSupa() };
-    try { await mod.handleModalSubmit(interaction, client); } catch {}
+    const guild = makeGuild();
+    const supa = makeSupa();
+    const eventBus = makeEventBus();
+    try { await mod.handleModalSubmit(interaction, guild, supa as any, eventBus); } catch {}
   });
 });
 
