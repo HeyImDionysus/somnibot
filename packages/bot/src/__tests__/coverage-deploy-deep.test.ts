@@ -102,7 +102,7 @@ describe('deployer', () => {
     const guild = makeGuild();
     const supa = makeSupa();
     const desiredState = { everyonePermissions: '0', roles: [], categories: [], channels: [] };
-    const options = { dryRun: false, onProgress: vi.fn() };
+    const options = { dryRun: false, cleanExisting: false, onProgress: vi.fn() };
     const result = await mod.deployServerState(guild as any, supa as any, desiredState, options);
     expect(result).toBeDefined();
     expect(result).toHaveProperty('success');
@@ -118,7 +118,7 @@ describe('deployer', () => {
       categories: [],
       channels: [],
     };
-    const options = { dryRun: false, onProgress: vi.fn() };
+    const options = { dryRun: false, cleanExisting: false, onProgress: vi.fn() };
     const result = await mod.deployServerState(guild as any, supa as any, desiredState as any, options);
     expect(result).toBeDefined();
   });
@@ -132,7 +132,7 @@ describe('deployer', () => {
       categories: [{ key: 'cat1', name: 'General', position: 0 }],
       channels: [{ key: 'general', name: 'general', type: 0, categoryKey: 'cat1', position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 't1', overrides: [] }],
     };
-    const options = { dryRun: false, onProgress: vi.fn() };
+    const options = { dryRun: false, cleanExisting: false, onProgress: vi.fn() };
     const result = await mod.deployServerState(guild as any, supa as any, desiredState as any, options);
     expect(result).toBeDefined();
   });
@@ -146,7 +146,7 @@ describe('deployer', () => {
       categories: [],
       channels: [],
     };
-    const options = { dryRun: true, onProgress: vi.fn() };
+    const options = { dryRun: true, cleanExisting: false, onProgress: vi.fn() };
     const result = await mod.deployServerState(guild as any, supa as any, desiredState as any, options);
     expect(result).toBeDefined();
   });
@@ -157,7 +157,7 @@ describe('deployer', () => {
     const guild = makeGuild();
     const supa = makeSupa();
     const desiredState = { everyonePermissions: '0', roles: [], categories: [], channels: [] };
-    const result = await mod.deployServerState(guild as any, supa as any, desiredState, { dryRun: false });
+    const result = await mod.deployServerState(guild as any, supa as any, desiredState, { dryRun: false, cleanExisting: false });
     expect(result.success).toBe(false);
   });
 });

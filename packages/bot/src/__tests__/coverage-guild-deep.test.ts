@@ -177,8 +177,9 @@ describe('guild-init', () => {
   });
 
   it('registerGuildCommands registers commands', async () => {
+    const client: any = { env: { DISCORD_TOKEN: 'tok' }, user: { id: 'bot1' } };
     try {
-      await mod.registerGuildCommands('g1', 'token', []);
+      await mod.registerGuildCommands(client, 'g1', []);
     } catch {}
   });
 
@@ -205,23 +206,11 @@ describe('guild-context', () => {
 // config-loader.ts
 // ═══════════════════════════════════════════════════════════
 describe('config-loader', () => {
-  let mod: typeof import('../services/config-loader.js');
-
-  beforeEach(async () => {
-    vi.resetModules();
-    mod = await import('../services/config-loader.js');
-  });
-
   it('loadConfigFromDatabase loads config', async () => {
+    vi.resetModules();
     try {
+      const mod = await import('../services/config-loader.js');
       const count = await mod.loadConfigFromDatabase();
-      expect(typeof count).toBe('number');
-    } catch {}
-  });
-
-  it('syncConfigToDatabase syncs', async () => {
-    try {
-      const count = await mod.syncConfigToDatabase();
       expect(typeof count).toBe('number');
     } catch {}
   });
@@ -239,7 +228,9 @@ describe('ConfigWatcher', () => {
   });
 
   it('constructs', () => {
-    const watcher = new mod.ConfigWatcher(makeSupa() as any, makeValkey() as any, 'g1');
+    const guild: any = { id: 'g1' };
+    const eventBus: any = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
+    const watcher = new mod.ConfigWatcher(guild, makeSupa() as any, eventBus, makeValkey() as any);
     expect(watcher).toBeDefined();
   });
 });

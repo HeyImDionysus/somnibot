@@ -165,21 +165,19 @@ describe('xp-tracker', () => {
   it('loadLevelConfig returns config', async () => {
     const supa = makeSupa({ data: { min_xp: 15, max_xp: 25, cooldown_seconds: 60, level_up_channel_id: null, announcement_format: '{user} reached level {level}!', stack_roles: true, no_xp_roles: [], no_xp_channels: [] }, error: null });
     const valkey = makeValkey();
-    const config = await mod.loadLevelConfig(supa as any, valkey as any, 'g1');
+    const config = await mod.loadLevelConfig(supa as any, 'g1');
     expect(config).toBeDefined();
   });
 
   it('loadLevelConfig returns defaults when null', async () => {
     const supa = makeSupa({ data: null, error: null });
-    const valkey = makeValkey();
-    const config = await mod.loadLevelConfig(supa as any, valkey as any, 'g1');
+    const config = await mod.loadLevelConfig(supa as any, 'g1');
     expect(config).toBeDefined();
   });
 
   it('loadRewards returns array', async () => {
     const supa = makeSupa({ data: [{ level: 5, role_id: 'r1' }], error: null });
-    const valkey = makeValkey();
-    const rewards = await mod.loadRewards(supa as any, valkey as any, 'g1');
+    const rewards = await mod.loadRewards(supa as any, 'g1');
     expect(rewards).toBeDefined();
   });
 
@@ -187,7 +185,7 @@ describe('xp-tracker', () => {
     const supa = makeSupa({ data: { xp: 100, level: 1, total_messages: 10 }, error: null });
     const valkey = makeValkey();
     const message = { author: { id: 'u1', bot: false }, guild: { id: 'g1' }, channel: { id: 'c1' }, member: { roles: { cache: new Map() } } };
-    try { await mod.processMessageXp(message as any, supa as any, valkey as any, { emit: vi.fn() } as any); } catch {}
+    try { await mod.processMessageXp(message as any, supa as any, valkey as any, 'g1'); } catch {}
   });
 
   it('invalidateLevelCaches clears cache', () => {
@@ -235,7 +233,7 @@ describe('level-announcer', () => {
     const guild = makeGuild();
     const supa = makeSupa({ data: { level_up_channel_id: 'c1', announcement_format: '{user} reached level {level}!' }, error: null });
     const valkey = makeValkey();
-    try { await mod.handleLevelUp({ guildId: 'g1', userId: 'u1', oldLevel: 4, newLevel: 5 } as any, guild as any, supa as any, valkey as any); } catch {}
+    try { await mod.handleLevelUp(guild as any, supa as any, { emit: vi.fn(), on: vi.fn() } as any, 'u1', 4, 5, 1500); } catch {}
   });
 });
 
