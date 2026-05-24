@@ -56,17 +56,13 @@ vi.mock('discord.js', () => {
     setRequired() { return this; } setPlaceholder() { return this; } setValue() { return this; }
     setMinLength() { return this; } setMaxLength() { return this; }
   }
+  function chainable(): any {
+    const p: any = new Proxy({}, { get: () => (...args: any[]) => { if (typeof args[0] === 'function') { args[0](chainable()); } return p; } });
+    return p;
+  }
   class SlashCommandBuilder {
-    setName() { return this; } setDescription() { return this; } addSubcommand(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ addStringOption: () => ({ setRequired: () => ({}) }), addIntegerOption: () => ({ setRequired: () => ({}) }), addUserOption: () => ({ setRequired: () => ({}) }), addChannelOption: () => ({ setRequired: () => ({}) }), addBooleanOption: () => ({ setRequired: () => ({}) }), addRoleOption: () => ({ setRequired: () => ({}) }), addNumberOption: () => ({ setRequired: () => ({}) }) }) }) }); return this; }
-    addSubcommandGroup(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ addSubcommand: () => ({}) }) }) }); return this; }
-    addStringOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ addChoices: () => ({}) }), addChoices: () => ({}) }) }) }); return this; }
-    addIntegerOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ setMinValue: () => ({ setMaxValue: () => ({}) }) }), setMinValue: () => ({}) }) }) }); return this; }
-    addUserOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addChannelOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addBooleanOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addRoleOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addNumberOption(fn: any) { fn?.({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ setMinValue: () => ({}) }) }) }) }); return this; }
-    setDefaultMemberPermissions() { return this; }
+    [key: string]: any;
+    constructor() { return chainable(); }
     toJSON() { return {}; }
   }
   class ContainerBuilder { addComponents(..._c: any[]) { return this; } toJSON() { return {}; } }
@@ -121,6 +117,10 @@ vi.mock('discord.js', () => {
     GuildMemberFlags: {},
     Partials: { Channel: 0, Message: 1, Reaction: 2, GuildMember: 3 },
     ActivityType: { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Custom: 4, Competing: 5 },
+    AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
+    AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
+    AutoModerationRuleKeywordPresetType: { Profanity: 1, SexualContent: 2, Slurs: 3 },
+    AutoModerationRuleEventType: { MessageSend: 1 },
   };
 });
 
@@ -297,7 +297,7 @@ function makeEventBus() {
 describe('commerce coverage', () => {
   it('buildReceiptEmbed + buildReceiptComponents', async () => {
     const { buildReceiptEmbed, buildReceiptComponents } = await import('../features/commerce/receipt-builder.js');
-    const data: any = { orderId: 'ord1', buyerTag: 'User#001', itemName: 'Sword', price: 9.99, currency: 'USD', timestamp: new Date().toISOString() };
+    const data: any = { orderId: 'ord1', buyerTag: 'User#001', itemName: 'Sword', amountCents: 999, currency: 'USD', date: new Date(), buyerDiscordId: 'u1', paymentMethod: 'paypal' };
     const embed = buildReceiptEmbed(data);
     expect(embed).toBeDefined();
     try { buildReceiptComponents(data); } catch {}
