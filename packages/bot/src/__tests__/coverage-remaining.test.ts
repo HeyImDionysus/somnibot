@@ -186,7 +186,7 @@ describe('ticket-service', () => {
   it('checkInactiveTickets', async () => {
     const mod = await import('../features/tickets/ticket-service.js');
     try {
-      await mod.checkInactiveTickets(makeGuild(), makeSupabase());
+      await mod.checkInactiveTickets(makeSupabase(), makeGuild() as any, makeEventBus());
     } catch { }
     expect(true).toBe(true);
   });
@@ -205,7 +205,7 @@ describe('xp-tracker', () => {
 
   it('loadLevelConfig returns defaults when null data', async () => {
     const mod = await import('../features/levels/xp-tracker.js');
-    const cfg = await mod.loadLevelConfig('guild1', makeSupabase());
+    const cfg = await mod.loadLevelConfig(makeSupabase(), 'guild1');
     expect(cfg).toBeDefined();
   });
 

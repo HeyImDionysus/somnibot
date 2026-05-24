@@ -220,7 +220,7 @@ describe('AdventureManager deep', () => {
   });
 
   it('handleChoice', async () => {
-    try { await mgr.handleChoice({} as any); } catch { /* mock limitation */ }
+    try { await mgr.handleChoice({} as any, 'session-1', 0); } catch { /* mock limitation */ }
     expect(true).toBe(true);
   });
 });
