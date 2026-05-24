@@ -150,7 +150,7 @@ describe('anti-raid', () => {
     const message = { author: { id: 'u1', bot: false }, guild: { id: 'g1' }, member, content: 'Hello world', channel: { id: 'c1' } };
     const supa = makeSupa({ data: { enabled: true, join_threshold: 10, join_window: 60, message_threshold: 20, message_window: 10, action: 'kick', min_account_age_days: 7 }, error: null });
     const valkey = makeValkey();
-    try { await mod.processAntiRaid(message as any, supa as any, valkey as any, { emit: vi.fn() } as any); } catch {}
+    try { await mod.processAntiRaid({ id: 'g1' } as any, member as any, supa as any); } catch {}
   });
 
   it('invalidateAntiRaidCache invalidates', () => {
@@ -293,7 +293,7 @@ describe('reaction-engine', () => {
     const supa = makeSupa({ data: [{ message_id: 'msg1', emoji: '👍', role_id: 'r1', type: 'toggle' }], error: null });
     const valkey = makeValkey();
     const guild = makeGuild();
-    try { await mod.handleReactionAdd(reaction as any, user as any, supa as any, valkey as any, guild as any); } catch {}
+    try { await mod.handleReactionAdd(reaction as any, user as any, guild as any, supa as any, valkey as any, { emit: vi.fn(), on: vi.fn() } as any); } catch {}
   });
 
   it('handleReactionRemove processes remove', async () => {
@@ -302,7 +302,7 @@ describe('reaction-engine', () => {
     const supa = makeSupa({ data: [{ message_id: 'msg1', emoji: '👍', role_id: 'r1', type: 'toggle' }], error: null });
     const valkey = makeValkey();
     const guild = makeGuild();
-    try { await mod.handleReactionRemove(reaction as any, user as any, supa as any, valkey as any, guild as any); } catch {}
+    try { await mod.handleReactionRemove(reaction as any, user as any, guild as any, supa as any, valkey as any, { emit: vi.fn(), on: vi.fn() } as any); } catch {}
   });
 });
 
@@ -338,7 +338,7 @@ describe('custom-commands', () => {
   it('loadCustomCommands loads from DB', async () => {
     const supa = makeSupa({ data: [{ name: 'ping', response: 'Pong!', enabled: true }], error: null });
     const valkey = makeValkey();
-    try { await mod.loadCustomCommands(supa as any, valkey as any, 'g1'); } catch {}
+    try { await mod.loadCustomCommands(supa as any, makeGuild() as any, { put: vi.fn(async () => []) } as any); } catch {}
   });
 
   it('isCustomCommand checks registry', () => {
@@ -354,7 +354,8 @@ describe('custom-commands', () => {
     const message = { content: '!ping', guild: { id: 'g1' }, channel: { send: vi.fn(async () => {}) }, author: { id: 'u1' }, member: { roles: { cache: new Map() } } };
     const supa = makeSupa({ data: [{ name: 'ping', response: 'Pong!', enabled: true }], error: null });
     const valkey = makeValkey();
-    try { await mod.handleCustomCommand(message as any, supa as any, valkey as any); } catch {}
+    const interaction: any = { commandName: 'ping', reply: vi.fn(async () => {}), guild: { id: 'g1' }, user: { id: 'u1' } };
+    try { await mod.handleCustomCommand(interaction, supa as any, valkey as any, makeGuild() as any); } catch {}
   });
 });
 
@@ -436,7 +437,8 @@ describe('goodbye-service (real)', () => {
     const member = { id: 'u1', user: { tag: 'User#0001', displayAvatarURL: () => 'url', id: 'u1' }, guild: { id: 'g1', name: 'Test', memberCount: 99, channels: { cache: new Map([['c1', { id: 'c1', send: vi.fn(async () => {}) }]]) } } };
     const supa = makeSupa({ data: { goodbye_channel_id: 'c1', goodbye_message: 'Goodbye {user}!' }, error: null });
     const valkey = makeValkey();
-    try { await mod.executeGoodbyeFlow(member as any, supa as any, valkey as any); } catch {}
+    const config: any = { goodbye_enabled: true, goodbye_channel_id: 'c1', goodbye_message: 'Goodbye {user}!', goodbye_embed: false };
+    try { await mod.executeGoodbyeFlow(member as any, config); } catch {}
   });
 });
 
@@ -452,7 +454,7 @@ describe('AutoModSync', () => {
   });
 
   it('constructs', () => {
-    const sync = new mod.AutoModSync(makeGuild() as any, makeSupa() as any);
+    const sync = new mod.AutoModSync(makeGuild() as any, makeSupa() as any, { emit: vi.fn(), on: vi.fn(), off: vi.fn() } as any);
     expect(sync).toBeDefined();
   });
 });

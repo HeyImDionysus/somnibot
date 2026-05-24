@@ -128,7 +128,7 @@ describe('onboarding-sync', () => {
   it('imports', async () => {
     vi.resetModules();
     try {
-      const mod = await import('../features/discord-native/onboarding-sync.js');
+      const mod = await import('../features/discord-native/guild-onboarding-sync.js');
       expect(mod).toBeDefined();
     } catch {}
   });
@@ -156,7 +156,7 @@ describe('TempChannelManager', () => {
     try {
       const mod = await import('../features/temp-channels/temp-channel-manager.js');
       const guild = { id: 'g1', channels: { cache: new Map(), create: vi.fn(async () => ({ id: 'c1' })) }, members: { cache: new Map() } };
-      const mgr = new mod.TempChannelManager(guild as any, makeSupa() as any, makeValkey() as any);
+      const mgr = new mod.TempChannelManager(guild as any, makeSupa() as any);
       expect(mgr).toBeDefined();
     } catch {}
   });
@@ -182,7 +182,7 @@ describe('analytics-service', () => {
   it('imports', async () => {
     vi.resetModules();
     try {
-      const mod = await import('../features/audit/analytics-service.js');
+      const mod = await import('../features/audit/audit-service.js');
       expect(mod).toBeDefined();
     } catch {}
   });
@@ -223,7 +223,7 @@ describe('forgetme-command', () => {
       followUp: vi.fn(async () => {}),
     };
     const supa = makeSupa();
-    try { await mod.handleForgetMeCommand(interaction as any, supa as any); } catch {}
+    try { await mod.handleForgetMeCommand(interaction as any, supa as any, 'g1'); } catch {}
   });
 });
 
