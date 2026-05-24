@@ -10,6 +10,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
 const ECONOMY_COLUMNS = [
   'economy_enabled',
@@ -151,27 +152,8 @@ export async function PATCH(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
 
-    let rawBody: unknown;
-    try {
-      rawBody = await request.json();
-    } catch {
-      return NextResponse.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
-    }
-
-    const parsed = economyPatchSchema.safeParse(rawBody);
-    if (!parsed.success) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Validation failed',
-          issues: parsed.error.issues.map((i) => ({
-            path: i.path.join('.'),
-            message: i.message,
-          })),
-        },
-        { status: 400 },
-      );
-    }
+    const parsed = await parseBody(request, economyPatchSchema);
+    if (!parsed.ok) return parsed.response;
 
     const updates = parsed.data;
     if (Object.keys(updates).length === 0) {

@@ -10,8 +10,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const { searchParams } = new URL(request.url);

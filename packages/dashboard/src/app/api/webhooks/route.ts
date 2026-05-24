@@ -6,10 +6,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const DEFAULT_PAGE_SIZE = 25;
 
 export async function GET(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'standard');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

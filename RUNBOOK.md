@@ -34,6 +34,28 @@ install → typecheck → lint → build → test → migration-lint → securit
 
 ## Rollback
 
+### Railway (Bot)
+1. Open Railway dashboard → SomniBot service → **Deployments** tab
+2. Click the three-dot menu on the last known-good deployment → **Rollback**
+3. Railway will redeploy that exact image instantly
+4. Verify health: `curl http://localhost:3001/health` (or check Railway logs for `HealthServer: listening`)
+
+### Vercel (Dashboard)
+1. Open Vercel dashboard → somnibot → **Deployments** tab
+2. Find the last green deployment → click three-dot menu → **Promote to Production**
+3. Vercel routes traffic to that build within seconds
+4. Verify: visit `https://<domain>/api/diagnostics` — should return `{ status: 'ok' }`
+
+### Database Migrations
+Migrations are **forward-only**. To undo a migration:
+1. Create a NEW migration that reverses the changes (e.g., `DROP INDEX`, `ALTER TABLE DROP COLUMN`)
+2. Name it with the next timestamp: `20260609000000_revert_<name>.sql`
+3. Test locally: `supabase db reset` (or `supabase migration up` on a staging project)
+4. Push via normal PR flow — CI migration-lint will validate
+
+**Never** run `DROP TABLE` or `TRUNCATE` in a rollback migration without explicit team approval.
+
+### Git (Code)
 ```bash
 git log --oneline -10          # Find last good commit
 git checkout <hash>
@@ -41,7 +63,13 @@ pnpm install --frozen-lockfile && pnpm build
 # Restart process
 ```
 
-Migrations are forward-only. To undo, create a NEW reverse migration.
+### Valkey
+If Valkey state is corrupted, flush the specific guild or feature namespace:
+```bash
+valkey-cli -a $VALKEY_PASSWORD KEYS "antiraid:*" | xargs valkey-cli DEL
+valkey-cli -a $VALKEY_PASSWORD KEYS "ratelimit:*" | xargs valkey-cli DEL
+```
+Anti-raid and rate limiting will rebuild state on next event. Economy cooldowns reset (safe — users just lose active cooldowns).
 
 ## Monitoring
 
@@ -76,8 +104,18 @@ Auto-run on bot start via `migration-runner.ts`. SHA-256 checksums. Stops on fir
 
 ### Data Retention (every 6h cron)
 - Audit logs: 90 days
+- Economy transactions: 180 days
+- License validations: 90 days
 - Portal sessions: on expiry
 - Webhook events: 30 days (processed only)
+
+**Manual cleanup** (deletes in batches of 10,000):
+```sql
+SELECT cleanup_old_records('economy_transactions', 180);  -- 180 days retention
+SELECT cleanup_old_records('audit_log', 90);               -- 90 days retention
+SELECT cleanup_old_records('license_validations', 90);
+SELECT cleanup_old_records('webhook_events', 30);
+```
 
 ### User Data Deletion
 ```sql

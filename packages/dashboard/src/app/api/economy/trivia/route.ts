@@ -1,9 +1,10 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
 const triviaQuestionSchema = z.object({
   id: z.string().uuid().optional(),
@@ -31,18 +32,15 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const raw = await request.json();
-    const parsed = triviaQuestionSchema.safeParse(raw);
-    if (!parsed.success) {
-      return NextResponse.json({ error: parsed.error.issues[0]?.message ?? 'Validation failed' }, { status: 400 });
-    }
-    const body = parsed.data;
+    const result = await parseBody(request, triviaQuestionSchema);
+    if (!result.ok) return result.response;
+    const body = result.data;
     const supabase = createAdminSupabase();
     const { data, error } = await supabase
       .from('economy_trivia_questions')
@@ -64,18 +62,16 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PUT(request: Request) {
+export async function PUT(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const raw = await request.json();
-    const parsed = triviaQuestionSchema.extend({ id: z.string().uuid() }).safeParse(raw);
-    if (!parsed.success) {
-      return NextResponse.json({ error: parsed.error.issues[0]?.message ?? 'Validation failed' }, { status: 400 });
-    }
-    const body = parsed.data;
+    const putSchema = triviaQuestionSchema.extend({ id: z.string().uuid() });
+    const result = await parseBody(request, putSchema);
+    if (!result.ok) return result.response;
+    const body = result.data;
     const supabase = createAdminSupabase();
     const { data, error } = await supabase
       .from('economy_trivia_questions')
@@ -99,7 +95,7 @@ export async function PUT(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+export async function DELETE(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 

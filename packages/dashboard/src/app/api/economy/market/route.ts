@@ -3,11 +3,15 @@
  *
  * GET — Returns market status (placeholder for dashboard)
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
     const supabase = createAdminSupabase();
@@ -16,7 +20,8 @@ export async function GET() {
       .from('economy_market_listings')
       .select('id', { count: 'exact', head: true })
       .eq('guild_id', ctx.guildId)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .limit(500);
 
     return NextResponse.json({ data: { active_listings: count ?? 0 } });
   } catch (err: unknown) {

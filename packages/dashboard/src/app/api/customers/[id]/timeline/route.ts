@@ -5,6 +5,7 @@
 import { NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 interface TimelineEvent {
   id: string;
@@ -20,6 +21,9 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const rateLimited = await checkAdminRateLimit(_request, 'standard');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_customers');
     const { id } = await params;
