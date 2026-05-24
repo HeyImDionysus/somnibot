@@ -38,6 +38,8 @@ vi.mock('discord.js', () => {
     Events: { ClientReady: 'ready', InteractionCreate: 'interactionCreate', GuildCreate: 'guildCreate' },
     REST: class { setToken() { return this; } },
     Routes: { applicationGuildCommands: () => '/fake' },
+    AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
+    AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
     SlashCommandBuilder: class {
       setName() { return this; } setDescription() { return this; } setDefaultMemberPermissions() { return this; }
       addSubcommand(fn: any) { try { fn(this); } catch {} return this; }
@@ -130,7 +132,8 @@ function makeClient(): any {
 describe('ConfigWatcher', () => {
   it('constructs and starts', async () => {
     const mod = await import('../services/config-watcher.js');
-    const watcher = new mod.ConfigWatcher(makeSupa() as any, makeValkey());
+    const eventBus: any = { on: vi.fn(), emit: vi.fn(), removeAllListeners: vi.fn() };
+    const watcher = new mod.ConfigWatcher(makeGuild() as any, makeSupa() as any, eventBus, makeValkey());
     expect(watcher).toBeDefined();
   });
 });
@@ -139,7 +142,8 @@ describe('ConfigWatcher', () => {
 describe('CommerceFulfillmentService', () => {
   it('constructs', async () => {
     const mod = await import('../services/commerce-fulfillment.js');
-    const svc = new mod.CommerceFulfillmentService(makeSupa() as any, makeClient());
+    const eventBus: any = { on: vi.fn(), emit: vi.fn() };
+    const svc = new mod.CommerceFulfillmentService(makeGuild() as any, makeSupa() as any, eventBus);
     expect(svc).toBeDefined();
   });
 });
@@ -148,12 +152,16 @@ describe('CommerceFulfillmentService', () => {
 describe('fraud-detection', () => {
   it('checkPurchaseVelocity returns result', async () => {
     const mod = await import('../services/fraud-detection.js');
-    const result = await mod.checkPurchaseVelocity(makeSupa() as any, 'u1');
+    const supa = makeSupa({ data: null, error: null, count: 0 });
+    const ctx: any = { supabase: supa, guildId: 'g1' };
+    const result = await mod.checkPurchaseVelocity(ctx, 'cust1', 'u1');
     expect(result).toBeDefined();
   });
   it('checkDeviceAbuse returns result', async () => {
     const mod = await import('../services/fraud-detection.js');
-    const result = await mod.checkDeviceAbuse(makeSupa() as any, 'u1', 'device1');
+    const supa = makeSupa({ data: null, error: null, count: 0 });
+    const ctx: any = { supabase: supa, guildId: 'g1' };
+    const result = await mod.checkDeviceAbuse(ctx, 'key1', 5);
     expect(result).toBeDefined();
   });
 });
@@ -162,7 +170,7 @@ describe('fraud-detection', () => {
 describe('AlertService', () => {
   it('constructs and inits', async () => {
     const mod = await import('../services/alert-service.js');
-    const svc = new mod.AlertService(makeSupa() as any, makeClient());
+    const svc = new mod.AlertService(makeValkey(), makeSupa() as any, makeGuild() as any);
     await svc.init();
     expect(svc).toBeDefined();
   });
@@ -172,7 +180,8 @@ describe('AlertService', () => {
 describe('OwnerNotificationService', () => {
   it('constructs', async () => {
     const mod = await import('../services/owner-notifications.js');
-    const svc = new mod.OwnerNotificationService(makeClient(), makeSupa() as any);
+    const eventBus: any = { on: vi.fn(), emit: vi.fn() };
+    const svc = new mod.OwnerNotificationService(makeClient() as any, 'g1', makeSupa() as any, eventBus);
     expect(svc).toBeDefined();
   });
 });
@@ -181,7 +190,7 @@ describe('OwnerNotificationService', () => {
 describe('HeartbeatService', () => {
   it('constructs', async () => {
     const mod = await import('../services/heartbeat.js');
-    const svc = new mod.HeartbeatService(makeClient(), makeValkey());
+    const svc = new mod.HeartbeatService(makeValkey(), makeSupa() as any, 'g1', makeClient() as any);
     expect(svc).toBeDefined();
   });
 });
@@ -190,7 +199,7 @@ describe('HeartbeatService', () => {
 describe('embed-theme', () => {
   it('themedEmbed returns embed', async () => {
     const mod = await import('../services/embed-theme.js');
-    const embed = await mod.themedEmbed(makeSupa() as any, 'g1', { title: 'Test' });
+    const embed = await mod.themedEmbed(makeSupa() as any, makeValkey() as any, 'g1', 'welcome');
     expect(embed).toBeDefined();
   });
 });
@@ -199,7 +208,8 @@ describe('embed-theme', () => {
 describe('MusicStatusReporter', () => {
   it('constructs', async () => {
     const mod = await import('../services/music-status-reporter.js');
-    const reporter = new mod.MusicStatusReporter(makeClient(), makeValkey());
+    const musicPlayer: any = { getStatus: vi.fn(async () => null) };
+    const reporter = new mod.MusicStatusReporter(musicPlayer, makeSupa() as any, 'g1');
     expect(reporter).toBeDefined();
   });
 });
@@ -208,7 +218,11 @@ describe('MusicStatusReporter', () => {
 describe('guild-snapshot', () => {
   it('writeGuildSnapshot', async () => {
     const mod = await import('../services/guild-snapshot.js');
-    await mod.writeGuildSnapshot(makeSupa() as any, makeGuild());
+    const guild = makeGuild();
+    // Ensure roles and channels have fetch
+    expect(guild.roles.fetch).toBeDefined();
+    expect(guild.channels.fetch).toBeDefined();
+    await mod.writeGuildSnapshot(guild as any, makeSupa() as any);
   });
 });
 
