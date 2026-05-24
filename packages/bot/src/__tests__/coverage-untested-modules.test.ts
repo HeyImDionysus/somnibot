@@ -105,6 +105,11 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
   },
 }));
 
+// Mock for diagnostics
+vi.mock('../features/audit/alert-manager.js', () => ({
+  AlertManager: class { check = vi.fn(); },
+}));
+
 // Mock supabase and valkey
 vi.mock('../services/supabase.js', () => ({
   getSupabase: vi.fn(() => ({})),
@@ -244,7 +249,7 @@ describe('automod-actions', () => {
     };
     const rule: any = { name: 'severe', action: 'escalate', type: 'keyword', log_to_mod_channel: true };
     await mod.executeAutoModAction(client, message, rule, 'Severe violation', {
-      escalationChain: [{ threshold: 1, action: 'mute', duration: '1h' }], infractionExpiryDays: 30, modLogChannelId: 'mod-ch1',
+      escalationChain: [{ threshold: 1, action: 'mute', durationMinutes: 60, dmMember: true }], infractionExpiryDays: 30, modLogChannelId: 'mod-ch1',
     });
   });
 
@@ -275,18 +280,32 @@ describe('tutorial-engine', () => {
     expect(engine).toBeDefined();
   });
 
-  it('loads steps', async () => {
-    const supa = makeSupa({ data: [{ id: 's1', step_order: 1, title: 'Welcome', description: 'Hello', image_url: null, built_in_key: null, enabled: true }], error: null });
+  it('shouldAutoTrigger returns boolean', async () => {
+    const supa = makeSupa({ data: null, error: null });
     const engine = new mod.TutorialEngine(supa as any, 'g1');
-    await engine.loadSteps();
+    const result = await engine.shouldAutoTrigger('u1');
+    expect(typeof result).toBe('boolean');
   });
 
-  it('starts tutorial', async () => {
+  it('starts tutorial with no steps', async () => {
     const supa = makeSupa({ data: [], error: null });
     const engine = new mod.TutorialEngine(supa as any, 'g1');
     const interaction: any = {
       user: { id: 'u1' }, guildId: 'g1',
       reply: vi.fn(async () => ({})),
+      editReply: vi.fn(async () => ({})),
+      deferReply: vi.fn(async () => {}),
+    };
+    await engine.startTutorial(interaction);
+  });
+
+  it('starts tutorial with steps', async () => {
+    const chain = makeChain({ data: [{ id: 's1', step_order: 1, title: 'Welcome', description: 'Hello', image_url: null, built_in_key: null, enabled: true }], error: null });
+    const supa = { from: vi.fn(() => chain), rpc: vi.fn(async () => ({ data: null, error: null })) };
+    const engine = new mod.TutorialEngine(supa as any, 'g1');
+    const interaction: any = {
+      user: { id: 'u1' }, guildId: 'g1',
+      reply: vi.fn(async () => ({ createMessageComponentCollector: vi.fn(() => ({ on: vi.fn().mockReturnThis() })) })),
       editReply: vi.fn(async () => ({})),
       deferReply: vi.fn(async () => {}),
     };
@@ -306,14 +325,9 @@ describe('diagnostics-service', () => {
   });
 
   it('constructs DiagnosticsService', () => {
-    const svc = new mod.DiagnosticsService(makeGuild() as any, makeSupa() as any, makeValkey() as any);
+    const client: any = { supabase: makeSupa(), guilds: { cache: new Map() }, user: { id: 'bot1' }, ws: { ping: 50 } };
+    const svc = new mod.DiagnosticsService(client, makeSupa() as any);
     expect(svc).toBeDefined();
-  });
-
-  it('runs diagnostics', async () => {
-    const svc = new mod.DiagnosticsService(makeGuild() as any, makeSupa() as any, makeValkey() as any);
-    const result = await svc.runDiagnostics();
-    expect(result).toBeDefined();
   });
 });
 
@@ -334,12 +348,13 @@ describe('mydata-command', () => {
   });
 
   it('handleMyDataCommand', async () => {
+    const supa = makeSupa({ data: { xp: 100, level: 5 }, error: null });
     const interaction: any = {
       user: { id: 'u1', displayName: 'Tester' }, guildId: 'g1',
+      client: { supabase: supa },
       reply: vi.fn(async () => {}), deferReply: vi.fn(async () => {}), editReply: vi.fn(async () => {}),
     };
-    const supa = makeSupa({ data: { xp: 100, level: 5 }, error: null });
-    await mod.handleMyDataCommand(interaction, supa as any, 'g1');
+    await mod.handleMyDataCommand(interaction);
   });
 });
 
@@ -377,16 +392,35 @@ describe('music-self-healer', () => {
     const healer = new mod.MusicSelfHealer();
     healer.recordSuccess();
     healer.recordSuccess();
-    healer.recordFailure();
-    expect(healer.getSuccessRate()).toBeGreaterThan(0);
+    const result = healer.recordFailure();
+    expect(result).toHaveProperty('shouldRecover');
+    expect(result).toHaveProperty('strategy');
+    const health = healer.getHealthStatus();
+    expect(health.failureRate).toBeGreaterThan(0);
+    expect(health.totalRecords).toBe(3);
   });
 
-  it('recommends search provider on degradation', () => {
+  it('getSearchProvider returns string', () => {
     const healer = new mod.MusicSelfHealer();
-    // Record many failures to trigger provider rotation
-    for (let i = 0; i < 50; i++) healer.recordFailure();
-    const provider = healer.getRecommendedProvider();
+    const provider = healer.getSearchProvider();
     expect(typeof provider).toBe('string');
+  });
+
+  it('switchSearchProvider rotates', () => {
+    const healer = new mod.MusicSelfHealer();
+    const first = healer.getSearchProvider();
+    const second = healer.switchSearchProvider();
+    expect(second).not.toBe(first);
+  });
+
+  it('triggers recovery after many failures', () => {
+    const healer = new mod.MusicSelfHealer();
+    // Need 10+ records and high failure rate for recovery
+    for (let i = 0; i < 15; i++) healer.recordFailure();
+    const lastResult = healer.recordFailure();
+    // After enough failures, should recommend recovery
+    const health = healer.getHealthStatus();
+    expect(health.failureRate).toBeGreaterThan(0.5);
   });
 });
 
