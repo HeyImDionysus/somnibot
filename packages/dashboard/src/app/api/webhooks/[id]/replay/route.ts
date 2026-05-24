@@ -16,7 +16,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
   || (process.env.NEXTAUTH_SECRET
     ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-    : '');
+    : (() => { throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret'); })());
 
 export async function POST(
   _req: Request,

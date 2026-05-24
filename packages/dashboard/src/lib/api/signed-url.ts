@@ -12,11 +12,19 @@
  */
 import { createHmac } from 'crypto';
 
-const DOWNLOAD_SECRET =
-  process.env.DOWNLOAD_SIGNING_SECRET ||
-  process.env.NEXTAUTH_SECRET ||
-  process.env.CSRF_SECRET ||
-  'somnibot-download-signing-fallback';
+const DOWNLOAD_SECRET = (() => {
+  const secret =
+    process.env.DOWNLOAD_SIGNING_SECRET ||
+    process.env.NEXTAUTH_SECRET ||
+    process.env.CSRF_SECRET;
+  if (!secret) {
+    throw new Error(
+      'Missing DOWNLOAD_SIGNING_SECRET (or NEXTAUTH_SECRET / CSRF_SECRET fallback). ' +
+      'Refusing to start with predictable signing keys.',
+    );
+  }
+  return secret;
+})();
 
 const DEFAULT_EXPIRY_SECONDS = 300; // 5 minutes
 
