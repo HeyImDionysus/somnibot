@@ -159,8 +159,7 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Supabase CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/supabase/cli/main/install.sh | sh -s -- -b /usr/local/bin v2.0.2
-          supabase --version
+          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.0.2/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin supabase
       - name: Start Supabase local
         run: |
           cd packages/supabase
