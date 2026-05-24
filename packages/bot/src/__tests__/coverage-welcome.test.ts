@@ -64,7 +64,8 @@ function makeChain(result: any = { data: null, error: null }) {
 
 function makeSupa(result?: any) {
   const chain = makeChain(result);
-  return { from: vi.fn(() => chain), _chain: chain };
+  // Return fresh chain per call so state doesn't leak between queries
+  return { from: vi.fn(() => makeChain(result)), _chain: chain };
 }
 
 function makeValkey() {
@@ -97,6 +98,11 @@ describe('onboarding-handler', () => {
   });
 
   function makeMember(flags = 0, overrides: any = {}) {
+    const flagSet = new Set<number>();
+    // Set individual flag bits
+    if (flags & 2) flagSet.add(2);  // CompletedOnboarding
+    if (flags & 4) flagSet.add(4);  // DidRejoin
+    if (flags & 8) flagSet.add(8);  // StartedOnboarding
     return {
       id: 'u1',
       guild: {
@@ -105,9 +111,9 @@ describe('onboarding-handler', () => {
         roles: { cache: new Map([['r1', { id: 'r1', name: 'Member' }]]) },
         memberCount: 100,
       },
-      user: { tag: 'User#0001', displayAvatarURL: () => 'url', bot: false },
-      flags: { bitfield: flags },
-      roles: { add: vi.fn(async () => {}), cache: new Map() },
+      user: { tag: 'User#0001', displayAvatarURL: () => 'url', bot: false, id: 'u1' },
+      flags: { bitfield: flags, has: (flag: number) => flagSet.has(flag) },
+      roles: { add: vi.fn(async () => {}), cache: Object.assign(new Map(), { map: (fn: Function) => [] as any[] }) },
       pending: false,
       ...overrides,
     };

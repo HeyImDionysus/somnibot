@@ -28,64 +28,58 @@ function fluent(): any {
 }
 
 vi.mock('discord.js', () => {
+  const cbMethods = new Set([
+    'addSubcommand', 'addSubcommandGroup',
+    'addUserOption', 'addStringOption', 'addIntegerOption',
+    'addBooleanOption', 'addNumberOption', 'addChannelOption',
+    'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
+  ]);
   class SlashCommandBuilder {
     [key: string]: any;
     constructor() {
-      return new Proxy(this, {
-        get(target, prop) {
+      const target = this;
+      const proxy: any = new Proxy(this, {
+        get(_t, prop) {
           if (prop === 'toJSON') return () => ({ name: target._name || '' });
           if (prop === 'constructor') return SlashCommandBuilder;
           if (typeof prop === 'symbol') return undefined;
-          // Methods that take a callback: pass in a fluent proxy as arg
-          const cbMethods = new Set([
-            'addSubcommand', 'addSubcommandGroup',
-            'addUserOption', 'addStringOption', 'addIntegerOption',
-            'addBooleanOption', 'addNumberOption', 'addChannelOption',
-            'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
-          ]);
           if (cbMethods.has(prop as string)) {
-            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+            return (fn: Function) => { try { fn(fluent()); } catch {} return proxy; };
           }
-          if (prop === 'setName') return (n: string) => { target._name = n; return target; };
-          if (prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          if (prop === 'setName') return (n: string) => { target._name = n; return proxy; };
+          if (prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => proxy;
           return fluent();
         },
       });
+      return proxy;
     }
   }
   class EmbedBuilder {
     [key: string]: any;
     constructor() {
-      return new Proxy(this, {
-        get(target, prop) {
+      const proxy: any = new Proxy(this, {
+        get(_target, prop) {
           if (typeof prop === 'symbol') return undefined;
           if (prop === 'toJSON') return () => ({});
-          return (..._args: any[]) => target;
+          return (..._args: any[]) => proxy;
         },
       });
+      return proxy;
     }
   }
+  function chainProxy() {
+    const p: any = new Proxy(function(){}, {
+      get: (_t, prop) => typeof prop === 'symbol' ? undefined : (..._a: any[]) => p,
+      apply: () => p,
+    });
+    return p;
+  }
   class ActionRowBuilder { addComponents() { return this; } }
-  class ButtonBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => () => t }); }
-  }
-  class StringSelectMenuBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
-  }
-  class ContextMenuCommandBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => () => t }); }
-  }
-  class ModalBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
-  }
-  class TextInputBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => () => t }); }
-  }
+  class ButtonBuilder { constructor() { return chainProxy(); } }
+  class StringSelectMenuBuilder { constructor() { return chainProxy(); } }
+  class ContextMenuCommandBuilder { constructor() { return chainProxy(); } }
+  class ModalBuilder { constructor() { return chainProxy(); } }
+  class TextInputBuilder { constructor() { return chainProxy(); } }
   class AttachmentBuilder { constructor() {} }
 
   return {

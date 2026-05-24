@@ -100,7 +100,7 @@ describe('ticket-service', () => {
       id: 'g1',
       name: 'Test Guild',
       channels: {
-        cache: new Map([
+        cache: new Map<string, any>([
           ['cat1', { id: 'cat1', name: 'Tickets', type: 4 }],
           ['ticket_ch', createdChannel],
         ]),

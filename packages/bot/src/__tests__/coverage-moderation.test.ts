@@ -40,23 +40,33 @@ vi.mock('discord.js', () => {
   class SlashCommandBuilder {
     [key: string]: any;
     constructor() {
-      return new Proxy(this, {
-        get(target, prop) {
+      const proxy: any = new Proxy(this, {
+        get(_t, prop) {
           if (prop === 'toJSON') return () => ({});
           if (prop === 'constructor') return SlashCommandBuilder;
           if (typeof prop === 'symbol') return undefined;
           if (cbMethods.has(prop as string)) {
-            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+            return (fn: Function) => { try { fn(fluent()); } catch {} return proxy; };
           }
-          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => proxy;
           return fluent();
         },
       });
+      return proxy;
     }
   }
   class EmbedBuilder {
     [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t, p) => typeof p === 'symbol' ? undefined : p === 'toJSON' ? () => ({}) : (..._a: any[]) => t }); }
+    constructor() {
+      const proxy: any = new Proxy(this, {
+        get(_t, p) {
+          if (typeof p === 'symbol') return undefined;
+          if (p === 'toJSON') return () => ({});
+          return (..._a: any[]) => proxy;
+        },
+      });
+      return proxy;
+    }
   }
   return { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits: { ModerateMembers: 1n, KickMembers: 2n, BanMembers: 4n, ManageMessages: 8n } };
 });
