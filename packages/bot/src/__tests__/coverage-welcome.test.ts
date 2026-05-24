@@ -114,10 +114,12 @@ describe('onboarding-handler', () => {
       },
       user: { tag: 'User#0001', displayAvatarURL: () => 'url', bot: false, id: 'u1' },
       flags: { bitfield: flags, has: (flag: number) => flagSet.has(flag) },
-      roles: { add: vi.fn(async () => {}), cache: Object.assign(new Map(), {
-        map: (fn: Function) => [] as any[],
-        filter: (_fn: Function) => Object.assign(new Map(), { size: 0, map: () => [], forEach: () => {} }),
-      }) },
+      roles: { add: vi.fn(async () => {}), cache: (() => {
+        const m = new Map() as any;
+        m.map = (_fn: Function) => [];
+        m.filter = (_fn: Function) => { const r = new Map() as any; r.map = () => []; r.filter = () => r; return r; };
+        return m;
+      })() },
       pending: false,
       ...overrides,
     };

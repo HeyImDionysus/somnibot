@@ -23,6 +23,8 @@ function collection<K, V>(entries: [K, V][] = []): Map<K, V> & { map: Function; 
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   SOMNI_PALETTE: {},
+  computeStateDiff: vi.fn(() => []),
+  classifyDrift: vi.fn(() => []),
 }));
 
 vi.mock('discord.js', () => ({
