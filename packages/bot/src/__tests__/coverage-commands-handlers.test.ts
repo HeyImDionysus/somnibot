@@ -247,7 +247,9 @@ describe('economy command handlers', () => {
         targetUser: { id: 'u2', displayName: 'Other', displayAvatarURL: () => '', tag: 'Other#0001', bot: false },
       });
       await mod.handleEconomyCommand(interaction, mockEconMgr);
-      expect(interaction.reply).toHaveBeenCalled();
+      // Some commands use reply(), others deferReply()+editReply()
+      const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
   }
 
