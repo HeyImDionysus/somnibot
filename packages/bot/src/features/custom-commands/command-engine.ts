@@ -56,7 +56,8 @@ export async function loadCustomCommands(
     .from('custom_commands')
     .select('*')
     .eq('guild_id', guild.id)
-    .eq('enabled', true);
+    .eq('enabled', true)
+    .limit(1000);
 
   commandRegistry.clear();
 

@@ -30,7 +30,8 @@ export async function GET(request: NextRequest) {
       .select('*', { count: 'exact' })
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
-      .range((page - 1) * pageSize, page * pageSize - 1);
+      .range((page - 1) * pageSize, page * pageSize - 1)
+      .limit(1000);
 
     if (targetType) query = query.eq('target_type', targetType);
     if (actorId) query = query.eq('actor_id', actorId);

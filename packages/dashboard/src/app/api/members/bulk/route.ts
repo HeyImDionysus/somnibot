@@ -97,7 +97,8 @@ export async function POST(req: NextRequest) {
         .from('members')
         .select('discord_id, username, display_name, joined_at, xp, level, wallet, bank, roles')
         .eq('guild_id', guildId)
-        .in('discord_id', member_ids);
+        .in('discord_id', member_ids)
+        .limit(1000);
 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });

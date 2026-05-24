@@ -211,7 +211,8 @@ export class MarketManager {
       .eq('guild_id', this.guild.id)
       .eq('status', 'active')
       .gt('remaining', 0)
-      .gt('expires_at', new Date().toISOString());
+      .gt('expires_at', new Date().toISOString())
+      .limit(1000);
 
     if (searchTerm) {
       // Escape ILIKE special chars to prevent wildcard injection

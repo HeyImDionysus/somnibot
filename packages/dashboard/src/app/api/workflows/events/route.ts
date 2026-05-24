@@ -26,7 +26,8 @@ export async function GET(request: NextRequest) {
       .select('*', { count: 'exact' })
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
-      .range((page - 1) * pageSize, page * pageSize - 1);
+      .range((page - 1) * pageSize, page * pageSize - 1)
+      .limit(1000);
 
     if (eventType) query = query.eq('event_type', eventType);
     if (source) query = query.eq('source', source);

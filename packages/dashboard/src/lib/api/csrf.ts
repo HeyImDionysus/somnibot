@@ -95,7 +95,6 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
     '/api/auth/',
     '/api/setup',
     '/api/downloads/',
-    '/api/webhooks/',
     '/api/csrf',
   ];
   if (exemptPrefixes.some((prefix) => path.startsWith(prefix))) return null;

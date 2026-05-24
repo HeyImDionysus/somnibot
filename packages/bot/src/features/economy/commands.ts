@@ -541,7 +541,8 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
         return supabase
           .from('economy_role_income')
           .select('role_id, amount, interval_minutes')
-          .eq('guild_id', interaction.guildId!);
+          .eq('guild_id', interaction.guildId!)
+          .limit(1000);
       })()
     : { data: [] };
 

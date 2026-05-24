@@ -38,7 +38,8 @@ export async function loadReactionRoles(
     .from('reaction_roles')
     .select('*')
     .eq('guild_id', guildId)
-    .eq('active', true);
+    .eq('active', true)
+    .limit(1000);
 
   if (!data || data.length === 0) {
     log.info('No active reaction role configs found');
@@ -149,7 +150,8 @@ export async function handleReactionAdd(
       .eq('guild_id', guild.id)
       .eq('exclusive_group', config.exclusive_group)
       .eq('active', true)
-      .neq('id', config.id);
+      .neq('id', config.id)
+      .limit(1000);
 
     if (groupConfigs) {
       for (const gc of groupConfigs) {
@@ -171,7 +173,8 @@ export async function handleReactionAdd(
       .select('role_id')
       .eq('guild_id', guild.id)
       .eq('exclusive_group', config.exclusive_group)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (groupConfigs) {
       const currentCount = groupConfigs.filter((gc) =>

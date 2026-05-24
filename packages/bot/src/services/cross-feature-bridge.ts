@@ -95,7 +95,8 @@ export class CrossFeatureBridge {
           .from('level_unlock_configs')
           .select('feature_key, unlock_message')
           .eq('guild_id', this.guild.id)
-          .eq('required_level', newLevel);
+          .eq('required_level', newLevel)
+          .limit(1000);
 
         if (unlocks && unlocks.length > 0) {
           for (const unlock of unlocks) {
@@ -365,7 +366,8 @@ export class CrossFeatureBridge {
         .from('giveaways')
         .select('id')
         .eq('guild_id', this.guild.id)
-        .eq('status', 'active');
+        .eq('status', 'active')
+        .limit(1000);
 
       if (!giveaways || giveaways.length === 0) return;
 

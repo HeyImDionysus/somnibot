@@ -181,6 +181,7 @@ export class EconomyManager {
       .from('guild_config')
       .select(
         'economy_enabled, currency_name, currency_emoji, economy_starting_balance, ' +
+      .limit(1000)
         'economy_daily_amount, economy_weekly_amount, economy_monthly_amount, ' +
         'economy_streak_bonus_pct, economy_work_cooldown_seconds, economy_work_min, ' +
         'economy_work_max, economy_crime_success_pct, economy_crime_fine_pct, ' +
@@ -974,7 +975,8 @@ export class EconomyManager {
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .order('sort_order', { ascending: true })
-      .order('price', { ascending: true });
+      .order('price', { ascending: true })
+      .limit(1000);
 
     if (category) {
       query = query.eq('category', category);
@@ -1185,7 +1187,8 @@ export class EconomyManager {
       .select('quantity, durability_remaining, item_id, economy_items(name, emoji)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     return (data ?? []).map((row: Record<string, unknown>) => {
       const item = row.economy_items as Record<string, string> | null;

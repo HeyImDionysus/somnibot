@@ -93,7 +93,8 @@ export class PetsManager {
       const { data: pets } = await this.supabase
         .from('economy_pets')
         .select('id, guild_id, user_id, name, hunger, happiness, energy, status')
-        .eq('guild_id', guildId);
+        .eq('guild_id', guildId)
+        .limit(1000);
 
       if (!pets || pets.length === 0) return;
 

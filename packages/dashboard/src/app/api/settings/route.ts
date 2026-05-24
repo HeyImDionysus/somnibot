@@ -97,7 +97,8 @@ export async function GET() {
     const admin = createAdminSupabase();
     const { data: settings } = await admin
       .from('instance_settings')
-      .select('key, value, section');
+      .select('key, value, section')
+      .limit(1000);
 
     if (settings) {
       for (const row of settings) {

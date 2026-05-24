@@ -183,7 +183,8 @@ export class ScheduledMessageRunner {
       .from('scheduled_messages')
       .select('*')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     this.schedules = (data ?? []) as ScheduledMessage[];
   }

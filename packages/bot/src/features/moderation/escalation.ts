@@ -296,7 +296,8 @@ async function suspendEntitlements(
       .eq('guild_id', guildId)
       .eq('customer_id', customer.id)
       .eq('status', 'active')
-      .select('id');
+      .select('id')
+      .limit(1000);
 
     if (error) {
       // Table might not exist yet (pre-commerce phase)

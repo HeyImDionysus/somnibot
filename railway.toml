@@ -11,3 +11,5 @@ dockerfilePath = "packages/bot/Dockerfile"
 startCommand = "bun run packages/bot/dist/index.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
+healthcheckPath = "/health"
+healthcheckTimeout = 10

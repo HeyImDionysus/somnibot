@@ -121,7 +121,8 @@ export async function getAuthContext(): Promise<AuthContext | null> {
     .from('dashboard_user_roles')
     .select('role_id, dashboard_roles(permissions)')
     .eq('guild_id', guild.id)
-    .eq('discord_id', discordId);
+    .eq('discord_id', discordId)
+    .limit(1000);
 
   const permissions = new Set<DashboardPermission>();
   if (userRoles) {

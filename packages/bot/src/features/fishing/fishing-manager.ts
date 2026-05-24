@@ -156,7 +156,8 @@ export class FishingManager {
       .from('economy_fish_species')
       .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (!data || data.length === 0) {
       await this.seedDefaultSpecies();
@@ -164,7 +165,8 @@ export class FishingManager {
         .from('economy_fish_species')
         .select('id, name, emoji, rarity, min_weight, max_weight, base_price')
         .eq('guild_id', this.guild.id)
-        .eq('active', true);
+        .eq('active', true)
+        .limit(1000);
       this.speciesCache = (seeded ?? []) as FishSpecies[];
     } else {
       this.speciesCache = data as FishSpecies[];
@@ -394,7 +396,8 @@ export class FishingManager {
       .from('economy_fish_catches')
       .select('price_earned', { count: 'exact' })
       .eq('guild_id', this.guild.id)
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .limit(1000);
 
     const totalEarned = (data ?? []).reduce((sum: number, c: any) => sum + (c.price_earned ?? 0), 0);
     return new EmbedBuilder()
@@ -414,7 +417,8 @@ export class FishingManager {
       .from('economy_fish_catches')
       .select('species_id, weight')
       .eq('guild_id', this.guild.id)
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .limit(1000);
 
     const caught = new Map<string, { count: number; maxWeight: number }>();
     for (const c of (catches ?? []) as any[]) {

@@ -348,7 +348,8 @@ async function restoreLevelRoles(
       .select('role_id, level, remove_at_level')
       .eq('guild_id', member.guild.id)
       .lte('level', levelData.level)
-      .order('level', { ascending: true });
+      .order('level', { ascending: true })
+      .limit(1000);
 
     if (!rewards?.length) return;
 

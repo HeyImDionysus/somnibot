@@ -53,7 +53,8 @@ async function getDiscordCredentials(): Promise<{
     const { data: settings } = await admin
       .from('instance_settings')
       .select('key, value')
-      .in('key', ['discord_application_id', 'discord_client_secret']);
+      .in('key', ['discord_application_id', 'discord_client_secret'])
+      .limit(1000);
 
     if (settings) {
       for (const row of settings) {
