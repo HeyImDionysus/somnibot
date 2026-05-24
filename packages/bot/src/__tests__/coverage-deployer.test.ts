@@ -48,10 +48,25 @@ function makeGuild() {
     id: 'guild1', name: 'Test',
     roles: {
       everyone: { id: 'r0', permissions: { bitfield: 0n }, setPermissions: vi.fn(async () => {}) },
-      cache: new Map([
-        ['r0', { id: 'r0', name: '@everyone', position: 0, managed: false, permissions: { bitfield: 0n } }],
-        ['r1', { id: 'r1', name: 'Moderator', position: 5, managed: false, permissions: { bitfield: 0n } }],
-      ]),
+      cache: (() => {
+        const m = new Map([
+          ['r0', { id: 'r0', name: '@everyone', position: 0, managed: false, permissions: { bitfield: 0n } }],
+          ['r1', { id: 'r1', name: 'Moderator', position: 5, managed: false, permissions: { bitfield: 0n } }],
+        ]);
+        // discord.js Collection methods used by bot-role-guard
+        (m as any).sort = (fn: Function) => {
+          const sorted = [...m.values()].sort(fn as any);
+          const out = new Map(sorted.map(r => [(r as any).id, r]));
+          (out as any).sort = (m as any).sort;
+          (out as any).filter = (m as any).filter;
+          return out;
+        };
+        (m as any).filter = (fn: Function) => {
+          const filtered = [...m.values()].filter(fn as any);
+          return filtered;
+        };
+        return m;
+      })(),
       create: vi.fn(async () => ({ id: 'newrole', name: 'New', position: 0 })),
       fetch: vi.fn(async () => new Map()),
     },
