@@ -19,8 +19,9 @@ vi.mock('discord.js', () => ({
     setFooter() { return this; }
     addFields() { return this; }
   },
-  ChannelType: { GuildText: 0 },
-  PermissionFlagsBits: {},
+  ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4 },
+  PermissionFlagsBits: { ViewChannel: 1n, SendMessages: 2n, ManageChannels: 4n },
+  PermissionsBitField: class { static Flags = { ViewChannel: 1n, SendMessages: 2n }; },
   ButtonBuilder: class { setCustomId() { return this; } setLabel() { return this; } setStyle() { return this; } },
   ActionRowBuilder: class { addComponents() { return this; } },
   ButtonStyle: { Primary: 1 },
@@ -139,7 +140,8 @@ describe('commerce-fulfillment', () => {
     const { CommerceFulfillmentService } = await import('../services/commerce-fulfillment.js');
     const supa = makeSupa();
     const eventBus = { emit: vi.fn(), on: vi.fn() };
-    const svc = new CommerceFulfillmentService(supa as any, eventBus as any);
+    const guild: any = { id: 'g1', members: { fetch: vi.fn(async () => ({ id: 'u1', user: { send: vi.fn(), tag: 'User#1' }, roles: { add: vi.fn() } })) } };
+    const svc = new CommerceFulfillmentService(guild as any, supa as any, eventBus as any);
     expect(svc).toBeDefined();
   });
 
@@ -147,15 +149,14 @@ describe('commerce-fulfillment', () => {
     const { CommerceFulfillmentService } = await import('../services/commerce-fulfillment.js');
     const supa = makeSupa({ data: { id: 'ent1' }, error: null });
     const eventBus = { emit: vi.fn(), on: vi.fn() };
-    const svc = new CommerceFulfillmentService(supa as any, eventBus as any);
-
     const guild: any = {
       id: 'g1',
       members: { fetch: vi.fn(async () => ({ id: 'u1', user: { send: vi.fn(async () => {}), tag: 'User#1' }, roles: { add: vi.fn(async () => {}) } })) },
     };
+    const svc = new CommerceFulfillmentService(guild as any, supa as any, eventBus as any);
 
     try {
-      await svc.fulfill(guild, {
+      await svc.fulfill({
         fulfillment_type: 'one_time_purchase',
         guild_id: 'g1',
         customer_discord_id: 'u1',
@@ -198,7 +199,7 @@ describe('reconciliation', () => {
 // ═════════════════════════════════════════════════════════════
 describe('notifications', () => {
   it('module loads', async () => {
-    const mod = await import('../services/notifications.js');
+    const mod = await import('../services/owner-notifications.js');
     expect(mod).toBeDefined();
   });
 });

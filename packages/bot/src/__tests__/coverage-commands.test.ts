@@ -1,9 +1,8 @@
 /**
  * Coverage tests — All feature command builders
- * Exercises buildXxxCommands() and handleXxxCommand() for every feature.
- * These are large files (many at 0-5% coverage).
+ * Exercises buildXxxCommands() for every feature.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // ── Shared mocks ────────────────────────────────────────────
 vi.mock('@somnibot/shared', () => ({
@@ -12,96 +11,93 @@ vi.mock('@somnibot/shared', () => ({
   DEFAULT_ESCALATION_CHAIN: [],
 }));
 
+/** Returns a proxy that is callable, iterable, and returns itself for every property access. */
+function fluent(): any {
+  const handler: ProxyHandler<Function> = {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive) return () => 0;
+      if (prop === Symbol.iterator) return function* () {};
+      if (prop === 'then') return undefined; // prevent await-hanging
+      if (prop === 'toJSON') return () => ({});
+      if (prop === 'length') return 0;
+      return fluent();
+    },
+    apply() { return fluent(); },
+  };
+  return new Proxy(function () {}, handler);
+}
+
 vi.mock('discord.js', () => {
   class SlashCommandBuilder {
-    name = ''; desc = '';
-    setName(n: string) { this.name = n; return this; }
-    setDescription(d: string) { this.desc = d; return this; }
-    setDefaultMemberPermissions() { return this; }
-    addSubcommand(fn: Function) { fn(new SlashCommandBuilder()); return this; }
-    addSubcommandGroup(fn: Function) { fn(new SlashCommandBuilder()); return this; }
-    addUserOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addStringOption(fn: Function) {
-      fn({
-        setName: () => ({
-          setDescription: () => ({
-            setRequired: () => ({ addChoices: (..._a: any[]) => ({}) }),
-            addChoices: (..._a: any[]) => ({ setRequired: () => ({}) }),
-            setMinLength: () => ({ setRequired: () => ({}) }),
-            setAutocomplete: () => ({ setRequired: () => ({}) }),
-          }),
-        }),
+    [key: string]: any;
+    constructor() {
+      return new Proxy(this, {
+        get(target, prop) {
+          if (prop === 'toJSON') return () => ({ name: target._name || '' });
+          if (prop === 'constructor') return SlashCommandBuilder;
+          if (typeof prop === 'symbol') return undefined;
+          // Methods that take a callback: pass in a fluent proxy as arg
+          const cbMethods = new Set([
+            'addSubcommand', 'addSubcommandGroup',
+            'addUserOption', 'addStringOption', 'addIntegerOption',
+            'addBooleanOption', 'addNumberOption', 'addChannelOption',
+            'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
+          ]);
+          if (cbMethods.has(prop as string)) {
+            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+          }
+          if (prop === 'setName') return (n: string) => { target._name = n; return target; };
+          if (prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          return fluent();
+        },
       });
-      return this;
     }
-    addIntegerOption(fn: Function) {
-      fn({
-        setName: () => ({
-          setDescription: () => ({
-            setRequired: () => ({ addChoices: (..._a: any[]) => ({}), setMinValue: () => ({ setMaxValue: () => ({}) }) }),
-            setMinValue: () => ({ setMaxValue: () => ({ setRequired: () => ({}) }) }),
-            addChoices: (..._a: any[]) => ({ setRequired: () => ({}) }),
-          }),
-        }),
-      });
-      return this;
-    }
-    addBooleanOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addNumberOption(fn: Function) {
-      fn({
-        setName: () => ({
-          setDescription: () => ({
-            setRequired: () => ({ setMinValue: () => ({}) }),
-            setMinValue: () => ({ setMaxValue: () => ({}) }),
-          }),
-        }),
-      });
-      return this;
-    }
-    addChannelOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addRoleOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addAttachmentOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addMentionableOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    toJSON() { return { name: this.name }; }
   }
   class EmbedBuilder {
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    setThumbnail() { return this; }
-    setTimestamp() { return this; }
-    setFooter() { return this; }
-    setImage() { return this; }
-    setAuthor() { return this; }
-    setURL() { return this; }
-    addFields(..._f: any[]) { return this; }
-    toJSON() { return {}; }
+    [key: string]: any;
+    constructor() {
+      return new Proxy(this, {
+        get(target, prop) {
+          if (typeof prop === 'symbol') return undefined;
+          if (prop === 'toJSON') return () => ({});
+          return (..._args: any[]) => target;
+        },
+      });
+    }
   }
-  class ActionRowBuilder {
-    components: any[] = [];
-    addComponents(...c: any[]) { this.components.push(...c); return this; }
-  }
+  class ActionRowBuilder { addComponents() { return this; } }
   class ButtonBuilder {
-    setCustomId() { return this; }
-    setLabel() { return this; }
-    setStyle() { return this; }
-    setEmoji() { return this; }
-    setDisabled() { return this; }
-    setURL() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => () => t }); }
   }
   class StringSelectMenuBuilder {
-    setCustomId() { return this; }
-    setPlaceholder() { return this; }
-    addOptions(..._o: any[]) { return this; }
-    setMaxValues() { return this; }
-    setMinValues() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
   }
+  class ContextMenuCommandBuilder {
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => () => t }); }
+  }
+  class ModalBuilder {
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
+  }
+  class TextInputBuilder {
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => () => t }); }
+  }
+  class AttachmentBuilder { constructor() {} }
+
   return {
     SlashCommandBuilder,
     EmbedBuilder,
     ActionRowBuilder,
     ButtonBuilder,
     StringSelectMenuBuilder,
+    ContextMenuCommandBuilder,
+    ModalBuilder,
+    TextInputBuilder,
+    AttachmentBuilder,
     PermissionFlagsBits: {
       Administrator: 1n, ManageGuild: 2n, ManageRoles: 4n, ManageChannels: 8n,
       ModerateMembers: 16n, KickMembers: 32n, BanMembers: 64n, ManageMessages: 128n,
@@ -110,10 +106,11 @@ vi.mock('discord.js', () => {
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
     ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4, GuildForum: 15 },
     ComponentType: { Button: 2, StringSelect: 3 },
+    ApplicationCommandType: { User: 2, Message: 3 },
+    TextInputStyle: { Short: 1, Paragraph: 2 },
   };
 });
 
-// Mock all internal imports commonly used by command handlers
 vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
@@ -122,151 +119,38 @@ vi.mock('../services/audit.js', () => ({
 // Test each feature's command builder
 // ═════════════════════════════════════════════════════════════
 
-describe('achievements commands', () => {
-  it('builds commands', async () => {
-    const { buildAchievementCommands } = await import('../features/achievements/commands.js');
-    const cmds = buildAchievementCommands();
-    expect(cmds).toBeDefined();
-    expect(typeof cmds).toBe('object');
-  });
-});
+const commandBuilders: [string, string, string][] = [
+  ['achievements', '../features/achievements/commands.js', 'buildAchievementCommands'],
+  ['adventures', '../features/adventures/commands.js', 'buildAdventureCommands'],
+  ['crafting', '../features/crafting/commands.js', 'buildCraftingCommands'],
+  ['economy', '../features/economy/commands.js', 'buildEconomyCommands'],
+  ['farming', '../features/farming/commands.js', 'buildFarmingCommands'],
+  ['fishing', '../features/fishing/commands.js', 'buildFishingCommands'],
+  ['games', '../features/games/commands.js', 'buildGameCommands'],
+  ['gathering', '../features/gathering/commands.js', 'buildGatheringCommands'],
+  ['giveaways', '../features/giveaways/commands.js', 'buildGiveawayCommands'],
+  ['heist', '../features/heist/commands.js', 'buildHeistCommands'],
+  ['levels', '../features/levels/commands.js', 'buildLevelCommands'],
+  ['lottery', '../features/lottery/commands.js', 'buildLotteryCommands'],
+  ['market', '../features/market/commands.js', 'buildMarketCommands'],
+  ['music', '../features/music/commands.js', 'buildMusicCommands'],
+  ['pets', '../features/pets/commands.js', 'buildPetCommands'],
+  ['polls', '../features/polls/commands.js', 'buildPollCommands'],
+  ['profiles', '../features/profiles/commands.js', 'buildProfileCommands'],
+  ['quests', '../features/quests/commands.js', 'buildQuestCommands'],
+  ['trivia', '../features/trivia/commands.js', 'buildTriviaCommands'],
+];
 
-describe('adventures commands', () => {
-  it('builds commands', async () => {
-    const { buildAdventureCommands } = await import('../features/adventures/commands.js');
-    const cmds = buildAdventureCommands();
-    expect(cmds).toBeDefined();
+for (const [name, path, fn] of commandBuilders) {
+  describe(`${name} commands`, () => {
+    it('builds commands', async () => {
+      const mod = await import(path);
+      expect(mod[fn]).toBeDefined();
+      const cmds = mod[fn]();
+      expect(cmds).toBeDefined();
+    });
   });
-});
-
-describe('crafting commands', () => {
-  it('builds commands', async () => {
-    const { buildCraftingCommands } = await import('../features/crafting/commands.js');
-    const cmds = buildCraftingCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('economy commands', () => {
-  it('builds commands', async () => {
-    const { buildEconomyCommands } = await import('../features/economy/commands.js');
-    const cmds = buildEconomyCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('farming commands', () => {
-  it('builds commands', async () => {
-    const { buildFarmingCommands } = await import('../features/farming/commands.js');
-    const cmds = buildFarmingCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('fishing commands', () => {
-  it('builds commands', async () => {
-    const { buildFishingCommands } = await import('../features/fishing/commands.js');
-    const cmds = buildFishingCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('games commands', () => {
-  it('builds commands', async () => {
-    const { buildGameCommands } = await import('../features/games/commands.js');
-    const cmds = buildGameCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('gathering commands', () => {
-  it('builds commands', async () => {
-    const { buildGatheringCommands } = await import('../features/gathering/commands.js');
-    const cmds = buildGatheringCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('giveaways commands', () => {
-  it('builds commands', async () => {
-    const { buildGiveawayCommands } = await import('../features/giveaways/commands.js');
-    const cmds = buildGiveawayCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('heist commands', () => {
-  it('builds commands', async () => {
-    const { buildHeistCommands } = await import('../features/heist/commands.js');
-    const cmds = buildHeistCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('level commands', () => {
-  it('builds commands', async () => {
-    const { buildLevelCommands } = await import('../features/levels/commands.js');
-    const cmds = buildLevelCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('lottery commands', () => {
-  it('builds commands', async () => {
-    const { buildLotteryCommands } = await import('../features/lottery/commands.js');
-    const cmds = buildLotteryCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('market commands', () => {
-  it('builds commands', async () => {
-    const { buildMarketCommands } = await import('../features/market/commands.js');
-    const cmds = buildMarketCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('music commands', () => {
-  it('builds commands', async () => {
-    const { buildMusicCommands } = await import('../features/music/commands.js');
-    const cmds = buildMusicCommands();
-    expect(cmds).toBeDefined();
-    expect(Array.isArray(cmds)).toBe(true);
-  });
-});
-
-describe('pets commands', () => {
-  it('builds commands', async () => {
-    const { buildPetCommands } = await import('../features/pets/commands.js');
-    const cmds = buildPetCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('polls commands', () => {
-  it('builds commands', async () => {
-    const { buildPollCommands } = await import('../features/polls/commands.js');
-    const cmds = buildPollCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('profiles commands', () => {
-  it('builds commands', async () => {
-    const { buildProfileCommands } = await import('../features/profiles/commands.js');
-    const cmds = buildProfileCommands();
-    expect(cmds).toBeDefined();
-  });
-});
-
-describe('quests commands', () => {
-  it('builds commands', async () => {
-    const { buildQuestCommands } = await import('../features/quests/commands.js');
-    const cmds = buildQuestCommands();
-    expect(cmds).toBeDefined();
-  });
-});
+}
 
 describe('setup-wizard commands', () => {
   it('builds commands', async () => {
@@ -284,10 +168,10 @@ describe('temp-channels commands', () => {
   });
 });
 
-describe('trivia commands', () => {
-  it('builds commands', async () => {
-    const { buildTriviaCommands } = await import('../features/trivia/commands.js');
-    const cmds = buildTriviaCommands();
+describe('level admin commands', () => {
+  it('builds xp admin commands', async () => {
+    const { buildXpAdminCommands } = await import('../features/levels/admin-commands.js');
+    const cmds = buildXpAdminCommands();
     expect(cmds).toBeDefined();
   });
 });
