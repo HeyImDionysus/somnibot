@@ -60,6 +60,7 @@ vi.mock('discord.js', () => {
       const proxy: any = new Proxy(this, {
         get(_target, prop) {
           if (typeof prop === 'symbol') return undefined;
+          if (prop === 'then') return undefined;
           if (prop === 'toJSON') return () => ({});
           return (..._args: any[]) => proxy;
         },
@@ -69,7 +70,7 @@ vi.mock('discord.js', () => {
   }
   function chainProxy() {
     const p: any = new Proxy(function(){}, {
-      get: (_t, prop) => typeof prop === 'symbol' ? undefined : (..._a: any[]) => p,
+      get: (_t, prop) => typeof prop === 'symbol' || prop === 'then' ? undefined : (..._a: any[]) => p,
       apply: () => p,
     });
     return p;

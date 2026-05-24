@@ -35,10 +35,11 @@ vi.mock('../services/audit.js', () => ({
 }));
 
 vi.mock('../features/welcome/member-service.js', () => ({
-  lookupMember: vi.fn(async () => null),
+  lookupMember: vi.fn(async () => ({ member: null, isReturning: false, previousRoles: [] })),
   recordMemberJoin: vi.fn(async () => {}),
   recordMemberLeave: vi.fn(async () => {}),
   markOnboardingCompleted: vi.fn(async () => {}),
+  getMemberNumber: vi.fn(async () => 42),
 }));
 
 vi.mock('../features/welcome/welcome-service.js', () => ({
@@ -113,7 +114,10 @@ describe('onboarding-handler', () => {
       },
       user: { tag: 'User#0001', displayAvatarURL: () => 'url', bot: false, id: 'u1' },
       flags: { bitfield: flags, has: (flag: number) => flagSet.has(flag) },
-      roles: { add: vi.fn(async () => {}), cache: Object.assign(new Map(), { map: (fn: Function) => [] as any[] }) },
+      roles: { add: vi.fn(async () => {}), cache: Object.assign(new Map(), {
+        map: (fn: Function) => [] as any[],
+        filter: (_fn: Function) => Object.assign(new Map(), { size: 0, map: () => [], forEach: () => {} }),
+      }) },
       pending: false,
       ...overrides,
     };

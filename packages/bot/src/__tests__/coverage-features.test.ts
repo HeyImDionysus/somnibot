@@ -59,6 +59,7 @@ vi.mock('discord.js', () => {
       const proxy: any = new Proxy(this, {
         get(_t, p) {
           if (typeof p === 'symbol') return undefined;
+          if (p === 'then') return undefined;          // prevent thenable trap on await
           if (p === 'toJSON') return () => ({});
           return (..._a: any[]) => proxy;
         },
@@ -72,7 +73,7 @@ vi.mock('discord.js', () => {
   }
   function chainProxy() {
     const p: any = new Proxy(function(){}, {
-      get: (_t, prop) => typeof prop === 'symbol' ? undefined : (..._a: any[]) => p,
+      get: (_t, prop) => typeof prop === 'symbol' || prop === 'then' ? undefined : (..._a: any[]) => p,
       apply: () => p,
     });
     return p;

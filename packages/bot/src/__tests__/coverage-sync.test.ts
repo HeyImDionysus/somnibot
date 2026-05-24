@@ -4,6 +4,22 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+
+/** Creates a Map with discord.js Collection-like .map() and .filter() */
+function collection<K, V>(entries: [K, V][] = []): Map<K, V> & { map: Function; filter: Function; find: Function; first: Function } {
+  const m = new Map<K, V>(entries);
+  return Object.assign(m, {
+    map: (fn: (v: V, k: K) => any) => [...m.values()].map((v, i) => fn(v, [...m.keys()][i])),
+    filter: (fn: (v: V, k: K) => boolean) => {
+      const res = new Map<K, V>();
+      for (const [k, v] of m) if (fn(v, k)) res.set(k, v);
+      return Object.assign(res, { map: (f2: any) => [...res.values()].map(f2), filter: (f2: any) => [...res.values()].filter(f2), first: () => [...res.values()][0] });
+    },
+    find: (fn: (v: V) => boolean) => [...m.values()].find(fn),
+    first: () => [...m.values()][0],
+  });
+}
+
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   SOMNI_PALETTE: {},
@@ -215,13 +231,13 @@ describe('sync-engine', () => {
       id: 'g1',
       name: 'Test',
       roles: {
-        cache: new Map([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]]),
+        cache: collection([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]]),
         everyone: { id: 'r0', permissions: { bitfield: 0n } },
-        fetch: vi.fn(async () => new Map([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]])),
+        fetch: vi.fn(async () => collection([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]])),
       },
       channels: {
-        cache: new Map([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]]),
-        fetch: vi.fn(async () => new Map([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]])),
+        cache: collection([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]]),
+        fetch: vi.fn(async () => collection([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]])),
       },
     };
     const supa = makeSupa({ data: [], error: null });
@@ -236,8 +252,8 @@ describe('sync-engine', () => {
     const guild: any = {
       id: 'g1',
       name: 'Test',
-      roles: { cache: new Map() },
-      channels: { cache: new Map() },
+      roles: { cache: collection() },
+      channels: { cache: collection() },
     };
     const supa = makeSupa({ data: [], error: null });
     const eventBus = { emit: vi.fn(), on: vi.fn() };
@@ -284,7 +300,7 @@ describe('repair-actions', () => {
         fetch: vi.fn(async () => new Map()),
       },
       channels: {
-        cache: new Map([['c1', { id: 'c1', name: 'general', edit: vi.fn(async () => {}), setPosition: vi.fn(async () => {}) }]]),
+        cache: collection([['c1', { id: 'c1', name: 'general', edit: vi.fn(async () => {}), setPosition: vi.fn(async () => {}) }]]),
         create: vi.fn(async () => ({ id: 'new_c1' })),
         fetch: vi.fn(async () => new Map()),
       },
