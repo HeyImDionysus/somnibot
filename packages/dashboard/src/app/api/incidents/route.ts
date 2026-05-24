@@ -66,7 +66,8 @@ export async function GET(request: NextRequest) {
     const { data: allIncidents } = await admin
       .from('incidents')
       .select('status, severity')
-      .eq('guild_id', ctx.guildId);
+      .eq('guild_id', ctx.guildId)
+      .limit(500);
 
     const summary = {
       total: (allIncidents || []).length,

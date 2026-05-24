@@ -12,6 +12,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
 const itemSchema = z.object({
   name: z.string().min(1).max(64),
@@ -69,8 +70,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const parsed = itemSchema.parse(body);
+    const result = await parseBody(request, itemSchema);
+    if (!result.ok) return result.response;
+    const parsed = result.data;
 
     const admin = createAdminSupabase();
 
@@ -97,9 +99,7 @@ export async function POST(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
-    if (err instanceof z.ZodError) {
-      return NextResponse.json({ success: false, error: err.errors }, { status: 400 });
-    }
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to create item';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
@@ -111,14 +111,10 @@ export async function PATCH(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-
-    const { id, ...fields } = body;
-    if (!id || typeof id !== 'string') {
-      return NextResponse.json({ success: false, error: 'Missing item id' }, { status: 400 });
-    }
-
-    const parsed = itemSchema.partial().parse(fields);
+    const patchSchema = z.object({ id: z.string().uuid() }).merge(itemSchema.partial());
+    const result = await parseBody(request, patchSchema);
+    if (!result.ok) return result.response;
+    const { id, ...parsed } = result.data;
     const admin = createAdminSupabase();
 
     const { data, error } = await admin
@@ -136,9 +132,7 @@ export async function PATCH(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
-    if (err instanceof z.ZodError) {
-      return NextResponse.json({ success: false, error: err.errors }, { status: 400 });
-    }
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to update item';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }

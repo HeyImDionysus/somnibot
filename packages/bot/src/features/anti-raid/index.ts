@@ -41,6 +41,11 @@ const _configCache = new Map<string, { config: AntiRaidConfig; time: number }>()
 
 const RAID_MODE_COOLDOWN = 5 * 60_000; // Auto-deactivate after 5 minutes
 
+// ── V5 Audit §14.6 — In-memory fallback when Valkey is unavailable ──
+// Prevents anti-raid from silently failing if Valkey goes down.
+const _memoryJoinWindows = new Map<string, number[]>();
+const _memoryRaidMode = new Map<string, number>();
+
 // Valkey key helpers
 function joinWindowKey(guildId: string): string {
   return `antiraid:joins:${guildId}`;
@@ -102,41 +107,71 @@ async function logRaidEvent(
 
 /**
  * Record a join in the Valkey sliding window and return the count.
+ * V5 Audit §14.6 — Falls back to in-memory tracking if Valkey is unavailable.
  */
 async function recordJoinAndCount(guildId: string, windowMs: number): Promise<number> {
-  const valkey = getValkey();
-  const key = joinWindowKey(guildId);
-  const now = Date.now();
-  const windowStart = now - windowMs;
+  try {
+    const valkey = getValkey();
+    const key = joinWindowKey(guildId);
+    const now = Date.now();
+    const windowStart = now - windowMs;
 
-  // Atomic pipeline: remove expired entries, add current, count, set expiry
-  const pipeline = valkey.pipeline();
-  pipeline.zremrangebyscore(key, '-inf', String(windowStart));
-  pipeline.zadd(key, String(now), `${now}:${Math.random().toString(36).slice(2, 8)}`);
-  pipeline.zcard(key);
-  pipeline.pexpire(key, windowMs + 10_000); // TTL slightly longer than window
-  const results = await pipeline.exec();
+    // Atomic pipeline: remove expired entries, add current, count, set expiry
+    const pipeline = valkey.pipeline();
+    pipeline.zremrangebyscore(key, '-inf', String(windowStart));
+    pipeline.zadd(key, String(now), `${now}:${Math.random().toString(36).slice(2, 8)}`);
+    pipeline.zcard(key);
+    pipeline.pexpire(key, windowMs + 10_000); // TTL slightly longer than window
+    const results = await pipeline.exec();
 
-  // zcard result is at index 2
-  const count = (results?.[2]?.[1] as number) ?? 0;
-  return count;
+    // zcard result is at index 2
+    const count = (results?.[2]?.[1] as number) ?? 0;
+    return count;
+  } catch (err) {
+    // Valkey unavailable — fall back to in-memory tracking
+    log.warn(`Valkey unavailable for anti-raid, using in-memory fallback: ${err}`);
+    const now = Date.now();
+    const windowStart = now - windowMs;
+    const joins = _memoryJoinWindows.get(guildId) ?? [];
+    const filtered = joins.filter((t) => t > windowStart);
+    filtered.push(now);
+    // Cap in-memory array to prevent unbounded growth
+    if (filtered.length > 500) filtered.splice(0, filtered.length - 500);
+    _memoryJoinWindows.set(guildId, filtered);
+    return filtered.length;
+  }
 }
 
 /**
  * Check if raid mode is active for a guild.
+ * V5 Audit §14.6 — Falls back to in-memory state if Valkey is unavailable.
  */
 async function isRaidModeActive(guildId: string): Promise<boolean> {
-  const valkey = getValkey();
-  const val = await valkey.get(raidModeKey(guildId));
-  return val !== null;
+  try {
+    const valkey = getValkey();
+    const val = await valkey.get(raidModeKey(guildId));
+    return val !== null;
+  } catch {
+    // Valkey unavailable — check in-memory state
+    const activated = _memoryRaidMode.get(guildId);
+    if (!activated) return false;
+    return Date.now() - activated < RAID_MODE_COOLDOWN;
+  }
 }
 
 /**
  * Activate raid mode for a guild (with auto-expiry).
+ * V5 Audit §14.6 — Falls back to in-memory state if Valkey is unavailable.
  */
 async function activateRaidMode(guildId: string): Promise<void> {
-  const valkey = getValkey();
-  await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', RAID_MODE_COOLDOWN);
+  try {
+    const valkey = getValkey();
+    await valkey.set(raidModeKey(guildId), String(Date.now()), 'PX', RAID_MODE_COOLDOWN);
+  } catch {
+    // Valkey unavailable — store in memory
+    _memoryRaidMode.set(guildId, Date.now());
+    log.warn(`Valkey unavailable — raid mode for ${guildId} stored in-memory only`);
+  }
 }
 
 /**

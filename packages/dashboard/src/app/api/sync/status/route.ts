@@ -1,12 +1,16 @@
 /**
  * /api/sync/status — GET sync engine status and drift items.
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
