@@ -105,11 +105,8 @@ describe('action-queue', () => {
       roles: { cache: { get: vi.fn(() => ({ id: 'r1', name: 'Role' })) } },
     };
     const supa = makeSupa({ data: [], error: null });
-    const handle = await mod.startActionQueueListener(guild, supa as any);
-    expect(handle).toBeDefined();
-    // Clean up the interval
-    if (handle && typeof handle === 'object' && 'unref' in handle) (handle as any).unref();
-    clearInterval(handle as any);
+    // startActionQueueListener returns void — just call it
+    await mod.startActionQueueListener(guild, supa as any);
   });
 });
 

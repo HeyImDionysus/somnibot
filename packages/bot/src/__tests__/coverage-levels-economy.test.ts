@@ -1,8 +1,8 @@
 /**
- * Coverage tests — Levels, Economy, Profiles, Quests, Trivia, Achievements
- * These feature handlers/managers are large files with minimal existing coverage.
+ * Coverage tests — Levels, Economy, Profiles, Quests, Trivia, Achievements,
+ * Setup Wizard, Temp Channels, Commerce, Music, Event Bus, Alert, Deployer
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
@@ -56,7 +56,7 @@ vi.mock('discord.js', () => {
     StringSelectMenuBuilder, AttachmentBuilder,
     PermissionFlagsBits: { Administrator: 1n, ManageGuild: 2n, ManageRoles: 4n },
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
-    ChannelType: { GuildText: 0 },
+    ChannelType: { GuildText: 0, GuildVoice: 2 },
   };
 });
 
@@ -64,60 +64,22 @@ vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
 
-function makeChain(result: any = { data: null, error: null }) {
-  const chain: any = {};
-  for (const m of ['from', 'select', 'insert', 'update', 'delete', 'upsert',
-    'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'is', 'not',
-    'order', 'limit', 'single', 'maybeSingle', 'match', 'contains',
-    'overlaps', 'filter', 'or', 'ilike', 'like', 'textSearch', 'returns']) {
-    chain[m] = vi.fn(() => chain);
-  }
-  chain.single = vi.fn(() => Promise.resolve(result));
-  chain.maybeSingle = vi.fn(() => Promise.resolve(result));
-  chain.then = (resolve: Function) => resolve(result);
-  return chain;
-}
-
-function makeSupa(result?: any) {
-  const chain = makeChain(result);
-  return { from: vi.fn(() => chain), rpc: vi.fn(async () => ({ data: null, error: null })), _chain: chain };
-}
-
-function makeValkey() {
-  return {
-    get: vi.fn(async () => null),
-    set: vi.fn(async () => {}),
-    setex: vi.fn(async () => {}),
-    del: vi.fn(async () => {}),
-    incr: vi.fn(async () => 1),
-    expire: vi.fn(async () => {}),
-    keys: vi.fn(async () => []),
-    hset: vi.fn(async () => {}),
-    hget: vi.fn(async () => null),
-    hgetall: vi.fn(async () => ({})),
-    zadd: vi.fn(async () => {}),
-    zrangebyscore: vi.fn(async () => []),
-    zrevrange: vi.fn(async () => []),
-    zrank: vi.fn(async () => null),
-    zscore: vi.fn(async () => null),
-  };
-}
-
 // ═════════════════════════════════════════════════════════════
-// Levels — loadLevelConfig, handleMessageXP, level-handler
+// Levels — xp-tracker, level-announcer, voice-xp, commands
 // ═════════════════════════════════════════════════════════════
 describe('levels', () => {
-  it('loadLevelConfig loads from supabase', async () => {
-    const mod = await import('../features/levels/level-config.js');
+  it('xp-tracker module loads', async () => {
+    const mod = await import('../features/levels/xp-tracker.js');
     expect(mod).toBeDefined();
-    if (mod.loadLevelConfig) {
-      const supa = makeSupa({ data: { xp_per_message: 10, cooldown_seconds: 60 }, error: null });
-      try { await mod.loadLevelConfig(supa as any, 'g1'); } catch {}
-    }
   });
 
-  it('level handler module loads', async () => {
-    const mod = await import('../features/levels/level-handler.js');
+  it('level-announcer module loads', async () => {
+    const mod = await import('../features/levels/level-announcer.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('voice-xp module loads', async () => {
+    const mod = await import('../features/levels/voice-xp.js');
     expect(mod).toBeDefined();
   });
 
@@ -126,14 +88,20 @@ describe('levels', () => {
     const cmds = buildLevelCommands();
     expect(cmds).toBeDefined();
   });
+
+  it('level admin commands build', async () => {
+    const { buildLevelAdminCommands } = await import('../features/levels/admin-commands.js');
+    const cmds = buildLevelAdminCommands();
+    expect(cmds).toBeDefined();
+  });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Economy — economy handlers
+// Economy — economy-manager, commands, timers-command
 // ═════════════════════════════════════════════════════════════
 describe('economy', () => {
-  it('economy handler module loads', async () => {
-    const mod = await import('../features/economy/economy-handler.js');
+  it('economy-manager module loads', async () => {
+    const mod = await import('../features/economy/economy-manager.js');
     expect(mod).toBeDefined();
   });
 
@@ -142,14 +110,19 @@ describe('economy', () => {
     const cmds = buildEconomyCommands();
     expect(cmds).toBeDefined();
   });
+
+  it('timers-command module loads', async () => {
+    const mod = await import('../features/economy/timers-command.js');
+    expect(mod).toBeDefined();
+  });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Profiles
+// Profiles — profiles-manager, commands
 // ═════════════════════════════════════════════════════════════
 describe('profiles', () => {
-  it('profile handler module loads', async () => {
-    const mod = await import('../features/profiles/profile-handler.js');
+  it('profiles-manager module loads', async () => {
+    const mod = await import('../features/profiles/profiles-manager.js');
     expect(mod).toBeDefined();
   });
 
@@ -161,11 +134,11 @@ describe('profiles', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
-// Quests
+// Quests — quests-manager, commands
 // ═════════════════════════════════════════════════════════════
 describe('quests', () => {
-  it('quests module loads', async () => {
-    const mod = await import('../features/quests/quest-manager.js');
+  it('quests-manager module loads', async () => {
+    const mod = await import('../features/quests/quests-manager.js');
     expect(mod).toBeDefined();
   });
 
@@ -177,10 +150,10 @@ describe('quests', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
-// Trivia
+// Trivia — trivia-manager, commands
 // ═════════════════════════════════════════════════════════════
 describe('trivia', () => {
-  it('trivia manager module loads', async () => {
+  it('trivia-manager module loads', async () => {
     const mod = await import('../features/trivia/trivia-manager.js');
     expect(mod).toBeDefined();
   });
@@ -193,11 +166,11 @@ describe('trivia', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
-// Achievements
+// Achievements — achievements-manager, commands
 // ═════════════════════════════════════════════════════════════
 describe('achievements', () => {
-  it('achievement manager module loads', async () => {
-    const mod = await import('../features/achievements/achievement-manager.js');
+  it('achievements-manager module loads', async () => {
+    const mod = await import('../features/achievements/achievements-manager.js');
     expect(mod).toBeDefined();
   });
 
@@ -209,42 +182,67 @@ describe('achievements', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
-// Setup Wizard
+// Setup Wizard — wizard-engine, steps, commands
 // ═════════════════════════════════════════════════════════════
 describe('setup-wizard', () => {
-  it('setup wizard handler module loads', async () => {
-    const mod = await import('../features/setup-wizard/setup-handler.js');
+  it('wizard-engine module loads', async () => {
+    const mod = await import('../features/setup-wizard/wizard-engine.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('steps module loads', async () => {
+    const mod = await import('../features/setup-wizard/steps.js');
     expect(mod).toBeDefined();
   });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Temp Channels
+// Temp Channels — temp-channel-manager, voice-handler, commands
 // ═════════════════════════════════════════════════════════════
 describe('temp-channels', () => {
-  it('temp channel handler module loads', async () => {
-    const mod = await import('../features/temp-channels/temp-channel-handler.js');
+  it('temp-channel-manager module loads', async () => {
+    const mod = await import('../features/temp-channels/temp-channel-manager.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('voice-handler module loads', async () => {
+    const mod = await import('../features/temp-channels/voice-handler.js');
     expect(mod).toBeDefined();
   });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Commerce — entitlement-service, receipt-builder, fraud-detection
+// Commerce — entitlement-service, receipt-builder, payment-handler
 // ═════════════════════════════════════════════════════════════
 describe('commerce', () => {
-  it('entitlement service module loads', async () => {
+  it('entitlement-service module loads', async () => {
     const mod = await import('../features/commerce/entitlement-service.js');
     expect(mod).toBeDefined();
   });
 
-  it('receipt builder module loads', async () => {
+  it('receipt-builder module loads', async () => {
     const mod = await import('../features/commerce/receipt-builder.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('payment-handler module loads', async () => {
+    const mod = await import('../features/commerce/payment-handler.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('store-command module loads', async () => {
+    const mod = await import('../features/commerce/store-command.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('license-commands module loads', async () => {
+    const mod = await import('../features/commerce/license-commands.js');
     expect(mod).toBeDefined();
   });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Music — music-player, music-queue
+// Music — music-player, music-queue, music-embeds, music-filters
 // ═════════════════════════════════════════════════════════════
 describe('music', () => {
   it('music-player module loads', async () => {
@@ -256,6 +254,16 @@ describe('music', () => {
     const mod = await import('../features/music/music-queue.js');
     expect(mod).toBeDefined();
   });
+
+  it('music-embeds module loads', async () => {
+    const mod = await import('../features/music/music-embeds.js');
+    expect(mod).toBeDefined();
+  });
+
+  it('music-filters module loads', async () => {
+    const mod = await import('../features/music/music-filters.js');
+    expect(mod).toBeDefined();
+  });
 });
 
 // ═════════════════════════════════════════════════════════════
@@ -265,6 +273,7 @@ describe('event-bus', () => {
   it('PlatformEventBus module loads', async () => {
     const mod = await import('../services/event-bus.js');
     expect(mod).toBeDefined();
+    expect(mod.eventBus).toBeDefined();
   });
 });
 
@@ -272,16 +281,26 @@ describe('alert-service', () => {
   it('AlertService module loads', async () => {
     const mod = await import('../services/alert-service.js');
     expect(mod).toBeDefined();
+    expect(mod.AlertService).toBeDefined();
   });
 });
 
 // ═════════════════════════════════════════════════════════════
-// Deployer (deployServerState)
+// Deployer — deploy/deployer.ts
 // ═════════════════════════════════════════════════════════════
 describe('deployer', () => {
   it('deployer module loads', async () => {
-    const mod = await import('../sync/deployer.js');
+    const mod = await import('../deploy/deployer.js');
     expect(mod).toBeDefined();
-    expect(mod.deployServerState).toBeDefined();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════
+// Deploy Listener — deploy/deploy-listener.ts
+// ═════════════════════════════════════════════════════════════
+describe('deploy-listener', () => {
+  it('deploy-listener module loads', async () => {
+    const mod = await import('../deploy/deploy-listener.js');
+    expect(mod).toBeDefined();
   });
 });

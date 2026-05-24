@@ -68,7 +68,7 @@ vi.mock('discord.js', () => {
     }
     sort(fn?: Function) { return this; }
     first() { return this.values().next().value; }
-    map(fn: Function) { return [...this.values()].map(fn); }
+    map(fn: (value: any, key: any, collection: any) => any) { return [...this.values()].map(fn); }
   }
   return {
     SlashCommandBuilder,
@@ -471,7 +471,7 @@ describe('GiveawayManager', () => {
         prize: 'Nitro',
         winnerCount: 1,
         durationMs: 86400000,
-        hostId: 'u1',
+        creatorId: 'u1',
       });
     } catch {}
   });
