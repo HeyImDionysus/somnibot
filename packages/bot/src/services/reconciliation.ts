@@ -150,13 +150,13 @@ export async function runReconciliation(
     const { data: staleSessions } = await supabase
       .from('license_sessions')
       .select(`
-      .limit(1000)
         id,
         last_seen_at,
         license_key_id,
         license_keys!inner(product_id)
       `)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (staleSessions) {
       for (const session of staleSessions) {
