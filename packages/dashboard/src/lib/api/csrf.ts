@@ -21,10 +21,17 @@ import { cookies } from 'next/headers';
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
 const CSRF_HEADER_NAME = 'x-csrf-token';
 
-/** Secret used to sign CSRF tokens. Falls back to a per-process random if not configured. */
-const CSRF_SECRET = process.env.CSRF_SECRET
-  || process.env.NEXTAUTH_SECRET
-  || randomBytes(32).toString('hex');
+/** Secret used to sign CSRF tokens. Fails closed — refuses to start without an explicit secret. */
+const CSRF_SECRET = (() => {
+  const secret = process.env.CSRF_SECRET || process.env.NEXTAUTH_SECRET;
+  if (!secret) {
+    throw new Error(
+      'Missing CSRF_SECRET (or NEXTAUTH_SECRET fallback). ' +
+      'Refusing to start with unpredictable per-process CSRF keys that break across restarts/replicas.',
+    );
+  }
+  return secret;
+})();
 
 /**
  * Generate a CSRF token tied to a session identifier.

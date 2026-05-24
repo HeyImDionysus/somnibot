@@ -25,7 +25,7 @@ const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
   || (process.env.NEXTAUTH_SECRET
     ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-    : '');
+    : (() => { throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret'); })());
 
 function isInternalReplay(req: NextRequest): boolean {
   const provided = req.headers.get('x-replay-secret');
