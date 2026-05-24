@@ -5,6 +5,13 @@ vi.mock('@somnibot/shared', () => ({
   SOMNI_PALETTE: { primary: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c },
   computeStateDiff: vi.fn(() => []),
   classifyDrift: vi.fn(() => []),
+  LEVEL_CONFIG: {
+    XP_FORMULA: (level: number) => 5 * Math.pow(level, 2) + 50 * level + 100,
+    DEFAULT_MIN_XP: 15,
+    DEFAULT_MAX_XP: 25,
+    DEFAULT_COOLDOWN_SECONDS: 60,
+    MAX_LEVEL: 100,
+  },
 }));
 
 vi.mock('discord.js', () => {
@@ -206,8 +213,8 @@ describe('voice-xp', () => {
   });
 
   it('onVoiceStateUpdate handles join', () => {
-    const oldState = { channelId: null, member: { id: 'u1', user: { bot: false } }, guild: { id: 'g1' } };
-    const newState = { channelId: 'vc1', member: { id: 'u1', user: { bot: false } }, guild: { id: 'g1' } };
+    const oldState = { channelId: null, member: { id: 'u1', user: { bot: false }, roles: { cache: new Map() } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
+    const newState = { channelId: 'vc1', member: { id: 'u1', user: { bot: false }, roles: { cache: new Map() } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
     mod.onVoiceStateUpdate(oldState as any, newState as any);
   });
 

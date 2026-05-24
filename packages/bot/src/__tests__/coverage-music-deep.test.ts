@@ -6,7 +6,7 @@ vi.mock('@somnibot/shared', () => ({
 }));
 
 vi.mock('discord.js', () => ({
-  EmbedBuilder: class { setColor() { return this; } setTitle() { return this; } setDescription() { return this; } setThumbnail() { return this; } setTimestamp() { return this; } setFooter() { return this; } setAuthor() { return this; } addFields() { return this; } setImage() { return this; } },
+  EmbedBuilder: class { setColor() { return this; } setTitle() { return this; } setDescription() { return this; } setThumbnail() { return this; } setTimestamp() { return this; } setFooter() { return this; } setAuthor() { return this; } addFields() { return this; } setImage() { return this; } setURL() { return this; } },
   ActionRowBuilder: class { addComponents() { return this; } },
   ButtonBuilder: class { setCustomId() { return this; } setLabel() { return this; } setStyle() { return this; } setEmoji() { return this; } setDisabled() { return this; } },
   ButtonStyle: { Primary: 1, Secondary: 2, Danger: 4 },
