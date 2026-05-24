@@ -350,7 +350,7 @@ describe('services coverage', () => {
     const { writeAuditLog, writeAuditBatch } = await import('../services/audit.js');
     const supa = makeSupa();
     await writeAuditLog(supa as any, { guild_id: 'g1', action: 'test', actor_id: 'u1' } as any);
-    try { await writeAuditBatch(supa as any, [{ guild_id: 'g1', action: 'test', actor_id: 'u1' }] as any); } catch {}
+    try { await writeAuditBatch(supa as any, 'g1', 'deploy1', [{ action: 'test', entity_type: 'role', entity_name: 'TestRole' }] as any); } catch {}
   });
 
   it('HeartbeatService', async () => {
@@ -551,12 +551,12 @@ describe('tickets coverage', () => {
 
   it('postPanel', async () => {
     const { postPanel } = await import('../features/tickets/panel-manager.js');
-    try { await postPanel(makeGuild() as any, makeSupa() as any, 'panel1'); } catch {}
+    try { await postPanel(makeGuild() as any, { id: 'p1', channel_id: 'ch1', title: 'Help', description: 'Click', guild_id: 'g1' } as any, makeSupa() as any); } catch {}
   });
 
   it('generateTranscript', async () => {
     const { generateTranscript } = await import('../features/tickets/transcript-generator.js');
-    try { await generateTranscript(makeGuild() as any, makeSupa() as any, 'ticket1'); } catch {}
+    try { await generateTranscript(makeGuild() as any, { id: 't1', channel_id: 'ch1', guild_id: 'g1', user_id: 'u1' } as any, makeSupa() as any); } catch {}
   });
 });
 
@@ -711,7 +711,8 @@ describe('moderation coverage', () => {
       const mod = await import('../features/moderation/automod-engine.js');
       const client: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1', guilds: { cache: new Map() } };
       const msg: any = { content: 'test', author: { id: 'u1', bot: false }, guild: makeGuild(), member: { roles: { cache: new Map() }, permissions: { has: () => false } }, channel: { id: 'ch1' }, delete: vi.fn() };
-      await mod.processMessage(msg, client);
+      const modConfig = { escalationChain: [], infractionExpiryDays: 30, modLogChannelId: null };
+      await mod.processMessage(client, msg, modConfig);
     } catch {}
   });
 
@@ -751,7 +752,7 @@ describe('music coverage', () => {
   it('MusicPlayerManager constructor', async () => {
     const { MusicPlayerManager } = await import('../features/music/music-player.js');
     const shoukaku: any = { on: vi.fn(), getIdealNode: vi.fn(() => null) };
-    const mgr = new MusicPlayerManager(makeGuild() as any, shoukaku, makeSupa() as any);
+    const mgr = new MusicPlayerManager(makeGuild() as any, shoukaku, makeSupa() as any, makeValkey() as any, makeEventBus() as any);
     expect(mgr).toBeDefined();
     mgr.getConfig();
     try { mgr.getPlayerPosition('g1'); } catch {}
@@ -1074,7 +1075,7 @@ describe('economy commands coverage', () => {
     try {
       const { handleEconomyCommand } = await import('../features/economy/commands.js');
       const { EconomyManager } = await import('../features/economy/economy-manager.js');
-      const mgr = new EconomyManager(makeGuild() as any, makeSupa() as any);
+      const mgr = new EconomyManager(makeGuild() as any, makeSupa() as any, makeValkey() as any);
       await handleEconomyCommand(makeInteraction({ subcommand: 'balance' }) as any, mgr);
     } catch {}
   });
