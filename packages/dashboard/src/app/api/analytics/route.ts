@@ -8,8 +8,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.view_analytics');
     const { searchParams } = new URL(request.url);
@@ -41,7 +45,7 @@ export async function GET(request: NextRequest) {
       .eq('guild_id', ctx.guildId)
       .gte('created_at', startIso)
       .in('status', ['completed', 'refunded'])
-      .limit(10000);
+      .limit(1000);
 
     const { data: prevOrders } = await admin
       .from('orders')
@@ -50,7 +54,7 @@ export async function GET(request: NextRequest) {
       .gte('created_at', prevStart)
       .lt('created_at', startIso)
       .in('status', ['completed', 'refunded'])
-      .limit(10000);
+      .limit(1000);
 
     const completedOrders = (currentOrders || []).filter(o => o.status === 'completed');
     const refundedOrders = (currentOrders || []).filter(o => o.status === 'refunded');
@@ -82,7 +86,7 @@ export async function GET(request: NextRequest) {
       .from('customers')
       .select('id, total_spent_cents, first_purchase_at, created_at')
       .eq('guild_id', ctx.guildId)
-      .limit(10000);
+      .limit(1000);
 
     const { count: newCustomersCount } = await admin
       .from('customers')
@@ -157,7 +161,7 @@ export async function GET(request: NextRequest) {
       .eq('guild_id', ctx.guildId)
       .eq('status', 'failed')
       .gte('created_at', startIso)
-      .limit(10000);
+      .limit(1000);
 
     return NextResponse.json({
       success: true,

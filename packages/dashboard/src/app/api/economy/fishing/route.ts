@@ -12,6 +12,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
 const speciesSchema = z.object({
   id: z.string().uuid().optional(),
@@ -51,8 +52,9 @@ export async function POST(request: NextRequest) {
     if (rateLimited) return rateLimited;
 
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const parsed = speciesSchema.parse(body);
+    const result = await parseBody(request, speciesSchema);
+    if (!result.ok) return result.response;
+    const parsed = result.data;
 
     const supabase = createAdminSupabase();
     const { data, error } = await supabase
@@ -85,8 +87,9 @@ export async function PUT(request: NextRequest) {
     if (rateLimited) return rateLimited;
 
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const parsed = speciesSchema.parse(body);
+    const result = await parseBody(request, speciesSchema);
+    if (!result.ok) return result.response;
+    const parsed = result.data;
 
     if (!parsed.id) return NextResponse.json({ error: 'id required' }, { status: 400 });
 

@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const ALLOWED_TABLES = new Set([
   'tickets',
@@ -17,6 +18,9 @@ const ALLOWED_TABLES = new Set([
 ]);
 
 export async function GET(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'standard');
+  if (rateLimited) return rateLimited;
+
   const { searchParams } = new URL(req.url);
   const table = searchParams.get('table');
 

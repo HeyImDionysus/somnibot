@@ -13,6 +13,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
 
 const guildConfigPatchSchema = z.object({
   mod_log_channel_id: z.string().nullable().optional(),
@@ -200,27 +201,9 @@ export async function PATCH(request: NextRequest) {
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  // Validate with Zod
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-  }
-
-  const parsed = guildConfigPatchSchema.safeParse(rawBody);
-  if (!parsed.success) {
-    return NextResponse.json(
-      {
-        error: 'Validation failed',
-        issues: parsed.error.issues.map((i) => ({
-          path: i.path.join('.'),
-          message: i.message,
-        })),
-      },
-      { status: 400 },
-    );
-  }
+  // Validate with Zod via centralized parseBody
+  const parsed = await parseBody(request, guildConfigPatchSchema);
+  if (!parsed.ok) return parsed.response;
 
   const updates = parsed.data;
   if (Object.keys(updates).length === 0) {
