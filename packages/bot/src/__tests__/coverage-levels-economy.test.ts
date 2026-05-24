@@ -10,45 +10,58 @@ vi.mock('@somnibot/shared', () => ({
   DEFAULT_ESCALATION_CHAIN: [],
 }));
 
+/** Returns a proxy that is callable and returns itself for every property access. */
+function fluent(): any {
+  const handler: ProxyHandler<Function> = {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive) return () => 0;
+      if (prop === Symbol.iterator) return function* () {};
+      if (prop === 'then') return undefined;
+      if (prop === 'toJSON') return () => ({});
+      if (prop === 'length') return 0;
+      return fluent();
+    },
+    apply() { return fluent(); },
+  };
+  return new Proxy(function () {}, handler);
+}
+
 vi.mock('discord.js', () => {
+  const cbMethods = new Set([
+    'addSubcommand', 'addSubcommandGroup',
+    'addUserOption', 'addStringOption', 'addIntegerOption',
+    'addBooleanOption', 'addNumberOption', 'addChannelOption',
+    'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
+  ]);
   class SlashCommandBuilder {
-    setName() { return this; }
-    setDescription() { return this; }
-    setDefaultMemberPermissions() { return this; }
-    addSubcommand(fn: Function) { fn(new SlashCommandBuilder()); return this; }
-    addUserOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addStringOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ addChoices: () => ({}) }), addChoices: () => ({}) }) }) }); return this; }
-    addIntegerOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ setMinValue: () => ({ setMaxValue: () => ({}) }) }), setMinValue: () => ({ setMaxValue: () => ({}) }) }) }) }); return this; }
-    addBooleanOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({}) }) }); return this; }
-    addNumberOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setMinValue: () => ({}) }) }) }); return this; }
-    addChannelOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addRoleOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addAttachmentOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({}) }) }); return this; }
+    [key: string]: any;
+    constructor() {
+      return new Proxy(this, {
+        get(target, prop) {
+          if (prop === 'toJSON') return () => ({});
+          if (prop === 'constructor') return SlashCommandBuilder;
+          if (typeof prop === 'symbol') return undefined;
+          if (cbMethods.has(prop as string)) {
+            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+          }
+          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          return fluent();
+        },
+      });
+    }
   }
   class EmbedBuilder {
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    setThumbnail() { return this; }
-    setTimestamp() { return this; }
-    setFooter() { return this; }
-    setImage() { return this; }
-    setAuthor() { return this; }
-    addFields(..._f: any[]) { return this; }
-    toJSON() { return {}; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t, p) => typeof p === 'symbol' ? undefined : p === 'toJSON' ? () => ({}) : (..._a: any[]) => t }); }
   }
   class ActionRowBuilder { addComponents() { return this; } }
   class ButtonBuilder {
-    setCustomId() { return this; }
-    setLabel() { return this; }
-    setStyle() { return this; }
-    setEmoji() { return this; }
-    setDisabled() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => () => t }); }
   }
   class StringSelectMenuBuilder {
-    setCustomId() { return this; }
-    setPlaceholder() { return this; }
-    addOptions() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
   }
   class AttachmentBuilder { constructor() {} }
   return {
@@ -90,8 +103,8 @@ describe('levels', () => {
   });
 
   it('level admin commands build', async () => {
-    const { buildLevelAdminCommands } = await import('../features/levels/admin-commands.js');
-    const cmds = buildLevelAdminCommands();
+    const { buildXpAdminCommands } = await import('../features/levels/admin-commands.js');
+    const cmds = buildXpAdminCommands();
     expect(cmds).toBeDefined();
   });
 });

@@ -15,25 +15,48 @@ vi.mock('@somnibot/shared', () => ({
   ],
 }));
 
+function fluent(): any {
+  const handler: ProxyHandler<Function> = {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive) return () => 0;
+      if (prop === Symbol.iterator) return function* () {};
+      if (prop === 'then') return undefined;
+      if (prop === 'toJSON') return () => ({});
+      if (prop === 'length') return 0;
+      return fluent();
+    },
+    apply() { return fluent(); },
+  };
+  return new Proxy(function () {}, handler);
+}
+
 vi.mock('discord.js', () => {
+  const cbMethods = new Set([
+    'addSubcommand', 'addSubcommandGroup',
+    'addUserOption', 'addStringOption', 'addIntegerOption',
+    'addBooleanOption', 'addNumberOption', 'addChannelOption',
+    'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
+  ]);
   class SlashCommandBuilder {
-    name = ''; desc = '';
-    setName(n: string) { this.name = n; return this; }
-    setDescription(d: string) { this.desc = d; return this; }
-    setDefaultMemberPermissions() { return this; }
-    addUserOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addStringOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}), setMinLength: () => ({}) }) }) }); return this; }
-    addIntegerOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ addChoices: (..._a: any[]) => ({}) }), setMinValue: () => ({ setMaxValue: () => ({}) }) }) }) }); return this; }
-    addBooleanOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({}) }) }); return this; }
+    [key: string]: any;
+    constructor() {
+      return new Proxy(this, {
+        get(target, prop) {
+          if (prop === 'toJSON') return () => ({});
+          if (prop === 'constructor') return SlashCommandBuilder;
+          if (typeof prop === 'symbol') return undefined;
+          if (cbMethods.has(prop as string)) {
+            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+          }
+          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          return fluent();
+        },
+      });
+    }
   }
   class EmbedBuilder {
-    data: any = {};
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    setThumbnail() { return this; }
-    setTimestamp() { return this; }
-    addFields(..._f: any[]) { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t, p) => typeof p === 'symbol' ? undefined : p === 'toJSON' ? () => ({}) : (..._a: any[]) => t }); }
   }
   return { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits: { ModerateMembers: 1n, KickMembers: 2n, BanMembers: 4n, ManageMessages: 8n } };
 });

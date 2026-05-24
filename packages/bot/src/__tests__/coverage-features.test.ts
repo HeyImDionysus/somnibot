@@ -12,61 +12,69 @@ vi.mock('@somnibot/shared', () => ({
   DEFAULT_ESCALATION_CHAIN: [],
 }));
 
+/** Returns a proxy that is callable and returns itself for every property access. */
+function fluent(): any {
+  const handler: ProxyHandler<Function> = {
+    get(_target, prop) {
+      if (prop === Symbol.toPrimitive) return () => 0;
+      if (prop === Symbol.iterator) return function* () {};
+      if (prop === 'then') return undefined;
+      if (prop === 'toJSON') return () => ({});
+      if (prop === 'length') return 0;
+      return fluent();
+    },
+    apply() { return fluent(); },
+  };
+  return new Proxy(function () {}, handler);
+}
+
 vi.mock('discord.js', () => {
+  const cbMethods = new Set([
+    'addSubcommand', 'addSubcommandGroup',
+    'addUserOption', 'addStringOption', 'addIntegerOption',
+    'addBooleanOption', 'addNumberOption', 'addChannelOption',
+    'addRoleOption', 'addAttachmentOption', 'addMentionableOption',
+  ]);
   class SlashCommandBuilder {
-    setName() { return this; }
-    setDescription() { return this; }
-    setDefaultMemberPermissions() { return this; }
-    addSubcommand(fn: Function) { fn(new SlashCommandBuilder()); return this; }
-    addUserOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
-    addStringOption(fn: Function) {
-      fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ addChoices: () => ({}) }), addChoices: () => ({}) }) }) });
-      return this;
+    [key: string]: any;
+    constructor() {
+      return new Proxy(this, {
+        get(target, prop) {
+          if (prop === 'toJSON') return () => ({});
+          if (prop === 'constructor') return SlashCommandBuilder;
+          if (typeof prop === 'symbol') return undefined;
+          if (cbMethods.has(prop as string)) {
+            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+          }
+          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          return fluent();
+        },
+      });
     }
-    addIntegerOption(fn: Function) {
-      fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ setMinValue: () => ({ setMaxValue: () => ({}) }) }), setMinValue: () => ({ setMaxValue: () => ({}) }), addChoices: () => ({}) }) }) });
-      return this;
-    }
-    addBooleanOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({}) }) }); return this; }
-    addNumberOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}), setMinValue: () => ({}) }) }) }); return this; }
   }
   class EmbedBuilder {
-    data: any = {};
-    setColor() { return this; }
-    setTitle() { return this; }
-    setDescription() { return this; }
-    setThumbnail() { return this; }
-    setTimestamp() { return this; }
-    setFooter() { return this; }
-    setImage() { return this; }
-    setAuthor() { return this; }
-    setURL() { return this; }
-    addFields(..._f: any[]) { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t, p) => typeof p === 'symbol' ? undefined : p === 'toJSON' ? () => ({}) : (..._a: any[]) => t }); }
   }
   class ActionRowBuilder {
     components: any[] = [];
     addComponents(...c: any[]) { this.components.push(...c); return this; }
   }
   class ButtonBuilder {
-    setCustomId() { return this; }
-    setLabel() { return this; }
-    setStyle() { return this; }
-    setEmoji() { return this; }
-    setDisabled() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => () => t }); }
   }
   class StringSelectMenuBuilder {
-    setCustomId() { return this; }
-    setPlaceholder() { return this; }
-    addOptions() { return this; }
-    setMaxValues() { return this; }
+    [key: string]: any;
+    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
   }
   class Collection extends Map {
-    filter(fn: Function) {
+    filter(fn: (value: any, key: any, collection: any) => boolean) {
       const result = new Collection();
-      for (const [k, v] of this) { if (fn(v, k)) result.set(k, v); }
+      for (const [k, v] of this) { if (fn(v, k, this)) result.set(k, v); }
       return result;
     }
-    sort(fn?: Function) { return this; }
+    sort() { return this; }
     first() { return this.values().next().value; }
     map(fn: (value: any, key: any, collection: any) => any) { return [...this.values()].map(fn); }
   }
