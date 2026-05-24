@@ -61,6 +61,7 @@ vi.mock('discord.js', () => {
       const proxy: any = new Proxy(this, {
         get(_t, p) {
           if (typeof p === 'symbol') return undefined;
+          if (p === 'then') return undefined;
           if (p === 'toJSON') return () => ({});
           return (..._a: any[]) => proxy;
         },
