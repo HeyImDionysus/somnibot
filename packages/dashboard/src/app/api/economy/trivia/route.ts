@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
@@ -32,7 +32,7 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
   }
 }
 
-export async function PUT(request: Request) {
+export async function PUT(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 
@@ -95,7 +95,7 @@ export async function PUT(request: Request) {
   }
 }
 
-export async function DELETE(request: Request) {
+export async function DELETE(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 

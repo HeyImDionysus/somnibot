@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';

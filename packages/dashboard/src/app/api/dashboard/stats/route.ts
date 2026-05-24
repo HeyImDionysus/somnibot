@@ -9,7 +9,7 @@
  * - Uptime (from bot_diagnostics)
  * - Recent activity feed (from audit_logs)
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
