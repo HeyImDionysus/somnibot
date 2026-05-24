@@ -89,6 +89,11 @@ vi.mock('discord.js', () => {
     Events: { ClientReady: 'ready', MessageCreate: 'messageCreate' },
     ActivityType: { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 },
     InteractionType: { Ping: 1, ApplicationCommand: 2, MessageComponent: 3, ApplicationCommandAutocomplete: 4, ModalSubmit: 5 },
+    AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
+    AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
+    AutoModerationRuleEventType: { MessageSend: 1 },
+    REST: class { setToken() { return this; } },
+    Routes: { applicationGuildCommands: () => '' },
   };
 });
 
@@ -170,7 +175,10 @@ describe('ticket-service', () => {
   it('createTicket returns error with missing panel', async () => {
     const mod = await import('../features/tickets/ticket-service.js');
     try {
-      await mod.createTicket(makeGuild(), makeSupabase(), { on: vi.fn(() => () => {}), emit: vi.fn() } as any, 'panel1', { id: 'user1', displayName: 'User' } as any);
+      const member = { id: 'user1', displayName: 'User', user: { id: 'user1' } } as any;
+      const panel = { id: 'panel1', guild_id: 'guild1', channel_id: 'ch1', name: 'Support' } as any;
+      const ticketType = { name: 'general', emoji: '🎫' } as any;
+      await mod.createTicket(makeGuild(), member, panel, ticketType, makeSupabase(), makeEventBus());
     } catch { }
     expect(true).toBe(true);
   });
@@ -221,8 +229,8 @@ describe('AutomationEngine', () => {
   it('constructs', async () => {
     const { AutomationEngine } = await import('../features/automations/automation-engine.js');
     const { AlertService } = await import('../services/alert-service.js');
-    const alert = new AlertService(makeSupabase(), makeValkey(), makeGuild());
-    const engine = new AutomationEngine(makeGuild(), makeSupabase(), makeValkey(), makeEventBus(), alert);
+    const alert = new AlertService(makeValkey(), makeSupabase(), makeGuild() as any);
+    const engine = new AutomationEngine(makeGuild() as any, makeSupabase(), makeValkey(), makeEventBus(), alert);
     expect(engine).toBeDefined();
   });
 });
@@ -327,9 +335,9 @@ describe('discord-native/forum-tickets', () => {
   });
 });
 
-describe('discord-native/onboarding-sync', () => {
+describe('discord-native/guild-onboarding-sync', () => {
   it('imports', async () => {
-    const mod = await import('../features/discord-native/onboarding-sync.js');
+    const mod = await import('../features/discord-native/guild-onboarding-sync.js');
     expect(mod).toBeDefined();
   });
 });
