@@ -12,6 +12,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
 const recipeInputSchema = z.object({
   item_name: z.string().min(1).max(64),
@@ -61,8 +62,9 @@ export async function POST(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-    const parsed = recipeSchema.parse(body);
+    const result = await parseBody(request, recipeSchema);
+    if (!result.ok) return result.response;
+    const parsed = result.data;
 
     const admin = createAdminSupabase();
 
@@ -93,9 +95,7 @@ export async function POST(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
-    if (err instanceof z.ZodError) {
-      return NextResponse.json({ success: false, error: err.errors }, { status: 400 });
-    }
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to create recipe';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
@@ -107,14 +107,10 @@ export async function PUT(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const body = await request.json();
-
-    const { id, ...fields } = body;
-    if (!id || typeof id !== 'string') {
-      return NextResponse.json({ success: false, error: 'Missing recipe id' }, { status: 400 });
-    }
-
-    const parsed = recipeSchema.partial().parse(fields);
+    const putSchema = z.object({ id: z.string().uuid() }).merge(recipeSchema.partial());
+    const result = await parseBody(request, putSchema);
+    if (!result.ok) return result.response;
+    const { id, ...parsed } = result.data;
     const admin = createAdminSupabase();
 
     const updateData: Record<string, unknown> = {
@@ -140,9 +136,7 @@ export async function PUT(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, data });
   } catch (err: unknown) {
-    if (err instanceof z.ZodError) {
-      return NextResponse.json({ success: false, error: err.errors }, { status: 400 });
-    }
+    if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
     const message = err instanceof Error ? err.message : 'Failed to update recipe';
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
@@ -154,16 +148,10 @@ export async function DELETE(request: NextRequest) {
 
   try {
     const ctx = await requirePermission('dashboard.manage_economy');
-    const rawBody = await request.json().catch(() => null);
     const deleteSchema = z.object({ id: z.string().uuid() });
-    const parseResult = deleteSchema.safeParse(rawBody);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { success: false, error: parseResult.error.issues.map(i => i.message).join(', ') },
-        { status: 400 },
-      );
-    }
-    const { id } = parseResult.data;
+    const result = await parseBody(request, deleteSchema);
+    if (!result.ok) return result.response;
+    const { id } = result.data;
 
     const admin = createAdminSupabase();
 

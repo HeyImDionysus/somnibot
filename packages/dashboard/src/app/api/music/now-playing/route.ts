@@ -7,12 +7,16 @@
  *   music:stats:daily_plays:{guildId} — daily play count
  *   music:stats:top_tracks:{guildId} — top tracks
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 // For now, read from Supabase since we can't directly connect to Valkey from dashboard.
 // The bot writes music status to bot_diagnostics periodically.
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;

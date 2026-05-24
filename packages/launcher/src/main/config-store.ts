@@ -88,6 +88,9 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
  * libsecret on Linux). Falls back to plaintext if safeStorage is unavailable
  * (e.g., CI, headless Linux without a keyring).
  */
+// V5 Audit §10.5 — Track whether we've already warned about safeStorage
+let _safeStorageWarned = false;
+
 function encryptSensitive(value: string): string {
   if (!value) return '';
   try {
@@ -95,7 +98,17 @@ function encryptSensitive(value: string): string {
       return safeStorage.encryptString(value).toString('base64');
     }
   } catch {
-    // safeStorage not available — store plaintext (same as old behavior)
+    // safeStorage threw — treat as unavailable
+  }
+  // V5 Audit §10.5 — Warn loudly when falling back to plaintext storage
+  if (!_safeStorageWarned) {
+    _safeStorageWarned = true;
+    console.warn(
+      '[ConfigStore] WARNING: OS keychain (safeStorage) is not available. ' +
+      'Sensitive credentials will be stored in plaintext. ' +
+      'On Linux, install a keyring daemon (gnome-keyring, kwallet, or keepassxc) ' +
+      'to enable encrypted credential storage.',
+    );
   }
   return value;
 }
