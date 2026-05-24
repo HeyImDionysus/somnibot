@@ -18,7 +18,6 @@ export async function GET() {
     .from('guild_config')
     .select(
       'welcome_enabled, welcome_channel_id, welcome_message, welcome_card_enabled, ' +
-    .limit(1000)
       'welcome_card_background, welcome_dm_enabled, welcome_dm_message, welcome_auto_roles, ' +
       'goodbye_enabled, goodbye_channel_id, goodbye_message',
     )

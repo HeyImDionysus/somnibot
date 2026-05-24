@@ -181,7 +181,6 @@ export class EconomyManager {
       .from('guild_config')
       .select(
         'economy_enabled, currency_name, currency_emoji, economy_starting_balance, ' +
-      .limit(1000)
         'economy_daily_amount, economy_weekly_amount, economy_monthly_amount, ' +
         'economy_streak_bonus_pct, economy_work_cooldown_seconds, economy_work_min, ' +
         'economy_work_max, economy_crime_success_pct, economy_crime_fine_pct, ' +
