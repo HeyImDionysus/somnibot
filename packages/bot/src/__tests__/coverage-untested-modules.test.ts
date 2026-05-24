@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
-  SOMNI_PALETTE: { primary: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c },
+  SOMNI_PALETTE: { primary: 0x5865f2, success: 0x57f287, danger: 0xed4245, warning: 0xfee75c, CYAN: 0x00bcd4, ORANGE: 0xff9800, HOT_PINK: 0xff1493 },
   computeStateDiff: vi.fn(() => []),
   classifyDrift: vi.fn(() => []),
   DEFAULT_ESCALATION_CHAIN: [],
@@ -49,9 +49,26 @@ vi.mock('discord.js', () => {
     addChoices() { return this; } setChoices() { return this; } setAutocomplete() { return this; }
     toJSON() { return {}; }
   }
+  // ButtonInteraction class for instanceof checks in tutorial-engine
+  class ButtonInteraction {
+    readonly type = 'BUTTON';
+    update = vi.fn(async () => {});
+    message: any = {};
+  }
+  class ChatInputCommandInteraction {
+    readonly type = 'APPLICATION_COMMAND';
+  }
+  class Collection extends Map {
+    filter(fn: any) { const r = new Collection(); for (const [k,v] of this) if (fn(v,k)) r.set(k,v); return r; }
+    map(fn: any) { return [...this.values()].map(fn); }
+    find(fn: any) { return [...this.values()].find(fn); }
+    first() { return [...this.values()][0]; }
+    toJSON() { return [...this.values()]; }
+  }
   return {
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, StringSelectMenuBuilder, SlashCommandBuilder,
     ModalBuilder, TextInputBuilder, AttachmentBuilder,
+    ButtonInteraction, ChatInputCommandInteraction, Collection,
     ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4 },
     ButtonStyle: { Primary: 1, Secondary: 2, Danger: 4, Link: 5, Success: 3 },
     PermissionFlagsBits: { ViewChannel: 1n, SendMessages: 2n, BanMembers: 4n, KickMembers: 8n, ManageMessages: 16n, ModerateMembers: 128n, ManageGuild: 32n, ManageChannels: 64n },
@@ -60,12 +77,6 @@ vi.mock('discord.js', () => {
     Client: class { on() { return this; } once() { return this; } login() {} },
     GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildMessages: 4 },
     Partials: { Channel: 0, Message: 1, Reaction: 2 },
-    Collection: class extends Map {
-      filter(fn: any) { const r = new (this.constructor as any)(); for (const [k,v] of this) if (fn(v,k)) r.set(k,v); return r; }
-      map(fn: any) { return [...this.values()].map(fn); }
-      find(fn: any) { return [...this.values()].find(fn); }
-      first() { return [...this.values()][0]; }
-    },
     Events: { ClientReady: 'ready', InteractionCreate: 'interactionCreate' },
   };
 });
@@ -135,15 +146,34 @@ function makeSupa(result?: any) {
   return { from: vi.fn(() => chain), rpc: vi.fn(async () => ({ data: null, error: null })), channel: vi.fn(() => ({ on: vi.fn().mockReturnThis(), subscribe: vi.fn() })), removeChannel: vi.fn() };
 }
 
+// Use the mocked Collection from discord.js for guild caches
+function makeCollection(entries: [string, any][] = []): any {
+  // We can't import from the mocked module at top level, so build a Map-like with .map()
+  const col: any = new Map(entries);
+  col.filter = function(fn: any) { const r = makeCollection(); for (const [k,v] of this) if (fn(v,k)) r.set(k,v); return r; };
+  col.map = function(fn: any) { return [...this.values()].map(fn); };
+  col.find = function(fn: any) { return [...this.values()].find(fn); };
+  col.first = function() { return [...this.values()][0]; };
+  col.toJSON = function() { return [...this.values()]; };
+  return col;
+}
+
 function makeGuild(): any {
   return {
     id: 'g1', name: 'Test', memberCount: 100,
-    roles: { cache: new Map([['r1', { id: 'r1', name: 'Member', position: 1, permissions: { bitfield: 0n }, editable: true }]]), everyone: { id: 'g1', permissions: { bitfield: 0n } }, fetch: vi.fn(async () => new Map()) },
-    channels: { cache: new Map([['ch1', { id: 'ch1', name: 'general', type: 0, position: 0, permissionOverwrites: { cache: new Map() } }]]), fetch: vi.fn(async () => new Map()) },
-    members: { cache: new Map(), fetch: vi.fn(async () => new Map()) },
+    roles: {
+      cache: makeCollection([['r1', { id: 'r1', name: 'Member', position: 1, color: 0, hoist: false, mentionable: false, managed: false, permissions: { bitfield: 0n }, editable: true }]]),
+      everyone: { id: 'g1', permissions: { bitfield: 0n } },
+      fetch: vi.fn(async () => makeCollection()),
+    },
+    channels: {
+      cache: makeCollection([['ch1', { id: 'ch1', name: 'general', type: 0, position: 0, parentId: null, topic: null, rateLimitPerUser: 0, nsfw: false, permissionOverwrites: { cache: makeCollection() } }]]),
+      fetch: vi.fn(async () => makeCollection()),
+    },
+    members: { cache: makeCollection(), fetch: vi.fn(async () => makeCollection()) },
     commands: { set: vi.fn(async () => []) },
-    emojis: { cache: new Map() },
-    stickers: { cache: new Map() },
+    emojis: { cache: makeCollection() },
+    stickers: { cache: makeCollection() },
   };
 }
 
@@ -212,51 +242,51 @@ describe('automod-actions', () => {
   });
 
   it('executes delete action', async () => {
-    const client: any = { supabase: makeSupa() };
+    const client: any = { supabase: makeSupa(), eventBus: { emit: vi.fn(), on: vi.fn() } };
     const message: any = {
-      deletable: true, delete: vi.fn(async () => {}),
+      id: 'm1', deletable: true, delete: vi.fn(async () => {}),
       member: { id: 'u1', user: { id: 'u1', tag: 'User#0001' } },
       guild: { id: 'g1' },
       channel: { id: 'ch1' },
     };
-    const rule: any = { name: 'no-spam', action: 'delete', type: 'keyword', log_to_mod_channel: true };
+    const rule: any = { id: 'rule1', name: 'no-spam', action: 'delete', type: 'keyword', log_to_mod_channel: true };
     await mod.executeAutoModAction(client, message, rule, 'Spam detected', {
       escalationChain: [], infractionExpiryDays: 30, modLogChannelId: 'mod-ch1',
     });
   });
 
   it('executes warn action', async () => {
-    const client: any = { supabase: makeSupa() };
+    const client: any = { supabase: makeSupa(), eventBus: { emit: vi.fn(), on: vi.fn() } };
     const message: any = {
-      deletable: false, delete: vi.fn(async () => {}),
+      id: 'm2', deletable: false, delete: vi.fn(async () => {}),
       member: { id: 'u1', user: { id: 'u1', tag: 'User#0001' } },
       guild: { id: 'g1' },
       channel: { id: 'ch1' },
     };
-    const rule: any = { name: 'no-links', action: 'warn', type: 'keyword', log_to_mod_channel: false };
+    const rule: any = { id: 'rule2', name: 'no-links', action: 'warn', type: 'keyword', log_to_mod_channel: false };
     await mod.executeAutoModAction(client, message, rule, 'Posted link', {
       escalationChain: [], infractionExpiryDays: 30, modLogChannelId: null,
     });
   });
 
   it('executes escalate action', async () => {
-    const client: any = { supabase: makeSupa() };
+    const client: any = { supabase: makeSupa(), eventBus: { emit: vi.fn(), on: vi.fn() } };
     const message: any = {
-      deletable: true, delete: vi.fn(async () => {}),
+      id: 'm3', deletable: true, delete: vi.fn(async () => {}),
       member: { id: 'u1', user: { id: 'u1', tag: 'User#0001' }, timeout: vi.fn(async () => {}) },
       guild: { id: 'g1' },
       channel: { id: 'ch1' },
     };
-    const rule: any = { name: 'severe', action: 'escalate', type: 'keyword', log_to_mod_channel: true };
+    const rule: any = { id: 'rule3', name: 'severe', action: 'escalate', type: 'keyword', log_to_mod_channel: true };
     await mod.executeAutoModAction(client, message, rule, 'Severe violation', {
       escalationChain: [{ threshold: 1, action: 'mute', durationMinutes: 60, dmMember: true }], infractionExpiryDays: 30, modLogChannelId: 'mod-ch1',
     });
   });
 
   it('skips when no member', async () => {
-    const client: any = { supabase: makeSupa() };
+    const client: any = { supabase: makeSupa(), eventBus: { emit: vi.fn(), on: vi.fn() } };
     const message: any = { member: null, guild: { id: 'g1' } };
-    const rule: any = { name: 'test', action: 'delete', type: 'keyword' };
+    const rule: any = { id: 'rule4', name: 'test', action: 'delete', type: 'keyword' };
     await mod.executeAutoModAction(client, message, rule, 'test', {
       escalationChain: [], infractionExpiryDays: 30, modLogChannelId: null,
     });
@@ -287,29 +317,40 @@ describe('tutorial-engine', () => {
     expect(typeof result).toBe('boolean');
   });
 
-  it('starts tutorial with no steps', async () => {
+  it('starts tutorial and shows built-in steps', async () => {
+    // Supabase returns empty data for custom steps → falls through to built-in
     const supa = makeSupa({ data: [], error: null });
     const engine = new mod.TutorialEngine(supa as any, 'g1');
+    // reply must return an object with awaitMessageComponent that rejects (simulating timeout)
     const interaction: any = {
       user: { id: 'u1' }, guildId: 'g1',
-      reply: vi.fn(async () => ({})),
+      replied: false, deferred: false,
+      reply: vi.fn(async () => ({
+        awaitMessageComponent: vi.fn(async () => { throw new Error('timeout'); }),
+      })),
       editReply: vi.fn(async () => ({})),
       deferReply: vi.fn(async () => {}),
     };
     await engine.startTutorial(interaction);
+    // Should have called reply (showing built-in step)
+    expect(interaction.reply).toHaveBeenCalled();
   });
 
-  it('starts tutorial with steps', async () => {
+  it('starts tutorial with custom steps', async () => {
     const chain = makeChain({ data: [{ id: 's1', step_order: 1, title: 'Welcome', description: 'Hello', image_url: null, built_in_key: null, enabled: true }], error: null });
     const supa = { from: vi.fn(() => chain), rpc: vi.fn(async () => ({ data: null, error: null })) };
     const engine = new mod.TutorialEngine(supa as any, 'g1');
     const interaction: any = {
       user: { id: 'u1' }, guildId: 'g1',
-      reply: vi.fn(async () => ({ createMessageComponentCollector: vi.fn(() => ({ on: vi.fn().mockReturnThis() })) })),
+      replied: false, deferred: false,
+      reply: vi.fn(async () => ({
+        awaitMessageComponent: vi.fn(async () => { throw new Error('timeout'); }),
+      })),
       editReply: vi.fn(async () => ({})),
       deferReply: vi.fn(async () => {}),
     };
     await engine.startTutorial(interaction);
+    expect(interaction.reply).toHaveBeenCalled();
   });
 });
 
@@ -440,22 +481,29 @@ describe('purge-command', () => {
     expect(cmd).toBeDefined();
   });
 
-  it('handlePurgeCommand', async () => {
+  it('handlePurgeCommand deletes messages', async () => {
+    const mockMessages = new Map([
+      ['m1', { id: 'm1', author: { id: 'u1', bot: false }, content: 'hello', createdTimestamp: Date.now() }],
+      ['m2', { id: 'm2', author: { id: 'u2', bot: false }, content: 'world', createdTimestamp: Date.now() }],
+    ]);
     const interaction: any = {
+      id: '999',
       guildId: 'g1', user: { id: 'u1' },
       member: { permissions: { has: () => true } },
       options: {
-        getInteger: vi.fn(() => 10),
+        getInteger: vi.fn((key: string) => key === 'count' ? 10 : null),
         getUser: vi.fn(() => null),
         getString: vi.fn(() => null),
+        getBoolean: vi.fn(() => null),
       },
       channel: {
         bulkDelete: vi.fn(async () => new Map([['m1', {}], ['m2', {}]])),
-        messages: { fetch: vi.fn(async () => new Map([['m1', { author: { bot: false } }]])) },
+        messages: { fetch: vi.fn(async () => mockMessages) },
       },
       reply: vi.fn(async () => {}), deferReply: vi.fn(async () => {}), editReply: vi.fn(async () => {}),
     };
     await mod.handlePurgeCommand(interaction);
+    expect(interaction.deferReply).toHaveBeenCalled();
   });
 });
 
@@ -474,5 +522,8 @@ describe('sync/snapshot', () => {
     const guild = makeGuild();
     const snapshot = await mod.takeSnapshot(guild);
     expect(snapshot).toBeDefined();
+    expect(snapshot).toHaveProperty('roles');
+    expect(snapshot).toHaveProperty('channels');
+    expect(snapshot).toHaveProperty('everyonePermissions');
   });
 });
