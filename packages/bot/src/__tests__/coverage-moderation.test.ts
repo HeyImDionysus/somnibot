@@ -799,9 +799,9 @@ describe('escalation — executeEscalation', () => {
 
   it('getEscalationAction finds matching step', () => {
     const chain = [
-      { threshold: 3, action: 'mute' as any, durationMinutes: 60 },
-      { threshold: 5, action: 'kick' as any },
-      { threshold: 7, action: 'ban' as any },
+      { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+      { threshold: 5, action: 'kick' as const, dmMember: true },
+      { threshold: 7, action: 'ban' as const, dmMember: false },
     ];
     expect(esc.getEscalationAction(chain, 3)?.action).toBe('mute');
     expect(esc.getEscalationAction(chain, 5)?.action).toBe('kick');
@@ -810,7 +810,7 @@ describe('escalation — executeEscalation', () => {
 
   it('getEscalationAction returns null when below all thresholds', () => {
     const chain = [
-      { threshold: 3, action: 'mute' as any, durationMinutes: 60 },
+      { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
     ];
     expect(esc.getEscalationAction(chain, 1)).toBeNull();
   });
