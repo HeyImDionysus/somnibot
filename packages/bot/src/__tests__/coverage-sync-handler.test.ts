@@ -93,6 +93,31 @@ vi.mock('discord.js', () => {
     AutoModerationRuleEventType: { MessageSend: 1 },
     REST: class { setToken() { return this; } },
     Routes: { applicationGuildCommands: () => '' },
+    SlashCommandBuilder: class {
+      data: any = {};
+      setName(n: string) { this.data.name = n; return this; }
+      setDescription(d: string) { this.data.description = d; return this; }
+      addSubcommand(fn: Function) { fn(this); return this; }
+      addSubcommandGroup(fn: Function) { fn(this); return this; }
+      addStringOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({ addChoices: () => ({}) }) }) }), setRequired: () => ({}) }); return this; }
+      addIntegerOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
+      addBooleanOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
+      addUserOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
+      addChannelOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
+      addRoleOption(fn: Function) { fn({ setName: () => ({ setDescription: () => ({ setRequired: () => ({}) }) }) }); return this; }
+      setDMPermission() { return this; }
+      setDefaultMemberPermissions() { return this; }
+      toJSON() { return this.data; }
+    },
+    SlashCommandSubcommandBuilder: class {
+      setName() { return this; }
+      setDescription() { return this; }
+      addStringOption() { return this; }
+      addIntegerOption() { return this; }
+      addBooleanOption() { return this; }
+      addUserOption() { return this; }
+      addChannelOption() { return this; }
+    },
   };
 });
 

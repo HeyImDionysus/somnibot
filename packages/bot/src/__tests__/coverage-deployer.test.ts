@@ -104,16 +104,16 @@ describe('bot-role-guard', () => {
     expect(typeof mod.checkBotPermissions).toBe('function');
   });
 
-  it('checkBotRolePosition with guild', () => {
-    const { checkBotRolePosition } = require('../guards/bot-role-guard.js');
+  it('checkBotRolePosition with guild', async () => {
+    const { checkBotRolePosition } = await import('../guards/bot-role-guard.js');
     const g = makeGuild();
     const result = checkBotRolePosition(g, 'r1');
     expect(result).toBeDefined();
     expect(result.ok).toBeDefined();
   });
 
-  it('checkBotPermissions with guild', () => {
-    const { checkBotPermissions } = require('../guards/bot-role-guard.js');
+  it('checkBotPermissions with guild', async () => {
+    const { checkBotPermissions } = await import('../guards/bot-role-guard.js');
     const g = makeGuild();
     const result = checkBotPermissions(g, ['ManageRoles']);
     expect(result).toBeDefined();

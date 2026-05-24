@@ -12,7 +12,9 @@
  */
 import { createHmac } from 'crypto';
 
-const DOWNLOAD_SECRET = (() => {
+let _downloadSecret: string | undefined;
+function getDownloadSecret(): string {
+  if (_downloadSecret) return _downloadSecret;
   const secret =
     process.env.DOWNLOAD_SIGNING_SECRET ||
     process.env.NEXTAUTH_SECRET ||
@@ -20,11 +22,12 @@ const DOWNLOAD_SECRET = (() => {
   if (!secret) {
     throw new Error(
       'Missing DOWNLOAD_SIGNING_SECRET (or NEXTAUTH_SECRET / CSRF_SECRET fallback). ' +
-      'Refusing to start with predictable signing keys.',
+      'Refusing to operate with predictable signing keys.',
     );
   }
+  _downloadSecret = secret;
   return secret;
-})();
+}
 
 const DEFAULT_EXPIRY_SECONDS = 300; // 5 minutes
 
@@ -45,7 +48,7 @@ export function generateSignedDownloadUrl(
 ): string {
   const expires = Math.floor(Date.now() / 1000) + expirySeconds;
   const payload = `${params.productId}:${params.fileId}:${params.customerId}:${params.guildId}:${expires}`;
-  const signature = createHmac('sha256', DOWNLOAD_SECRET)
+  const signature = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
 
@@ -80,7 +83,7 @@ export function verifySignedDownloadUrl(
 
   // Verify HMAC
   const payload = `${productId}:${fileId}:${customerId}:${guildId}:${exp}`;
-  const expected = createHmac('sha256', DOWNLOAD_SECRET)
+  const expected = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
 

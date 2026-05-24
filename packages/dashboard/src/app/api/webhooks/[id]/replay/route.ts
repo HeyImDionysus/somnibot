@@ -13,10 +13,17 @@ import { createHmac } from 'crypto';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 // Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
-const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
-  || (process.env.NEXTAUTH_SECRET
-    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-    : (() => { throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret'); })());
+let _replaySecret: string | undefined;
+function getReplaySecret(): string {
+  if (_replaySecret) return _replaySecret;
+  const secret = process.env.WEBHOOK_REPLAY_SECRET
+    || (process.env.NEXTAUTH_SECRET
+      ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+      : undefined);
+  if (!secret) throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret');
+  _replaySecret = secret;
+  return secret;
+}
 
 export async function POST(
   _req: Request,
@@ -77,9 +84,9 @@ export async function POST(
     };
 
     // Use replay secret for authentication (NOT the old public X-Replay header)
-    if (REPLAY_SECRET) {
-      headers['X-Replay-Secret'] = REPLAY_SECRET;
-    } else {
+    try {
+      headers['X-Replay-Secret'] = getReplaySecret();
+    } catch {
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
 

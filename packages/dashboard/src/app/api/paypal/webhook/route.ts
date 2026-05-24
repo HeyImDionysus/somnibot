@@ -22,16 +22,24 @@ const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 // with paypal-* signature headers missing; verifyWebhookSignature would
 // always fail, so we accept a constant-time match on X-Replay-Secret
 // instead. Must match the derivation in the replay route.
-const REPLAY_SECRET = process.env.WEBHOOK_REPLAY_SECRET
-  || (process.env.NEXTAUTH_SECRET
-    ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-    : (() => { throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret'); })());
+let _replaySecret: string | undefined;
+function getReplaySecret(): string {
+  if (_replaySecret) return _replaySecret;
+  const secret = process.env.WEBHOOK_REPLAY_SECRET
+    || (process.env.NEXTAUTH_SECRET
+      ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
+      : undefined);
+  if (!secret) throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret');
+  _replaySecret = secret;
+  return secret;
+}
 
 function isInternalReplay(req: NextRequest): boolean {
   const provided = req.headers.get('x-replay-secret');
-  if (!provided || !REPLAY_SECRET) return false;
+  if (!provided) return false;
+  const secret = getReplaySecret();
   const a = Buffer.from(provided);
-  const b = Buffer.from(REPLAY_SECRET);
+  const b = Buffer.from(secret);
   if (a.length !== b.length) return false;
   try { return timingSafeEqual(a, b); } catch { return false; }
 }
