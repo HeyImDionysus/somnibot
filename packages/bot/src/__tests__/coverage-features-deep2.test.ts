@@ -74,6 +74,9 @@ vi.mock('discord.js', () => {
     ContextMenuCommandBuilder: class { setName() { return this; } setType() { return this; } },
     ApplicationCommandType: { Message: 3, User: 2 },
     Colors: { White: 0xffffff, Red: 0xff0000 },
+    AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
+    AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
+    AutoModerationRuleEventType: { MessageSend: 1 },
   };
 });
 
