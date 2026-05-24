@@ -116,7 +116,6 @@ vi.mock('discord.js', () => {
     at(idx: number) { return [...this.values()][idx]; }
     some(fn: any) { return [...this.values()].some(fn); }
     every(fn: any) { return [...this.values()].every(fn); }
-    size = 0;
   }
   class PermissionsBitField {
     bitfield: bigint;
@@ -286,7 +285,6 @@ function makeCollection(entries: [string, any][] = []): any {
   col.reduce = function(fn: any, init: any) { let acc = init; for (const [k,v] of this) acc = fn(acc, v, k); return acc; };
   col.some = function(fn: any) { return [...this.values()].some(fn); };
   col.at = function(idx: number) { return [...this.values()][idx]; };
-  col.size = entries.length;
   return col;
 }
 
@@ -629,7 +627,7 @@ describe('action-executor deep coverage', () => {
       if (table === 'tickets') return makeChain({ data: { id: 'ticket1' }, error: null });
       return makeChain();
     });
-    supa.rpc = vi.fn(async () => ({ data: 42, error: null }));
+    supa.rpc = vi.fn(async () => ({ data: 42, error: null })) as any;
     const ctx: any = {
       guild, member: guild.members.cache.get('u1'),
       channelId: 'ch1', messageId: null, message: null,
@@ -992,7 +990,7 @@ describe('music-player deep coverage', () => {
 
     const mgr = new MusicPlayerManager(guild, shoukaku, supa as any, valkey, eventBus);
     await mgr.init();
-    mgr.destroy();
+    mgr.shutdown();
   });
 
   it('getStatus returns status object', async () => {
@@ -1337,13 +1335,7 @@ describe('polls-manager deep coverage', () => {
     const supa = makeSupa({ data: { id: 'poll1' }, error: null });
     const mgr = new PollsManager(supa as any);
     const interaction = makeInteraction();
-    await mgr.createPoll(interaction, {
-      question: 'Favorite color?',
-      options: ['Red', 'Blue', 'Green'],
-      duration: 60,
-      multiVote: false,
-      anonymous: false,
-    });
+    await mgr.createPoll(interaction, 'Favorite color?', ['Red', 'Blue', 'Green'], false);
     expect(interaction.reply).toHaveBeenCalled();
   });
 
@@ -1599,7 +1591,14 @@ describe('onboarding-handler deep coverage', () => {
 
   it('invalidateGuildConfigCache works', async () => {
     const { invalidateGuildConfigCache } = await import('../features/welcome/onboarding-handler.js');
-    await invalidateGuildConfigCache('g1');
+    const client: any = {
+      guildId: 'g1',
+      guilds: { cache: makeCollection([['g1', makeGuild()]]) },
+      supabase: makeSupa(),
+      valkey: makeValkey(),
+      eventBus: { emit: vi.fn(), on: vi.fn(), removeAllListeners: vi.fn() },
+    };
+    await invalidateGuildConfigCache(client, 'g1');
   });
 });
 
