@@ -1253,7 +1253,7 @@ describe('AlertService deep coverage', () => {
     const guild = makeGuild();
     const valkey = makeValkey();
     const svc = new AlertService(valkey, supa, guild);
-    try { await svc.recordFailure('test-service', 'test error'); } catch { /* expected */ }
+    try { await svc.recordFailure('test-service', 'Test Automation', 'test error'); } catch { /* expected */ }
     try { await svc.getFailureCount('test-service'); } catch { /* expected */ }
     try { await svc.recordSuccess('test-service'); } catch { /* expected */ }
     expect(svc).toBeDefined();
@@ -1464,10 +1464,10 @@ describe('Deployer deep coverage', () => {
         { key: 'admin', name: 'Admin', tier: 'staff', permissions: '8', color: 0xff0000, hoist: true, mentionable: false, position: 1 },
       ],
       categories: [
-        { key: 'general-cat', name: 'General', position: 0, permissionOverwrites: [] },
+        { key: 'general-cat', name: 'General', position: 0 },
       ],
       channels: [
-        { key: 'welcome', name: 'welcome', type: 'GUILD_TEXT' as any, categoryKey: 'general-cat', position: 0, permissionOverwrites: [], topic: 'Welcome!' },
+        { key: 'welcome', name: 'welcome', type: 0, categoryKey: 'general-cat', position: 0, overrides: [], topic: 'Welcome!', slowmode: 0, nsfw: false, templateId: 'tpl-1' },
       ],
     };
     try { await deployServerState(guild, supa, desiredState, { cleanExisting: false, dryRun: true }); } catch { /* expected */ }
