@@ -214,8 +214,15 @@ describe('sync-engine', () => {
     const guild: any = {
       id: 'g1',
       name: 'Test',
-      roles: { cache: new Map([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]]) },
-      channels: { cache: new Map([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]]) },
+      roles: {
+        cache: new Map([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]]),
+        everyone: { id: 'r0', permissions: { bitfield: 0n } },
+        fetch: vi.fn(async () => new Map([['r0', { id: 'r0', name: '@everyone', managed: false, position: 0, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n } }]])),
+      },
+      channels: {
+        cache: new Map([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]]),
+        fetch: vi.fn(async () => new Map([['c1', { id: 'c1', name: 'general', type: 0, position: 0, parent: null, permissionOverwrites: { cache: new Map() } }]])),
+      },
     };
     const supa = makeSupa({ data: [], error: null });
     const eventBus = { emit: vi.fn(), on: vi.fn() };

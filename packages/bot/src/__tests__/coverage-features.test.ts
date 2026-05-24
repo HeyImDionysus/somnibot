@@ -38,36 +38,47 @@ vi.mock('discord.js', () => {
   class SlashCommandBuilder {
     [key: string]: any;
     constructor() {
-      return new Proxy(this, {
-        get(target, prop) {
+      const proxy: any = new Proxy(this, {
+        get(_t, prop) {
           if (prop === 'toJSON') return () => ({});
           if (prop === 'constructor') return SlashCommandBuilder;
           if (typeof prop === 'symbol') return undefined;
           if (cbMethods.has(prop as string)) {
-            return (fn: Function) => { try { fn(fluent()); } catch {} return target; };
+            return (fn: Function) => { try { fn(fluent()); } catch {} return proxy; };
           }
-          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => target;
+          if (prop === 'setName' || prop === 'setDescription' || prop === 'setDefaultMemberPermissions') return () => proxy;
           return fluent();
         },
       });
+      return proxy;
     }
   }
   class EmbedBuilder {
     [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t, p) => typeof p === 'symbol' ? undefined : p === 'toJSON' ? () => ({}) : (..._a: any[]) => t }); }
+    constructor() {
+      const proxy: any = new Proxy(this, {
+        get(_t, p) {
+          if (typeof p === 'symbol') return undefined;
+          if (p === 'toJSON') return () => ({});
+          return (..._a: any[]) => proxy;
+        },
+      });
+      return proxy;
+    }
   }
   class ActionRowBuilder {
     components: any[] = [];
     addComponents(...c: any[]) { this.components.push(...c); return this; }
   }
-  class ButtonBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => () => t }); }
+  function chainProxy() {
+    const p: any = new Proxy(function(){}, {
+      get: (_t, prop) => typeof prop === 'symbol' ? undefined : (..._a: any[]) => p,
+      apply: () => p,
+    });
+    return p;
   }
-  class StringSelectMenuBuilder {
-    [key: string]: any;
-    constructor() { return new Proxy(this, { get: (t) => (..._a: any[]) => t }); }
-  }
+  class ButtonBuilder { constructor() { return chainProxy(); } }
+  class StringSelectMenuBuilder { constructor() { return chainProxy(); } }
   class Collection extends Map {
     filter(fn: (value: any, key: any, collection: any) => boolean) {
       const result = new Collection();

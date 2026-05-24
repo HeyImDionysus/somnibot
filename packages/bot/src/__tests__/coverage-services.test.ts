@@ -69,7 +69,21 @@ function makeChain(result: any = { data: null, error: null }) {
 
 function makeSupa(result?: any) {
   const chain = makeChain(result);
-  return { from: vi.fn(() => chain), rpc: vi.fn(async () => ({ data: null, error: null })), _chain: chain };
+  const realtimeChannel = {
+    on: vi.fn(function(this: any) { return this; }),
+    subscribe: vi.fn(function(this: any, cb?: Function) { if (cb) cb('SUBSCRIBED'); return this; }),
+    unsubscribe: vi.fn(),
+  };
+  // Make `on` chainable
+  realtimeChannel.on.mockReturnValue(realtimeChannel);
+  realtimeChannel.subscribe.mockReturnValue(realtimeChannel);
+  return {
+    from: vi.fn(() => chain),
+    rpc: vi.fn(async () => ({ data: null, error: null })),
+    channel: vi.fn(() => realtimeChannel),
+    removeChannel: vi.fn(),
+    _chain: chain,
+  };
 }
 
 function makeValkey() {
@@ -159,14 +173,17 @@ describe('commerce-fulfillment', () => {
       await svc.fulfill({
         fulfillment_type: 'one_time_purchase',
         guild_id: 'g1',
-        customer_discord_id: 'u1',
+        customer_id: 'cust1',
+        discord_id: 'u1',
         product_id: 'prod1',
+        product_name: 'Test Product',
         order_id: 'order1',
+        order_number: 'ORD-001',
         amount_cents: 999,
         currency: 'usd',
-        license_key: 'LIC-123',
-        role_ids: ['role1'],
-        metadata: {},
+        granted_role_ids: ['role1'],
+        granted_channel_ids: [],
+        entitlement_type: 'one_time',
       });
     } catch {
       // May fail due to mock depth, but code paths still covered
