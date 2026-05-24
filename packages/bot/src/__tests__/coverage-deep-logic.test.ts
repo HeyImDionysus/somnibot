@@ -69,7 +69,7 @@ vi.mock('discord.js', () => {
   }
   class AttachmentBuilder { constructor(public d: any, public o?: any) {} }
   class Collection extends Map {
-    constructor(entries?: any) { super(entries); }
+    constructor(entries?: any) { super(); if (entries) for (const [k, v] of entries) this.set(k, v); }
     filter(fn: any) { const r = new Collection(); for (const [k,v] of this) if (fn(v,k)) r.set(k,v); return r; }
     map(fn: any) { return [...this.values()].map(fn); }
     find(fn: any) { return [...this.values()].find(fn); }
@@ -221,9 +221,13 @@ describe('xp-tracker deep', () => {
   it('processMessageXp grants xp when not on cooldown', async () => {
     const mod = await import('../features/levels/xp-tracker.js');
     mod.invalidateLevelCaches('g3');
-    const supa = makeSupa({
-      data: { levels_enabled: true, xp_min: 15, xp_max: 25, xp_cooldown_seconds: 60, voice_xp_enabled: false, voice_xp_per_interval: 10, voice_xp_interval_minutes: 5, xp_multiplier_mode: 'highest', xp_channel_mode: 'blacklist', xp_channel_list: [], level_up_channel_id: null, level_up_message: null, no_xp_role_id: null },
-      error: null,
+    const configData = { levels_enabled: true, xp_min: 15, xp_max: 25, xp_cooldown_seconds: 60, voice_xp_enabled: false, voice_xp_per_interval: 10, voice_xp_interval_minutes: 5, xp_multiplier_mode: 'highest', xp_channel_mode: 'blacklist', xp_channel_list: [], level_up_channel_id: null, level_up_message: null, no_xp_role_id: null };
+    const supa = makeSupa({ data: configData, error: null });
+    // Override from() to return table-specific results so xp_multipliers
+    // gets an array (not the config object), matching the real schema.
+    supa.from = vi.fn((table: string) => {
+      if (table === 'xp_multipliers') return makeChain({ data: [], error: null });
+      return makeChain({ data: configData, error: null });
     });
     const valkey = makeValkey();
     const msg: any = {
@@ -370,7 +374,7 @@ describe('guild-router deep', () => {
 
   it('getGuildId extracts from guild object', async () => {
     const mod = await import('../guild-router.js');
-    const guildId = mod.getGuildId({ guild: { id: 'g2' } });
+    const guildId = mod.getGuildId({ guild: { id: 'g2' } as any });
     expect(guildId).toBe('g2');
   });
 
