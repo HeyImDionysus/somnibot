@@ -124,9 +124,9 @@ describe('embed-theme', () => {
 
   it('invalidateThemeCache clears cache', async () => {
     const valkey = makeValkey();
-    valkey.keys = vi.fn(async () => ['embed-theme:g1:welcome']);
+    valkey.scan = vi.fn(async () => ['0', ['embed-theme:g1:welcome']]);
     await mod.invalidateThemeCache(valkey as any, 'g1');
-    expect(valkey.keys).toHaveBeenCalled();
+    expect(valkey.scan).toHaveBeenCalled();
   });
 });
 
