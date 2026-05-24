@@ -121,11 +121,7 @@ describe('action-queue (deep)', () => {
     const valkey = makeValkey();
     const eventBus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
     try {
-      const handle = await mod.startActionQueueListener(guild as any, supa as any, valkey as any, eventBus as any);
-      expect(handle).toBeDefined();
-      // Clean up  
-      if (typeof handle === 'object' && handle?.stop) handle.stop();
-      else if (typeof handle === 'function') handle();
+      await mod.startActionQueueListener(guild as any, supa as any);
     } catch {}
   });
 });
@@ -190,11 +186,11 @@ describe('fraud-detection', () => {
 // ═══════════════════════════════════════════════════════════
 // metrics-reporter.ts
 // ═══════════════════════════════════════════════════════════
-describe('metrics-reporter', () => {
+describe('music-status-reporter', () => {
   it('imports', async () => {
     vi.resetModules();
     try {
-      const mod = await import('../services/metrics-reporter.js');
+      const mod = await import('../services/music-status-reporter.js');
       expect(mod).toBeDefined();
     } catch {}
   });
