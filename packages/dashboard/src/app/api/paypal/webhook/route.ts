@@ -169,7 +169,8 @@ export async function POST(req: NextRequest) {
         },
         { onConflict: 'event_id', ignoreDuplicates: true },
       )
-      .select('event_id');
+      .select('event_id')
+      .limit(1000);
 
     // If upsert returned no rows, the event_id already existed — duplicate delivery
     if (!inserted || inserted.length === 0) {
@@ -709,7 +710,8 @@ async function handleCaptureRefunded(
     .from('entitlements')
     .select('id, customer_id, granted_role_ids')
     .eq('order_id', orderId)
-    .in('status', ['active', 'pending', 'grace_period']);
+    .in('status', ['active', 'pending', 'grace_period'])
+    .limit(1000);
 
   // Mark payment + order
   await supabase

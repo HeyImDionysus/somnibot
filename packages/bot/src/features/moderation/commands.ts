@@ -495,7 +495,8 @@ export async function handleBanCommand(
       .select('id')
       .eq('guild_id', interaction.guildId!)
       .eq('customer_id', customer.id)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .limit(1000);
 
     if (entitlements && entitlements.length > 0) {
       for (const ent of entitlements) {

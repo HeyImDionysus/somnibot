@@ -473,7 +473,8 @@ export class HeistManager {
     const { data: partRows } = await this.supabase
       .from('economy_heist_participants')
       .select('user_id')
-      .eq('heist_id', heistId);
+      .eq('heist_id', heistId)
+      .limit(1000);
     const participants = (partRows ?? []).map((r: any) => r.user_id as string);
 
     // Not enough participants — cancel
@@ -549,7 +550,8 @@ export class HeistManager {
       const { data: partData } = await this.supabase
         .from('economy_heist_participants')
         .select('user_id, role')
-        .eq('heist_id', heistId);
+        .eq('heist_id', heistId)
+        .limit(1000);
 
       const crewList = (partData ?? [])
         .map((p: any) => {
@@ -606,7 +608,8 @@ export class HeistManager {
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
-      .eq('status', 'recruiting');
+      .eq('status', 'recruiting')
+      .limit(1000);
 
     for (const heist of pending ?? []) {
       const remaining = new Date(heist.expires_at).getTime() - Date.now();

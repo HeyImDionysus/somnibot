@@ -144,7 +144,8 @@ export async function handleButtonRoleInteraction(
           .select('role_id')
           .eq('guild_id', guild.id)
           .eq('exclusive_group', btnRole.exclusive_group)
-          .neq('role_id', roleId);
+          .neq('role_id', roleId)
+          .limit(1000);
 
         if (groupEntries) {
           const rolesToRemove = groupEntries
@@ -187,7 +188,8 @@ export async function deployButtonRolesPanel(
     .eq('guild_id', guild.id)
     .eq('panel_id', panelId)
     .eq('active', true)
-    .order('sort_order', { ascending: true });
+    .order('sort_order', { ascending: true })
+    .limit(1000);
 
   if (!entries || entries.length === 0) {
     return { success: false, error: 'No active roles configured for this panel.' };

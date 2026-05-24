@@ -363,7 +363,8 @@ export class GiveawayManager {
       .select('*')
       .eq('guild_id', this.guild.id)
       .eq('status', 'active')
-      .lte('ends_at', new Date().toISOString());
+      .lte('ends_at', new Date().toISOString())
+      .limit(1000);
 
     if (!data || data.length === 0) return;
 

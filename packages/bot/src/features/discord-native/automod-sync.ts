@@ -99,7 +99,8 @@ export class AutoModSync {
       .from('automod_rules')
       .select('*')
       .eq('guild_id', this.guild.id)
-      .eq('sync_to_discord', true);
+      .eq('sync_to_discord', true)
+      .limit(1000);
 
     if (error || !dbRules) {
       log.warn('Failed to fetch rules from DB:', error?.message);

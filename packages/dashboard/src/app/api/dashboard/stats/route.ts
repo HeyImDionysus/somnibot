@@ -75,6 +75,7 @@ export async function GET(request: NextRequest) {
         .eq('guild_id', guildId)
         .eq('status', 'completed')
         .gte('created_at', monthStart),
+        .limit(1000)
 
       // Active giveaways
       admin

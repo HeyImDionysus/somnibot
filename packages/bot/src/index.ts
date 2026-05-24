@@ -8,6 +8,7 @@ import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer, stopHealthServer } from './services/health-server.js';
+import { HeartbeatService } from './services/heartbeat.js';
 import { EmbedBuilder } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -122,6 +123,11 @@ async function main(): Promise<void> {
     try {
       await client.router.getContext(client.guildId);
       log.info('Primary guild initialized through GuildRouter');
+
+      // V5 Fix #9: Bot-level heartbeat (replaces per-guild heartbeat timers)
+      const botHeartbeat = new HeartbeatService(client.valkey, client.supabase, client.guildId, client);
+      botHeartbeat.start();
+      log.info('Bot-level heartbeat started');
     } catch (err) {
       log.error('Primary guild initialization failed', { error: String(err) });
     }

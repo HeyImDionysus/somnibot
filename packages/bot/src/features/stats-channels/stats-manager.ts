@@ -76,7 +76,8 @@ export class StatsChannelManager {
       .from('stats_channels')
       .select('*')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     this.channels = (data ?? []) as StatsChannelConfig[];
   }

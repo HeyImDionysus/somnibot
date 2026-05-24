@@ -172,7 +172,8 @@ export async function POST(req: NextRequest) {
       .from('license_sessions')
       .select('*')
       .eq('license_key_id', licenseKey.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     const sessions = activeSessions ?? [];
     const existingSession = sessions.find(
@@ -393,7 +394,8 @@ async function checkIPMismatch(
       .from('license_sessions')
       .select('ip_address')
       .eq('license_key_id', licenseKeyId)
-      .gte('first_seen_at', since);
+      .gte('first_seen_at', since)
+      .limit(1000);
 
     const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 

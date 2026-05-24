@@ -419,7 +419,8 @@ export class FarmingManager {
       .select('id, plot_index, crop_id, planted_at, watered_at, fertilized, harvested')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .order('plot_index');
+      .order('plot_index')
+      .limit(1000);
 
     return (data as Plot[] | null) ?? [];
   }
@@ -430,7 +431,8 @@ export class FarmingManager {
       .select('id, name, emoji, grow_seconds, wilt_seconds, sell_price, seeds_returned, seed_item_id')
       .eq('guild_id', this.guild.id)
       .eq('active', true)
-      .order('sort_order');
+      .order('sort_order')
+      .limit(1000);
 
     return (data as Crop[] | null) ?? [];
   }
@@ -514,7 +516,8 @@ export class FarmingManager {
       .select('item_id, economy_items!inner(name)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     if (!items) return false;
 

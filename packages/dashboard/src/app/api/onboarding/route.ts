@@ -18,6 +18,7 @@ export async function GET() {
     .from('guild_config')
     .select(
       'member_role_id, onboarding_enabled, interest_role_mapping, ' +
+    .limit(1000)
       'returning_member_skip_welcome_dm, returning_member_restore_entitlements, returning_member_restore_levels, ' +
       'onboarding_config',
     )

@@ -85,7 +85,8 @@ export async function loadConfigFromDatabase(): Promise<number> {
     const { data: settings, error } = await supabase
       .from('instance_settings')
       .select('key, value')
-      .in('key', missingKeys);
+      .in('key', missingKeys)
+      .limit(1000);
 
     if (error) {
       // Table may not exist yet on first boot — that's OK

@@ -141,7 +141,8 @@ export async function GET() {
       const { data: settings } = await supabase
         .from('instance_settings')
         .select('key')
-        .in('key', ['discord_application_id', 'discord_client_secret']);
+        .in('key', ['discord_application_id', 'discord_client_secret'])
+        .limit(1000);
 
       if (settings && settings.length >= 2) {
         status.discordAuthConfigured = true;

@@ -133,7 +133,8 @@ export async function GET(request: NextRequest) {
     const { data: products } = await admin
       .from('products')
       .select('id, name, price_cents, type, active')
-      .eq('guild_id', ctx.guildId);
+      .eq('guild_id', ctx.guildId)
+      .limit(1000);
 
     const productPerformance = (products || []).map(p => {
       const stats = revenueByProduct[p.id] || { revenue: 0, orders: 0 };
@@ -152,7 +153,8 @@ export async function GET(request: NextRequest) {
     const { data: promotions } = await admin
       .from('promotions')
       .select('id, name, type, value, coupon_code, current_uses, max_uses, active')
-      .eq('guild_id', ctx.guildId);
+      .eq('guild_id', ctx.guildId)
+      .limit(1000);
 
     // ── Failed payments ────────────────────────────────
     const { data: failedPayments } = await admin

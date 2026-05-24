@@ -29,7 +29,8 @@ export async function GET(req: NextRequest) {
     .select('*', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1);
+    .range(offset, offset + limit - 1)
+    .limit(1000);
 
   if (status) {
     query = query.eq('status', status);

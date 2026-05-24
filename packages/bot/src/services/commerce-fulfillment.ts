@@ -244,7 +244,8 @@ export class CommerceFulfillmentService {
       .from('entitlements')
       .select('id')
       .eq('order_id', payload.order_id)
-      .in('status', ['active', 'grace_period']);
+      .in('status', ['active', 'grace_period'])
+      .limit(1000);
 
     if (entitlements && entitlements.length > 0) {
       for (const ent of entitlements) {
@@ -286,7 +287,8 @@ export class CommerceFulfillmentService {
       .from('entitlements')
       .select('id')
       .eq('order_id', payload.order_id)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .limit(1000);
 
     // Read configurable grace period (default 3 days if not set)
     const { data: guildCfg } = await this.supabase

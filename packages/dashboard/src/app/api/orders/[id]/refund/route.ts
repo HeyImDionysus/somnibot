@@ -82,7 +82,8 @@ export async function POST(
     .from('entitlements')
     .select('id, customer_id, granted_role_ids')
     .eq('order_id', orderId)
-    .in('status', ['active', 'pending', 'grace_period']);
+    .in('status', ['active', 'pending', 'grace_period'])
+    .limit(1000);
 
   // Update order status
   await supabase

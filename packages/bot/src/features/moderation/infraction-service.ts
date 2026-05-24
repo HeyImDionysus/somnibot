@@ -195,7 +195,8 @@ export async function expireInfractions(
     .eq('pardoned', false)
     .not('expires_at', 'is', null)
     .lte('expires_at', now)
-    .select('id');
+    .select('id')
+    .limit(1000);
 
   if (error) {
     log.error('Failed to expire infractions:', error.message);

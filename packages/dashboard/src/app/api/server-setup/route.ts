@@ -40,7 +40,8 @@ export async function GET() {
   const { data: idMappings } = await admin
     .from('discord_id_map')
     .select('entity_type, template_key, discord_id')
-    .eq('guild_id', guildId);
+    .eq('guild_id', guildId)
+    .limit(1000);
 
   // Get role templates
   const { data: roleTemplates } = await admin

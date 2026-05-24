@@ -147,7 +147,8 @@ async function main() {
     assert(!mapErr, `ID mappings stored (${mapErr?.message ?? 'ok'})`);
 
     const { data: mapData } = await supabase.from('discord_id_map').select('*')
-      .eq('guild_id', DISCORD_GUILD_ID);
+      .eq('guild_id', DISCORD_GUILD_ID)
+      .limit(1000);
     assert(mapData !== null && mapData.length >= result.idMappings.length, `${mapData?.length} mappings in DB`);
   }
 

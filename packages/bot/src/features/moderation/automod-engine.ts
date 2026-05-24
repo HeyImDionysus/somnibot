@@ -52,7 +52,8 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
     .from('automod_rules')
     .select('*')
     .eq('guild_id', guildId)
-    .eq('enabled', true);
+    .eq('enabled', true)
+    .limit(1000);
 
   if (error) {
     log.error('Failed to load rules:', error.message);
