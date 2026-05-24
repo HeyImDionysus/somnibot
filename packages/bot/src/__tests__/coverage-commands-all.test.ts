@@ -169,7 +169,7 @@ function makeInteraction(overrides: any = {}): any {
 function makeMgr(extra: Record<string, any> = {}): any {
   return new Proxy(extra, {
     get(target, prop) {
-      if (prop in target) return target[prop];
+      if (prop in target) return target[prop as any];
       if (typeof prop === 'string') return vi.fn(async () => ({ success: true, message: 'ok', items: [], data: [], entries: [] }));
       return undefined;
     }
@@ -354,7 +354,7 @@ describe('trivia commands', () => {
 describe('setup-wizard commands', () => {
   it('builds and handles', async () => {
     const mod = await import('../features/setup-wizard/commands.js');
-    const cmds = mod.buildSetupWizardCommands();
+    const cmds = mod.buildSetupCommand();
     expect(cmds).toBeDefined();
     // Most setup wizard requires Supabase so we just test the build
   });
@@ -366,8 +366,9 @@ describe('levels admin-commands', () => {
     const mod = await import('../features/levels/admin-commands.js');
     expect(mod).toBeDefined();
     // build* function
-    if (mod.buildLevelAdminCommands) {
-      const cmds = mod.buildLevelAdminCommands();
+    const build = (mod as any).buildXpAdminCommands ?? (mod as any).buildLevelAdminCommands;
+    if (build) {
+      const cmds = build();
       expect(cmds).toBeDefined();
     }
   });
