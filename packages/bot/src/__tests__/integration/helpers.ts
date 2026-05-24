@@ -40,6 +40,7 @@ export { TEST_GUILD_ID, TEST_USER_ID, TEST_USER_ID_2 };
 
 /**
  * Seed minimal guild config for tests.
+ * Silently ignores errors if the table doesn't exist.
  */
 export async function seedGuildConfig(supabase: SupabaseClient): Promise<void> {
   await supabase.from('guild_config').upsert(
@@ -55,6 +56,7 @@ export async function seedGuildConfig(supabase: SupabaseClient): Promise<void> {
 
 /**
  * Seed a license key for testing.
+ * Returns the key ID, or empty string if the table doesn't exist.
  */
 export async function seedLicenseKey(
   supabase: SupabaseClient,
@@ -82,6 +84,7 @@ export async function seedLicenseKey(
 
 /**
  * Seed an economy wallet for testing.
+ * Silently ignores errors if the table doesn't exist.
  */
 export async function seedWallet(
   supabase: SupabaseClient,
@@ -102,18 +105,24 @@ export async function seedWallet(
 
 /**
  * Clean up all test data (call in afterAll).
+ * Silently ignores errors if any table doesn't exist.
  */
 export async function cleanupTestData(supabase: SupabaseClient): Promise<void> {
   const tables = [
     'economy_wallets',
     'economy_transactions',
-    'license_keys',
     'license_sessions',
+    'license_keys',
     'guild_config',
     'audit_log',
+    'portal_sessions',
   ];
 
   for (const table of tables) {
-    await supabase.from(table).delete().eq('guild_id', TEST_GUILD_ID);
+    try {
+      await supabase.from(table).delete().eq('guild_id', TEST_GUILD_ID);
+    } catch {
+      // Table may not exist — ignore
+    }
   }
 }

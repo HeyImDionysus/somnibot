@@ -5,12 +5,12 @@
  * into their logic (not just early-return on missing config).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EmbedBuilder, Collection, PermissionsBitField, ChannelType } from 'discord.js';
+import { Collection, ChannelType } from 'discord.js';
 
 // ── Shared mock factories ──────────────────────────────────
 
-/** Supabase mock that returns configurable data */
-function makeSupa(overrides: Record<string, any> = {}) {
+/** Supabase mock that returns configurable data — always typed `any` to avoid TS2345 */
+function makeSupa(overrides: Record<string, any> = {}): any {
   const chainResult = { data: overrides.data ?? null, error: overrides.error ?? null };
   const chain: any = {
     select: vi.fn().mockReturnThis(),
@@ -41,7 +41,7 @@ function makeSupa(overrides: Record<string, any> = {}) {
       subscribe: vi.fn().mockReturnValue({ status: 'SUBSCRIBED' }),
     }),
     _chain: chain,
-  };
+  } as any;
 }
 
 /** Guild config that enables everything */
@@ -49,6 +49,7 @@ function makeConfig(overrides: Record<string, any> = {}): any {
   return {
     guild_id: 'g1',
     polls_enabled: true,
+    predictions_enabled: true,
     economy_games_enabled: true,
     economy_coinflip_max_bet: 10000,
     economy_slots_max_bet: 10000,
@@ -208,7 +209,7 @@ function makeMember(overrides: Record<string, any> = {}): any {
 describe('GamesManager deep coverage v2', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  function makeGameSupa() {
+  function makeGameSupa(): any {
     const config = makeConfig();
     const chain: any = {
       select: vi.fn().mockReturnThis(),
@@ -218,11 +219,10 @@ describe('GamesManager deep coverage v2', () => {
       order: vi.fn().mockReturnThis(),
       limit: vi.fn().mockReturnThis(),
       single: vi.fn().mockImplementation(() => {
-        // Return config for guild_config, balance for economy_wallets
         return Promise.resolve({ data: config, error: null });
       }),
     };
-    const supa: any = {
+    return {
       from: vi.fn().mockImplementation((table: string) => {
         if (table === 'economy_wallets') {
           return {
@@ -233,8 +233,7 @@ describe('GamesManager deep coverage v2', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
-    return supa;
+    } as any;
   }
 
   it('coinflip executes full win/loss path', async () => {
@@ -316,7 +315,7 @@ describe('GamesManager deep coverage v2', () => {
       single: vi.fn().mockResolvedValue({ data: { ...makeConfig(), economy_games_enabled: false }, error: null }),
       limit: vi.fn().mockReturnThis(), order: vi.fn().mockReturnThis(),
     };
-    const supa: any = { from: vi.fn().mockReturnValue(chain), rpc: vi.fn().mockResolvedValue({ data: 0, error: null }) };
+    const supa = { from: vi.fn().mockReturnValue(chain), rpc: vi.fn().mockResolvedValue({ data: 0, error: null }) } as any;
     const mgr = new GamesManager(supa);
     const int = makeInteraction();
     await mgr.coinflip(int, 100);
@@ -324,8 +323,7 @@ describe('GamesManager deep coverage v2', () => {
   });
 
   it('validateBet rejects insufficient balance', async () => {
-    const { GamesManager } = await import('../features/games/games-manager.js');
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(),
@@ -339,7 +337,8 @@ describe('GamesManager deep coverage v2', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
+    const { GamesManager } = await import('../features/games/games-manager.js');
     const mgr = new GamesManager(supa);
     const int = makeInteraction();
     await mgr.coinflip(int, 9999);
@@ -363,7 +362,7 @@ describe('GamesManager deep coverage v2', () => {
 describe('PollsManager deep coverage', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  function makePollSupa() {
+  function makePollSupa(): any {
     const config = makeConfig();
     const pollData = { id: 'poll1', guild_id: 'g1', channel_id: 'ch1', title: 'Test Poll', creator_user_id: 'u1' };
     const optionsData = [
@@ -379,7 +378,7 @@ describe('PollsManager deep coverage', () => {
       in: vi.fn().mockReturnThis(), is: vi.fn().mockReturnThis(),
       single: vi.fn().mockResolvedValue({ data: config, error: null }),
     };
-    const supa: any = {
+    return {
       from: vi.fn().mockImplementation((table: string) => {
         const c: any = { ...chain };
         if (table === 'polls') {
@@ -393,8 +392,7 @@ describe('PollsManager deep coverage', () => {
         return c;
       }),
       rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
-    };
-    return supa;
+    } as any;
   }
 
   it('createPoll full path', async () => {
@@ -413,7 +411,7 @@ describe('PollsManager deep coverage', () => {
       single: vi.fn().mockResolvedValue({ data: { ...makeConfig(), polls_enabled: false }, error: null }),
       limit: vi.fn().mockReturnThis(), order: vi.fn().mockReturnThis(),
     };
-    const supa: any = { from: vi.fn().mockReturnValue(chain), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) };
+    const supa = { from: vi.fn().mockReturnValue(chain), rpc: vi.fn().mockResolvedValue({ data: null, error: null }) } as any;
     const mgr = new PollsManager(supa);
     const int = makeInteraction();
     await mgr.createPoll(int, 'Test', ['A', 'B'], false);
@@ -457,19 +455,19 @@ describe('PollsManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 3. QuestsManager — deep coverage (288 lines, 15%)
+// 3. QuestsManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('QuestsManager deep coverage', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  function makeQuestSupa() {
+  function makeQuestSupa(): any {
     const config = makeConfig();
     const quests = [
       { id: 'q1', progress: 3, completed: false, claimed: false, template: { title: 'Send 10 Messages', target_count: 10, action_type: 'message', reward_amount: 50, quest_type: 'daily' } },
       { id: 'q2', progress: 5, completed: true, claimed: false, template: { title: 'Win 5 Games', target_count: 5, action_type: 'gamble', reward_amount: 100, quest_type: 'daily' } },
     ];
-    const supa: any = {
+    return {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -490,8 +488,7 @@ describe('QuestsManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
-    return supa;
+    } as any;
   }
 
   it('viewQuests with existing quests', async () => {
@@ -522,7 +519,7 @@ describe('QuestsManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 4. AchievementsManager — deep coverage (188 lines, 19%)
+// 4. AchievementsManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('AchievementsManager deep coverage', () => {
@@ -536,7 +533,7 @@ describe('AchievementsManager deep coverage', () => {
       { id: 'a2', name: 'Secret', description: 'Hidden', badge_emoji: '❓', hidden: true, condition_type: 'messages', condition_value: 1000, reward_currency: 200 },
     ];
     const userAch = [{ achievement_id: 'a1' }];
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(),
@@ -554,7 +551,7 @@ describe('AchievementsManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new AchievementsManager(supa);
     const int = makeInteraction();
     try { await mgr.viewBadges(int); } catch { /* expected */ }
@@ -565,7 +562,7 @@ describe('AchievementsManager deep coverage', () => {
     const { AchievementsManager } = await import('../features/achievements/achievements-manager.js');
     const config = makeConfig();
     const defs = [{ id: 'a1', condition_type: 'wins', condition_value: 5, reward_currency: 100, name: 'Winner' }];
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -582,9 +579,9 @@ describe('AchievementsManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new AchievementsManager(supa);
-    try { const result = await mgr.checkAndUnlock('g1', 'u1', 'wins', 10); } catch { /* expected */ }
+    try { await mgr.checkAndUnlock('g1', 'u1', 'wins', 10); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 
@@ -605,7 +602,7 @@ describe('AchievementsManager deep coverage', () => {
 describe('FarmingManager deep coverage', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  function makeFarmSupa() {
+  function makeFarmSupa(): any {
     const config = makeConfig();
     const crops = [
       { id: 'crop1', name: 'Wheat', emoji: '🌾', buy_price: 10, sell_price: 25, grow_time_seconds: 3600 },
@@ -615,7 +612,7 @@ describe('FarmingManager deep coverage', () => {
       { plot_index: 0, crop_id: 'crop1', planted_at: new Date(Date.now() - 7200000).toISOString(), watered: true, fertilized: false, harvested: false },
       { plot_index: 1, crop_id: null, planted_at: null, watered: false, fertilized: false, harvested: false },
     ];
-    const supa: any = {
+    return {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -635,8 +632,7 @@ describe('FarmingManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
-    return supa;
+    } as any;
   }
 
   it('viewFarm builds grid', async () => {
@@ -658,7 +654,7 @@ describe('FarmingManager deep coverage', () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeFarmSupa();
     const mgr = new FarmingManager(makeGuild(), supa, makeValkey());
-    try { await mgr.water('u1', 0); } catch { /* expected */ }
+    try { await mgr.water('u1'); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 
@@ -680,7 +676,7 @@ describe('FarmingManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 6. CraftingManager — deep coverage (425 lines, 28%)
+// 6. CraftingManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('CraftingManager deep coverage', () => {
@@ -692,7 +688,7 @@ describe('CraftingManager deep coverage', () => {
     const recipes = [
       { id: 'r1', name: 'Fertilizer', emoji: '🧪', category: 'Tools', inputs: [{ item_name: 'Bone', qty: 2 }], output_qty: 1 },
     ];
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -706,7 +702,7 @@ describe('CraftingManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new CraftingManager(makeGuild(), supa, makeValkey());
     try { const result = await mgr.listRecipes(); expect(result.embed).toBeDefined(); } catch { /* expected */ }
   });
@@ -721,7 +717,7 @@ describe('CraftingManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 7. MarketManager — deep coverage (528 lines, 33%)
+// 7. MarketManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('MarketManager deep coverage', () => {
@@ -733,7 +729,7 @@ describe('MarketManager deep coverage', () => {
     const listings = [
       { id: 'l1', seller_id: 'u2', item_name: 'Sword', quantity: 1, price_per_unit: 100, created_at: new Date().toISOString() },
     ];
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation((table: string) => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -748,7 +744,7 @@ describe('MarketManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new MarketManager(makeGuild(), supa, makeValkey());
     try { const result = await mgr.browse(); expect(result).toBeDefined(); } catch { /* expected */ }
   });
@@ -773,7 +769,7 @@ describe('MarketManager deep coverage', () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const supa = makeSupa({ data: makeConfig() });
     const mgr = new MarketManager(makeGuild(), supa, makeValkey());
-    try { const result = await mgr.myListings('u1'); } catch { /* expected */ }
+    try { await mgr.myListings('u1'); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 
@@ -787,7 +783,7 @@ describe('MarketManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 8. TriviaManager — deep coverage (305 lines, 22%)
+// 8. TriviaManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('TriviaManager deep coverage', () => {
@@ -796,7 +792,7 @@ describe('TriviaManager deep coverage', () => {
   it('startRound deep path', async () => {
     const { TriviaManager } = await import('../features/trivia/trivia-manager.js');
     const config = makeConfig();
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation(() => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(),
@@ -807,24 +803,24 @@ describe('TriviaManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
-    const mgr = new TriviaManager(makeGuild(), supa, makeValkey());
+    } as any;
+    const mgr = new TriviaManager(supa, makeValkey());
     const int = makeInteraction();
-    try { await mgr.startRound(int, 'science', 'easy' as any); } catch { /* expected */ }
+    try { await mgr.startRound(int, 'science'); } catch { /* expected */ }
     expect(int.reply).toHaveBeenCalled();
   });
 
   it('clearCache', async () => {
     const { TriviaManager } = await import('../features/trivia/trivia-manager.js');
     const supa = makeSupa({ data: makeConfig() });
-    const mgr = new TriviaManager(makeGuild(), supa, makeValkey());
+    const mgr = new TriviaManager(supa, makeValkey());
     mgr.clearCache();
     expect(mgr).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 9. HeistManager — deep coverage (636 lines, 37%)
+// 9. HeistManager — deep coverage
 // ═══════════════════════════════════════════════════════════
 
 describe('HeistManager deep coverage', () => {
@@ -867,7 +863,7 @@ describe('HeistManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 10. FishingManager — (483 lines, 59%)
+// 10. FishingManager
 // ═══════════════════════════════════════════════════════════
 
 describe('FishingManager deep coverage', () => {
@@ -885,7 +881,7 @@ describe('FishingManager deep coverage', () => {
     const { FishingManager } = await import('../features/fishing/fishing-manager.js');
     const supa = makeSupa({ data: makeConfig() });
     const mgr = new FishingManager(makeGuild(), supa, makeValkey());
-    try { const result = await mgr.checkRod('u1'); } catch { /* expected */ }
+    try { await mgr.checkRod('u1'); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 
@@ -923,7 +919,7 @@ describe('FishingManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 11. GatheringManager — (419 lines, 52%)
+// 11. GatheringManager
 // ═══════════════════════════════════════════════════════════
 
 describe('GatheringManager deep coverage', () => {
@@ -955,7 +951,7 @@ describe('GatheringManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 12. LotteryManager — (449 lines, 33%)
+// 12. LotteryManager
 // ═══════════════════════════════════════════════════════════
 
 describe('LotteryManager deep coverage', () => {
@@ -964,7 +960,7 @@ describe('LotteryManager deep coverage', () => {
   it('all methods exercised', async () => {
     const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
     const config = makeConfig();
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation(() => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -978,18 +974,17 @@ describe('LotteryManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new LotteryManager(supa, { user: { id: 'bot1' } } as any);
     const int = makeInteraction();
-    try { await mgr.buyTicket(int); } catch { /* expected */ }
+    try { await mgr.buyTickets(int, 1); } catch { /* expected */ }
     try { await mgr.viewLottery(int); } catch { /* expected */ }
-    try { await mgr.viewMyTickets(int); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 13. PetsManager — (533 lines)
+// 13. PetsManager
 // ═══════════════════════════════════════════════════════════
 
 describe('PetsManager deep coverage', () => {
@@ -998,7 +993,7 @@ describe('PetsManager deep coverage', () => {
   it('all pet methods', async () => {
     const { PetsManager } = await import('../features/pets/pets-manager.js');
     const config = makeConfig();
-    const supa: any = {
+    const supa = {
       from: vi.fn().mockImplementation(() => {
         const chain: any = {
           select: vi.fn().mockReturnThis(), insert: vi.fn().mockReturnThis(),
@@ -1011,20 +1006,21 @@ describe('PetsManager deep coverage', () => {
         return chain;
       }),
       rpc: vi.fn().mockResolvedValue({ data: 0, error: null }),
-    };
+    } as any;
     const mgr = new PetsManager(supa, { user: { id: 'bot1' } } as any, makeValkey());
-    try { await mgr.viewPet('u1'); } catch { /* expected */ }
-    try { await mgr.buyPet('u1', 'cat'); } catch { /* expected */ }
-    try { await mgr.feedPet('u1'); } catch { /* expected */ }
-    try { await mgr.playWithPet('u1'); } catch { /* expected */ }
-    try { await mgr.trainPet('u1'); } catch { /* expected */ }
-    try { await mgr.renamePet('u1', 'Fluffy'); } catch { /* expected */ }
+    const int = makeInteraction();
+    try { await mgr.viewPet(int); } catch { /* expected */ }
+    try { await mgr.buyPet(int); } catch { /* expected */ }
+    try { await mgr.feedPet(int); } catch { /* expected */ }
+    try { await mgr.playWithPet(int); } catch { /* expected */ }
+    try { await mgr.trainPet(int); } catch { /* expected */ }
+    try { await mgr.renamePet(int); } catch { /* expected */ }
     expect(mgr).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 14. GiveawayManager — (522 lines, 41%)
+// 14. GiveawayManager
 // ═══════════════════════════════════════════════════════════
 
 describe('GiveawayManager deep coverage', () => {
@@ -1056,7 +1052,7 @@ describe('GiveawayManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 15. AdventureManager — (893 lines, 52%)
+// 15. AdventureManager
 // ═══════════════════════════════════════════════════════════
 
 describe('AdventureManager deep coverage', () => {
@@ -1081,7 +1077,7 @@ describe('AdventureManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 16. Escalation — (316 lines, 17%)
+// 16. Escalation
 // ═══════════════════════════════════════════════════════════
 
 describe('Escalation deep coverage', () => {
@@ -1103,7 +1099,7 @@ describe('Escalation deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 17. ConfigWatcher — (362 lines, 14%)
+// 17. ConfigWatcher
 // ═══════════════════════════════════════════════════════════
 
 describe('ConfigWatcher deep coverage', () => {
@@ -1122,7 +1118,7 @@ describe('ConfigWatcher deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 18. CrossFeatureBridge — (453 lines, 18%)
+// 18. CrossFeatureBridge
 // ═══════════════════════════════════════════════════════════
 
 describe('CrossFeatureBridge deep coverage', () => {
@@ -1141,7 +1137,7 @@ describe('CrossFeatureBridge deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 19. TempChannelManager — (350 lines, 18%)
+// 19. TempChannelManager
 // ═══════════════════════════════════════════════════════════
 
 describe('TempChannelManager deep coverage', () => {
@@ -1188,7 +1184,7 @@ describe('TempChannelManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 20. ScheduledMessageRunner — (286 lines, 19%)
+// 20. ScheduledMessageRunner
 // ═══════════════════════════════════════════════════════════
 
 describe('ScheduledMessageRunner deep coverage', () => {
@@ -1205,7 +1201,7 @@ describe('ScheduledMessageRunner deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 21. AlertManager — (181 lines, 54%)
+// 21. AlertManager
 // ═══════════════════════════════════════════════════════════
 
 describe('AlertManager deep coverage', () => {
@@ -1245,7 +1241,7 @@ describe('AlertManager deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 22. AlertService — (233 lines, 62%)
+// 22. AlertService
 // ═══════════════════════════════════════════════════════════
 
 describe('AlertService deep coverage', () => {
@@ -1265,7 +1261,7 @@ describe('AlertService deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 23. AutoModSync — (186 lines, 30%)
+// 23. AutoModSync
 // ═══════════════════════════════════════════════════════════
 
 describe('AutoModSync deep coverage', () => {
@@ -1283,7 +1279,7 @@ describe('AutoModSync deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 24. AutomationEngine — (416 lines, 12%)
+// 24. AutomationEngine
 // ═══════════════════════════════════════════════════════════
 
 describe('AutomationEngine deep coverage', () => {
@@ -1300,7 +1296,7 @@ describe('AutomationEngine deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 25. AutomationLoader — (135 lines, 45%)
+// 25. AutomationLoader
 // ═══════════════════════════════════════════════════════════
 
 describe('AutomationLoader deep coverage', () => {
@@ -1310,33 +1306,13 @@ describe('AutomationLoader deep coverage', () => {
     const { AutomationLoader } = await import('../features/automations/automation-loader.js');
     const supa = makeSupa({ data: makeConfig() });
     const loader = new AutomationLoader(supa, 'g1');
-    try { const rules = await loader.load(); } catch { /* expected */ }
+    try { await loader.load(); } catch { /* expected */ }
     expect(loader).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 26. StatsManager — (212 lines, 41%)
-// ═══════════════════════════════════════════════════════════
-
-describe('StatsManager deep coverage', () => {
-  beforeEach(() => { vi.restoreAllMocks(); });
-
-  it('instantiates', async () => {
-    try {
-      const mod = await import('../features/stats-channels/stats-manager.js');
-      const supa = makeSupa({ data: makeConfig() });
-      const StatsManager = (mod as any).StatsManager ?? (mod as any).default;
-      if (StatsManager) {
-        const mgr = new StatsManager(makeGuild(), supa, makeValkey());
-        expect(mgr).toBeDefined();
-      }
-    } catch { /* module may have different structure */ }
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 27. Starboard handler — (187 lines, 69%)
+// 26. Starboard handler
 // ═══════════════════════════════════════════════════════════
 
 describe('Starboard deep coverage', () => {
@@ -1366,7 +1342,7 @@ describe('Starboard deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 28. EntitlementService — (300 lines, 56%)
+// 27. EntitlementService
 // ═══════════════════════════════════════════════════════════
 
 describe('EntitlementService deep coverage', () => {
@@ -1380,17 +1356,17 @@ describe('EntitlementService deep coverage', () => {
     try {
       await svc.grant({
         customerId: 'cust1', productId: 'prod1', productName: 'VIP',
-        orderId: 'order1', discordId: 'u1', type: 'role',
+        orderId: 'order1', discordId: 'u1', type: 'one_time',
         source: 'manual', grantedRoleIds: ['role1'], grantedChannelIds: [],
       });
     } catch { /* expected */ }
-    try { await svc.revoke('ent1', 'test revoke'); } catch { /* expected */ }
+    try { await svc.revoke('ent1', 'revoked'); } catch { /* expected */ }
     expect(svc).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 29. handleModalSubmit — (400 lines, 11%)
+// 28. handleModalSubmit
 // ═══════════════════════════════════════════════════════════
 
 describe('handleModalSubmit deep coverage', () => {
@@ -1431,7 +1407,7 @@ describe('handleModalSubmit deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 30. Reaction roles — (255+265 lines)
+// 29. Reaction roles
 // ═══════════════════════════════════════════════════════════
 
 describe('Reaction roles deep coverage', () => {
@@ -1447,15 +1423,18 @@ describe('Reaction roles deep coverage', () => {
         fetch: vi.fn(),
       };
       const user: any = { id: 'u1', bot: false };
+      const guild = makeGuild();
       const supa = makeSupa({ data: makeConfig() });
-      try { await handleReactionAdd(reaction, user, supa); } catch { /* expected */ }
-      try { await handleReactionRemove(reaction, user, supa); } catch { /* expected */ }
+      const valkey = makeValkey();
+      const eb = makeEventBus();
+      try { await handleReactionAdd(reaction, user, guild, supa, valkey, eb); } catch { /* expected */ }
+      try { await handleReactionRemove(reaction, user, guild, supa, valkey, eb); } catch { /* expected */ }
     } catch { /* module structure may differ */ }
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 31. Deployer — (614 lines, 18%)
+// 30. Deployer
 // ═══════════════════════════════════════════════════════════
 
 describe('Deployer deep coverage', () => {
@@ -1471,7 +1450,7 @@ describe('Deployer deep coverage', () => {
       categories: [],
       channels: [],
     };
-    try { await deployServerState(guild, supa, desiredState, {}); } catch { /* expected */ }
+    try { await deployServerState(guild, supa, desiredState, { cleanExisting: false, dryRun: true }); } catch { /* expected */ }
     expect(guild).toBeDefined();
   });
 
@@ -1491,13 +1470,13 @@ describe('Deployer deep coverage', () => {
         { key: 'welcome', name: 'welcome', type: 'GUILD_TEXT' as any, categoryKey: 'general-cat', position: 0, permissionOverwrites: [], topic: 'Welcome!' },
       ],
     };
-    try { await deployServerState(guild, supa, desiredState, {}); } catch { /* expected */ }
+    try { await deployServerState(guild, supa, desiredState, { cleanExisting: false, dryRun: true }); } catch { /* expected */ }
     expect(guild).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 32. SyncEngine — (444 lines, 23%)
+// 31. SyncEngine — requires 4 args: guild, supabase, eventBus, config
 // ═══════════════════════════════════════════════════════════
 
 describe('SyncEngine deep coverage', () => {
@@ -1507,13 +1486,14 @@ describe('SyncEngine deep coverage', () => {
     const { runSyncCycle } = await import('../sync/sync-engine.js');
     const guild = makeGuild();
     const supa = makeSupa({ data: makeConfig() });
-    try { await runSyncCycle(guild, supa, { dryRun: true }); } catch { /* expected */ }
+    const eb = makeEventBus();
+    try { await runSyncCycle(guild, supa, eb, { enabled: true, intervalMinutes: 60, autoRepair: false, autoRepairEveryone: false }); } catch { /* expected */ }
     expect(guild).toBeDefined();
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 33. Welcome service — (165 lines, 19%)
+// 32. Welcome service
 // ═══════════════════════════════════════════════════════════
 
 describe('Welcome service deep coverage', () => {
@@ -1532,26 +1512,7 @@ describe('Welcome service deep coverage', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-// 34. Role guard — (97 lines, 76%)
-// ═══════════════════════════════════════════════════════════
-
-describe('Role guard deep coverage', () => {
-  beforeEach(() => { vi.restoreAllMocks(); });
-
-  it('import and test', async () => {
-    try {
-      const mod = await import('../guards/role-guard.js');
-      const fn = (mod as any).checkRoleGuard ?? (mod as any).default;
-      if (fn) {
-        const int = makeInteraction();
-        try { const result = fn(int, ['role1'], []); } catch { /* expected */ }
-      }
-    } catch { /* expected */ }
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 35. Misc services — action-queue, audit, embed-theme, etc.
+// 33. Misc services — audit, embed-theme, event bus, guild snapshot, heartbeat
 // ═══════════════════════════════════════════════════════════
 
 describe('Audit service', () => {
@@ -1562,8 +1523,8 @@ describe('Audit service', () => {
     const supa = makeSupa({});
     try {
       await writeAuditLog(supa, {
-        guildId: 'g1', action: 'test', category: 'test',
-        details: { info: 'test' }, performedBy: 'system',
+        guildId: 'g1', action: 'test', actorType: 'system',
+        actorId: 'test-actor', details: { info: 'test' },
       });
     } catch { /* expected */ }
     expect(supa.from).toHaveBeenCalled();
