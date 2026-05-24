@@ -294,7 +294,7 @@ describe('MarketManager deep coverage', () => {
   it('listItem', async () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const mgr = new MarketManager(makeGuild(), makeSupa(), makeValkey());
-    try { await mgr.listItem('u1', 'Sword', 100, 1, 'Rare sword'); } catch { /* expected */ }
+    try { await mgr.listItem('u1', 'Sword', 1, 100); } catch { /* expected */ }
   });
   it('buy', async () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
@@ -603,7 +603,8 @@ describe('autocomplete deep coverage', () => {
       options: { getSubcommand: vi.fn().mockReturnValue('buy'), getFocused: vi.fn().mockReturnValue({ name: 'item', value: 'sw' }) },
       respond: vi.fn().mockResolvedValue({}), guildId: 'g1',
     };
-    try { await handleAutocomplete(int, makeSupa()); } catch { /* expected */ }
+    const shoukaku: any = { players: new Map(), getIdealNode: vi.fn() };
+    try { await handleAutocomplete(int, makeSupa(), shoukaku, 'g1'); } catch { /* expected */ }
   });
 });
 
