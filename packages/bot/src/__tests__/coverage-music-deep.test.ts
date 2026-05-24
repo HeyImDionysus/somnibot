@@ -13,8 +13,8 @@ vi.mock('discord.js', () => ({
   Collection: class extends Map {},
 }));
 
-function makeValkey() {
-  return { get: vi.fn(async () => null), set: vi.fn(async () => {}), setex: vi.fn(async () => {}), del: vi.fn(async () => {}), incr: vi.fn(async () => 1), expire: vi.fn(async () => {}), keys: vi.fn(async () => []), sadd: vi.fn(async () => 1), scard: vi.fn(async () => 0), smembers: vi.fn(async () => []) };
+function makeValkey(): any {
+  return { get: vi.fn(async () => null), set: vi.fn(async () => 'OK'), setex: vi.fn(async () => 'OK'), del: vi.fn(async () => 1), incr: vi.fn(async () => 1), expire: vi.fn(async () => 1), keys: vi.fn(async () => []), sadd: vi.fn(async () => 1), scard: vi.fn(async () => 0), smembers: vi.fn(async () => []) };
 }
 
 function makeQueueEntry(overrides?: Partial<any>): any {
