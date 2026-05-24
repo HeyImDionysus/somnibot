@@ -331,7 +331,7 @@ describe('commerce coverage', () => {
   it('handleBuyButton', async () => {
     const { handleBuyButton } = await import('../features/commerce/payment-handler.js');
     const interaction = makeInteraction({ isButton: true, customId: 'buy:item1' });
-    try { await handleBuyButton(interaction as any, makeSupa() as any, 'g1', 'https://api.paypal.com', 'client123', 'secret123'); } catch {}
+    try { await handleBuyButton(interaction as any, makeSupa() as any, 'g1', 'https://api.paypal.com', 'client123', 'secret123', 'https://dash.example.com'); } catch {}
   });
 
   it('CommerceFulfillmentService', async () => {
@@ -357,7 +357,7 @@ describe('services coverage', () => {
     const { HeartbeatService, readHeartbeat } = await import('../services/heartbeat.js');
     const svc = new HeartbeatService(makeValkey() as any, makeSupa() as any, 'g1');
     expect(svc).toBeDefined();
-    try { await readHeartbeat(makeValkey() as any, makeSupa() as any, 'g1'); } catch {}
+    try { await readHeartbeat(makeValkey() as any, 'g1'); } catch {}
   });
 
   it('AlertService', async () => {
@@ -365,19 +365,19 @@ describe('services coverage', () => {
     const svc = new AlertService(makeValkey() as any, makeSupa() as any, makeGuild() as any);
     expect(svc).toBeDefined();
     try { await svc.recordSuccess('auto1'); } catch {}
-    try { await svc.recordFailure('auto1', new Error('test')); } catch {}
+    try { await svc.recordFailure('auto1', 'TestAutomation', 'test error'); } catch {}
     try { await svc.getFailureCount('auto1'); } catch {}
   });
 
   it('ConfigWatcher', async () => {
     const { ConfigWatcher } = await import('../services/config-watcher.js');
-    const svc = new ConfigWatcher(makeGuild() as any, makeSupa() as any, makeEventBus() as any);
+    const svc = new ConfigWatcher(makeGuild() as any, makeSupa() as any, makeEventBus() as any, makeValkey() as any);
     expect(svc).toBeDefined();
   });
 
   it('CrossFeatureBridge', async () => {
     const { CrossFeatureBridge } = await import('../services/cross-feature-bridge.js');
-    const svc = new CrossFeatureBridge(makeGuild() as any, makeSupa() as any, makeEventBus() as any);
+    const svc = new CrossFeatureBridge(makeGuild() as any, makeSupa() as any, makeEventBus() as any, makeValkey() as any);
     expect(svc).toBeDefined();
     try { svc.start(); } catch {}
     try { svc.stop(); } catch {}
@@ -385,17 +385,17 @@ describe('services coverage', () => {
 
   it('themedEmbed + invalidateThemeCache', async () => {
     const { themedEmbed, invalidateThemeCache } = await import('../services/embed-theme.js');
-    try { await themedEmbed(makeSupa() as any, 'economy', 'g1'); } catch {}
-    try { await invalidateThemeCache('g1'); } catch {}
+    try { await themedEmbed(makeSupa() as any, makeValkey() as any, 'g1', 'economy'); } catch {}
+    try { await invalidateThemeCache(makeValkey() as any, 'g1'); } catch {}
   });
 
   it('fraud detection functions', async () => {
     const mod = await import('../services/fraud-detection.js');
     const ctx: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1' };
-    try { await mod.checkPurchaseVelocity(ctx, 'u1', 'item1'); } catch {}
-    try { await mod.checkDeviceAbuse(ctx, '1.2.3.4'); } catch {}
-    try { await mod.checkIPMismatch(ctx, 'u1', '1.2.3.4'); } catch {}
-    try { await mod.checkPaymentPattern(ctx, 'u1', 10); } catch {}
+    try { await mod.checkPurchaseVelocity(ctx, 'cust1', 'disc1'); } catch {}
+    try { await mod.checkDeviceAbuse(ctx, 'lic1', 3, 'disc1'); } catch {}
+    try { await mod.checkIPMismatch(ctx, 'lic1', 'disc1'); } catch {}
+    try { await mod.checkPaymentPattern(ctx, 'cust1', 'disc1'); } catch {}
     try { await mod.checkCriticalThreshold(ctx); } catch {}
   });
 
@@ -420,7 +420,7 @@ describe('services coverage', () => {
   it('OwnerNotificationService', async () => {
     const { OwnerNotificationService } = await import('../services/owner-notifications.js');
     const client: any = { user: { id: 'bot1' }, ws: { status: 0 }, on: vi.fn(), guilds: { cache: new Map() } };
-    const svc = new OwnerNotificationService(client, 'g1', makeSupa() as any);
+    const svc = new OwnerNotificationService(client, 'g1', makeSupa() as any, makeEventBus() as any);
     expect(svc).toBeDefined();
   });
 
@@ -467,12 +467,13 @@ describe('deploy coverage', () => {
     const guild = makeGuild();
     const supa = makeSupa();
     // Empty desired
-    try { const r = await deployServerState(guild as any, supa as any, { roles: [], channels: [], categories: [] }, { cleanExisting: false, dryRun: true }); expect(r).toBeDefined(); } catch {}
+    try { const r = await deployServerState(guild as any, supa as any, { everyonePermissions: '0', roles: [], channels: [], categories: [] }, { cleanExisting: false, dryRun: true }); expect(r).toBeDefined(); } catch {}
     // With roles/channels
     try { await deployServerState(guild as any, supa as any, {
-      roles: [{ key: 'a', name: 'A', color: '#000', hoist: false, mentionable: false, permissions: [] }],
-      channels: [{ key: 'b', name: 'B', type: 'text', category_key: null, permission_overrides: [] }],
-      categories: [{ key: 'c', name: 'C', permission_overrides: [] }],
+      everyonePermissions: '0',
+      roles: [{ key: 'a', name: 'A', tier: 'mod', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 }],
+      channels: [{ key: 'b', name: 'B', type: 0, categoryKey: null, position: 0, topic: null, slowmode: 0, nsfw: false, templateId: 't1', overrides: [] }],
+      categories: [{ key: 'c', name: 'C', position: 0 }],
     }, { cleanExisting: true, dryRun: false }); } catch {}
   });
 });
@@ -508,7 +509,7 @@ describe('discord-native coverage', () => {
       try { await handler(makeInteraction() as any); } catch {}
     }
     if (mod.withCooldown) {
-      const handler = mod.withCooldown(5, async () => {});
+      const handler = mod.withCooldown(async () => {}, 5000);
       try { await handler(makeInteraction() as any); } catch {}
     }
   });
@@ -572,12 +573,14 @@ describe('levels coverage', () => {
 
   it('handleRankCommand', async () => {
     const { handleRankCommand } = await import('../features/levels/commands.js');
-    try { await handleRankCommand(makeInteraction({ subcommand: 'rank' }) as any, makeSupa() as any, 'g1'); } catch {}
+    const client: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1', guilds: { cache: new Map([['g1', makeGuild()]]) } };
+    try { await handleRankCommand(makeInteraction({ subcommand: 'rank' }) as any, client); } catch {}
   });
 
   it('handleLeaderboardCommand', async () => {
     const { handleLeaderboardCommand } = await import('../features/levels/commands.js');
-    try { await handleLeaderboardCommand(makeInteraction({ subcommand: 'leaderboard' }) as any, makeSupa() as any, 'g1'); } catch {}
+    const client: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1', guilds: { cache: new Map([['g1', makeGuild()]]) } };
+    try { await handleLeaderboardCommand(makeInteraction({ subcommand: 'leaderboard' }) as any, client); } catch {}
   });
 
   it('loadLevelConfig + loadRewards', async () => {
@@ -588,8 +591,7 @@ describe('levels coverage', () => {
 
   it('handleLevelUp', async () => {
     const { handleLevelUp } = await import('../features/levels/level-announcer.js');
-    const member: any = { id: 'u1', user: { id: 'u1', username: 'Test', tag: 'Test#0001', displayAvatarURL: () => '' }, guild: makeGuild(), send: vi.fn(), displayName: 'Test', roles: { add: vi.fn() } };
-    try { await handleLevelUp(member, 5, makeSupa() as any, 'g1', makeEventBus() as any); } catch {}
+    try { await handleLevelUp(makeGuild() as any, makeSupa() as any, makeEventBus() as any, 'u1', 4, 5, 500); } catch {}
   });
 
   it('loadRankCardSettings', async () => {
@@ -599,7 +601,8 @@ describe('levels coverage', () => {
 
   it('handleXpAdminCommand', async () => {
     const { handleXpAdminCommand } = await import('../features/levels/admin-commands.js');
-    try { await handleXpAdminCommand(makeInteraction({ subcommand: 'set' }) as any, makeSupa() as any, 'g1'); } catch {}
+    const client: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1', guilds: { cache: new Map([['g1', makeGuild()]]) } };
+    try { await handleXpAdminCommand(makeInteraction({ subcommand: 'set' }) as any, client); } catch {}
   });
 });
 
@@ -678,7 +681,9 @@ describe('pets coverage', () => {
 
   it('handlePetCommand', async () => {
     const { handlePetCommand } = await import('../features/pets/commands.js');
-    try { await handlePetCommand(makeInteraction({ subcommand: 'view' }) as any, makeSupa() as any, 'g1'); } catch {}
+    const { PetsManager } = await import('../features/pets/pets-manager.js');
+    const mgr = new PetsManager(makeSupa() as any);
+    try { await handlePetCommand(makeInteraction({ subcommand: 'view' }) as any, mgr); } catch {}
   });
 });
 
@@ -696,7 +701,8 @@ describe('moderation coverage', () => {
   it('handleWarnCommand', async () => {
     try {
       const { handleWarnCommand } = await import('../features/moderation/commands.js');
-      await handleWarnCommand(makeInteraction({ subcommand: 'add', user: { id: 'u2', username: 'Target' } }) as any, makeSupa() as any, 'g1', makeEventBus() as any);
+      const client: any = { supabase: makeSupa(), valkey: makeValkey(), guildId: 'g1', guilds: { cache: new Map([['g1', makeGuild()]]) } };
+      await handleWarnCommand(makeInteraction({ subcommand: 'add', user: { id: 'u2', username: 'Target' } }) as any, client);
     } catch {}
   });
 
@@ -977,9 +983,9 @@ describe('anti-raid coverage', () => {
 // 27. AUDIT — alert-manager, analytics
 // ═══════════════════════════════════════════════════════════
 describe('audit coverage', () => {
-  it('audit analytics service', async () => {
+  it('audit diagnostics service', async () => {
     try {
-      const mod = await import('../features/audit/analytics-service.js');
+      const mod = await import('../features/audit/diagnostics-service.js');
       expect(mod).toBeDefined();
     } catch {}
   });
@@ -1032,7 +1038,9 @@ describe('polls coverage', () => {
   it('handlePollCommand', async () => {
     try {
       const { handlePollCommand } = await import('../features/polls/commands.js');
-      await handlePollCommand(makeInteraction({ subcommand: 'create' }) as any, makeSupa() as any, 'g1');
+      const { PollsManager } = await import('../features/polls/polls-manager.js');
+      const mgr = new PollsManager(makeSupa() as any);
+      await handlePollCommand(makeInteraction({ subcommand: 'create' }) as any, mgr);
     } catch {}
   });
 });
@@ -1065,7 +1073,9 @@ describe('economy commands coverage', () => {
   it('handleEconomyCommand', async () => {
     try {
       const { handleEconomyCommand } = await import('../features/economy/commands.js');
-      await handleEconomyCommand(makeInteraction({ subcommand: 'balance' }) as any, makeSupa() as any, 'g1', makeEventBus() as any);
+      const { EconomyManager } = await import('../features/economy/economy-manager.js');
+      const mgr = new EconomyManager(makeGuild() as any, makeSupa() as any);
+      await handleEconomyCommand(makeInteraction({ subcommand: 'balance' }) as any, mgr);
     } catch {}
   });
 });
