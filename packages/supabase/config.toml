@@ -1,7 +1,8 @@
 # SomniBot Supabase Configuration
 # https://supabase.com/docs/guides/cli/config
 
-project_id = ""  # Set after project creation
+[project]
+id = ""  # Set after project creation
 
 [api]
 enabled = true
