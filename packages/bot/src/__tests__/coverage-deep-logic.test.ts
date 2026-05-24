@@ -69,6 +69,7 @@ vi.mock('discord.js', () => {
   }
   class AttachmentBuilder { constructor(public d: any, public o?: any) {} }
   class Collection extends Map {
+    constructor(entries?: any) { super(entries); }
     filter(fn: any) { const r = new Collection(); for (const [k,v] of this) if (fn(v,k)) r.set(k,v); return r; }
     map(fn: any) { return [...this.values()].map(fn); }
     find(fn: any) { return [...this.values()].find(fn); }
@@ -119,8 +120,11 @@ vi.mock('../features/moderation/mod-log.js', () => ({ postModLogEntry: vi.fn(asy
 vi.mock('../features/moderation/infraction-service.js', () => ({
   createInfraction: vi.fn(async () => ({ id: 'inf1' })),
   getActiveWarningCount: vi.fn(async () => 0),
+  getActiveInfractionCount: vi.fn(async () => 0),
   getMemberInfractions: vi.fn(async () => []),
   pardonInfraction: vi.fn(async () => true),
+  expireInfractions: vi.fn(async () => 0),
+  calculateExpiryDate: vi.fn((days: number) => new Date(Date.now() + days * 86400000).toISOString()),
 }));
 vi.mock('../features/levels/rank-card.js', () => ({
   generateRankCard: vi.fn(async () => Buffer.from('PNG')),
@@ -229,7 +233,7 @@ describe('xp-tracker deep', () => {
       member: { roles: { cache: makeCollection() } },
       channel: { id: 'ch1', send: vi.fn() },
     };
-    const result = await mod.processMessageXp(supa as any, valkey as any, msg);
+    const result = await mod.processMessageXp(msg, supa as any, valkey as any, 'g3');
     expect(result).toBeDefined();
   });
 
@@ -241,8 +245,8 @@ describe('xp-tracker deep', () => {
     expect(rewards).toBeDefined();
   });
 
-  it('invalidateLevelCaches clears all caches', () => {
-    const mod = require('../features/levels/xp-tracker.js');
+  it('invalidateLevelCaches clears all caches', async () => {
+    const mod = await import('../features/levels/xp-tracker.js');
     mod.invalidateLevelCaches();
     expect(true).toBe(true);
   });
@@ -254,35 +258,57 @@ describe('xp-tracker deep', () => {
 describe('escalation deep', () => {
   it('getEscalationAction returns correct action for warning count', async () => {
     const mod = await import('../features/moderation/escalation.js');
-    const action3 = mod.getEscalationAction(3);
+    const chain = [
+      { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+      { threshold: 5, action: 'kick' as const, dmMember: true },
+      { threshold: 10, action: 'ban' as const, dmMember: true },
+    ];
+    const action3 = mod.getEscalationAction(chain, 3);
     expect(action3).toBeDefined();
     expect(action3?.action).toBe('mute');
 
-    const action5 = mod.getEscalationAction(5);
+    const action5 = mod.getEscalationAction(chain, 5);
     expect(action5?.action).toBe('kick');
 
-    const action10 = mod.getEscalationAction(10);
+    const action10 = mod.getEscalationAction(chain, 10);
     expect(action10?.action).toBe('ban');
   });
 
-  it('getEscalationAction returns null for low warning count', () => {
-    const mod = require('../features/moderation/escalation.js');
-    const action = mod.getEscalationAction(1);
+  it('getEscalationAction returns null for low warning count', async () => {
+    const mod = await import('../features/moderation/escalation.js');
+    const chain = [
+      { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+      { threshold: 5, action: 'kick' as const, dmMember: true },
+    ];
+    const action = mod.getEscalationAction(chain, 1);
     expect(action).toBeNull();
   });
 
   it('executeEscalation with mute', async () => {
     const mod = await import('../features/moderation/escalation.js');
-    const guild: any = { id: 'g1', name: 'Test' };
+    const supa = makeSupa();
+    const client: any = {
+      supabase: supa,
+      valkey: makeValkey(),
+      guildId: 'g1',
+    };
     const member: any = {
       id: 'u1',
+      guild: { id: 'g1', name: 'Test' },
       user: { id: 'u1', tag: 'User#0001', send: vi.fn() },
       timeout: vi.fn(async () => {}),
       kick: vi.fn(async () => {}),
       ban: vi.fn(async () => {}),
     };
-    const supa = makeSupa();
-    await mod.executeEscalation(supa as any, guild, member, { action: 'mute', duration: '1h', warningCount: 3 } as any);
+    const config = {
+      escalationChain: [
+        { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+        { threshold: 5, action: 'kick' as const, dmMember: true },
+      ],
+      infractionExpiryDays: 30,
+      modLogChannelId: null,
+    };
+    await mod.executeEscalation(client as any, member, 'test reason', config);
   });
 });
 
@@ -293,7 +319,7 @@ describe('anti-raid deep', () => {
   it('processAntiRaid with valid member', async () => {
     const mod = await import('../features/anti-raid/index.js');
     const supa = makeSupa({
-      data: { enabled: true, join_threshold: 10, window_seconds: 60, min_account_age_days: 7, action: 'kick', log_channel_id: null },
+      data: { anti_raid_enabled: true, anti_raid_join_threshold: 10, anti_raid_join_window_seconds: 60, anti_raid_account_age_days: 7, anti_raid_action: 'kick', anti_raid_log_channel_id: null, mod_log_channel_id: null },
       error: null,
     });
     const member: any = {
@@ -305,7 +331,7 @@ describe('anti-raid deep', () => {
       kick: vi.fn(async () => {}),
       ban: vi.fn(async () => {}),
     };
-    await mod.processAntiRaid(supa as any, member);
+    await mod.processAntiRaid(member.guild, member, supa as any);
   });
 
   it('invalidateAntiRaidCache clears cache', async () => {
@@ -342,15 +368,16 @@ describe('guild-router deep', () => {
     expect(guildId).toBe('g1');
   });
 
-  it('getGuildId extracts from guild object', () => {
-    const mod = require('../guild-router.js');
+  it('getGuildId extracts from guild object', async () => {
+    const mod = await import('../guild-router.js');
     const guildId = mod.getGuildId({ guild: { id: 'g2' } });
     expect(guildId).toBe('g2');
   });
 
   it('GuildRouter constructs', async () => {
     const mod = await import('../guild-router.js');
-    const router = new mod.GuildRouter({} as any, makeSupa() as any, makeValkey() as any);
+    const eventBus: any = { on: vi.fn(), emit: vi.fn(), removeAllListeners: vi.fn() };
+    const router = new mod.GuildRouter({} as any, makeSupa() as any, makeValkey() as any, eventBus);
     expect(router).toBeDefined();
   });
 });
@@ -396,13 +423,9 @@ describe('music-queue deep', () => {
   it('MusicQueue operations', async () => {
     const mod = await import('../features/music/music-queue.js');
     expect(mod).toBeDefined();
-    if (mod.MusicQueue) {
-      const q = new mod.MusicQueue();
+    if (mod.MusicQueueManager) {
+      const q = new mod.MusicQueueManager(makeValkey() as any);
       expect(q).toBeDefined();
-      // Test queue operations
-      if (typeof q.add === 'function') q.add({ title: 'Song', url: 'https://example.com', duration: 180 } as any);
-      if (typeof q.isEmpty === 'function') expect(typeof q.isEmpty()).toBe('boolean');
-      if (typeof q.clear === 'function') q.clear();
     }
   });
 });
@@ -429,7 +452,9 @@ describe('giveaway-manager deep', () => {
     const mod = await import('../features/giveaways/giveaway-manager.js');
     expect(mod).toBeDefined();
     if (mod.GiveawayManager) {
-      const mgr = new mod.GiveawayManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const eventBus: any = { on: vi.fn(), emit: vi.fn(), removeAllListeners: vi.fn() };
+      const mgr = new mod.GiveawayManager(guild, makeSupa() as any, makeValkey() as any, eventBus);
       expect(mgr).toBeDefined();
     }
   });
@@ -443,7 +468,8 @@ describe('crafting-manager deep', () => {
     const mod = await import('../features/crafting/crafting-manager.js');
     expect(mod).toBeDefined();
     if (mod.CraftingManager) {
-      const mgr = new mod.CraftingManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.CraftingManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -457,7 +483,8 @@ describe('farming-manager deep', () => {
     const mod = await import('../features/farming/farming-manager.js');
     expect(mod).toBeDefined();
     if (mod.FarmingManager) {
-      const mgr = new mod.FarmingManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.FarmingManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -471,7 +498,8 @@ describe('fishing-manager deep', () => {
     const mod = await import('../features/fishing/fishing-manager.js');
     expect(mod).toBeDefined();
     if (mod.FishingManager) {
-      const mgr = new mod.FishingManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.FishingManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -485,7 +513,8 @@ describe('gathering-manager deep', () => {
     const mod = await import('../features/gathering/gathering-manager.js');
     expect(mod).toBeDefined();
     if (mod.GatheringManager) {
-      const mgr = new mod.GatheringManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.GatheringManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -499,7 +528,8 @@ describe('heist-manager deep', () => {
     const mod = await import('../features/heist/heist-manager.js');
     expect(mod).toBeDefined();
     if (mod.HeistManager) {
-      const mgr = new mod.HeistManager(makeSupa() as any);
+      const client: any = { guilds: { cache: new Map() } };
+      const mgr = new mod.HeistManager(makeSupa() as any, client);
       expect(mgr).toBeDefined();
     }
   });
@@ -527,7 +557,8 @@ describe('market-manager deep', () => {
     const mod = await import('../features/market/market-manager.js');
     expect(mod).toBeDefined();
     if (mod.MarketManager) {
-      const mgr = new mod.MarketManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.MarketManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -569,7 +600,8 @@ describe('temp-channel-manager deep', () => {
     const mod = await import('../features/temp-channels/temp-channel-manager.js');
     expect(mod).toBeDefined();
     if (mod.TempChannelManager) {
-      const mgr = new mod.TempChannelManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.TempChannelManager(guild, makeSupa() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -583,7 +615,8 @@ describe('adventure-manager deep', () => {
     const mod = await import('../features/adventures/adventure-manager.js');
     expect(mod).toBeDefined();
     if (mod.AdventureManager) {
-      const mgr = new mod.AdventureManager(makeSupa() as any);
+      const guild: any = { id: 'g1', name: 'Test', memberCount: 10 };
+      const mgr = new mod.AdventureManager(guild, makeSupa() as any, makeValkey() as any);
       expect(mgr).toBeDefined();
     }
   });
@@ -665,7 +698,10 @@ describe('commerce deeper', () => {
     if (typeof (mod as any).generateLicenseKey === 'function') {
       const key = (mod as any).generateLicenseKey();
       expect(key).toBeDefined();
-      expect(typeof key).toBe('string');
+      expect(typeof key).toBe('object');
+      expect(typeof key.plaintext).toBe('string');
+      expect(typeof key.hash).toBe('string');
+      expect(key.plaintext).toMatch(/^SMNI-/);
     }
   });
 });
@@ -781,3 +817,4 @@ describe('automod-engine deep', () => {
     expect(mod).toBeDefined();
   });
 });
+
