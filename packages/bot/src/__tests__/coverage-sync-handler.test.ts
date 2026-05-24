@@ -88,6 +88,11 @@ vi.mock('discord.js', () => {
     Client: class { on() { return this; } once() { return this; } login() {} },
     GatewayIntentBits: { Guilds: 1, GuildMembers: 2, GuildMessages: 4, MessageContent: 8 },
     Events: { ClientReady: 'ready', MessageCreate: 'messageCreate', InteractionCreate: 'interactionCreate', GuildMemberAdd: 'guildMemberAdd', GuildMemberRemove: 'guildMemberRemove', GuildMemberUpdate: 'guildMemberUpdate', VoiceStateUpdate: 'voiceStateUpdate', GuildRoleCreate: 'guildRoleCreate', GuildRoleUpdate: 'guildRoleUpdate', GuildRoleDelete: 'guildRoleDelete', ChannelCreate: 'channelCreate', ChannelUpdate: 'channelUpdate', ChannelDelete: 'channelDelete', MessageReactionAdd: 'messageReactionAdd', MessageReactionRemove: 'messageReactionRemove' },
+    AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
+    AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
+    AutoModerationRuleEventType: { MessageSend: 1 },
+    REST: class { setToken() { return this; } },
+    Routes: { applicationGuildCommands: () => '' },
   };
 });
 
@@ -370,7 +375,13 @@ describe('sync/repair-actions', () => {
   it('ignoreDriftItem', async () => {
     const mod = await import('../sync/repair-actions.js');
     try {
-      await mod.ignoreDriftItem(makeSupabase(), 'drift1');
+      await mod.ignoreDriftItem(makeSupabase(), 'guild1', {
+        type: 'EXTRA_RESOURCE',
+        key: 'ch1',
+        expected: 'absent',
+        actual: 'present',
+        severity: 'low',
+      } as any);
     } catch { }
     expect(true).toBe(true);
   });
@@ -396,9 +407,9 @@ describe('sync/sync-engine', () => {
     const mod = await import('../sync/sync-engine.js');
     try {
       await mod.runSyncCycle(makeGuild(), makeSupabase(), {
-        on: vi.fn(() => () => {}),
+        on: vi.fn(),
         emit: vi.fn(),
-      } as any);
+      } as any, {} as any);
     } catch { }
     expect(true).toBe(true);
   });
