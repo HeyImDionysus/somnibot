@@ -34,6 +34,7 @@ vi.mock('discord.js', () => {
     name = ''; desc = '';
     setName(n: string) { this.name = n; return this; } setDescription(d: string) { this.desc = d; return this; }
     setDefaultMemberPermissions() { return this; }
+    setDMPermission() { return this; }
     addSubcommand(fn: any) { try { fn(new SlashCommandSubcommandBuilder()); } catch {} return this; }
     addSubcommandGroup(fn: any) { try { fn(this); } catch {} return this; }
     addStringOption(fn: any) { try { fn(this); } catch {} return this; }
