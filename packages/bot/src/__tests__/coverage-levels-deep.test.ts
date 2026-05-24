@@ -213,8 +213,10 @@ describe('voice-xp', () => {
   });
 
   it('onVoiceStateUpdate handles join', () => {
-    const oldState = { channelId: null, member: { id: 'u1', user: { bot: false }, roles: { cache: new Map() } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
-    const newState = { channelId: 'vc1', member: { id: 'u1', user: { bot: false }, roles: { cache: new Map() } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
+    const rolesCache = new Map([['r1', { id: 'r1' }]]) as any;
+    rolesCache.map = (fn: any) => [...rolesCache.values()].map(fn);
+    const oldState = { channelId: null, member: { id: 'u1', user: { bot: false }, roles: { cache: rolesCache } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
+    const newState = { channelId: 'vc1', member: { id: 'u1', user: { bot: false }, roles: { cache: rolesCache } }, guild: { id: 'g1', afkChannelId: null }, selfDeaf: false, serverDeaf: false };
     mod.onVoiceStateUpdate(oldState as any, newState as any);
   });
 
