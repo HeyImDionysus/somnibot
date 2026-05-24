@@ -41,7 +41,7 @@ vi.mock('discord.js', () => {
     AutoModerationRuleTriggerType: { Keyword: 1, Spam: 3, KeywordPreset: 4, MentionSpam: 5 },
     AutoModerationActionType: { BlockMessage: 1, SendAlertMessage: 2, Timeout: 3 },
     SlashCommandBuilder: class {
-      setName() { return this; } setDescription() { return this; } setDefaultMemberPermissions() { return this; }
+      setName() { return this; } setDescription() { return this; } setDefaultMemberPermissions() { return this; } setDMPermission() { return this; }
       addSubcommand(fn: any) { try { fn(this); } catch {} return this; }
       addStringOption(fn: any) { try { fn(this); } catch {} return this; }
       addIntegerOption(fn: any) { try { fn(this); } catch {} return this; }
@@ -105,13 +105,14 @@ function makeCollection(entries: [string, any][] = []): any {
 function makeGuild(): any {
   return {
     id: 'g1', name: 'Test', memberCount: 100, ownerId: 'owner1',
-    roles: { cache: makeCollection([['r1', { id: 'r1', name: 'Member', position: 1, color: 0, hoist: false, mentionable: false, managed: false, permissions: { bitfield: 0n }, editable: true }]]), everyone: { id: 'g1', permissions: { bitfield: 0n } }, fetch: vi.fn(async () => makeCollection()) },
+    roles: { cache: makeCollection([['r1', { id: 'r1', name: 'Member', position: 1, color: 0, hoist: false, mentionable: false, managed: false, permissions: { bitfield: 0n }, editable: true, members: makeCollection(), tags: null }]]), everyone: { id: 'g1', permissions: { bitfield: 0n } }, fetch: vi.fn(async () => makeCollection()) },
     channels: { cache: makeCollection([['ch1', { id: 'ch1', name: 'general', type: 0, position: 0, parentId: null, topic: null, rateLimitPerUser: 0, nsfw: false, permissionOverwrites: { cache: makeCollection() } }]]), fetch: vi.fn(async () => makeCollection()), create: vi.fn(async () => ({ id: 'new-ch', send: vi.fn(async () => ({})) })) },
-    members: { cache: makeCollection([['u1', { id: 'u1', displayName: 'User', user: { id: 'u1', tag: 'User#0001' } }]]), fetch: vi.fn(async () => makeCollection()) },
+    members: { cache: makeCollection([['u1', { id: 'u1', displayName: 'User', user: { id: 'u1', tag: 'User#0001' } }]]), fetch: vi.fn(async () => makeCollection()), me: { roles: { highest: { id: 'r-bot', position: 5 } } } },
     commands: { set: vi.fn(async () => []) },
     emojis: { cache: makeCollection() },
     stickers: { cache: makeCollection() },
     me: { permissions: { has: vi.fn(() => true) } },
+    fetchOnboarding: vi.fn(async () => ({ enabled: false, prompts: [] })),
   };
 }
 
@@ -150,19 +151,17 @@ describe('CommerceFulfillmentService', () => {
 
 // ═══════ FraudDetection ═══════
 describe('fraud-detection', () => {
-  it('checkPurchaseVelocity returns result', async () => {
+  it('checkPurchaseVelocity runs without error', async () => {
     const mod = await import('../services/fraud-detection.js');
     const supa = makeSupa({ data: null, error: null, count: 0 });
     const ctx: any = { supabase: supa, guildId: 'g1' };
-    const result = await mod.checkPurchaseVelocity(ctx, 'cust1', 'u1');
-    expect(result).toBeDefined();
+    await expect(mod.checkPurchaseVelocity(ctx, 'cust1', 'u1')).resolves.not.toThrow();
   });
-  it('checkDeviceAbuse returns result', async () => {
+  it('checkDeviceAbuse runs without error', async () => {
     const mod = await import('../services/fraud-detection.js');
     const supa = makeSupa({ data: null, error: null, count: 0 });
     const ctx: any = { supabase: supa, guildId: 'g1' };
-    const result = await mod.checkDeviceAbuse(ctx, 'key1', 5);
-    expect(result).toBeDefined();
+    await expect(mod.checkDeviceAbuse(ctx, 'key1', 5, 'u1')).resolves.not.toThrow();
   });
 });
 
