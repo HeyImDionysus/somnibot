@@ -138,6 +138,41 @@ jobs:
         run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=60 --reporter=verbose
       integration-test:
     name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/supabase/cli/main/install.sh | sh -s -- -b /usr/local/bin v2.0.2
+          supabase --version
+      - name: Start Supabase local
+        run: |
+          cd packages/supabase
+          supabase init --force 2>/dev/null || true
+          supabase start --ignore-health-check
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Build shared
+        run: pnpm --filter @somnibot/shared build
+      - name: Run integration tests
+        run: pnpm --filter @somnibot/bot test:integration -- --reporter=verbose
+        env:
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      - name: Stop Supabase
+        if: always()
+        run: cd packages/supabase && supabase stop 2>/dev/null || true
       
 
   # ──────────────────────────────────────────────────────────
