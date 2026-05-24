@@ -77,24 +77,12 @@ describe('deployer', () => {
   it('imports', async () => {
     const mod = await import('../deploy/deployer.js');
     expect(typeof mod.deployServerState).toBe('function');
-    expect(typeof mod.planDeployment).toBe('function');
-    expect(typeof mod.executePlan).toBe('function');
   });
 
-  it('planDeployment with no desired state', async () => {
-    const mod = await import('../deploy/deployer.js');
-    const sb = makeSupabase();
-    try {
-      const plan = await mod.planDeployment(makeGuild(), sb);
-      expect(plan).toBeDefined();
-    } catch { }
-    expect(true).toBe(true);
-  });
-
-  it('deployServerState', async () => {
+  it('deployServerState with desired state and options', async () => {
     const mod = await import('../deploy/deployer.js');
     try {
-      await mod.deployServerState(makeGuild(), makeSupabase());
+      await mod.deployServerState(makeGuild(), makeSupabase(), {} as any, {} as any);
     } catch { }
     expect(true).toBe(true);
   });

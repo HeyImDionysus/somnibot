@@ -329,7 +329,7 @@ describe('deploy/deployer', () => {
   it('deployServerState with no desired state', async () => {
     const mod = await import('../deploy/deployer.js');
     try {
-      await mod.deployServerState(makeGuild(), makeSupabase());
+      await mod.deployServerState(makeGuild(), makeSupabase(), {} as any, {} as any);
     } catch { }
     expect(true).toBe(true);
   });

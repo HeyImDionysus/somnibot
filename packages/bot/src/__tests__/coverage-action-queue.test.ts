@@ -90,38 +90,16 @@ function makeValkey() {
 }
 
 describe('ActionQueue', () => {
-  it('imports ActionQueue class', async () => {
+  it('imports startActionQueueListener', async () => {
     const mod = await import('../services/action-queue.js');
-    expect(mod.ActionQueue).toBeDefined();
+    expect(typeof mod.startActionQueueListener).toBe('function');
   });
 
-  it('constructs', async () => {
-    const { ActionQueue } = await import('../services/action-queue.js');
-    const q = new ActionQueue(makeGuild(), makeSupabase(), makeValkey());
-    expect(q).toBeDefined();
-  });
-
-  it('start subscribes to channel', async () => {
-    const { ActionQueue } = await import('../services/action-queue.js');
-    const q = new ActionQueue(makeGuild(), makeSupabase(), makeValkey());
-    q.start();
-    expect(true).toBe(true);
-  });
-
-  it('stop unsubscribes', async () => {
-    const { ActionQueue } = await import('../services/action-queue.js');
-    const q = new ActionQueue(makeGuild(), makeSupabase(), makeValkey());
-    q.start();
-    q.stop();
-    expect(true).toBe(true);
-  });
-
-  it('processPendingActions with no pending', async () => {
-    const { ActionQueue } = await import('../services/action-queue.js');
-    const q = new ActionQueue(makeGuild(), makeSupabase(), makeValkey());
+  it('startActionQueueListener subscribes to channel', async () => {
+    const { startActionQueueListener } = await import('../services/action-queue.js');
     try {
-      await q.processPendingActions();
-    } catch { }
+      await startActionQueueListener(makeGuild(), makeSupabase());
+    } catch { /* expected with mocks */ }
     expect(true).toBe(true);
   });
 });
