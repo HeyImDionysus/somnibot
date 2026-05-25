@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/market/market-manager.ts — browse, listItem, buy, myListings, cancel.
  * 224 uncovered statements at 42.3%.
@@ -51,7 +50,7 @@ describe('MarketManager deep', () => {
         { id: 'list-1', seller_id: 'user-2', item_name: 'Sword', price: 100, quantity: 1, created_at: new Date().toISOString() },
       ],
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.browse();
     expect(result).toBeDefined();
   });
@@ -61,7 +60,7 @@ describe('MarketManager deep', () => {
       guild_config: { guild_id: guildId, market_enabled: true, currency_symbol: '💰' },
       market_listings: [],
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.browse('weapons');
     expect(result).toBeDefined();
   });
@@ -71,7 +70,7 @@ describe('MarketManager deep', () => {
       guild_config: { guild_id: guildId, market_enabled: true, market_max_listings: 10, currency_symbol: '💰' },
       market_listings: [],
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.listItem('user-1', 'Sword', 100, 1);
     expect(result).toBeDefined();
   });
@@ -81,7 +80,7 @@ describe('MarketManager deep', () => {
       guild_config: { guild_id: guildId, market_enabled: true, market_tax_percent: 5, currency_symbol: '💰' },
       market_listings: { id: 'list-abc123', seller_id: 'user-2', item_name: 'Sword', item_id: 'sword-1', price: 100, quantity: 1, guild_id: guildId },
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.buy('user-1', 'abc123');
     expect(result).toBeDefined();
   });
@@ -93,7 +92,7 @@ describe('MarketManager deep', () => {
         { id: 'list-1', seller_id: 'user-1', item_name: 'Shield', price: 50, quantity: 1, created_at: new Date().toISOString() },
       ],
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.myListings('user-1');
     expect(result).toBeDefined();
   });
@@ -103,7 +102,7 @@ describe('MarketManager deep', () => {
       guild_config: { guild_id: guildId, market_enabled: true, currency_symbol: '💰' },
       market_listings: { id: 'list-abc123', seller_id: 'user-1', item_name: 'Shield', item_id: 'shield-1', price: 50, quantity: 1, guild_id: guildId },
     });
-    const mgr = new MarketManager(guildId, supa);
+    const mgr = new MarketManager(guildId as any, supa, {} as any);
     const result = await mgr.cancelListing('user-1', 'abc123');
     expect(result).toBeDefined();
   });

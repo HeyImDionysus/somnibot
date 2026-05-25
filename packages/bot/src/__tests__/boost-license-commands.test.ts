@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for features/commerce/license-commands.ts — buildLicenseCommand, handleLicenseCommand.
  * 191 uncovered statements at 29.8%.
@@ -63,6 +62,6 @@ describe('license-commands', () => {
       editReply: vi.fn().mockResolvedValue({}),
     } as any;
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await handleLicenseCommand(interaction, supa);
+    await handleLicenseCommand(interaction, supa, {} as any);
   });
 });

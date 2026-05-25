@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/crafting/crafting-manager.ts — listRecipes, craft.
  * 204 uncovered statements at 32.5%.
@@ -48,7 +47,7 @@ describe('CraftingManager deep', () => {
     const supa = makeSupa({
       guild_config: { guild_id: guildId, crafting_enabled: true },
     });
-    const mgr = new CraftingManager(guildId, supa);
+    const mgr = new CraftingManager(guildId as any, supa, {} as any);
     const config = await mgr.getConfig();
     expect(config).toBeDefined();
   });
@@ -60,7 +59,7 @@ describe('CraftingManager deep', () => {
         { id: 'r1', name: 'Iron Sword', ingredients: [{ item_name: 'Iron', quantity: 3 }], result_item_id: 'sword-1', result_quantity: 1, emoji: '⚔️', craft_time_minutes: 5, level_required: 1 },
       ],
     });
-    const mgr = new CraftingManager(guildId, supa);
+    const mgr = new CraftingManager(guildId as any, supa, {} as any);
     const result = await mgr.listRecipes();
     expect(result.embed).toBeDefined();
   });
@@ -72,7 +71,7 @@ describe('CraftingManager deep', () => {
         { id: 'r1', name: 'Iron Sword', ingredients: [{ item_name: 'Iron', quantity: 3 }], result_item_id: 'sword-1', result_quantity: 1, emoji: '⚔️' },
       ],
     });
-    const mgr = new CraftingManager(guildId, supa);
+    const mgr = new CraftingManager(guildId as any, supa, {} as any);
     const result = await mgr.craft('user-1', 'Iron Sword');
     expect(result.embed).toBeDefined();
   });

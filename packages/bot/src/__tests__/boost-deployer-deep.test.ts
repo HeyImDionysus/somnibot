@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for deploy/deployer.ts — deployServerState with various states.
  * 268 uncovered statements at 37.0%.
@@ -83,7 +82,7 @@ describe('Deployer deep', () => {
       categories: [],
       everyonePermissions: '0',
     }, {
-      dryRun: false,
+      dryRun: false, cleanExisting: false,
     });
     expect(result).toBeDefined();
     expect(result.success).toBeDefined();
@@ -96,7 +95,7 @@ describe('Deployer deep', () => {
       categories: [],
       everyonePermissions: '0',
     }, {
-      dryRun: true,
+      dryRun: true, cleanExisting: false,
     });
     expect(result).toBeDefined();
     expect(result.actions).toBeInstanceOf(Array);
@@ -106,13 +105,13 @@ describe('Deployer deep', () => {
     const guild = makeGuild(5);
     const result = await deployServerState(guild, makeSupa(), {
       roles: [
-        { key: 'mod', name: 'Moderator', color: '#ff0000', permissions: '0', hoist: false, mentionable: false },
+        { key: 'mod', name: 'Moderator', tier: 'staff', color: 0xff0000, permissions: '0', hoist: false, mentionable: false, position: 0 },
       ],
       channels: [],
       categories: [],
       everyonePermissions: '0',
     }, {
-      dryRun: false,
+      dryRun: false, cleanExisting: false,
       onProgress: vi.fn(),
     });
     expect(result).toBeDefined();

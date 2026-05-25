@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep coverage for:
  *  - features/discord-ux/modal-handlers.ts (237 uncov / 301 total)
@@ -205,7 +204,7 @@ describe('deployServerState', () => {
       roles: [], channels: [], categories: [],
       everyonePermissions: '0',
     };
-    const result = await deployServerState(guild, supa, desiredState, { dryRun: true });
+    const result = await deployServerState(guild, supa, desiredState, { dryRun: true, cleanExisting: false });
     expect(result).toBeDefined();
     expect(typeof result.success).toBe('boolean');
   });
@@ -214,12 +213,12 @@ describe('deployServerState', () => {
     const guild = makeGuild();
     const supa = makeSupa();
     const desiredState = {
-      roles: [{ key: 'mod', name: 'Mod', tier: 'custom', permissions: '0', color: 0, hoist: false, mentionable: false }],
+      roles: [{ key: 'mod', name: 'Mod', tier: 'custom', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 }],
       channels: [],
       categories: [],
       everyonePermissions: '0',
     };
-    const result = await deployServerState(guild, supa, desiredState, { dryRun: true });
+    const result = await deployServerState(guild, supa, desiredState, { dryRun: true, cleanExisting: false });
     expect(result).toBeDefined();
   });
 });
@@ -240,7 +239,7 @@ describe('guild-init', () => {
     vi.clearAllMocks();
     try {
       const mod = await import('../guild-init.js');
-      initGuild = mod.initGuild || mod.default;
+      initGuild = mod.initGuildFeatures;
     } catch {
       initGuild = null;
     }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/polls/polls-manager.ts — exercises createPoll, handlePollVote,
  * closePoll, createPrediction, placeBet, resolvePrediction.
@@ -145,7 +144,7 @@ describe('PollsManager deep', () => {
   describe('createPrediction', () => {
     it('creates a prediction market', async () => {
       const interaction = makeInteraction();
-      await manager.createPrediction(interaction, 'Will it rain?', ['Yes', 'No'], 60);
+      await manager.createPrediction(interaction, 'Will it rain?', ['Yes', 'No']);
     });
   });
 

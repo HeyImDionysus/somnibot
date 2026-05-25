@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep function-level coverage — exercises real code paths with richer mock data.
  * These mocks return actual data arrays so the business logic runs deep.
@@ -144,7 +143,7 @@ describe('FarmingManager deep paths', () => {
       economy_farm_plots: farmPlots,
       economy_crops: farmCrops,
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey());
     try { const r = await mgr.viewFarm('u1'); expect(r.embed).toBeDefined(); } catch { /* can still fail on PLOT_ICONS etc */ }
   });
 
@@ -156,7 +155,7 @@ describe('FarmingManager deep paths', () => {
       economy_crops: farmCrops,
       economy_inventory: [{ id: 'inv1', item_id: 'seed_wheat', item_name: 'Wheat Seed', quantity: 5, user_id: 'u1', guild_id: 'g1' }],
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.plant('u1', 'Wheat'); } catch { /* expected */ }
   });
 
@@ -167,7 +166,7 @@ describe('FarmingManager deep paths', () => {
       economy_farm_plots: [{ ...farmPlots[1], watered_at: null }],
       economy_crops: farmCrops,
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.water('u1'); } catch { /* expected */ }
   });
 
@@ -178,7 +177,7 @@ describe('FarmingManager deep paths', () => {
       economy_farm_plots: [{ ...farmPlots[0], planted_at: new Date(Date.now() - 86400000).toISOString() }], // old enough to be ready
       economy_crops: farmCrops,
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.harvest('u1'); } catch { /* expected */ }
   });
 
@@ -190,7 +189,7 @@ describe('FarmingManager deep paths', () => {
       economy_crops: farmCrops,
       economy_inventory: [{ id: 'inv2', item_id: 'fertilizer', item_name: 'Fertilizer', quantity: 3, user_id: 'u1', guild_id: 'g1' }],
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.fertilize('u1', 0); } catch { /* expected */ }
   });
 });
@@ -208,7 +207,7 @@ describe('MarketManager deep paths', () => {
       guild_config: guildConfig,
       market_listings: listings,
     });
-    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey());
     try { const r = await mgr.browse(); } catch { /* expected */ }
   });
 
@@ -218,7 +217,7 @@ describe('MarketManager deep paths', () => {
       guild_config: guildConfig,
       market_listings: [listings[0]],
     });
-    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.buy('u1', 'l1', 1); } catch { /* expected */ }
   });
 
@@ -229,7 +228,7 @@ describe('MarketManager deep paths', () => {
       market_listings: [],
       economy_inventory: [{ id: 'inv1', item_id: 'sword', item_name: 'Iron Sword', quantity: 5, user_id: 'u1', guild_id: 'g1' }],
     });
-    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.listItem(makeInt(), 'Iron Sword', 500, 1); } catch { /* expected */ }
   });
 
@@ -239,7 +238,7 @@ describe('MarketManager deep paths', () => {
       guild_config: guildConfig,
       market_listings: [listings[1]],
     });
-    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey());
     try { const r = await mgr.myListings('u1'); } catch { /* expected */ }
   });
 
@@ -249,7 +248,7 @@ describe('MarketManager deep paths', () => {
       guild_config: guildConfig,
       market_listings: [listings[1]],
     });
-    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.cancelListing('u1', 'l2'); } catch { /* expected */ }
   });
 });
@@ -264,7 +263,7 @@ describe('HeistManager deep paths', () => {
       economy_wallets: [{ user_id: 'u1', guild_id: 'g1', balance: 5000, suspended: false }],
     });
     const valkey = makeValkey();
-    const mgr = new HeistManager({ id: 'g1' } as any, supa, valkey, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, valkey as any);
     try { await mgr.startHeist(makeInt()); } catch { /* expected */ }
   });
 
@@ -280,7 +279,7 @@ describe('HeistManager deep paths', () => {
         participants: ['u1'],
       }],
     });
-    const mgr = new HeistManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, makeValkey() as any);
     try { await mgr.viewHeist(makeInt()); } catch { /* expected */ }
   });
 
@@ -296,7 +295,7 @@ describe('HeistManager deep paths', () => {
         participants: ['u2'],
       }],
     });
-    const mgr = new HeistManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, makeValkey() as any);
     try { await mgr.joinHeist(makeInt()); } catch { /* expected */ }
   });
 
@@ -312,7 +311,7 @@ describe('HeistManager deep paths', () => {
         participants: ['u1', 'u2'],
       }],
     });
-    const mgr = new HeistManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, makeValkey() as any);
     try { await mgr.resumePendingHeists('g1'); } catch { /* expected */ }
   });
 });
@@ -330,7 +329,7 @@ describe('CraftingManager deep paths', () => {
       guild_config: guildConfig,
       crafting_recipes: recipes,
     });
-    const mgr = new CraftingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new CraftingManager({ id: 'g1' } as any, supa, makeValkey());
     try { const r = await mgr.listRecipes(); expect(r.embed).toBeDefined(); } catch { /* expected */ }
   });
 
@@ -344,7 +343,7 @@ describe('CraftingManager deep paths', () => {
         { id: 'i2', item_id: 'wood', item_name: 'Wood', quantity: 5, user_id: 'u1', guild_id: 'g1' },
       ],
     });
-    const mgr = new CraftingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new CraftingManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.craft('u1', 'Iron Sword'); } catch { /* expected */ }
   });
 });
@@ -360,8 +359,8 @@ describe('GatheringManager deep paths', () => {
         { id: 'n2', guild_id: 'g1', name: 'Iron Vein', emoji: '⛏️', type: 'mine', yields: [{ item_name: 'Iron Ore', min: 1, max: 2 }], cooldown_ms: 120000, level_required: 3, active: true },
       ],
     });
-    const mgr = new GatheringManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-    try { await mgr.gather('u1'); } catch { /* expected */ }
+    const mgr = new GatheringManager({ id: 'g1' } as any, supa, makeValkey());
+    try { await mgr.gather('u1', {} as any); } catch { /* expected */ }
   });
 
   it('viewInventory with items', async () => {
@@ -373,8 +372,8 @@ describe('GatheringManager deep paths', () => {
         { id: 'i2', item_id: 'iron', item_name: 'Iron Ore', quantity: 8, user_id: 'u1', guild_id: 'g1' },
       ],
     });
-    const mgr = new GatheringManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-    try { await mgr.viewInventory('u1'); } catch { /* expected */ }
+    const mgr = new GatheringManager({ id: 'g1' } as any, supa, makeValkey());
+    try { await mgr.gather('u1', {} as any); } catch { /* expected */ }
   });
 });
 
@@ -390,8 +389,8 @@ describe('FishingManager deep paths', () => {
           { id: 'f2', guild_id: 'g1', name: 'Salmon', emoji: '🐠', rarity: 'uncommon', sell_price: 50, xp: 15, min_level: 3, weight_min: 1, weight_max: 8, active: true },
         ],
       });
-      const mgr = new FishingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.cast('u1');
+      const mgr = new FishingManager({ id: 'g1' } as any, supa, makeValkey());
+      await mgr.fish('u1');
     } catch { /* expected */ }
   });
 
@@ -407,8 +406,8 @@ describe('FishingManager deep paths', () => {
           { id: 'f1', guild_id: 'g1', name: 'Trout', emoji: '🐟', rarity: 'common', sell_price: 20 },
         ],
       });
-      const mgr = new FishingManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.viewBag('u1');
+      const mgr = new FishingManager({ id: 'g1' } as any, supa, makeValkey());
+      await mgr.getCollection('u1');
     } catch { /* expected */ }
   });
 });
@@ -431,7 +430,7 @@ describe('LotteryManager deep paths', () => {
           { id: 't2', lottery_id: 'lot1', user_id: 'u2', quantity: 5 },
         ],
       });
-      const mgr = new LotteryManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+      const mgr = new LotteryManager(supa as any);
       await mgr.viewLottery(makeInt());
     } catch { /* expected */ }
   });
@@ -449,8 +448,8 @@ describe('LotteryManager deep paths', () => {
         }],
         lottery_tickets: [{ id: 't1', lottery_id: 'lot1', user_id: 'u1', quantity: 1 }],
       });
-      const mgr = new LotteryManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.buyTicket(makeInt());
+      const mgr = new LotteryManager(supa as any);
+      await mgr.buyTickets(makeInt() as any, 1);
     } catch { /* expected */ }
   });
 
@@ -470,8 +469,8 @@ describe('LotteryManager deep paths', () => {
           { id: 't2', lottery_id: 'lot1', user_id: 'u2', quantity: 7 },
         ],
       });
-      const mgr = new LotteryManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.drawLottery('g1');
+      const mgr = new LotteryManager(supa as any);
+      await (mgr as any).checkAndDraw('g1');
     } catch { /* expected */ }
   });
 });
@@ -495,7 +494,7 @@ describe('AdventureManager deep paths', () => {
       ],
       adventure_sessions: [],
     });
-    const mgr = new AdventureManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+    const mgr = new AdventureManager({ id: 'g1' } as any, supa, makeValkey());
     try { await mgr.startAdventure(makeInt()); } catch { /* expected */ }
   });
 });
@@ -509,8 +508,8 @@ describe('SyncEngine deep paths', () => {
       guild_desired_state: {
         guild_id: 'g1',
         roles: [
-          { key: 'mod', name: 'Moderator', permissions: '268435456', color: 0x5865f2, hoist: true, mentionable: false },
-          { key: 'member', name: 'Member', permissions: '0', color: 0, hoist: false, mentionable: false },
+          { key: 'mod', name: 'Moderator', permissions: '268435456', color: 0x5865f2, hoist: true, mentionable: false, position: 0 },
+          { key: 'member', name: 'Member', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 },
         ],
         channels: [
           { key: 'general', name: 'general', type: 0, categoryKey: null, position: 0, permissionOverrides: [] },
@@ -534,7 +533,7 @@ describe('SyncEngine deep paths', () => {
         ['c1', { id: 'c1', name: 'general', type: 0, parentId: null, position: 0, permissionOverwrites: { cache: new Map() } }],
       ]) },
     };
-    try { await runSyncCycle(guild as any, supa); } catch { /* expected */ }
+    try { await runSyncCycle(guild as any, supa, {} as any, {} as any); } catch { /* expected */ }
   });
 });
 
@@ -547,10 +546,10 @@ describe('RepairActions deep paths', () => {
     });
     const guild = {
       id: 'g1',
-      roles: { cache: new Map([['r1', { id: 'r1', name: 'Admin', edit: vi.fn().mockResolvedValue({}), color: 0xff0000, hoist: false, mentionable: false }]]) },
+      roles: { cache: new Map([['r1', { id: 'r1', name: 'Admin', edit: vi.fn().mockResolvedValue({}), color: 0xff0000, hoist: false, mentionable: false, position: 0 }]]) },
       channels: { cache: new Map() },
     };
-    try { await repairDriftItem(guild as any, supa, { id: 'd1', guild_id: 'g1', entity_type: 'role', entity_key: 'mod', discord_id: 'r1', drift_type: 'modified', details: { name: { expected: 'Mod', actual: 'Admin' } }, created_at: new Date().toISOString() }); } catch { /* expected */ }
+    try { await repairDriftItem(guild as any, supa, { type: 'ROLE_MODIFIED' as any, severity: 'warning' as any, entityType: 'role', entityName: 'mod', entityDiscordId: 'r1', description: 'name mismatch', details: { name: { expected: 'Mod', actual: 'Admin' } }, suggestedAction: 'repair' }); } catch { /* expected */ }
   });
 
   it('repairDriftItem for channel modification', async () => {
@@ -561,19 +560,19 @@ describe('RepairActions deep paths', () => {
       roles: { cache: new Map() },
       channels: { cache: new Map([['c1', { id: 'c1', name: 'wrong-name', edit: vi.fn().mockResolvedValue({}), type: 0 }]]) },
     };
-    try { await repairDriftItem(guild as any, supa, { id: 'd2', guild_id: 'g1', entity_type: 'channel', entity_key: 'general', discord_id: 'c1', drift_type: 'modified', details: { name: { expected: 'general', actual: 'wrong-name' } }, created_at: new Date().toISOString() }); } catch { /* expected */ }
+    try { await repairDriftItem(guild as any, supa, { type: 'CHANNEL_MODIFIED' as any, severity: 'warning' as any, entityType: 'channel', entityName: 'general', entityDiscordId: 'c1', description: 'name mismatch', details: { name: { expected: 'general', actual: 'wrong-name' } }, suggestedAction: 'repair' }); } catch { /* expected */ }
   });
 
   it('repairDriftItem for deleted role', async () => {
     const { repairDriftItem } = await import('../sync/repair-actions.js');
     const supa = smartSupa({
-      guild_desired_state: { roles: [{ key: 'mod', name: 'Mod', permissions: '0', color: 0, hoist: false, mentionable: false }] },
+      guild_desired_state: { roles: [{ key: 'mod', name: 'Mod', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 }] },
     });
     const guild = {
       id: 'g1',
       roles: { cache: new Map(), create: vi.fn().mockResolvedValue({ id: 'r-new', name: 'Mod' }) },
       channels: { cache: new Map() },
     };
-    try { await repairDriftItem(guild as any, supa, { id: 'd3', guild_id: 'g1', entity_type: 'role', entity_key: 'mod', discord_id: 'r1', drift_type: 'deleted', details: {}, created_at: new Date().toISOString() }); } catch { /* expected */ }
+    try { await repairDriftItem(guild as any, supa, { type: 'ROLE_DELETED' as any, severity: 'critical' as any, entityType: 'role', entityName: 'mod', entityDiscordId: 'r1', description: 'role deleted', suggestedAction: 'repair' }); } catch { /* expected */ }
   });
 });

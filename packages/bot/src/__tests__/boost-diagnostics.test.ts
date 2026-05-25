@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for features/audit/diagnostics-service.ts — DiagnosticsService class.
  * 132 uncovered statements at 14.8%.
@@ -33,7 +32,7 @@ function makeChain(data: any = null) {
 
 describe('DiagnosticsService', () => {
   it('instantiates', () => {
-    const svc = new DiagnosticsService({
+    const svc = new DiagnosticsService({} as any, {
       from: vi.fn(() => makeChain()),
       rpc: vi.fn(async () => ({ data: null, error: null })),
     } as any);
