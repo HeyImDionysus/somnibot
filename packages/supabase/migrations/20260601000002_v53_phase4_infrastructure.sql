@@ -59,8 +59,7 @@ CREATE TABLE IF NOT EXISTS temp_role_grants (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_temp_role_grants_expiry ON temp_role_grants(expires_at)
-  WHERE expires_at > now();
+CREATE INDEX IF NOT EXISTS idx_temp_role_grants_expiry ON temp_role_grants(expires_at);
 
 ALTER TABLE temp_role_grants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY temp_role_grants_guild ON temp_role_grants
