@@ -309,8 +309,8 @@ SET search_path = ''
 AS $$
 BEGIN
   UPDATE public.automations
-  SET run_count = run_count + 1,
-      last_run_at = now()
+  SET execution_count = COALESCE(execution_count, 0) + 1,
+      last_executed_at = now()
   WHERE id = automation_uuid;
 END;
 $$;
@@ -404,13 +404,11 @@ DECLARE
   v_xp_per_level INT := 100;
 BEGIN
   -- Upsert member_levels row
-  INSERT INTO public.member_levels (guild_id, member_id, xp, level, username, avatar_url, updated_at)
-  VALUES (p_guild_id, p_member_id, p_xp_gain, 0, p_username, p_avatar, now())
+  INSERT INTO public.member_levels (guild_id, member_id, xp, level, updated_at)
+  VALUES (p_guild_id, p_member_id, p_xp_gain, 0, now())
   ON CONFLICT (guild_id, member_id)
   DO UPDATE SET
     xp = public.member_levels.xp + p_xp_gain,
-    username = COALESCE(p_username, public.member_levels.username),
-    avatar_url = COALESCE(p_avatar, public.member_levels.avatar_url),
     updated_at = now()
   RETURNING public.member_levels.xp, public.member_levels.level
   INTO v_new_xp, v_current_level;
@@ -451,8 +449,9 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
   UPDATE public.customers
-  SET total_orders = total_orders + 1,
-      total_spent = total_spent + p_amount
+  SET total_spent_cents = COALESCE(total_spent_cents, 0) + p_amount,
+      first_purchase_at = COALESCE(first_purchase_at, now()),
+      updated_at = now()
   WHERE id = p_customer_id;
 $$;
 
