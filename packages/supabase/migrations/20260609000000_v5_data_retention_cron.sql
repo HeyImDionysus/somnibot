@@ -5,7 +5,7 @@
 --
 -- Tables and retention periods:
 --   economy_transactions  — 180 days
---   audit_log             — 90 days
+--   audit_logs             — 90 days
 --   license_validations   — 90 days
 --   webhook_events        — 30 days
 --
@@ -32,7 +32,7 @@ SELECT cron.unschedule('retention-audit-log')
 SELECT cron.schedule(
   'retention-audit-log',
   '10 3 * * 0',
-  $$SELECT cleanup_old_records('audit_log', 90)$$
+  $$SELECT cleanup_old_records('audit_logs', 90)$$
 );
 
 SELECT cron.unschedule('retention-license-validations')
