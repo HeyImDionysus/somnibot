@@ -158,14 +158,27 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Supabase CLI
         run: |
-          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.0.2/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin supabase
+          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.101.0/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
       - name: Start Supabase local
         run: |
-          cd packages/supabase
-          supabase init --force 2>/dev/null || true
-          supabase start --ignore-health-check
+          cd packages
+          supabase start
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Verify Supabase is healthy
+        run: |
+          echo "Verifying Supabase REST API is responding..."
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
+              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+              echo "✅ Supabase REST API ready (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — waiting..."
+            sleep 2
+          done
+          echo "❌ Supabase REST API did not respond within 60s"
+          exit 1
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
       - name: Run integration tests
@@ -175,7 +188,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       - name: Stop Supabase
         if: always()
-        run: cd packages/supabase && supabase stop 2>/dev/null || true
+        run: cd packages && supabase stop 2>/dev/null || true
 
   # ──────────────────────────────────────────────────────────
   # Migration Lint
