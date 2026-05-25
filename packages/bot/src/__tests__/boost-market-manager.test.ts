@@ -136,6 +136,15 @@ function makeDiscordClient() {
 }
 
 describe('MarketManager', () => {
+  it('has required methods', () => {
+    const manager = new MarketManager(makeGuild() as any, makeSupa() as any, makeValkey());
+    expect(typeof manager.browse).toBe('function');
+    expect(typeof manager.listItem).toBe('function');
+    expect(typeof manager.buy).toBe('function');
+    expect(typeof manager.myListings).toBe('function');
+    expect(typeof manager.cancelListing).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new MarketManager(makeGuild() as any, makeSupa() as any, makeValkey());
     expect(manager).toBeDefined();

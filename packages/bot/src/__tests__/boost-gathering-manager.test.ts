@@ -134,5 +134,16 @@ describe('GatheringManager', () => {
     const manager = new GatheringManager(makeGuild() as any, makeSupa() as any, makeValkey());
     expect(manager).toBeDefined();
   });
-  
+
+  it('has getConfig method', () => {
+    const manager = new GatheringManager(makeGuild() as any, makeSupa() as any, makeValkey());
+    expect(typeof manager.getConfig).toBe('function');
+  });
+
+  it('getConfig returns config object', async () => {
+    const manager = new GatheringManager(makeGuild() as any, makeSupa() as any, makeValkey());
+    const config = await manager.getConfig();
+    expect(config).toBeDefined();
+    expect(typeof config.economy_gathering_enabled).toBe('boolean');
+  });
 });

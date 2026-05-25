@@ -131,6 +131,15 @@ function makeDiscordClient() {
 }
 
 describe('PetsManager', () => {
+  it('has required methods', () => {
+    const manager = new PetsManager(makeSupa() as any);
+    expect(typeof manager.viewPet).toBe('function');
+    expect(typeof manager.buyPet).toBe('function');
+    expect(typeof manager.feedPet).toBe('function');
+    expect(typeof manager.playWithPet).toBe('function');
+    expect(typeof manager.trainPet).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new PetsManager(makeGuild() as any, makeSupa() as any, makeValkey());
     expect(manager).toBeDefined();

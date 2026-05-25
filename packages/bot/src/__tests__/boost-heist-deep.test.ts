@@ -81,7 +81,13 @@ describe('HeistManager deep', () => {
       guild_config: { guild_id: 'guild-1', heist_enabled: true, heist_min_players: 2, heist_max_players: 10, heist_cooldown_minutes: 5, heist_bet_min: 50, heist_bet_max: 5000, currency_symbol: '💰' },
     });
     const mgr = new HeistManager(supa, makeClient());
-    await mgr.startHeist(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.startHeist(interaction);
+    // Should respond to the interaction
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
+    // Should query config
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('joinHeist adds a player', async () => {
@@ -90,7 +96,10 @@ describe('HeistManager deep', () => {
       heists: { id: 'heist-1', guild_id: 'guild-1', status: 'recruiting', players: ['user-2'], bet_amount: 100, started_by: 'user-2', channel_id: 'ch-1' },
     });
     const mgr = new HeistManager(supa, makeClient());
-    await mgr.joinHeist(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.joinHeist(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('viewHeist shows current heist', async () => {
@@ -99,18 +108,25 @@ describe('HeistManager deep', () => {
       heists: { id: 'heist-1', guild_id: 'guild-1', status: 'recruiting', players: ['user-1'], bet_amount: 100, started_by: 'user-1', channel_id: 'ch-1', target: 'bank' },
     });
     const mgr = new HeistManager(supa, makeClient());
-    await mgr.viewHeist(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.viewHeist(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('cleanup clears timers', () => {
     const supa = makeSupa();
     const mgr = new HeistManager(supa, makeClient());
     mgr.cleanup();
+    // Should not throw
+    expect(mgr).toBeDefined();
   });
 
   it('clearCache clears config cache', () => {
     const supa = makeSupa();
     const mgr = new HeistManager(supa, makeClient());
     mgr.clearCache();
+    // Should not throw
+    expect(mgr).toBeDefined();
   });
 });

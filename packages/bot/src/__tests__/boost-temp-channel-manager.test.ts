@@ -128,6 +128,14 @@ function makeDiscordClient() {
 }
 
 describe('TempChannelManager', () => {
+  it('has required methods', () => {
+    const manager = new TempChannelManager(makeGuild() as any, makeSupa() as any);
+    expect(typeof manager.start).toBe('function');
+    expect(typeof manager.handleJoinHub).toBe('function');
+    expect(typeof manager.handleLeaveTemp).toBe('function');
+    expect(typeof manager.reloadHubs).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new TempChannelManager(makeGuild() as any, makeSupa() as any);
     expect(manager).toBeDefined();

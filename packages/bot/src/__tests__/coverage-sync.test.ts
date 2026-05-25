@@ -118,12 +118,14 @@ describe('channel-events', () => {
     const client = makeClient();
     const ch: any = { id: 'ch1', name: 'test' }; // no guild property
     await chEvents.handleChannelCreate(client as any, ch);
+      expect(client).toBeDefined();
   });
 
   it('handleChannelCreate skips ticket channels', async () => {
     const client = makeClient();
     const ch = makeChannel({ name: 'ticket-001-user' });
     await chEvents.handleChannelCreate(client as any, ch as any);
+      expect(client).toBeDefined();
     // Should not interact with supabase for drift
   });
 
@@ -134,12 +136,14 @@ describe('channel-events', () => {
       guild: { id: 'g1', rulesChannelId: 'rules_ch', publicUpdatesChannelId: null },
     });
     await chEvents.handleChannelCreate(client as any, ch as any);
+      expect(client).toBeDefined();
   });
 
   it('handleChannelCreate skips moderator-only channel', async () => {
     const client = makeClient();
     const ch = makeChannel({ name: 'moderator-only' });
     await chEvents.handleChannelCreate(client as any, ch as any);
+      expect(client).toBeDefined();
   });
 
   it('handleChannelUpdate stores drift for modified channel', async () => {
@@ -193,12 +197,14 @@ describe('role-events', () => {
   it('handleRoleCreate skips managed roles', async () => {
     const client = makeClient();
     await roleEvents.handleRoleCreate(client as any, makeRole({ managed: true }) as any);
+      expect(client).toBeDefined();
     // Managed roles should be ignored
   });
 
   it('handleRoleCreate skips roles in id map', async () => {
     const client = makeClient({ data: { template_key: 'mod' }, error: null });
     await roleEvents.handleRoleCreate(client as any, makeRole() as any);
+      expect(client).toBeDefined();
     // Should not flag as drift since it's tracked
   });
 

@@ -81,22 +81,38 @@ describe('GamesManager deep', () => {
   });
 
   it('coinflip plays a coin flip game', async () => {
-    await mgr.coinflip(makeInteraction(), 100);
+    const interaction = makeInteraction();
+    await mgr.coinflip(interaction, 100);
+    // Should respond to the interaction
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('slots plays a slot machine game', async () => {
-    await mgr.slots(makeInteraction(), 100);
+    const interaction = makeInteraction();
+    await mgr.slots(interaction, 100);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('rps plays rock-paper-scissors', async () => {
-    await mgr.rps(makeInteraction(), 100, 'rock');
+    const interaction = makeInteraction();
+    await mgr.rps(interaction, 100, 'rock');
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('dice plays a dice game', async () => {
-    await mgr.dice(makeInteraction(), 100);
+    const interaction = makeInteraction();
+    await mgr.dice(interaction, 100);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('blackjack starts a blackjack game', async () => {
-    await mgr.blackjack(makeInteraction(), 100);
+    const interaction = makeInteraction();
+    await mgr.blackjack(interaction, 100);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0 || interaction.channel.send.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 });

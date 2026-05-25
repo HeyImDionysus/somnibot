@@ -108,7 +108,13 @@ describe('AdventureManager deep', () => {
       ],
     });
     const mgr = new AdventureManager(makeGuild(), supa, makeValkey());
-    await mgr.startAdventure(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.startAdventure(interaction);
+    // Should reply or editReply to the interaction
+    const replied = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(replied).toBe(true);
+    // Should query guild_config
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('handleChoice processes a player choice', async () => {
@@ -129,5 +135,8 @@ describe('AdventureManager deep', () => {
       message: { edit: vi.fn().mockResolvedValue({}) },
     } as any;
     await mgr.handleChoice(btn, 'session-1', 0);
+    // Should interact with the button
+    const responded = btn.reply.mock.calls.length > 0 || btn.deferUpdate.mock.calls.length > 0 || btn.editReply.mock.calls.length > 0 || btn.followUp.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 });

@@ -135,6 +135,13 @@ function makeDiscordClient() {
 }
 
 describe('LotteryManager', () => {
+  it('has required methods', () => {
+    const manager = new LotteryManager(makeSupa() as any, makeGuild() as any);
+    expect(typeof manager.buyTickets).toBe('function');
+    expect(typeof manager.viewLottery).toBe('function');
+    expect(typeof manager.drawWinner).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new LotteryManager(makeSupa() as any);
     expect(manager).toBeDefined();

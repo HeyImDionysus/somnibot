@@ -81,6 +81,7 @@ describe('escalation', () => {
         modLogChannelId: null as any,
       };
       await executeEscalation(client, member as any, 'Test reason', config);
+        expect(client.supabase.from).toHaveBeenCalled();
     });
   });
 });

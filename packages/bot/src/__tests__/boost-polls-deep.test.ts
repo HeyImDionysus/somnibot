@@ -113,6 +113,7 @@ describe('PollsManager deep', () => {
     it('creates a multi-choice poll', async () => {
       const interaction = makeInteraction();
       await manager.createPoll(interaction, 'Pick many', ['A', 'B', 'C', 'D'], true);
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 
@@ -126,6 +127,8 @@ describe('PollsManager deep', () => {
       manager = new PollsManager(supa);
       const btn = makeButtonInteraction('poll:vote:poll-1:0');
       await manager.handlePollVote(btn);
+      const responded = btn.deferUpdate.mock.calls.length > 0 || btn.reply.mock.calls.length > 0 || btn.editReply.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
   });
 
@@ -138,6 +141,7 @@ describe('PollsManager deep', () => {
       manager = new PollsManager(supa);
       const interaction = makeInteraction();
       await manager.closePoll(interaction, 'poll-1');
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 
@@ -145,6 +149,7 @@ describe('PollsManager deep', () => {
     it('creates a prediction market', async () => {
       const interaction = makeInteraction();
       await manager.createPrediction(interaction, 'Will it rain?', ['Yes', 'No']);
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 
@@ -161,6 +166,7 @@ describe('PollsManager deep', () => {
       manager = new PollsManager(supa);
       const interaction = makeInteraction();
       await manager.placeBet(interaction, 'pred-1', 0, 100);
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 
@@ -177,6 +183,7 @@ describe('PollsManager deep', () => {
       manager = new PollsManager(supa);
       const interaction = makeInteraction();
       await manager.resolvePrediction(interaction, 'pred-1', 0);
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 });

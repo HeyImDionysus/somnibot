@@ -39,6 +39,11 @@ function makeChain(data: any = null) {
 }
 
 describe('ForumTicketService', () => {
+  it('has required methods', () => {
+    const svc = new ForumTicketService({} as any, {} as any);
+    expect(typeof svc.createForumTicket).toBe('function');
+  });
+
   it('instantiates', () => {
     const svc = new ForumTicketService(
       { id: 'guild-1' } as any,

@@ -48,7 +48,7 @@ describe('license-commands', () => {
     expect(cmd).toBeDefined();
   });
 
-  it('handleLicenseCommand runs without error', async () => {
+  it('handleLicenseCommand responds to interaction', async () => {
     const interaction = {
       guildId: 'guild-1',
       user: { id: 'user-1' },
@@ -63,5 +63,6 @@ describe('license-commands', () => {
     } as any;
     const supa = { from: vi.fn(() => makeChain()) } as any;
     await handleLicenseCommand(interaction, supa, {} as any);
+      expect(supa.from).toHaveBeenCalled();
   });
 });

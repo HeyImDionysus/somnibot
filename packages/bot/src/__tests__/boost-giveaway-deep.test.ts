@@ -85,6 +85,8 @@ describe('GiveawayManager deep', () => {
       winnerCount: 1,
       durationMs: 60000,
     });
+    // Should insert into giveaways table
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('handleEntry adds a user to a giveaway', async () => {
@@ -106,6 +108,9 @@ describe('GiveawayManager deep', () => {
       followUp: vi.fn().mockResolvedValue({}),
     } as any;
     await mgr.handleEntry(btn);
+    // Should respond to the button interaction
+    const responded = btn.deferUpdate.mock.calls.length > 0 || btn.reply.mock.calls.length > 0 || btn.followUp.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('endGiveaway picks winners', async () => {
@@ -117,13 +122,16 @@ describe('GiveawayManager deep', () => {
       },
     });
     const mgr = new GiveawayManager(makeGuild(), supa, makeValkey(), makeEventBus());
-    // endGiveaway may return undefined if no data found; we just verify it doesn't throw
-    await mgr.endGiveaway('ga-1');
+    const result = await mgr.endGiveaway('ga-1');
+    // Should return an array (winners list) or handle gracefully
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('start begins expiration check timer', async () => {
     const supa = makeSupa();
     const mgr = new GiveawayManager(makeGuild(), supa, makeValkey(), makeEventBus());
     await mgr.start();
+    // Should query for active giveaways
+    expect(supa.from).toHaveBeenCalled();
   });
 });

@@ -70,6 +70,11 @@ describe('button-roles', () => {
         editReply: vi.fn().mockResolvedValue({}),
       } as any;
       await handleButtonRoleInteraction(interaction, supa);
+      // Should query the panels table
+      expect(supa.from).toHaveBeenCalled();
+      // Should respond to the interaction
+      const responded = interaction.reply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
 
     it('ignores non-buttonrole custom IDs', async () => {
@@ -78,7 +83,8 @@ describe('button-roles', () => {
         reply: vi.fn(),
       } as any;
       const result = await handleButtonRoleInteraction(interaction, makeSupa());
-      // Should return early
+      // Should return early without replying
+      expect(interaction.reply).not.toHaveBeenCalled();
     });
   });
 
@@ -97,6 +103,8 @@ describe('button-roles', () => {
         },
       });
       await deployButtonRolesPanel(guild, supa, 'panel-1');
+      // Should query the panels table
+      expect(supa.from).toHaveBeenCalled();
     });
   });
 });

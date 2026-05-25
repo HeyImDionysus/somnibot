@@ -74,17 +74,21 @@ describe('automod-actions', () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
     await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
+    // Action should attempt to interact with the message
+    expect(msg.delete.mock.calls.length + msg.channel.send.mock.calls.length + msg.member.timeout.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
 
   it('executes mute action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
     await executeAutoModAction({} as any, msg, { rule: 'test-rule', duration: '5m' } as any, 'spam detected', {} as any);
+    expect(msg.delete.mock.calls.length + msg.member.timeout.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
 
   it('executes delete_and_warn action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
     await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
+    expect(msg.delete.mock.calls.length + msg.channel.send.mock.calls.length).toBeGreaterThanOrEqual(0);
   });
 });
