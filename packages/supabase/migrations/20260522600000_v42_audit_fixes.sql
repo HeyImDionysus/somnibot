@@ -120,14 +120,15 @@ END;
 $$;
 
 -- nextval_ticket (from ticket_transcripts)
+DROP FUNCTION IF EXISTS nextval_ticket();
 CREATE OR REPLACE FUNCTION nextval_ticket()
-RETURNS INT
+RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_val INT;
+  v_val BIGINT;
 BEGIN
   SELECT COALESCE(MAX(ticket_number), 0) + 1 INTO v_val FROM public.ticket_transcripts;
   RETURN v_val;
@@ -135,14 +136,15 @@ END;
 $$;
 
 -- nextval_incident (from V13)
+DROP FUNCTION IF EXISTS nextval_incident();
 CREATE OR REPLACE FUNCTION nextval_incident()
-RETURNS INT
+RETURNS BIGINT
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_val INT;
+  v_val BIGINT;
 BEGIN
   SELECT COALESCE(MAX(incident_number), 0) + 1 INTO v_val FROM public.incidents;
   RETURN v_val;
@@ -336,6 +338,7 @@ END;
 $$;
 
 -- giveaway_add_entry (giveaway_atomic_entries)
+DROP FUNCTION IF EXISTS giveaway_add_entry(UUID, TEXT);
 CREATE OR REPLACE FUNCTION giveaway_add_entry(p_giveaway_id UUID, p_user_id TEXT)
 RETURNS void
 LANGUAGE plpgsql
@@ -351,6 +354,7 @@ END;
 $$;
 
 -- giveaway_remove_entry (giveaway_atomic_entries)
+DROP FUNCTION IF EXISTS giveaway_remove_entry(UUID, TEXT);
 CREATE OR REPLACE FUNCTION giveaway_remove_entry(p_giveaway_id UUID, p_user_id TEXT)
 RETURNS void
 LANGUAGE plpgsql
@@ -379,6 +383,7 @@ END;
 $$;
 
 -- increment_member_xp (audit_v5_atomic_ops)
+DROP FUNCTION IF EXISTS increment_member_xp(TEXT, TEXT, INT, BOOLEAN, INT);
 CREATE OR REPLACE FUNCTION increment_member_xp(
   p_guild_id TEXT,
   p_member_id TEXT,
@@ -463,6 +468,7 @@ AS $$
 $$;
 
 -- aggregate_member_levels (V31 economy core)
+DROP FUNCTION IF EXISTS aggregate_member_levels(text);
 CREATE OR REPLACE FUNCTION aggregate_member_levels(p_guild_id text)
 RETURNS TABLE(total_members bigint, avg_level numeric, max_level int, total_xp bigint)
 LANGUAGE sql
