@@ -254,8 +254,8 @@ AS $$
   FROM public.economy_items ei
   LEFT JOIN public.economy_transactions et
     ON et.guild_id = p_guild_id
-    AND et.metadata->>'item_id' = ei.id
-    AND et.type = 'spend'
+    AND et.metadata->>'item_id' = ei.id::TEXT
+    AND et.type = 'shop_buy'
     AND et.created_at >= NOW() - (p_days || ' days')::INTERVAL
   WHERE ei.guild_id = p_guild_id
   GROUP BY ei.id, ei.name
