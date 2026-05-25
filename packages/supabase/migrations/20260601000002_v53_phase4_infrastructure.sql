@@ -59,14 +59,16 @@ CREATE TABLE IF NOT EXISTS temp_role_grants (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_temp_role_grants_expiry ON temp_role_grants(expires_at)
-  WHERE expires_at > now();
+CREATE INDEX IF NOT EXISTS idx_temp_role_grants_expiry ON temp_role_grants(expires_at);
 
 ALTER TABLE temp_role_grants ENABLE ROW LEVEL SECURITY;
 CREATE POLICY temp_role_grants_guild ON temp_role_grants
   FOR ALL USING (guild_id = current_setting('app.guild_id', true));
 
 -- ── 4.4: Bulk member economy reset RPC ──────────────────────────
+
+ALTER TABLE economy_market_listings ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+
 CREATE OR REPLACE FUNCTION bulk_reset_economy(
   p_guild_id text,
   p_member_ids text[]
