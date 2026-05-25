@@ -20,9 +20,15 @@ CREATE TABLE IF NOT EXISTS alerts (
   updated_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- Ensure columns exist even if table was created by an earlier migration
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS metadata    JSONB DEFAULT '{}';
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS resolved    BOOLEAN DEFAULT false;
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ DEFAULT now();
+
 ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
 
 -- Owner/service role access only
+DROP POLICY IF EXISTS "service_role_full_access" ON alerts;
 CREATE POLICY "service_role_full_access" ON alerts
   FOR ALL USING (auth.role() = 'service_role')
   WITH CHECK (auth.role() = 'service_role');
