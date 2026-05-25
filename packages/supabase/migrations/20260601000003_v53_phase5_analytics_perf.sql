@@ -174,12 +174,12 @@ AS $$
   SELECT
     d.day,
     COUNT(ml.id) FILTER (WHERE ml.created_at::DATE = d.day) AS listings_created,
-    COUNT(ml.id) FILTER (WHERE ml.sold_at::DATE = d.day AND ml.status = 'sold') AS listings_sold,
-    COALESCE(AVG(ml.price) FILTER (WHERE ml.sold_at::DATE = d.day AND ml.status = 'sold'), 0) AS avg_price
+    COUNT(ml.id) FILTER (WHERE ml.updated_at::DATE = d.day AND ml.status = 'sold') AS listings_sold,
+    COALESCE(AVG(ml.price_per_unit) FILTER (WHERE ml.updated_at::DATE = d.day AND ml.status = 'sold'), 0) AS avg_price
   FROM date_series d
   LEFT JOIN public.economy_market_listings ml
     ON ml.guild_id = p_guild_id
-    AND (ml.created_at::DATE = d.day OR ml.sold_at::DATE = d.day)
+    AND (ml.created_at::DATE = d.day OR ml.updated_at::DATE = d.day)
   GROUP BY d.day
   ORDER BY d.day;
 $$;
