@@ -128,6 +128,12 @@ function makeDiscordClient() {
 }
 
 describe('ScheduledMessageRunner', () => {
+  it('has required lifecycle methods', () => {
+    const runner = new ScheduledMessageRunner(makeGuild() as any, makeSupa() as any);
+    expect(typeof runner.start).toBe('function');
+    expect(typeof runner.stop).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new ScheduledMessageRunner(makeGuild() as any, makeSupa() as any);
     expect(manager).toBeDefined();

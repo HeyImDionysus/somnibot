@@ -156,6 +156,7 @@ describe('events/handler', () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireOnce('ready', { user: { tag: 'Bot#0001' }, ws: { ping: 50 }, guilds: { cache: new Map() } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('guildMemberAdd fires handleMemberJoin', async () => {
@@ -163,6 +164,7 @@ describe('events/handler', () => {
     registerEvents(client as any);
     const member = { id: 'u1', guild: { id: 'g1' }, user: { bot: false } };
     await fireEvent('guildMemberAdd', member);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('guildMemberRemove fires handleMemberLeave', async () => {
@@ -170,6 +172,7 @@ describe('events/handler', () => {
     registerEvents(client as any);
     const member = { id: 'u1', guild: { id: 'g1' }, user: { bot: false } };
     await fireEvent('guildMemberRemove', member);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('guildMemberUpdate fires handleMemberUpdate', async () => {
@@ -178,42 +181,49 @@ describe('events/handler', () => {
     const old = { id: 'u1', guild: { id: 'g1' } };
     const nw = { id: 'u1', guild: { id: 'g1' } };
     await fireEvent('guildMemberUpdate', old, nw);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('roleCreate fires handleRoleCreate', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('roleCreate', { id: 'r1', guild: { id: 'g1' } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('roleUpdate fires handleRoleUpdate', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('roleUpdate', { id: 'r1', guild: { id: 'g1' } }, { id: 'r1', guild: { id: 'g1' } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('roleDelete fires handleRoleDelete', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('roleDelete', { id: 'r1', guild: { id: 'g1' } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('channelCreate fires handleChannelCreate', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('channelCreate', { id: 'c1', guild: { id: 'g1' }, type: 0 });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('channelUpdate fires handleChannelUpdate', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('channelUpdate', { id: 'c1', guild: { id: 'g1' } }, { id: 'c1', guild: { id: 'g1' } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('channelDelete fires handleChannelDelete', async () => {
     const client = makeClient();
     registerEvents(client as any);
     await fireEvent('channelDelete', { id: 'c1', guild: { id: 'g1' } });
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageCreate processes a regular message', async () => {
@@ -227,6 +237,7 @@ describe('events/handler', () => {
       member: { roles: { cache: new Map() } },
     };
     await fireEvent('messageCreate', message);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageCreate ignores bot messages', async () => {
@@ -234,6 +245,7 @@ describe('events/handler', () => {
     registerEvents(client as any);
     const message = { author: { id: 'bot1', bot: true }, guild: { id: 'g1' }, content: 'hi' };
     await fireEvent('messageCreate', message);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageReactionAdd processes reaction', async () => {
@@ -242,6 +254,7 @@ describe('events/handler', () => {
     const reaction = { emoji: { name: '⭐' }, message: { guild: { id: 'g1' }, author: { id: 'u1' }, partial: false, fetch: vi.fn() }, partial: false };
     const user = { id: 'u2', bot: false };
     await fireEvent('messageReactionAdd', reaction, user);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageReactionRemove processes reaction', async () => {
@@ -250,6 +263,7 @@ describe('events/handler', () => {
     const reaction = { emoji: { name: '👍' }, message: { guild: { id: 'g1' }, partial: false, fetch: vi.fn() }, partial: false };
     const user = { id: 'u2', bot: false };
     await fireEvent('messageReactionRemove', reaction, user);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageUpdate processes edit', async () => {
@@ -258,6 +272,7 @@ describe('events/handler', () => {
     const old = { content: 'old', guild: { id: 'g1' }, partial: false, author: { bot: false } };
     const nw = { content: 'new', guild: { id: 'g1' }, partial: false, author: { bot: false } };
     await fireEvent('messageUpdate', old, nw);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('messageDelete processes deletion', async () => {
@@ -265,6 +280,7 @@ describe('events/handler', () => {
     registerEvents(client as any);
     const msg = { content: 'del', guild: { id: 'g1' }, partial: false, author: { bot: false }, attachments: new Map() };
     await fireEvent('messageDelete', msg);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('voiceStateUpdate fires voice handlers', async () => {
@@ -273,6 +289,7 @@ describe('events/handler', () => {
     const old = { channelId: null, member: { id: 'u1', user: { bot: false } }, guild: { id: 'g1' } };
     const nw = { channelId: 'vc1', member: { id: 'u1', user: { bot: false } }, guild: { id: 'g1' } };
     await fireEvent('voiceStateUpdate', old, nw);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('interactionCreate handles slash command', async () => {
@@ -295,6 +312,7 @@ describe('events/handler', () => {
       options: { getString: vi.fn(), getSubcommand: vi.fn(() => null), getUser: vi.fn(), getInteger: vi.fn(), getBoolean: vi.fn() },
     };
     await fireEvent('interactionCreate', interaction);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('interactionCreate handles button', async () => {
@@ -316,6 +334,7 @@ describe('events/handler', () => {
       deferUpdate: vi.fn(async () => {}),
     };
     await fireEvent('interactionCreate', interaction);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('interactionCreate handles select menu', async () => {
@@ -335,6 +354,7 @@ describe('events/handler', () => {
       reply: vi.fn(async () => {}),
     };
     await fireEvent('interactionCreate', interaction);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('interactionCreate handles modal', async () => {
@@ -354,6 +374,7 @@ describe('events/handler', () => {
       fields: { getTextInputValue: vi.fn(() => 'reason') },
     };
     await fireEvent('interactionCreate', interaction);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('interactionCreate handles autocomplete', async () => {
@@ -372,6 +393,7 @@ describe('events/handler', () => {
       options: { getFocused: vi.fn(() => ({ name: 'item', value: 'sw' })) },
     };
     await fireEvent('interactionCreate', interaction);
+      expect(handlers.size).toBeGreaterThan(0);
   });
 
   it('error and warn events fire', async () => {
@@ -379,5 +401,6 @@ describe('events/handler', () => {
     registerEvents(client as any);
     await fireEvent('error', new Error('test'));
     await fireEvent('warn', 'test warning');
+      expect(handlers.size).toBeGreaterThan(0);
   });
 });

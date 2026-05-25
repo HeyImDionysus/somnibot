@@ -115,4 +115,12 @@ describe('AdventureManager', () => {
   it('instantiates without errors', () => {
     expect(manager).toBeDefined();
   });
+
+  it('has startAdventure method', () => {
+    expect(typeof manager.startAdventure).toBe('function');
+  });
+
+  it('has handleChoice method', () => {
+    expect(typeof manager.handleChoice).toBe('function');
+  });
 });

@@ -137,6 +137,16 @@ function makeDiscordClient() {
 }
 
 describe('HeistManager', () => {
+  it('has required methods', () => {
+    const supa = makeSupa();
+    const manager = new HeistManager(supa as any, makeGuild() as any);
+    expect(typeof manager.startHeist).toBe('function');
+    expect(typeof manager.joinHeist).toBe('function');
+    expect(typeof manager.viewHeist).toBe('function');
+    expect(typeof manager.cleanup).toBe('function');
+    expect(typeof manager.clearCache).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new HeistManager(makeSupa() as any, makeDiscordClient() as any, makeValkey());
     expect(manager).toBeDefined();

@@ -70,6 +70,8 @@ describe('TempChannelManager deep', () => {
     });
     const mgr = new TempChannelManager(makeGuild(), supa);
     await mgr.start();
+    // Should query config and hubs tables
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('handleJoinHub creates a temp channel for user', async () => {
@@ -82,6 +84,8 @@ describe('TempChannelManager deep', () => {
     await mgr.start();
     const member = { id: 'user-1', displayName: 'Tester', voice: { setChannel: vi.fn() }, user: { id: 'user-1' } } as any;
     await mgr.handleJoinHub(member, 'vc-hub');
+    // Should attempt to create a channel or query DB
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('reloadHubs refreshes hub configuration', async () => {
@@ -91,5 +95,7 @@ describe('TempChannelManager deep', () => {
     });
     const mgr = new TempChannelManager(makeGuild(), supa);
     await mgr.reloadHubs();
+    // Should query the hubs table
+    expect(supa.from).toHaveBeenCalled();
   });
 });

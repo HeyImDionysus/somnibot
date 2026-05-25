@@ -134,5 +134,19 @@ describe('GiveawayManager', () => {
     const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
     expect(manager).toBeDefined();
   });
-  
+
+  it('has create method', () => {
+    const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
+    expect(typeof manager.create).toBe('function');
+  });
+
+  it('has handleEntry method', () => {
+    const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
+    expect(typeof manager.handleEntry).toBe('function');
+  });
+
+  it('has endGiveaway method', () => {
+    const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
+    expect(typeof manager.endGiveaway).toBe('function');
+  });
 });

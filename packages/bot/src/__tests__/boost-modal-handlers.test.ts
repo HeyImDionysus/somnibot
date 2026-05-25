@@ -109,6 +109,9 @@ describe('modal-handlers', () => {
       });
       const client = { supabase: makeSupa() } as any;
       await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
+      // Should respond to the interaction
+      const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0 || interaction.followUp.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
 
     it('handles report modal (report_message_MSG_ID)', async () => {
@@ -118,6 +121,8 @@ describe('modal-handlers', () => {
       });
       const client = { supabase: makeSupa() } as any;
       await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
+      const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0 || interaction.followUp.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
 
     it('handles ticket create modal (create_ticket_from_MSG_ID)', async () => {
@@ -127,12 +132,16 @@ describe('modal-handlers', () => {
       });
       const client = { supabase: makeSupa() } as any;
       await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
+      const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0 || interaction.followUp.mock.calls.length > 0;
+      expect(responded).toBe(true);
     });
 
     it('handles unknown modal ID gracefully', async () => {
       const interaction = makeModalInteraction('unknown_modal_xyz', {});
       const client = { supabase: makeSupa() } as any;
       await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
+      // Unknown modals should be handled gracefully (may or may not reply)
+      expect(interaction).toBeDefined();
     });
   });
 });

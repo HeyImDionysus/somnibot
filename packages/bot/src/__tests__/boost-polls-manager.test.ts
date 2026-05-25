@@ -131,6 +131,13 @@ function makeDiscordClient() {
 }
 
 describe('PollsManager', () => {
+  it('has required methods', () => {
+    const manager = new PollsManager(makeSupa() as any);
+    expect(typeof manager.createPoll).toBe('function');
+    expect(typeof manager.handlePollVote).toBe('function');
+    expect(typeof manager.closePoll).toBe('function');
+  });
+
   it('instantiates without errors', () => {
     const manager = new PollsManager(makeSupa() as any);
     expect(manager).toBeDefined();

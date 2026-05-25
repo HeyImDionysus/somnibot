@@ -77,7 +77,11 @@ describe('PetsManager deep', () => {
       pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat', level: 3, hunger: 50, happiness: 80, xp: 100, health: 100, prestige: 0 },
     });
     const mgr = new PetsManager(supa);
-    await mgr.viewPet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.viewPet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('buyPet creates a new pet', async () => {
@@ -87,7 +91,10 @@ describe('PetsManager deep', () => {
       pet_species: [{ name: 'cat', emoji: '🐱', cost: 200 }],
     });
     const mgr = new PetsManager(supa);
-    await mgr.buyPet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.buyPet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('feedPet feeds a pet', async () => {
@@ -96,7 +103,10 @@ describe('PetsManager deep', () => {
       pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat', hunger: 30, happiness: 80, health: 100, xp: 100, level: 3, prestige: 0 },
     });
     const mgr = new PetsManager(supa);
-    await mgr.feedPet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.feedPet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('playWithPet plays with a pet', async () => {
@@ -105,7 +115,10 @@ describe('PetsManager deep', () => {
       pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat', hunger: 50, happiness: 50, health: 100, xp: 100, level: 3, prestige: 0 },
     });
     const mgr = new PetsManager(supa);
-    await mgr.playWithPet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.playWithPet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('trainPet trains a pet', async () => {
@@ -114,7 +127,10 @@ describe('PetsManager deep', () => {
       pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat', hunger: 50, happiness: 80, health: 100, xp: 100, level: 3, prestige: 0 },
     });
     const mgr = new PetsManager(supa);
-    await mgr.trainPet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.trainPet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 
   it('renamePet renames a pet', async () => {
@@ -123,6 +139,9 @@ describe('PetsManager deep', () => {
       pets: { id: 'pet-1', user_id: 'user-1', guild_id: 'guild-1', name: 'Fluffy', species: 'cat' },
     });
     const mgr = new PetsManager(supa);
-    await mgr.renamePet(makeInteraction());
+    const interaction = makeInteraction();
+    await mgr.renamePet(interaction);
+    const responded = interaction.reply.mock.calls.length > 0 || interaction.editReply.mock.calls.length > 0 || interaction.deferReply.mock.calls.length > 0;
+    expect(responded).toBe(true);
   });
 });

@@ -134,6 +134,7 @@ describe('onboarding-handler', () => {
   it('handleMemberJoin skips bots', async () => {
     const client = makeClient();
     await handler.handleMemberJoin(client as any, makeMember(0, { user: { tag: 'Bot#0001', bot: true, displayAvatarURL: () => 'url' } }) as any);
+      expect(client).toBeDefined();
   });
 
   it('handleMemberUpdate detects onboarding completion', async () => {

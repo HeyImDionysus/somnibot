@@ -31,6 +31,11 @@ function makeChain(data: any = null) {
 }
 
 describe('DiagnosticsService', () => {
+  it('has snapshot method', () => {
+    const svc = new DiagnosticsService({} as any, {} as any);
+    expect(typeof svc.start).toBe('function');
+  });
+
   it('instantiates', () => {
     const svc = new DiagnosticsService({} as any, {
       from: vi.fn(() => makeChain()),

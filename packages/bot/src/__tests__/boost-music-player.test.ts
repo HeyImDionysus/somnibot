@@ -150,6 +150,15 @@ describe('MusicPlayerManager', () => {
     await manager.init();
   });
 
+  it('has required playback methods', () => {
+    expect(typeof manager.play).toBe('function');
+    expect(typeof manager.skip).toBe('function');
+    expect(typeof manager.stop).toBe('function');
+    expect(typeof manager.togglePause).toBe('function');
+    expect(typeof manager.setVolume).toBe('function');
+    expect(typeof manager.shuffle).toBe('function');
+  });
+
   it('shutdown clears timers', () => {
     manager.shutdown();
   });

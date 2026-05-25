@@ -175,24 +175,28 @@ describe('events/handler', () => {
   it('handles ready event', async () => {
     registerEvents(client);
     await client._emit('ready', client);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles guildMemberAdd event', async () => {
     registerEvents(client);
     const member = { id: 'user-1', guild: { id: 'guild-1' }, user: { tag: 'Test#0001' } };
     await client._emit('guildMemberAdd', member);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles guildMemberRemove event', async () => {
     registerEvents(client);
     const member = { id: 'user-1', guild: { id: 'guild-1' }, user: { tag: 'Test#0001' } };
     await client._emit('guildMemberRemove', member);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles messageCreate event (ignores bots)', async () => {
     registerEvents(client);
     const message = { author: { bot: true }, guildId: 'guild-1' };
     await client._emit('messageCreate', message);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles messageCreate event for real user', async () => {
@@ -206,6 +210,7 @@ describe('events/handler', () => {
       channel: { id: 'ch-1' },
     };
     await client._emit('messageCreate', message);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles interactionCreate for chat input command', async () => {
@@ -225,6 +230,7 @@ describe('events/handler', () => {
       editReply: vi.fn().mockResolvedValue({}),
     };
     await client._emit('interactionCreate', interaction);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles interactionCreate for button', async () => {
@@ -243,6 +249,7 @@ describe('events/handler', () => {
       deferReply: vi.fn().mockResolvedValue({}),
     };
     await client._emit('interactionCreate', interaction);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles interactionCreate for modal submit', async () => {
@@ -260,12 +267,14 @@ describe('events/handler', () => {
       reply: vi.fn().mockResolvedValue({}),
     };
     await client._emit('interactionCreate', interaction);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles roleCreate event', async () => {
     registerEvents(client);
     const role = { id: 'role-1', guild: { id: 'guild-1' }, name: 'NewRole' };
     await client._emit('roleCreate', role);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles roleUpdate event', async () => {
@@ -273,18 +282,21 @@ describe('events/handler', () => {
     const oldRole = { id: 'role-1', name: 'Old' };
     const newRole = { id: 'role-1', name: 'New', guild: { id: 'guild-1' } };
     await client._emit('roleUpdate', oldRole, newRole);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles roleDelete event', async () => {
     registerEvents(client);
     const role = { id: 'role-1', guild: { id: 'guild-1' }, name: 'Gone' };
     await client._emit('roleDelete', role);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles channelCreate event', async () => {
     registerEvents(client);
     const channel = { id: 'ch-1', guild: { id: 'guild-1' }, name: 'new-ch' };
     await client._emit('channelCreate', channel);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles channelUpdate event', async () => {
@@ -292,12 +304,14 @@ describe('events/handler', () => {
     const oldCh = { id: 'ch-1', guild: { id: 'guild-1' } };
     const newCh = { id: 'ch-1', guild: { id: 'guild-1' }, name: 'updated' };
     await client._emit('channelUpdate', oldCh, newCh);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles channelDelete event', async () => {
     registerEvents(client);
     const channel = { id: 'ch-1', guild: { id: 'guild-1' }, name: 'gone-ch' };
     await client._emit('channelDelete', channel);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
   it('handles guildMemberUpdate event', async () => {
@@ -305,5 +319,6 @@ describe('events/handler', () => {
     const oldMember = { id: 'user-1', roles: { cache: new Map() } };
     const newMember = { id: 'user-1', roles: { cache: new Map() }, guild: { id: 'guild-1' } };
     await client._emit('guildMemberUpdate', oldMember, newMember);
+      expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 });

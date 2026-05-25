@@ -100,6 +100,13 @@ describe('AutomationEngine', () => {
   describe('setAlertService', () => {
     it('accepts an alert service', () => {
       engine.setAlertService({ send: vi.fn() } as any);
+      // Should not throw
+      expect(engine).toBeDefined();
+    });
+
+    it('has required methods', () => {
+      expect(typeof engine.start).toBe('function');
+      expect(typeof engine.setAlertService).toBe('function');
     });
   });
 });

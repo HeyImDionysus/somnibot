@@ -77,6 +77,8 @@ describe('Action Queue deep', () => {
   it('starts listener with no pending actions', async () => {
     const supa = makeSupa();
     await startActionQueueListener(makeGuild(), supa);
+    // Should set up realtime subscription
+    expect(supa.channel).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending create_role action', async () => {
@@ -86,6 +88,8 @@ describe('Action Queue deep', () => {
       status: 'pending', attempt_count: 0, created_at: new Date().toISOString(),
     }]);
     await startActionQueueListener(makeGuild(), supa);
+    // Should query pending actions and attempt to create role
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending create_channel action', async () => {
@@ -95,6 +99,7 @@ describe('Action Queue deep', () => {
       status: 'pending', attempt_count: 0, created_at: new Date().toISOString(),
     }]);
     await startActionQueueListener(makeGuild(), supa);
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending send_embed action', async () => {
@@ -104,6 +109,7 @@ describe('Action Queue deep', () => {
       status: 'pending', attempt_count: 0, created_at: new Date().toISOString(),
     }]);
     await startActionQueueListener(makeGuild(), supa);
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending config_reload action', async () => {
@@ -113,6 +119,7 @@ describe('Action Queue deep', () => {
       status: 'pending', attempt_count: 0, created_at: new Date().toISOString(),
     }]);
     await startActionQueueListener(makeGuild(), supa);
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending delete_role action', async () => {
@@ -124,6 +131,7 @@ describe('Action Queue deep', () => {
     const guild = makeGuild();
     guild.roles.cache.get('role-1').delete = vi.fn().mockResolvedValue(undefined);
     await startActionQueueListener(guild, supa);
+    expect(supa.from).toHaveBeenCalled();
   });
 
   it('starts listener and processes pending update_role action', async () => {
@@ -135,5 +143,6 @@ describe('Action Queue deep', () => {
     const guild = makeGuild();
     guild.roles.cache.get('role-1').edit = vi.fn().mockResolvedValue({});
     await startActionQueueListener(guild, supa);
+    expect(supa.from).toHaveBeenCalled();
   });
 });

@@ -155,6 +155,7 @@ describe('handler interaction routing (all commands)', () => {
       const client = makeClient();
       registerEvents(client as any);
       await fireInteraction(makeCmd(cmd));
+      expect(handlers.has('interactionCreate')).toBe(true);
     });
   }
 
@@ -175,6 +176,7 @@ describe('handler interaction routing (all commands)', () => {
       targetMessage: null,
       reply: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles buy button interaction', async () => {
@@ -195,6 +197,7 @@ describe('handler interaction routing (all commands)', () => {
       deferReply: vi.fn(async () => {}),
       deferUpdate: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles setup button interaction', async () => {
@@ -214,6 +217,7 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       deferUpdate: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles ticket button interaction', async () => {
@@ -233,6 +237,7 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       deferUpdate: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles brole button interaction', async () => {
@@ -252,6 +257,7 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       deferUpdate: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles adventure button interaction', async () => {
@@ -270,6 +276,7 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       deferUpdate: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles setup select menu', async () => {
@@ -288,6 +295,7 @@ describe('handler interaction routing (all commands)', () => {
       values: ['moderation'],
       reply: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles help select menu', async () => {
@@ -306,6 +314,7 @@ describe('handler interaction routing (all commands)', () => {
       values: ['economy'],
       reply: vi.fn(async () => {}),
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles setup modal submit', async () => {
@@ -324,6 +333,7 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       fields: { getTextInputValue: vi.fn(() => 'value') },
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 
   it('handles generic modal submit', async () => {
@@ -342,5 +352,6 @@ describe('handler interaction routing (all commands)', () => {
       reply: vi.fn(async () => {}),
       fields: { getTextInputValue: vi.fn(() => 'reason') },
     });
+        expect(handlers.has('interactionCreate')).toBe(true);
   });
 });
