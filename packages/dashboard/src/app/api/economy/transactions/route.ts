@@ -32,7 +32,8 @@ export async function GET(request: NextRequest) {
       .select('*', { count: 'exact' })
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .range(offset, offset + limit - 1)
+      .limit(1000);
 
     if (userId) query = query.eq('user_id', userId);
     if (type) query = query.eq('type', type);

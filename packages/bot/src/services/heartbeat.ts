@@ -1,22 +1,30 @@
 /**
  * Heartbeat Service — Lets the dashboard know the bot is alive.
  *
- * V53 Phase 2 (Finding 2.1 — M-4)
+ * V5 Audit Fix #9 — Consolidated from per-guild to bot-level.
+ * One Valkey key, one Supabase row. Removes 2 timers per guild,
+ * replaces with 2 timers total.
  *
- * Writes `config_sync_heartbeat` to Valkey every 30s.
- * Also writes `last_heartbeat` to Supabase guild row every 60s as fallback.
+ * Writes to Valkey every 30s (key: somnibot:heartbeat:bot).
+ * Writes to Supabase every 60s as fallback (guild_id = primary guild).
  *
- * Dashboard layout reads the Valkey key via the diagnostics API and shows:
+ * Payload includes guildCount, uptime, memoryUsageMB so the dashboard
+ * can assess bot health from a single read.
+ *
+ * Dashboard reads:
  *   - Stale >90s: yellow banner "⚠️ Bot appears offline"
  *   - Stale >5min: red banner "🛑 Bot is offline"
  *   - On reconnect: banner auto-clears
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
+import type { Client } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Heartbeat');
 
+const VALKEY_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
+// Keep legacy per-guild key prefix for backwards-compatible reads
 const VALKEY_HEARTBEAT_KEY_PREFIX = 'somnibot:heartbeat:';
 const VALKEY_HEARTBEAT_TTL = 120; // 2 minutes — auto-expires if bot dies
 const VALKEY_INTERVAL_MS = 30_000; // 30 seconds
@@ -25,15 +33,17 @@ const SUPABASE_INTERVAL_MS = 60_000; // 60 seconds
 export class HeartbeatService {
   private valkey: Valkey;
   private supabase: SupabaseClient;
-  private guildId: string;
+  private primaryGuildId: string;
+  private client: Client | null;
   private valkeyTimer: ReturnType<typeof setInterval> | null = null;
   private supabaseTimer: ReturnType<typeof setInterval> | null = null;
   private startedAt: number;
 
-  constructor(valkey: Valkey, supabase: SupabaseClient, guildId: string) {
+  constructor(valkey: Valkey, supabase: SupabaseClient, primaryGuildId: string, client?: Client) {
     this.valkey = valkey;
     this.supabase = supabase;
-    this.guildId = guildId;
+    this.primaryGuildId = primaryGuildId;
+    this.client = client ?? null;
     this.startedAt = Date.now();
   }
 
@@ -53,7 +63,7 @@ export class HeartbeatService {
       void this.writeSupabaseHeartbeat();
     }, SUPABASE_INTERVAL_MS);
 
-    log.info('Started — Valkey every 30s, Supabase every 60s');
+    log.info('Started — bot-level heartbeat (Valkey 30s, Supabase 60s)');
   }
 
   /**
@@ -73,16 +83,26 @@ export class HeartbeatService {
 
   /**
    * Write heartbeat to Valkey with TTL.
-   * Stores timestamp + uptime so the dashboard can determine freshness.
+   * Stores timestamp + uptime + guildCount + memory so the dashboard
+   * can determine freshness and overall health from a single key.
+   * Also writes to per-guild key for backwards-compatible dashboard reads.
    */
   private async writeValkeyHeartbeat(): Promise<void> {
     try {
-      const key = `${VALKEY_HEARTBEAT_KEY_PREFIX}${this.guildId}`;
+      const memUsage = process.memoryUsage();
       const payload = JSON.stringify({
         timestamp: Date.now(),
         uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
+        guildCount: this.client?.guilds.cache.size ?? 0,
+        memoryUsageMB: Math.round(memUsage.rss / 1024 / 1024),
       });
-      await this.valkey.set(key, payload, 'EX', VALKEY_HEARTBEAT_TTL);
+
+      // Write bot-level key
+      await this.valkey.set(VALKEY_HEARTBEAT_KEY, payload, 'EX', VALKEY_HEARTBEAT_TTL);
+
+      // Write per-guild key for backwards compatibility (dashboard reads per-guild)
+      const guildKey = `${VALKEY_HEARTBEAT_KEY_PREFIX}${this.primaryGuildId}`;
+      await this.valkey.set(guildKey, payload, 'EX', VALKEY_HEARTBEAT_TTL);
     } catch (err) {
       log.warn('Valkey write failed:', err instanceof Error ? err.message : err);
     }
@@ -97,7 +117,7 @@ export class HeartbeatService {
         .from('bot_diagnostics')
         .upsert(
           {
-            guild_id: this.guildId,
+            guild_id: this.primaryGuildId,
             type: 'heartbeat',
             snapshot_at: new Date().toISOString(),
             uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -116,17 +136,23 @@ export class HeartbeatService {
 
 /**
  * Read heartbeat data (used by dashboard API).
+ * Tries bot-level key first, falls back to per-guild key.
  * Returns null if no heartbeat exists.
  */
 export async function readHeartbeat(
   valkey: Valkey,
   guildId: string,
-): Promise<{ timestamp: number; uptimeSeconds: number } | null> {
+): Promise<{ timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number } | null> {
   try {
-    const key = `${VALKEY_HEARTBEAT_KEY_PREFIX}${guildId}`;
-    const raw = await valkey.get(key);
+    // Try bot-level key first
+    let raw = await valkey.get(VALKEY_HEARTBEAT_KEY);
+    if (!raw) {
+      // Fallback to per-guild key (backwards compat)
+      const key = `${VALKEY_HEARTBEAT_KEY_PREFIX}${guildId}`;
+      raw = await valkey.get(key);
+    }
     if (!raw) return null;
-    return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number };
+    return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number };
   } catch {
     return null;
   }

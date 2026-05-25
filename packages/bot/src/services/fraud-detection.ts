@@ -121,7 +121,8 @@ export async function checkIPMismatch(
     .from('license_sessions')
     .select('ip_address')
     .eq('license_key_id', licenseKeyId)
-    .gte('first_seen_at', since);
+    .gte('first_seen_at', since)
+    .limit(1000);
 
   const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
 

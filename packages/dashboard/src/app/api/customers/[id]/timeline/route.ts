@@ -87,7 +87,8 @@ export async function GET(
     const { data: licenseKeys } = await admin
       .from('license_keys')
       .select('id, key_prefix, key_suffix')
-      .eq('customer_id', id);
+      .eq('customer_id', id)
+      .limit(1000);
 
     if (licenseKeys && licenseKeys.length > 0) {
       const keyIds = licenseKeys.map(k => k.id);

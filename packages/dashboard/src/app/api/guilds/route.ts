@@ -26,7 +26,8 @@ export async function GET() {
   const { data: guilds, error } = await admin
     .from('guild')
     .select('id, name')
-    .eq('owner_discord_id', discordId);
+    .eq('owner_discord_id', discordId)
+    .limit(1000);
 
   if (error || !guilds) {
     return NextResponse.json({ error: 'Failed to load guilds' }, { status: 500 });

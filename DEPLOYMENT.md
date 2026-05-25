@@ -68,7 +68,7 @@
 | `VALKEY_URL` | Redis/Valkey connection string (default: `redis://127.0.0.1:6379`) |
 | `LAVALINK_HOST` | Lavalink server host (default: `localhost`) |
 | `LAVALINK_PORT` | Lavalink server port (default: `2333`) |
-| `LAVALINK_PASSWORD` | Lavalink password (default: `youshallnotpass`) |
+| `LAVALINK_PASSWORD` | Lavalink password (default: `YOUR_LAVALINK_PASSWORD`) |
 | `NODE_ENV` | Set to `production` |
 
 ### Railway Deploy
@@ -112,7 +112,7 @@ server:
   address: 0.0.0.0
 lavalink:
   server:
-    password: "youshallnotpass"
+    password: "YOUR_LAVALINK_PASSWORD"
     sources:
       youtube: true
 ```

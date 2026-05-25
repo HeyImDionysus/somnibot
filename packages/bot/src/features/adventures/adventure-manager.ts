@@ -434,7 +434,8 @@ export class AdventureManager {
       .from('economy_adventures')
       .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (!data || data.length === 0) {
       await this.seedDefaults();
@@ -442,7 +443,8 @@ export class AdventureManager {
         .from('economy_adventures')
         .select('id, name, emoji, description, adventure_type, difficulty, min_scenes, max_scenes')
         .eq('guild_id', this.guild.id)
-        .eq('active', true);
+        .eq('active', true)
+        .limit(1000);
       this.adventureCache = (seeded ?? []) as Adventure[];
     } else {
       this.adventureCache = data as Adventure[];

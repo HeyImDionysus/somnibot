@@ -37,7 +37,8 @@ export async function handleStoreCommand(
     .select('*')
     .eq('guild_id', guildId)
     .eq('active', true)
-    .order('sort_order', { ascending: true });
+    .order('sort_order', { ascending: true })
+    .limit(1000);
 
   if (error) {
     await interaction.editReply({ content: '❌ Failed to load store. Please try again later.' });

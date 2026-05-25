@@ -331,7 +331,7 @@ somnibot/
 | `DISCORD_GUILD_ID` | Auto-detected | Detected on first bot login |
 | `LAVALINK_HOST` | `localhost` | `lavalink.railway.internal` on Railway |
 | `LAVALINK_PORT` | `2333` | — |
-| `LAVALINK_PASSWORD` | `youshallnotpass` | — |
+| `LAVALINK_PASSWORD` | `YOUR_LAVALINK_PASSWORD` | — |
 | `VALKEY_URL` | `redis://127.0.0.1:6379` | `redis://valkey.railway.internal:6379` on Railway |
 
 ### Optional

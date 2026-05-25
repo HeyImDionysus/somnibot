@@ -35,10 +35,12 @@ export class AchievementsManager {
     const userId = interaction.user.id;
 
     const { data: allDefs } = await this.supabase
-      .from('economy_achievement_defs').select('*').eq('guild_id', guildId).order('created_at');
+      .from('economy_achievement_defs').select('*').eq('guild_id', guildId).order('created_at')
+      .limit(1000);
 
     const { data: userAch } = await this.supabase
-      .from('economy_user_achievements').select('achievement_id').eq('guild_id', guildId).eq('user_id', userId);
+      .from('economy_user_achievements').select('achievement_id').eq('guild_id', guildId).eq('user_id', userId)
+      .limit(1000);
 
     const unlockedIds = new Set((userAch ?? []).map((a: any) => a.achievement_id));
 
@@ -66,7 +68,8 @@ export class AchievementsManager {
       .from('economy_achievement_defs')
       .select('*')
       .eq('guild_id', guildId)
-      .eq('condition_type', conditionType);
+      .eq('condition_type', conditionType)
+      .limit(1000);
 
     for (const def of defs ?? []) {
       if (currentValue < def.condition_value) continue;

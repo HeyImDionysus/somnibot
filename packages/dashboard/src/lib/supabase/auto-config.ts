@@ -18,7 +18,7 @@ interface AutoConfigResult {
 
 /**
  * Extract Supabase project ref from the project URL.
- * e.g. "https://REDACTED_PROJECT_REF.supabase.co" → "REDACTED_PROJECT_REF"
+ * e.g. "https://YOUR_PROJECT.supabase.co" → "YOUR_PROJECT_REF"
  */
 function getProjectRef(): string | null {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
@@ -53,7 +53,8 @@ async function getDiscordCredentials(): Promise<{
     const { data: settings } = await admin
       .from('instance_settings')
       .select('key, value')
-      .in('key', ['discord_application_id', 'discord_client_secret']);
+      .in('key', ['discord_application_id', 'discord_client_secret'])
+      .limit(1000);
 
     if (settings) {
       for (const row of settings) {

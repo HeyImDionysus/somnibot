@@ -1,13 +1,16 @@
 /**
  * GET /api/downloads/[productId]/[fileId] — Protected file downloads.
  *
- * Authenticates via portal token (x-portal-token header) and validates
- * that the customer has an active entitlement for the product before
- * serving the file. Increments download counter on success.
+ * V5 Audit Fix #5 — Now authenticates via HMAC-signed URL parameters
+ * instead of raw portal tokens in query strings. Falls back to
+ * x-portal-token header for backwards compatibility.
+ *
+ * Signed URL params: sig, exp, cid (customer ID), gid (guild ID)
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
+import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -20,34 +23,52 @@ export async function GET(
   const { productId, fileId } = await params;
   const supabase = createAdminSupabase();
 
-  // ── Auth: require a valid portal token ──
-  // FIX #1: Accept token via query param as fallback for <a href> downloads
-  // (browser navigation can't send custom headers on anchor clicks)
-  const token = req.headers.get('x-portal-token') || req.nextUrl.searchParams.get('token');
-  if (!token) {
-    return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
-  }
+  // ── Auth: prefer signed URL, fall back to portal token header ──
+  let customerId: string;
+  let guildId: string;
 
-  const { data: session } = await supabase
-    .from('portal_sessions')
-    .select('customer_id, guild_id')
-    .eq('token_hash', hashToken(token))
-    .eq('revoked', false)
-    .gt('expires_at', new Date().toISOString())
-    .single();
+  const sig = req.nextUrl.searchParams.get('sig');
+  const exp = req.nextUrl.searchParams.get('exp');
+  const cid = req.nextUrl.searchParams.get('cid');
+  const gid = req.nextUrl.searchParams.get('gid');
 
-  if (!session) {
-    return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+  if (sig && exp && cid && gid) {
+    // Signed URL authentication (preferred — no raw token in URL)
+    const verified = verifySignedDownloadUrl(productId, fileId, sig, exp, cid, gid);
+    if (!verified) {
+      return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
+    }
+    customerId = verified.customerId;
+    guildId = verified.guildId;
+  } else {
+    // Fallback: portal token via header (API clients, not browser navigation)
+    const token = req.headers.get('x-portal-token');
+    if (!token) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
+    const { data: session } = await supabase
+      .from('portal_sessions')
+      .select('customer_id, guild_id')
+      .eq('token_hash', hashToken(token))
+      .eq('revoked', false)
+      .gt('expires_at', new Date().toISOString())
+      .single();
+
+    if (!session) {
+      return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+    }
+    customerId = session.customer_id;
+    guildId = session.guild_id;
   }
 
   // ── Entitlement check: customer must own the product ──
-  // V52-L1: add guild_id scope from portal session for defense-in-depth
   const { data: entitlement } = await supabase
     .from('entitlements')
     .select('id')
-    .eq('customer_id', session.customer_id)
+    .eq('customer_id', customerId)
     .eq('product_id', productId)
-    .eq('guild_id', session.guild_id)
+    .eq('guild_id', guildId)
     .in('status', ['active', 'grace_period'])
     .limit(1)
     .maybeSingle();

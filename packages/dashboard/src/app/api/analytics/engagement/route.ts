@@ -138,7 +138,8 @@ export async function GET(request: NextRequest) {
       .from('members')
       .select('joined_at, left_at, is_returning')
       .eq('guild_id', ctx.guildId)
-      .gte('joined_at', startIso);
+      .gte('joined_at', startIso)
+      .limit(1000);
 
     const joins = members?.length ?? 0;
     const returningJoins = members?.filter(m => m.is_returning).length ?? 0;
@@ -155,7 +156,8 @@ export async function GET(request: NextRequest) {
       .from('giveaways')
       .select('status, entries, winners, created_at')
       .eq('guild_id', ctx.guildId)
-      .gte('created_at', startIso);
+      .gte('created_at', startIso)
+      .limit(1000);
 
     const totalGiveaways = giveaways?.length ?? 0;
     const totalEntries = giveaways?.reduce((s, g) => s + (g.entries?.length ?? 0), 0) ?? 0;

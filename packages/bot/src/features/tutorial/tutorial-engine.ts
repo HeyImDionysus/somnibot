@@ -153,7 +153,8 @@ export class TutorialEngine {
       .select('*')
       .eq('guild_id', this.guildId)
       .eq('enabled', true)
-      .order('step_order', { ascending: true });
+      .order('step_order', { ascending: true })
+      .limit(1000);
 
     if (customSteps && customSteps.length > 0) {
       return customSteps as TutorialStep[];

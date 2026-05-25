@@ -61,7 +61,8 @@ export async function runReconciliation(
       .from('entitlements')
       .select('id, customer_id, granted_role_ids, product_id, customers(discord_id)')
       .eq('guild_id', guild.id)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .limit(1000);
 
     if (activeEntitlements) {
       for (const ent of activeEntitlements) {
@@ -103,7 +104,8 @@ export async function runReconciliation(
       .select('id, customer_id, granted_role_ids')
       .eq('guild_id', guild.id)
       .eq('status', 'grace_period')
-      .lt('grace_period_ends_at', now);
+      .lt('grace_period_ends_at', now)
+      .limit(1000);
 
     if (gracePeriodEntitlements) {
       for (const ent of gracePeriodEntitlements) {
@@ -153,7 +155,8 @@ export async function runReconciliation(
         license_key_id,
         license_keys!inner(product_id)
       `)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (staleSessions) {
       for (const session of staleSessions) {

@@ -232,7 +232,8 @@ async function handleCheck(
     .select('*, products(name)')
     .eq('customer_id', customer.id)
     .eq('guild_id', guildId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(1000);
 
   if (!entitlements || entitlements.length === 0) {
     await interaction.editReply({
@@ -321,7 +322,8 @@ async function handleInfo(
     .from('license_sessions')
     .select('*')
     .eq('license_key_id', licenseKey.id)
-    .eq('active', true);
+    .eq('active', true)
+    .limit(1000);
 
   if (sessions && sessions.length > 0) {
     const sessionLines = sessions.map((s) => {

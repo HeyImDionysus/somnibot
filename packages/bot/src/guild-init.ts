@@ -443,8 +443,8 @@ export async function initGuildFeatures(
     services.diagnosticsService = new DiagnosticsService(client, supabase);
     services.diagnosticsService.start();
 
-    services.heartbeatService = new HeartbeatService(valkey, supabase, guildId);
-    services.heartbeatService.start();
+    // V5 Fix #9: Heartbeat is now bot-level (started in index.ts), not per-guild.
+    // Per-guild heartbeat removed to avoid 2 timers per guild.
 
     services.alertService = new AlertService(valkey, supabase, guild);
     await services.alertService.init();

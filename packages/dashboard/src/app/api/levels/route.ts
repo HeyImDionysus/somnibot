@@ -53,7 +53,8 @@ export async function GET(req: NextRequest) {
       .select('member_id, xp, level, total_messages, voice_minutes', { count: 'exact' })
       .eq('guild_id', guildId)
       .order('xp', { ascending: false })
-      .range(offset, offset + pageSize - 1);
+      .range(offset, offset + pageSize - 1)
+      .limit(1000);
 
     return NextResponse.json({
       success: true,
@@ -77,12 +78,14 @@ export async function GET(req: NextRequest) {
       .from('level_rewards')
       .select('*')
       .eq('guild_id', guildId)
-      .order('level', { ascending: true }),
+      .order('level', { ascending: true })
+      .limit(1000),
     supabase
       .from('xp_multipliers')
       .select('*')
       .eq('guild_id', guildId)
-      .order('multiplier', { ascending: false }),
+      .order('multiplier', { ascending: false })
+      .limit(1000),
   ]);
 
   return NextResponse.json({

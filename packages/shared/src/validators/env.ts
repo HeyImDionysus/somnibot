@@ -36,7 +36,7 @@ export const BotEnvSchema = z.object({
   // ─── Lavalink (auto-configured for Railway) ───
   LAVALINK_HOST: z.string().default('localhost'),
   LAVALINK_PORT: z.coerce.number().default(2333),
-  LAVALINK_PASSWORD: z.string().default('youshallnotpass'),
+  LAVALINK_PASSWORD: z.string().default('YOUR_LAVALINK_PASSWORD'),
 
   // ─── Valkey (auto-configured for Railway) ───
   VALKEY_URL: z.string().default('redis://127.0.0.1:6379'),

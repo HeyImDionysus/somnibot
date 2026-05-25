@@ -91,7 +91,8 @@ export class PollsManager {
     const { data: insertedOptions } = await this.supabase
       .from('poll_options')
       .insert(optionRows)
-      .select();
+      .select()
+      .limit(1000);
 
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
@@ -233,7 +234,8 @@ export class PollsManager {
       .update({ status: 'closed', closed_at: new Date().toISOString() })
       .eq('id', pollId)
       .eq('status', 'open')
-      .select('id');
+      .select('id')
+      .limit(1000);
 
     if (!closedRows || closedRows.length === 0) {
       await interaction.reply({ content: '❌ Poll is already closed.', ephemeral: true });
@@ -245,7 +247,8 @@ export class PollsManager {
       .from('poll_options')
       .select('*')
       .eq('poll_id', pollId)
-      .order('sort_order');
+      .order('sort_order')
+      .limit(1000);
 
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
     const results: string[] = [];
@@ -313,7 +316,8 @@ export class PollsManager {
     const { data: insertedOptions } = await this.supabase
       .from('prediction_options')
       .insert(optionRows)
-      .select();
+      .select()
+      .limit(1000);
 
     const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
 
@@ -376,7 +380,8 @@ export class PollsManager {
       .from('prediction_options')
       .select('*')
       .eq('prediction_id', predictionId)
-      .order('sort_order');
+      .order('sort_order')
+      .limit(1000);
 
     if (!options || optionIndex >= options.length) {
       await interaction.reply({ content: '❌ Invalid option number.', ephemeral: true });
@@ -507,7 +512,8 @@ export class PollsManager {
       .from('prediction_options')
       .select('*')
       .eq('prediction_id', predictionId)
-      .order('sort_order');
+      .order('sort_order')
+      .limit(1000);
 
     if (!options || winningIndex >= options.length) {
       await interaction.reply({ content: '❌ Invalid winning option.', ephemeral: true });
@@ -543,7 +549,8 @@ export class PollsManager {
     const { data: allBets } = await this.supabase
       .from('prediction_bets')
       .select('*')
-      .eq('prediction_id', predictionId);
+      .eq('prediction_id', predictionId)
+      .limit(1000);
 
     const allBetsArr = (allBets ?? []) as Array<{
       id: string;

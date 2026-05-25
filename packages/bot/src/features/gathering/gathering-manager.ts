@@ -306,7 +306,8 @@ export class GatheringManager {
       .select('id, item_name, emoji, rarity, min_qty, max_qty, weight, tool_tier, sell_value, gives_item_id')
       .eq('guild_id', this.guild.id)
       .eq('source_type', sourceType)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     return (data as LootEntry[] | null) ?? [];
   }
@@ -331,7 +332,8 @@ export class GatheringManager {
       .select('id, quantity, durability_remaining, item_id, economy_items!inner(use_effect, category)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     if (!items || items.length === 0) {
       return { tier: 0, inventoryId: null, durabilityLeft: null }; // bare hands

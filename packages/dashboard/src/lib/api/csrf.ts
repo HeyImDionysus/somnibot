@@ -21,10 +21,20 @@ import { cookies } from 'next/headers';
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
 const CSRF_HEADER_NAME = 'x-csrf-token';
 
-/** Secret used to sign CSRF tokens. Falls back to a per-process random if not configured. */
-const CSRF_SECRET = process.env.CSRF_SECRET
-  || process.env.NEXTAUTH_SECRET
-  || randomBytes(32).toString('hex');
+/** Secret used to sign CSRF tokens. Fails closed — refuses to serve without an explicit secret. */
+let _csrfSecret: string | undefined;
+function getCsrfSecret(): string {
+  if (_csrfSecret) return _csrfSecret;
+  const secret = process.env.CSRF_SECRET || process.env.NEXTAUTH_SECRET;
+  if (!secret) {
+    throw new Error(
+      'Missing CSRF_SECRET (or NEXTAUTH_SECRET fallback). ' +
+      'Refusing to operate with unpredictable per-process CSRF keys that break across restarts/replicas.',
+    );
+  }
+  _csrfSecret = secret;
+  return secret;
+}
 
 /**
  * Generate a CSRF token tied to a session identifier.
@@ -32,7 +42,7 @@ const CSRF_SECRET = process.env.CSRF_SECRET
  */
 export function generateCsrfToken(sessionId: string): { token: string; nonce: string } {
   const nonce = randomBytes(16).toString('hex');
-  const token = createHmac('sha256', CSRF_SECRET)
+  const token = createHmac('sha256', getCsrfSecret())
     .update(`${nonce}:${sessionId}`)
     .digest('hex');
   return { token, nonce };
@@ -46,7 +56,7 @@ export function verifyCsrfToken(
   nonce: string,
   sessionId: string,
 ): boolean {
-  const expected = createHmac('sha256', CSRF_SECRET)
+  const expected = createHmac('sha256', getCsrfSecret())
     .update(`${nonce}:${sessionId}`)
     .digest('hex');
 
@@ -95,7 +105,6 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
     '/api/auth/',
     '/api/setup',
     '/api/downloads/',
-    '/api/webhooks/',
     '/api/csrf',
   ];
   if (exemptPrefixes.some((prefix) => path.startsWith(prefix))) return null;

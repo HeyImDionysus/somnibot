@@ -1,10 +1,14 @@
 /**
  * GET /api/portal/downloads — Customer's available product downloads.
  * Requires: x-portal-token header.
+ *
+ * V5 Audit Fix #5 — Download URLs now use HMAC-signed links instead of
+ * raw portal tokens in query parameters. Each link expires in 5 minutes.
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
+import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -38,7 +42,8 @@ export async function GET(request: NextRequest) {
       .from('entitlements')
       .select('*, products(id, name, description, type)')
       .eq('customer_id', session.customer_id)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .limit(1000);
 
     // Collect product IDs to fetch their files
     const productIds = (entitlements || [])
@@ -52,6 +57,7 @@ export async function GET(request: NextRequest) {
           .select('*')
           .in('product_id', productIds)
           .order('sort_order', { ascending: true })
+          .limit(1000)
       : { data: [] };
 
     // Group files by product_id
@@ -62,11 +68,8 @@ export async function GET(request: NextRequest) {
       filesByProduct.get(pid)!.push(f as Record<string, unknown>);
     }
 
-    // FIX P2 + FIX #1: Build download list with proper download URLs.
-    // The portal UI renders files as <a href> links, which can't send
-    // custom headers. Generate download URLs with the token as a query
-    // param pointing to /api/downloads/[productId]/[fileId]?token=...
-    const portalToken = request.headers.get('x-portal-token') ?? '';
+    // V5 Fix #5: Build download list with HMAC-signed URLs.
+    // The portal token never appears in a URL — signed links expire in 5 min.
     const downloads = (entitlements || []).map((e) => {
       const product = (e as Record<string, unknown>).products as {
         id: string;
@@ -78,7 +81,12 @@ export async function GET(request: NextRequest) {
       const rawFiles = product?.id ? filesByProduct.get(product.id) ?? [] : [];
       const files = rawFiles.map((f) => ({
         name: (f.file_name as string) || (f.name as string) || 'Download',
-        url: `/api/downloads/${product!.id}/${f.id}?token=${encodeURIComponent(portalToken)}`,
+        url: generateSignedDownloadUrl({
+          productId: product!.id,
+          fileId: f.id as string,
+          customerId: session.customer_id,
+          guildId: session.guild_id,
+        }),
         size: f.file_size as number | undefined,
       }));
 

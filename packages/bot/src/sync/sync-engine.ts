@@ -63,7 +63,8 @@ export async function runSyncCycle(
   const { data: mappings } = await supabase
     .from('discord_id_map')
     .select('*')
-    .eq('guild_id', guild.id);
+    .eq('guild_id', guild.id)
+    .limit(1000);
 
   const idMap = new Map<string, string>();
   for (const m of mappings ?? []) {

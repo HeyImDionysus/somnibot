@@ -248,7 +248,8 @@ export async function handleLeaderboardCommand(
     .select('member_id, xp, level', { count: 'exact' })
     .eq('guild_id', guildId)
     .order('xp', { ascending: false })
-    .range(0, pageSize - 1);
+    .range(0, pageSize - 1)
+    .limit(1000);
 
   if (!data || data.length === 0) {
     await interaction.editReply({ content: 'No one has earned XP yet!' });
@@ -265,7 +266,8 @@ export async function handleLeaderboardCommand(
       .select('member_id, xp, level')
       .eq('guild_id', guildId)
       .order('xp', { ascending: false })
-      .range(offset, offset + pageSize - 1);
+      .range(offset, offset + pageSize - 1)
+      .limit(1000);
 
     if (!pageData || pageData.length === 0) return 'No data.';
 

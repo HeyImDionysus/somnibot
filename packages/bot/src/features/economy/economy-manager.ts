@@ -974,7 +974,8 @@ export class EconomyManager {
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .order('sort_order', { ascending: true })
-      .order('price', { ascending: true });
+      .order('price', { ascending: true })
+      .limit(1000);
 
     if (category) {
       query = query.eq('category', category);
@@ -1185,7 +1186,8 @@ export class EconomyManager {
       .select('quantity, durability_remaining, item_id, economy_items(name, emoji)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     return (data ?? []).map((row: Record<string, unknown>) => {
       const item = row.economy_items as Record<string, string> | null;

@@ -105,7 +105,8 @@ async function loadMultipliers(
   const { data } = await supabase
     .from('xp_multipliers')
     .select('role_id, multiplier')
-    .eq('guild_id', guildId);
+    .eq('guild_id', guildId)
+    .limit(1000);
 
   const multipliers = (data ?? []) as XpMultiplier[];
   _multiplierCache.set(guildId, { data: multipliers, time: now });
@@ -126,7 +127,8 @@ export async function loadRewards(
     .from('level_rewards')
     .select('*')
     .eq('guild_id', guildId)
-    .order('level', { ascending: true });
+    .order('level', { ascending: true })
+    .limit(1000);
 
   const rewards = (data ?? []) as LevelReward[];
   _rewardCache.set(guildId, { data: rewards, time: now });

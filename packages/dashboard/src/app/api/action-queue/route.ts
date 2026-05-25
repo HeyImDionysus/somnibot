@@ -107,7 +107,8 @@ export async function POST(request: NextRequest) {
       .select('*')
       .eq('guild_id', guildId)
       .in('id', ids)
-      .eq('retried', false);
+      .eq('retried', false)
+      .limit(1000);
 
     if (fetchErr) {
       return NextResponse.json({ success: false, error: fetchErr.message }, { status: 500 });

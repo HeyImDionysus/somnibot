@@ -57,7 +57,8 @@ export class AutomationLoader {
     const { data, error } = await this.supabase
       .from('automations')
       .select('*')
-      .eq('guild_id', this.guildId);
+      .eq('guild_id', this.guildId)
+      .limit(1000);
 
     if (error) {
       log.error('Failed to load automations:', error.message);

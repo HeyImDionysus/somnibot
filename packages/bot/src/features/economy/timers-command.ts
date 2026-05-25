@@ -106,7 +106,8 @@ export async function handleTimersCommand(
     const { data: roleIncomes } = await client.supabase
       .from('economy_role_income')
       .select('role_id, role_name, cooldown_hours')
-      .eq('guild_id', guildId);
+      .eq('guild_id', guildId)
+      .limit(1000);
 
     if (roleIncomes && roleIncomes.length > 0) {
       const riPipeline = valkey.pipeline();

@@ -3438,7 +3438,7 @@ server:
   address: 0.0.0.0
 lavalink:
   server:
-    password: "youshallnotpass"
+    password: "YOUR_LAVALINK_PASSWORD"
     sources:
       youtube: false     # Disabled — using plugin
       bandcamp: false
@@ -5502,7 +5502,7 @@ PAYPAL_WEBHOOK_URL=
 # Lavalink
 LAVALINK_HOST=localhost
 LAVALINK_PORT=2333
-LAVALINK_PASSWORD=youshallnotpass
+LAVALINK_PASSWORD=YOUR_LAVALINK_PASSWORD
 
 # Valkey
 VALKEY_URL=redis://127.0.0.1:6379

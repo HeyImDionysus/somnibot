@@ -595,7 +595,8 @@ export async function checkInactiveTickets(
     .select('*')
     .eq('guild_id', guild.id)
     .in('status', ['open', 'claimed'])
-    .order('updated_at', { ascending: true });
+    .order('updated_at', { ascending: true })
+    .limit(1000);
 
   if (!openTickets?.length) return { warned: 0, closed: 0 };
 
