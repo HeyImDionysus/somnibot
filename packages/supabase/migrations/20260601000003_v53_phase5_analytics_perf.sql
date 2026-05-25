@@ -2,6 +2,10 @@
 -- 5.1: Economy analytics RPCs
 -- 5.2: Performance indexes
 
+-- Ensure columns exist before functions/indexes reference them
+ALTER TABLE economy_market_listings
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 -- ═══════════════════════════════════════════════════════════
 -- 5.2: Performance Indexes (do first — analytics queries need them)
 -- ═══════════════════════════════════════════════════════════
