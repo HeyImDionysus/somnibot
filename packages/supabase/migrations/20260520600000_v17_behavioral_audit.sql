@@ -94,7 +94,7 @@ COMMENT ON COLUMN ticket_panels.intake_form_fields IS 'Array of {label, placehol
 
 -- 11. Triggers for updated_at
 CREATE TRIGGER update_starboard_entries_updated_at BEFORE UPDATE ON starboard_entries
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 CREATE TRIGGER update_button_roles_updated_at BEFORE UPDATE ON button_roles
-  FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

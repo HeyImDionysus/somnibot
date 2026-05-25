@@ -71,7 +71,8 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
   const { data: guilds } = await admin
     .from('guild')
     .select('id')
-    .eq('owner_discord_id', discordId);
+    .eq('owner_discord_id', discordId)
+    .limit(1000);
 
   if (!guilds || guilds.length === 0) {
     return {

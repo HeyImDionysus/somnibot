@@ -201,6 +201,8 @@ REVOKE ALL ON FUNCTION public.economy_daily_totals(TEXT, INT) FROM anon, authent
 GRANT EXECUTE ON FUNCTION public.economy_daily_totals(TEXT, INT) TO service_role;
 
 -- Fix economy_top_earners: use actual transaction type names.
+-- Must drop first: return type changed (removed net_worth column).
+DROP FUNCTION IF EXISTS public.economy_top_earners(TEXT, INT);
 CREATE OR REPLACE FUNCTION public.economy_top_earners(
   p_guild_id TEXT,
   p_limit INT DEFAULT 10

@@ -98,7 +98,8 @@ export async function writeGuildSnapshot(
   const { data: mappings } = await supabase
     .from('discord_id_map')
     .select('entity_type, template_key, discord_id')
-    .eq('guild_id', guild.id);
+    .eq('guild_id', guild.id)
+    .limit(1000);
 
   const roleIdToKey = new Map<string, string>();
   const channelIdToKey = new Map<string, string>();

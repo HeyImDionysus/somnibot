@@ -225,7 +225,8 @@ export class LotteryManager {
       .select('id')
       .eq('drawing_id', drawing.id)
       .eq('guild_id', guildId)
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .limit(1000);
 
     const existingCount = existingTickets?.length ?? 0;
     if (existingCount + count > maxTickets) {
@@ -346,7 +347,8 @@ export class LotteryManager {
     const { data: tickets } = await this.supabase
       .from('economy_lottery_tickets')
       .select('user_id')
-      .eq('drawing_id', drawing.id);
+      .eq('drawing_id', drawing.id)
+      .limit(1000);
 
     const uniquePlayers = new Set((tickets ?? []).map((t: any) => t.user_id));
 
@@ -394,7 +396,8 @@ export class LotteryManager {
     const { data: tickets } = await this.supabase
       .from('economy_lottery_tickets')
       .select('*')
-      .eq('drawing_id', drawing.id);
+      .eq('drawing_id', drawing.id)
+      .limit(1000);
 
     if (!tickets || tickets.length === 0) {
       // No tickets — revert the claim so the scheduled "no entries"

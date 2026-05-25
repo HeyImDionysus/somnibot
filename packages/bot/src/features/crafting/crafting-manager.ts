@@ -291,7 +291,8 @@ export class CraftingManager {
       .eq('guild_id', this.guild.id)
       .eq('active', true)
       .order('category')
-      .order('name');
+      .order('name')
+      .limit(1000);
 
     return (data as Recipe[] | null) ?? [];
   }
@@ -362,7 +363,8 @@ export class CraftingManager {
       .select('quantity, item_id, economy_items(name)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     if (!data) return [];
     return (data as any[]).map((row) => ({
@@ -379,7 +381,8 @@ export class CraftingManager {
       .select('item_id, economy_items!inner(name)')
       .eq('guild_id', this.guild.id)
       .eq('user_id', userId)
-      .gt('quantity', 0);
+      .gt('quantity', 0)
+      .limit(1000);
 
     if (!items) return { success: false, itemId: '' };
 

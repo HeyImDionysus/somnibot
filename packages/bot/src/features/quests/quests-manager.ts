@@ -48,7 +48,8 @@ export class QuestsManager {
       .select('*, template:economy_quest_templates(*)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
-      .gte('assigned_at', weekStart);
+      .gte('assigned_at', weekStart)
+      .limit(1000);
 
     if (!progress || progress.length === 0) {
       // Auto-assign daily + weekly quests
@@ -137,7 +138,8 @@ export class QuestsManager {
       .select('id, template:economy_quest_templates(action_type)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
-      .eq('completed', false);
+      .eq('completed', false)
+      .limit(1000);
 
     for (const p of active ?? []) {
       if ((p.template as any)?.action_type === actionType) {
@@ -159,7 +161,8 @@ export class QuestsManager {
       .select('*')
       .eq('guild_id', guildId)
       .eq('quest_type', 'daily')
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (!templates || templates.length === 0) return;
 
@@ -193,7 +196,8 @@ export class QuestsManager {
       .select('id, template:economy_quest_templates(quest_type)')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
-      .gte('assigned_at', monday.toISOString());
+      .gte('assigned_at', monday.toISOString())
+      .limit(1000);
 
     const weeklyExisting = (existing ?? []).filter((p: any) => p.template?.quest_type === 'weekly');
     if (weeklyExisting.length >= weeklyCount) return;
@@ -206,7 +210,8 @@ export class QuestsManager {
       .select('*')
       .eq('guild_id', guildId)
       .eq('quest_type', 'weekly')
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (!templates || templates.length === 0) return;
 

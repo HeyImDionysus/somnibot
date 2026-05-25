@@ -267,7 +267,8 @@ async function executeAction(
       const panelQuery = ctx.supabase
         .from('ticket_panels')
         .select('id, open_category_id, manager_roles')
-        .eq('guild_id', ctx.guildId);
+        .eq('guild_id', ctx.guildId)
+        .limit(1000);
 
       if (panelId) panelQuery.eq('id', panelId);
       panelQuery.order('created_at', { ascending: true }).limit(1);

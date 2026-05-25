@@ -209,7 +209,7 @@ export function buildEnvVars(
     // Lavalink defaults
     LAVALINK_HOST: 'localhost',
     LAVALINK_PORT: '2333',
-    LAVALINK_PASSWORD: 'youshallnotpass',
+    LAVALINK_PASSWORD: 'YOUR_LAVALINK_PASSWORD',
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',

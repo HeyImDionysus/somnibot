@@ -49,7 +49,8 @@ export async function GET() {
       .from('tutorial_steps')
       .select('*')
       .eq('guild_id', guildId)
-      .order('step_order', { ascending: true }),
+      .order('step_order', { ascending: true })
+      .limit(1000),
   ]);
 
   return NextResponse.json({

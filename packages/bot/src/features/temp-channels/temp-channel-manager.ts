@@ -53,7 +53,8 @@ export class TempChannelManager {
       .from('temp_channel_hubs')
       .select('*')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (hubs) {
       for (const hub of hubs) {
@@ -65,7 +66,8 @@ export class TempChannelManager {
     const { data: active } = await this.supabase
       .from('active_temp_channels')
       .select('*')
-      .eq('guild_id', this.guild.id);
+      .eq('guild_id', this.guild.id)
+      .limit(1000);
 
     if (active) {
       for (const ch of active) {
@@ -306,7 +308,8 @@ export class TempChannelManager {
       .from('temp_channel_hubs')
       .select('*')
       .eq('guild_id', this.guild.id)
-      .eq('active', true);
+      .eq('active', true)
+      .limit(1000);
 
     if (hubs) {
       for (const hub of hubs) {

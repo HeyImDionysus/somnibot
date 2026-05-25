@@ -2,6 +2,10 @@
 -- 5.1: Economy analytics RPCs
 -- 5.2: Performance indexes
 
+-- Ensure columns exist before functions/indexes reference them
+ALTER TABLE economy_market_listings
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 -- ═══════════════════════════════════════════════════════════
 -- 5.2: Performance Indexes (do first — analytics queries need them)
 -- ═══════════════════════════════════════════════════════════
@@ -25,7 +29,7 @@ CREATE INDEX IF NOT EXISTS idx_econ_market_guild_status_date
 
 -- Leaderboard XP index for levels
 CREATE INDEX IF NOT EXISTS idx_members_guild_xp
-  ON members(guild_id, xp DESC);
+  ON member_levels(guild_id, xp DESC);
 
 -- ═══════════════════════════════════════════════════════════
 -- 5.2: Paginated leaderboard RPC (replaces old economy_leaderboard)
@@ -174,12 +178,12 @@ AS $$
   SELECT
     d.day,
     COUNT(ml.id) FILTER (WHERE ml.created_at::DATE = d.day) AS listings_created,
-    COUNT(ml.id) FILTER (WHERE ml.sold_at::DATE = d.day AND ml.status = 'sold') AS listings_sold,
-    COALESCE(AVG(ml.price) FILTER (WHERE ml.sold_at::DATE = d.day AND ml.status = 'sold'), 0) AS avg_price
+    COUNT(ml.id) FILTER (WHERE ml.updated_at::DATE = d.day AND ml.status = 'sold') AS listings_sold,
+    COALESCE(AVG(ml.price_per_unit) FILTER (WHERE ml.updated_at::DATE = d.day AND ml.status = 'sold'), 0) AS avg_price
   FROM date_series d
   LEFT JOIN public.economy_market_listings ml
     ON ml.guild_id = p_guild_id
-    AND (ml.created_at::DATE = d.day OR ml.sold_at::DATE = d.day)
+    AND (ml.created_at::DATE = d.day OR ml.updated_at::DATE = d.day)
   GROUP BY d.day
   ORDER BY d.day;
 $$;
@@ -250,8 +254,8 @@ AS $$
   FROM public.economy_items ei
   LEFT JOIN public.economy_transactions et
     ON et.guild_id = p_guild_id
-    AND et.metadata->>'item_id' = ei.id
-    AND et.type = 'spend'
+    AND et.metadata->>'item_id' = ei.id::TEXT
+    AND et.type = 'shop_buy'
     AND et.created_at >= NOW() - (p_days || ' days')::INTERVAL
   WHERE ei.guild_id = p_guild_id
   GROUP BY ei.id, ei.name

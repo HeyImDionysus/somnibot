@@ -110,7 +110,8 @@ export class TriviaManager {
     const { data } = await this.supabase
       .from('economy_trivia_questions')
       .select('*')
-      .eq('guild_id', guildId);
+      .eq('guild_id', guildId)
+      .limit(1000);
     const questions: TriviaQuestion[] = (data ?? []).map((q: any) => ({
       question: q.question,
       correct: q.correct_answer,

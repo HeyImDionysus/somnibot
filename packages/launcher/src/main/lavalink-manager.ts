@@ -184,7 +184,7 @@ async function writeDefaultConfig(): Promise<void> {
     '  address: 0.0.0.0',
     'lavalink:',
     '  server:',
-    '    password: "youshallnotpass"',
+    '    password: "YOUR_LAVALINK_PASSWORD"',
     '    sources:',
     '      youtube: true',
     '      bandcamp: true',

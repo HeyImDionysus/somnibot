@@ -29,8 +29,8 @@ cd packages/dashboard && pnpm build
 node .next/standalone/packages/dashboard/server.js
 ```
 
-### CI (7 jobs — all must pass)
-install → typecheck → lint → build → test → migration-lint → security
+### CI (8 jobs — all must pass)
+install → typecheck → lint → build → test → integration-test → migration-lint → security
 
 ## Rollback
 
@@ -133,4 +133,4 @@ SELECT purge_member_data('guild-id', 'user-id');  -- Covers 20+ tables
 
 ---
 
-*Last updated: 2026-05-23 · V3 Audit Remediation*
+*Last updated: 2026-05-24 · V5 Full Repository Audit*

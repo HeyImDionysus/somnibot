@@ -105,7 +105,8 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
   const { data } = await supabase
     .from('instance_settings')
     .select('key, value')
-    .in('key', allKeys);
+    .in('key', allKeys)
+    .limit(1000);
 
   if (!data) return configured;
 

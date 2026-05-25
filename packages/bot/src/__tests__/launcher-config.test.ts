@@ -45,7 +45,7 @@ function buildEnvVars(config: LauncherConfig, sessionToken: string): Record<stri
     NEXT_PUBLIC_APP_URL: 'http://localhost:3456',
     LAVALINK_HOST: 'localhost',
     LAVALINK_PORT: '2333',
-    LAVALINK_PASSWORD: 'youshallnotpass',
+    LAVALINK_PASSWORD: 'YOUR_LAVALINK_PASSWORD',
     VALKEY_URL: 'redis://127.0.0.1:6379',
     NODE_ENV: 'production',
   };
@@ -108,7 +108,7 @@ describe('buildEnvVars', () => {
     const env = buildEnvVars(makeConfig(), 'sess');
     expect(env.LAVALINK_HOST).toBe('localhost');
     expect(env.LAVALINK_PORT).toBe('2333');
-    expect(env.LAVALINK_PASSWORD).toBe('youshallnotpass');
+    expect(env.LAVALINK_PASSWORD).toBe('YOUR_LAVALINK_PASSWORD');
   });
 
   it('sets NODE_ENV to production', () => {

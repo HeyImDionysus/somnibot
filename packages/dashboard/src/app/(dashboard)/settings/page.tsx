@@ -73,7 +73,7 @@ const SECTIONS: ConnectionSection[] = [
     fields: [
       { key: 'paypal_client_id', label: 'Client ID', placeholder: 'AfDP...' },
       { key: 'paypal_client_secret', label: 'Client Secret', placeholder: 'EIAf...', secret: true },
-      { key: 'paypal_webhook_id', label: 'Webhook ID', placeholder: 'REDACTED_PAYPAL_WEBHOOK_ID' },
+      { key: 'paypal_webhook_id', label: 'Webhook ID', placeholder: 'YOUR_PAYPAL_WEBHOOK_ID' },
       { key: 'paypal_sandbox', label: 'Sandbox Mode', placeholder: 'true or false', helpText: 'Set to "true" for testing, "false" for live payments.' },
     ],
   },
@@ -86,7 +86,7 @@ const SECTIONS: ConnectionSection[] = [
     fields: [
       { key: 'lavalink_host', label: 'Host', placeholder: 'localhost' },
       { key: 'lavalink_port', label: 'Port', placeholder: '2333' },
-      { key: 'lavalink_password', label: 'Password', placeholder: 'youshallnotpass', secret: true },
+      { key: 'lavalink_password', label: 'Password', placeholder: 'YOUR_LAVALINK_PASSWORD', secret: true },
     ],
   },
   {

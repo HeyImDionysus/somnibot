@@ -31,7 +31,8 @@ export async function GET(request: NextRequest) {
       .select('*', { count: 'exact' })
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
-      .range((page - 1) * pageSize, page * pageSize - 1);
+      .range((page - 1) * pageSize, page * pageSize - 1)
+      .limit(1000);
 
     if (status) query = query.eq('status', status);
     if (severity) query = query.eq('severity', severity);
@@ -44,7 +45,8 @@ export async function GET(request: NextRequest) {
     const { data: stats } = await admin
       .from('fraud_signals')
       .select('status, severity')
-      .eq('guild_id', ctx.guildId);
+      .eq('guild_id', ctx.guildId)
+      .limit(1000);
 
     const summary = {
       total: (stats || []).length,

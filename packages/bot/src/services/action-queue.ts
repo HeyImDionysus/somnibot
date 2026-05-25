@@ -897,7 +897,8 @@ async function recoverStaleActions(
     const { data: rows2 } = await supabase
       .from('bot_action_queue')
       .select('*')
-      .in('id', requeuedIds);
+      .in('id', requeuedIds)
+      .limit(1000);
     for (const r of (rows2 ?? []) as ActionRow[]) {
       if (r.status === 'pending') {
         await processAction(guild, supabase, r);
@@ -924,7 +925,8 @@ export async function startActionQueueListener(
     .select('*')
     .eq('guild_id', guild.id)
     .eq('status', 'pending')
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true })
+    .limit(1000);
 
   if (pending && pending.length > 0) {
     log.info(`Processing ${pending.length} pending action(s)`);
