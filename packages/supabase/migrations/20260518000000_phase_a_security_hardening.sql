@@ -84,8 +84,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role
 
 -- ticket_transcripts: "owner_full_access" is USING(true) — anyone can read all
 DROP POLICY IF EXISTS "owner_full_access" ON ticket_transcripts;
+DROP POLICY IF EXISTS "service_role_full_access" ON ticket_transcripts;
 CREATE POLICY "service_role_full_access" ON ticket_transcripts
   FOR ALL TO service_role USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "owner_read_transcripts" ON ticket_transcripts;
 CREATE POLICY "owner_read_transcripts" ON ticket_transcripts
   FOR SELECT TO authenticated
   USING (
@@ -97,8 +99,10 @@ CREATE POLICY "owner_read_transcripts" ON ticket_transcripts
 
 -- bot_diagnostics: "owner_full_access" is USING(true) — anyone can read/write
 DROP POLICY IF EXISTS "owner_full_access" ON bot_diagnostics;
+DROP POLICY IF EXISTS "service_role_full_access" ON bot_diagnostics;
 CREATE POLICY "service_role_full_access" ON bot_diagnostics
   FOR ALL TO service_role USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS "owner_read_diagnostics" ON bot_diagnostics;
 CREATE POLICY "owner_read_diagnostics" ON bot_diagnostics
   FOR SELECT TO authenticated
   USING (
@@ -110,6 +114,7 @@ CREATE POLICY "owner_read_diagnostics" ON bot_diagnostics
 
 -- members: "service_role_full_access" is USING(true) but not scoped to service_role
 DROP POLICY IF EXISTS "service_role_full_access" ON members;
+DROP POLICY IF EXISTS "service_role_members_access" ON members;
 CREATE POLICY "service_role_members_access" ON members
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
@@ -126,10 +131,12 @@ DROP POLICY IF EXISTS "executions_insert" ON automation_executions;
 ALTER TABLE guild_live_state ENABLE ROW LEVEL SECURITY;
 
 -- Service role (bot) can read/write
+DROP POLICY IF EXISTS "service_role_full_access" ON guild_live_state;
 CREATE POLICY "service_role_full_access" ON guild_live_state
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Owner can read (for dashboard display)
+DROP POLICY IF EXISTS "owner_read_live_state" ON guild_live_state;
 CREATE POLICY "owner_read_live_state" ON guild_live_state
   FOR SELECT TO authenticated
   USING (
@@ -142,10 +149,12 @@ CREATE POLICY "owner_read_live_state" ON guild_live_state
 ALTER TABLE bot_action_queue ENABLE ROW LEVEL SECURITY;
 
 -- Service role (bot) can read/write
+DROP POLICY IF EXISTS "service_role_full_access" ON bot_action_queue;
 CREATE POLICY "service_role_full_access" ON bot_action_queue
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Owner can read status and insert new actions
+DROP POLICY IF EXISTS "owner_manage_actions" ON bot_action_queue;
 CREATE POLICY "owner_manage_actions" ON bot_action_queue
   FOR ALL TO authenticated
   USING (
@@ -185,6 +194,7 @@ GRANT SELECT, INSERT ON bot_action_queue TO authenticated;
 -- The owner_full_access policy already handles this via is_owner check,
 -- but add a self-read policy for non-owners.
 
+DROP POLICY IF EXISTS "users_read_own" ON users;
 CREATE POLICY "users_read_own" ON users
   FOR SELECT TO authenticated
   USING (id = auth.uid());
