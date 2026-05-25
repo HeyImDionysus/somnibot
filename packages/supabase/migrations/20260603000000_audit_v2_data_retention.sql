@@ -10,7 +10,7 @@
 
 -- Index for efficient audit log pruning by guild + date
 CREATE INDEX IF NOT EXISTS idx_audit_logs_guild_created
-  ON audit_logs (guild_id, created_at);
+  ON audit_logs (guild_id, timestamp);
 
 -- Index for efficient portal session expiry cleanup
 CREATE INDEX IF NOT EXISTS idx_portal_sessions_guild_expires
@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS idx_portal_sessions_guild_expires
 
 -- Index for efficient webhook event pruning
 CREATE INDEX IF NOT EXISTS idx_webhook_events_guild_status_created
-  ON webhook_events (guild_id, status, created_at);
+  ON webhook_events (guild_id, result, processed_at);
 
 -- Document retention policy
 COMMENT ON TABLE audit_logs IS 'Retained for 90 days, then pruned by bot cron.';

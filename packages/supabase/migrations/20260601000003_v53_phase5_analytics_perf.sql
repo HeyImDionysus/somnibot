@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_econ_market_guild_status_date
 
 -- Leaderboard XP index for levels
 CREATE INDEX IF NOT EXISTS idx_members_guild_xp
-  ON members(guild_id, xp DESC);
+  ON member_levels(guild_id, xp DESC);
 
 -- ═══════════════════════════════════════════════════════════
 -- 5.2: Paginated leaderboard RPC (replaces old economy_leaderboard)
