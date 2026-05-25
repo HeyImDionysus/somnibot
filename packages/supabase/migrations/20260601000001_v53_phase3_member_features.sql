@@ -3,7 +3,7 @@
 
 -- ─── 3.7: Per-Feature Embed Overrides ────────────────────
 CREATE TABLE IF NOT EXISTS feature_embed_overrides (
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   feature_key TEXT NOT NULL CHECK (feature_key IN (
     'welcome', 'goodbye', 'level_up', 'moderation',
     'economy', 'music', 'tickets', 'giveaways', 'achievements'
@@ -25,7 +25,7 @@ CREATE POLICY "feature_embed_overrides_guild_rls"
 
 -- ─── 3.2: Tutorial System ────────────────────────────────
 CREATE TABLE IF NOT EXISTS tutorial_configs (
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   enabled BOOLEAN DEFAULT false,
   auto_trigger BOOLEAN DEFAULT false,
   trigger_mode TEXT DEFAULT 'first_command' CHECK (trigger_mode IN ('first_command', 'join', 'disabled')),
@@ -41,7 +41,7 @@ CREATE POLICY "tutorial_configs_guild_rls"
 
 CREATE TABLE IF NOT EXISTS tutorial_steps (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   step_order INT NOT NULL DEFAULT 0,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
