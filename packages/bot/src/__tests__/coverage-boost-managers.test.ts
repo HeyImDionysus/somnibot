@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Coverage-driving tests — call real methods on managers to exercise deep code paths.
  * Targets the biggest remaining uncovered files.

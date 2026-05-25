@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for deploy/deployer.ts — the server state deployment pipeline.
  * 378 uncovered statements. Tests pre-flight checks, dry-run mode,

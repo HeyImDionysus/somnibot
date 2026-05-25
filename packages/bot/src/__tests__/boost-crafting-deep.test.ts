@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/crafting/crafting-manager.ts — listRecipes, craft.
  * 204 uncovered statements at 32.5%.

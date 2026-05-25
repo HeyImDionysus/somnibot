@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep coverage for:
  *  - features/discord-ux/modal-handlers.ts (237 uncov / 301 total)

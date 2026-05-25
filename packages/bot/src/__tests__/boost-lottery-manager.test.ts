@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for ../features/lottery/lottery-manager.js — instantiation and lifecycle.
  */

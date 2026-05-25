@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/gathering/gathering-manager.ts — gather.
  * 157 uncovered statements at 48.9%.

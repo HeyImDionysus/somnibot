@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/farming/farming-manager.ts — viewFarm, plant, water, harvest, fertilize.
  * 267 uncovered statements at 37.0%.

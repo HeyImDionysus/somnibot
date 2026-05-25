@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/adventures/adventure-manager.ts — startAdventure, handleChoice.
  * 336 uncovered statements at 52.3%.

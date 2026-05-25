@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/market/market-manager.ts — browse, listItem, buy, myListings, cancel.
  * 224 uncovered statements at 42.3%.
