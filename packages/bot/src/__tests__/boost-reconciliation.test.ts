@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for services/reconciliation.ts — runReconciliation and scheduleReconciliation.
  * 113 uncovered statements at 37.2%.

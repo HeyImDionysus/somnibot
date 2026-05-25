@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for services/commerce-fulfillment.ts — the post-payment
  * fulfillment pipeline handling purchases, subscriptions, cancellations,

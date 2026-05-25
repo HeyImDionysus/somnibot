@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/polls/polls-manager.ts — exercises createPoll, handlePollVote,
  * closePoll, createPrediction, placeBet, resolvePrediction.

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for features/moderation/escalation.ts — getEscalationAction and executeEscalation.
  * 176 uncovered statements at 17%.

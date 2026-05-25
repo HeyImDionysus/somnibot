@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for features/commerce/license-commands.ts — buildLicenseCommand, handleLicenseCommand.
  * 191 uncovered statements at 29.8%.

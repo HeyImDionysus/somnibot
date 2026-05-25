@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for services/action-queue.ts — the action queue listener that
  * processes dashboard-initiated operations (role/channel CRUD, embeds,

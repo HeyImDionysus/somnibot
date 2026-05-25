@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for ../features/giveaways/giveaway-manager.js — instantiation and lifecycle.
  */

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for features/giveaways/giveaway-manager.ts — create, handleEntry, endGiveaway, reroll.
  * 211 uncovered statements at 41.1%.

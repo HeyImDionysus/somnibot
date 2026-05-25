@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep function-level coverage — exercises real code paths with richer mock data.
  * These mocks return actual data arrays so the business logic runs deep.

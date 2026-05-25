@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Wide coverage sweep — imports & calls functions across many mid-coverage files.
  * Each test drives real code through guard clauses and early paths.

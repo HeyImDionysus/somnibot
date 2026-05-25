@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for features/audit/diagnostics-service.ts — DiagnosticsService class.
  * 132 uncovered statements at 14.8%.

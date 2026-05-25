@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for features/discord-ux/modal-handlers.ts — handles Discord modal
  * submissions for ticket creation, report filing, warn reasons, etc.

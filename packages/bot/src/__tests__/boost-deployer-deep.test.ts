@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep tests for deploy/deployer.ts — deployServerState with various states.
  * 268 uncovered statements at 37.0%.

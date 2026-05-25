@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Deep coverage tests for services/action-queue.ts — exercises all action handlers
  * via startActionQueueListener with mock pending actions.

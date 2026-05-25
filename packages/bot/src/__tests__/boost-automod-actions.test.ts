@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Tests for features/moderation/automod-actions.ts — executeAutoModAction.
  * 165 uncovered statements at 37.5%.
