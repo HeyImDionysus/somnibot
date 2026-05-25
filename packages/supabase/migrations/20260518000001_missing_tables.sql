@@ -8,6 +8,8 @@
 
 -- ── bot_action_queue ────────────────────────────────────────
 -- Commerce fulfillment pipeline: webhook → queue → bot processes
+-- Table may already exist from guild_live_state migration with different columns.
+-- CREATE TABLE IF NOT EXISTS will skip if it exists, so we ADD missing columns.
 CREATE TABLE IF NOT EXISTS bot_action_queue (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id      TEXT NOT NULL,
@@ -22,10 +24,19 @@ CREATE TABLE IF NOT EXISTS bot_action_queue (
   next_retry_at TIMESTAMPTZ
 );
 
+-- Ensure columns exist even if table was created by an earlier migration
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS action_type   TEXT;
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS attempts      INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS max_attempts  INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS error         TEXT;
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS processed_at  TIMESTAMPTZ;
+ALTER TABLE bot_action_queue ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_action_queue_status ON bot_action_queue (status, next_retry_at);
 CREATE INDEX IF NOT EXISTS idx_action_queue_guild ON bot_action_queue (guild_id, status);
 
 ALTER TABLE bot_action_queue ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON bot_action_queue;
 CREATE POLICY "owner_full_access" ON bot_action_queue
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -43,6 +54,7 @@ CREATE TABLE IF NOT EXISTS guild_live_state (
 );
 
 ALTER TABLE guild_live_state ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON guild_live_state;
 CREATE POLICY "owner_full_access" ON guild_live_state
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -63,6 +75,7 @@ CREATE TABLE IF NOT EXISTS sync_actions (
 CREATE INDEX IF NOT EXISTS idx_sync_actions_guild ON sync_actions (guild_id, created_at DESC);
 
 ALTER TABLE sync_actions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON sync_actions;
 CREATE POLICY "owner_full_access" ON sync_actions
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -81,6 +94,7 @@ CREATE TABLE IF NOT EXISTS dashboard_roles (
 );
 
 ALTER TABLE dashboard_roles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON dashboard_roles;
 CREATE POLICY "owner_full_access" ON dashboard_roles
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -99,6 +113,7 @@ CREATE TABLE IF NOT EXISTS dashboard_user_roles (
 CREATE INDEX IF NOT EXISTS idx_dashboard_user_roles_user ON dashboard_user_roles (user_id, guild_id);
 
 ALTER TABLE dashboard_user_roles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON dashboard_user_roles;
 CREATE POLICY "owner_full_access" ON dashboard_user_roles
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -124,6 +139,7 @@ CREATE INDEX IF NOT EXISTS idx_fraud_signals_guild ON fraud_signals (guild_id, c
 CREATE INDEX IF NOT EXISTS idx_fraud_signals_order ON fraud_signals (order_id);
 
 ALTER TABLE fraud_signals ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON fraud_signals;
 CREATE POLICY "owner_full_access" ON fraud_signals
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -143,6 +159,7 @@ CREATE TABLE IF NOT EXISTS fraud_rules (
 );
 
 ALTER TABLE fraud_rules ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON fraud_rules;
 CREATE POLICY "owner_full_access" ON fraud_rules
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -168,6 +185,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE INDEX IF NOT EXISTS idx_incidents_guild ON incidents (guild_id, status, created_at DESC);
 
 ALTER TABLE incidents ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON incidents;
 CREATE POLICY "owner_full_access" ON incidents
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -185,6 +203,7 @@ CREATE TABLE IF NOT EXISTS incident_events (
 CREATE INDEX IF NOT EXISTS idx_incident_events_incident ON incident_events (incident_id, created_at);
 
 ALTER TABLE incident_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON incident_events;
 CREATE POLICY "owner_full_access" ON incident_events
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -209,6 +228,7 @@ CREATE TABLE IF NOT EXISTS dead_letter_queue (
 CREATE INDEX IF NOT EXISTS idx_dead_letter_guild ON dead_letter_queue (guild_id, reprocessed, created_at DESC);
 
 ALTER TABLE dead_letter_queue ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON dead_letter_queue;
 CREATE POLICY "owner_full_access" ON dead_letter_queue
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -234,6 +254,7 @@ CREATE INDEX IF NOT EXISTS idx_admin_changes_guild ON admin_changes (guild_id, c
 CREATE INDEX IF NOT EXISTS idx_admin_changes_target ON admin_changes (target_table, target_id);
 
 ALTER TABLE admin_changes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON admin_changes;
 CREATE POLICY "owner_full_access" ON admin_changes
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -258,6 +279,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_guild ON alerts (guild_id, acknowledged, created_at DESC);
 
 ALTER TABLE alerts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON alerts;
 CREATE POLICY "owner_full_access" ON alerts
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -279,6 +301,7 @@ CREATE INDEX IF NOT EXISTS idx_portal_sessions_token ON portal_sessions (session
 CREATE INDEX IF NOT EXISTS idx_portal_sessions_customer ON portal_sessions (customer_id);
 
 ALTER TABLE portal_sessions ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON portal_sessions;
 CREATE POLICY "owner_full_access" ON portal_sessions
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -302,6 +325,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_events_guild ON workflow_events (guild_i
 CREATE INDEX IF NOT EXISTS idx_workflow_events_execution ON workflow_events (execution_id);
 
 ALTER TABLE workflow_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON workflow_events;
 CREATE POLICY "owner_full_access" ON workflow_events
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
@@ -325,6 +349,7 @@ CREATE TABLE IF NOT EXISTS message_reports (
 CREATE INDEX IF NOT EXISTS idx_message_reports_guild ON message_reports (guild_id, status, created_at DESC);
 
 ALTER TABLE message_reports ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "owner_full_access" ON message_reports;
 CREATE POLICY "owner_full_access" ON message_reports
   FOR ALL USING (EXISTS (SELECT 1 FROM users WHERE users.id = auth.uid() AND users.is_owner = true));
 
