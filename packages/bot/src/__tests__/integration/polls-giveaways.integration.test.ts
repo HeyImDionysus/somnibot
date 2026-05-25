@@ -8,12 +8,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient | null = null;
+let supa!: SupabaseClient;
 const GUILD_ID = `test-polls-guild-${Date.now()}`;
 
 beforeAll(async () => {
   supa = await requireSupabase();
-  if (!supa) return;
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -24,7 +23,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!supa) return;
   const { data: pollRows } = await supa.from('polls').select('id').eq('guild_id', GUILD_ID);
   const pollIds = (pollRows ?? []).map((p) => p.id);
   if (pollIds.length > 0) {
@@ -43,7 +41,6 @@ describe('Polls lifecycle', () => {
   let optionBId: string;
 
   it('creates a poll', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('polls')
       .insert({
@@ -65,7 +62,6 @@ describe('Polls lifecycle', () => {
   });
 
   it('adds options to the poll', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('poll_options')
       .insert([
@@ -82,7 +78,6 @@ describe('Polls lifecycle', () => {
   });
 
   it('records votes from different users', async () => {
-    if (!supa) return;
     const votes = [
       { poll_id: pollId, option_id: optionAId, user_id: 'voter-1' },
       { poll_id: pollId, option_id: optionAId, user_id: 'voter-2' },
@@ -94,7 +89,6 @@ describe('Polls lifecycle', () => {
   });
 
   it('enforces unique vote per user per option (UNIQUE constraint)', async () => {
-    if (!supa) return;
     const { error } = await supa.from('poll_votes').insert({
       poll_id: pollId,
       option_id: optionAId,
@@ -106,7 +100,6 @@ describe('Polls lifecycle', () => {
   });
 
   it('tallies votes correctly', async () => {
-    if (!supa) return;
     const { data: tsVotes } = await supa
       .from('poll_votes')
       .select('id')
@@ -124,7 +117,6 @@ describe('Polls lifecycle', () => {
   });
 
   it('closes a poll', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('polls')
       .update({
@@ -145,7 +137,6 @@ describe('Giveaways lifecycle', () => {
   let giveawayId: string;
 
   it('creates a giveaway', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('giveaways')
       .insert({
@@ -168,7 +159,6 @@ describe('Giveaways lifecycle', () => {
   });
 
   it('adds entries to the giveaway', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('giveaways')
       .update({
@@ -184,7 +174,6 @@ describe('Giveaways lifecycle', () => {
   });
 
   it('ends a giveaway with a winner', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('giveaways')
       .update({
@@ -202,7 +191,6 @@ describe('Giveaways lifecycle', () => {
   });
 
   it('rejects invalid giveaway status (CHECK constraint)', async () => {
-    if (!supa) return;
     const { error } = await supa
       .from('giveaways')
       .insert({

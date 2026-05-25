@@ -10,12 +10,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient | null = null;
+let supa!: SupabaseClient;
 const GUILD_ID = `test-queue-guild-${Date.now()}`;
 
 beforeAll(async () => {
   supa = await requireSupabase();
-  if (!supa) return;
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -25,7 +24,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!supa) return;
   await supa.from('action_queue_dlq').delete().eq('guild_id', GUILD_ID);
   await supa.from('bot_action_queue').delete().eq('guild_id', GUILD_ID);
   await supa.from('guild').delete().eq('id', GUILD_ID);
@@ -35,7 +33,6 @@ describe('Action queue', () => {
   let actionId: string;
 
   it('enqueues an action', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('bot_action_queue')
       .insert({
@@ -54,7 +51,6 @@ describe('Action queue', () => {
   });
 
   it('claims a pending action via bot_action_queue_claim RPC', async () => {
-    if (!supa) return;
     // RPC takes a single UUID, atomically moves pending → processing
     const { data, error } = await supa.rpc('bot_action_queue_claim', {
       p_action_id: actionId,
@@ -71,7 +67,6 @@ describe('Action queue', () => {
   });
 
   it('does not re-claim an already processing action', async () => {
-    if (!supa) return;
     // Try claiming the same action again — should return empty
     const { data, error } = await supa.rpc('bot_action_queue_claim', {
       p_action_id: actionId,
@@ -83,7 +78,6 @@ describe('Action queue', () => {
   });
 
   it('marks an action as completed', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('bot_action_queue')
       .update({
@@ -101,7 +95,6 @@ describe('Action queue', () => {
   });
 
   it('enqueues multiple actions and queries by status', async () => {
-    if (!supa) return;
     const actions = Array.from({ length: 3 }, (_, i) => ({
       guild_id: GUILD_ID,
       action: 'ASSIGN_ROLE',
@@ -125,7 +118,6 @@ describe('Action queue', () => {
 
 describe('Dead-letter queue', () => {
   it('moves a failed action to the DLQ', async () => {
-    if (!supa) return;
     // Insert a "failed" action
     const { data: failed } = await supa
       .from('bot_action_queue')

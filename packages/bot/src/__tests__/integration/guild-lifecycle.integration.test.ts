@@ -8,23 +8,20 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient | null = null;
+let supa!: SupabaseClient;
 const TEST_GUILD_ID = `test-guild-${Date.now()}`;
 
 beforeAll(async () => {
   supa = await requireSupabase();
-  if (!supa) return;
 });
 
 afterAll(async () => {
-  if (!supa) return;
   await supa.from('guild_config').delete().eq('guild_id', TEST_GUILD_ID);
   await supa.from('guild').delete().eq('id', TEST_GUILD_ID);
 });
 
 describe('Guild lifecycle', () => {
   it('inserts a new guild row', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('guild')
       .insert({
@@ -42,7 +39,6 @@ describe('Guild lifecycle', () => {
   });
 
   it('creates guild_config with FK to guild', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('guild_config')
       .insert({ guild_id: TEST_GUILD_ID })
@@ -58,7 +54,6 @@ describe('Guild lifecycle', () => {
   });
 
   it('rejects guild_config for nonexistent guild (FK constraint)', async () => {
-    if (!supa) return;
     const { error } = await supa
       .from('guild_config')
       .insert({ guild_id: 'nonexistent-guild-id-12345' })
@@ -70,7 +65,6 @@ describe('Guild lifecycle', () => {
   });
 
   it('updates guild config fields', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('guild_config')
       .update({
@@ -93,7 +87,6 @@ describe('Guild lifecycle', () => {
   });
 
   it('marks setup as completed', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('guild')
       .update({

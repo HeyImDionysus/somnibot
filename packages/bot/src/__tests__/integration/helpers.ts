@@ -1,9 +1,9 @@
 /**
  * Shared helpers for integration tests.
  *
- * Provides a Supabase client and a connection guard that skips tests
- * gracefully when the local Supabase instance isn't reachable (e.g.
- * Docker Hub rate limiting prevented image pull in CI).
+ * Provides a Supabase client and a connection guard that fails the
+ * suite when the local Supabase instance isn't reachable — integration
+ * tests must run against a real database, never silently pass.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
@@ -36,7 +36,7 @@ function sleep(ms: number): Promise<void> {
 export async function isSupabaseAvailable(): Promise<boolean> {
   if (_connected !== null) return _connected;
 
-  const maxRetries = 5;
+  const maxRetries = 10;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const client = getTestClient();
@@ -46,9 +46,9 @@ export async function isSupabaseAvailable(): Promise<boolean> {
         return true;
       }
       // Got an error — wait and retry
-      if (attempt < maxRetries - 1) await sleep(2000);
+      if (attempt < maxRetries - 1) await sleep(3000);
     } catch {
-      if (attempt < maxRetries - 1) await sleep(2000);
+      if (attempt < maxRetries - 1) await sleep(3000);
     }
   }
 
@@ -57,15 +57,18 @@ export async function isSupabaseAvailable(): Promise<boolean> {
 }
 
 /**
- * Call in beforeAll — skips the entire suite if Supabase is unreachable.
- * Returns the client if available, or null if not.
- * When null is returned, tests should be skipped (not failed).
+ * Call in beforeAll — fails the entire suite if Supabase is unreachable.
+ * Integration tests must run against a real database. If Supabase isn't
+ * available, the suite should fail loudly, not silently pass.
  */
-export async function requireSupabase(): Promise<SupabaseClient | null> {
+export async function requireSupabase(): Promise<SupabaseClient> {
   const available = await isSupabaseAvailable();
   if (!available) {
-    console.warn('⚠️  Supabase not reachable — integration tests will be skipped');
-    return null;
+    throw new Error(
+      'Supabase is not reachable at ' + SUPABASE_URL + '. ' +
+      'Integration tests require a running Supabase instance. ' +
+      'Run "supabase start" in packages/ before running integration tests.'
+    );
   }
   return getTestClient();
 }

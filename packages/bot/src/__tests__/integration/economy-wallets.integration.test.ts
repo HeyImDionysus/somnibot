@@ -13,14 +13,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient | null = null;
+let supa!: SupabaseClient;
 const GUILD_ID = `test-economy-guild-${Date.now()}`;
 const USER_A = 'econ-user-aaa';
 const USER_B = 'econ-user-bbb';
 
 beforeAll(async () => {
   supa = await requireSupabase();
-  if (!supa) return;
 
   // economy_wallets has no FK to guild, but we create one to be clean
   await supa.from('guild').insert({
@@ -31,7 +30,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!supa) return;
   await supa.from('economy_transactions').delete().eq('guild_id', GUILD_ID);
   await supa.from('economy_wallets').delete().eq('guild_id', GUILD_ID);
   await supa.from('guild').delete().eq('id', GUILD_ID);
@@ -39,7 +37,6 @@ afterAll(async () => {
 
 describe('economy_add_balance RPC', () => {
   it('creates a wallet on first credit (upsert)', async () => {
-    if (!supa) return;
     const { error } = await supa.rpc('economy_add_balance', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_A,
@@ -60,7 +57,6 @@ describe('economy_add_balance RPC', () => {
   });
 
   it('adds to existing wallet balance', async () => {
-    if (!supa) return;
     await supa.rpc('economy_add_balance', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_A,
@@ -80,7 +76,6 @@ describe('economy_add_balance RPC', () => {
 
 describe('economy_bank_deposit RPC', () => {
   it('moves funds from wallet to bank', async () => {
-    if (!supa) return;
     const { data: depositAmt, error } = await supa.rpc('economy_bank_deposit', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_A,
@@ -103,7 +98,6 @@ describe('economy_bank_deposit RPC', () => {
   });
 
   it('returns 0 when wallet has insufficient funds', async () => {
-    if (!supa) return;
     // Try to deposit more than wallet has — should return 0 and do nothing
     const { data: depositAmt, error } = await supa.rpc('economy_bank_deposit', {
       p_guild_id: GUILD_ID,
@@ -129,7 +123,6 @@ describe('economy_bank_deposit RPC', () => {
 
 describe('economy_bank_withdraw RPC', () => {
   it('moves funds from bank to wallet', async () => {
-    if (!supa) return;
     const { data: withdrawAmt, error } = await supa.rpc('economy_bank_withdraw', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_A,
@@ -151,7 +144,6 @@ describe('economy_bank_withdraw RPC', () => {
   });
 
   it('returns 0 when bank has insufficient funds', async () => {
-    if (!supa) return;
     const { data: withdrawAmt, error } = await supa.rpc('economy_bank_withdraw', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_A,
@@ -165,7 +157,6 @@ describe('economy_bank_withdraw RPC', () => {
 
 describe('economy_subtract_balance RPC', () => {
   it('debits wallet balance', async () => {
-    if (!supa) return;
     // User B gets funds first
     await supa.rpc('economy_add_balance', {
       p_guild_id: GUILD_ID,
@@ -192,7 +183,6 @@ describe('economy_subtract_balance RPC', () => {
   });
 
   it('raises on insufficient balance', async () => {
-    if (!supa) return;
     const { error } = await supa.rpc('economy_subtract_balance', {
       p_guild_id: GUILD_ID,
       p_user_id: USER_B,
@@ -207,7 +197,6 @@ describe('economy_subtract_balance RPC', () => {
 
 describe('Wallet passive mode', () => {
   it('toggles passive mode on a wallet', async () => {
-    if (!supa) return;
     const { error } = await supa
       .from('economy_wallets')
       .update({ passive: true })

@@ -9,14 +9,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient | null = null;
+let supa!: SupabaseClient;
 const GUILD_ID = `test-mod-guild-${Date.now()}`;
 const MOD_ID = 'moderator-001';
 const OFFENDER_ID = 'offender-001';
 
 beforeAll(async () => {
   supa = await requireSupabase();
-  if (!supa) return;
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -26,7 +25,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (!supa) return;
   await supa.from('audit_logs').delete().eq('guild_id', GUILD_ID);
   await supa.from('infractions').delete().eq('guild_id', GUILD_ID);
   await supa.from('guild').delete().eq('id', GUILD_ID);
@@ -36,7 +34,6 @@ describe('Infractions', () => {
   let warnId: string;
 
   it('creates a warning infraction', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('infractions')
       .insert({
@@ -57,7 +54,6 @@ describe('Infractions', () => {
   });
 
   it('creates a mute infraction with duration', async () => {
-    if (!supa) return;
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const { data, error } = await supa
       .from('infractions')
@@ -79,7 +75,6 @@ describe('Infractions', () => {
   });
 
   it('rejects invalid infraction type (CHECK constraint)', async () => {
-    if (!supa) return;
     const { error } = await supa.from('infractions').insert({
       guild_id: GUILD_ID,
       member_id: OFFENDER_ID,
@@ -93,7 +88,6 @@ describe('Infractions', () => {
   });
 
   it('queries active infractions for a member', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('infractions')
       .select('id, type, reason, active')
@@ -109,7 +103,6 @@ describe('Infractions', () => {
   });
 
   it('pardons a warning', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('infractions')
       .update({
@@ -129,7 +122,6 @@ describe('Infractions', () => {
   });
 
   it('only non-pardoned infractions remain active', async () => {
-    if (!supa) return;
     const { data } = await supa
       .from('infractions')
       .select('id, type')
@@ -144,7 +136,6 @@ describe('Infractions', () => {
 
 describe('Audit logs', () => {
   it('records a moderation action', async () => {
-    if (!supa) return;
     const { data, error } = await supa
       .from('audit_logs')
       .insert({
@@ -166,7 +157,6 @@ describe('Audit logs', () => {
   });
 
   it('queries audit logs for a guild ordered by timestamp', async () => {
-    if (!supa) return;
     await supa.from('audit_logs').insert({
       guild_id: GUILD_ID,
       actor_type: 'bot',
