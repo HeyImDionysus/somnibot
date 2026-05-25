@@ -1,9 +1,6 @@
 # SomniBot Supabase Configuration
 # https://supabase.com/docs/guides/cli/config
 
-[project]
-id = ""  # Set after project creation
-
 [api]
 enabled = true
 port = 54321
