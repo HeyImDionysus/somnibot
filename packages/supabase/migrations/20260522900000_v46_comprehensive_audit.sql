@@ -89,6 +89,10 @@ END;
 $$;
 
 -- ─── 4. Atomic license key failed_attempts increment ────────────
+
+ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMPTZ;
+
 -- Returns the new count so the caller can check the threshold in one round-trip.
 CREATE OR REPLACE FUNCTION license_increment_failed_attempts(
   p_license_key_id UUID,
