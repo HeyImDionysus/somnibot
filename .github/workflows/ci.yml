@@ -1,18 +1,18 @@
 name: CI
-
+​
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
+​
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
-
+​
 env:
   NODE_VERSION: '22'
-
+​
 jobs:
   # ──────────────────────────────────────────────────────────
   # Install & Cache
@@ -34,7 +34,7 @@ jobs:
             node_modules
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
-
+​
   # ──────────────────────────────────────────────────────────
   # Typecheck — all packages
   # ──────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ jobs:
         run: pnpm --filter @somnibot/dashboard type-check
       - name: Typecheck license-sdk
         run: pnpm --filter @somnibot/license-sdk typecheck
-
+​
   # ──────────────────────────────────────────────────────────
   # Lint
   # ──────────────────────────────────────────────────────────
@@ -86,7 +86,6 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Lint dashboard
         run: pnpm --filter @somnibot/dashboard lint
-
   # ──────────────────────────────────────────────────────────
   # Build — full production build
   # ──────────────────────────────────────────────────────────
@@ -113,7 +112,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder
           DISCORD_GUILD_ID: '000000000000000000'
-
+​
   # ──────────────────────────────────────────────────────────
   # Unit Tests — vitest
   # ──────────────────────────────────────────────────────────
@@ -137,7 +136,7 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Run tests
         run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=60 --reporter=verbose
-
+​
   # ──────────────────────────────────────────────────────────
   # Integration Tests — real Supabase
   # ──────────────────────────────────────────────────────────
@@ -159,11 +158,10 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Supabase CLI
         run: |
-          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.0.2/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin supabase
+          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.101.0/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin supabase
       - name: Start Supabase local
         run: |
-          cd packages/supabase
-          supabase init --force 2>/dev/null || true
+          cd packages
           supabase start --ignore-health-check
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -176,8 +174,8 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
       - name: Stop Supabase
         if: always()
-        run: cd packages/supabase && supabase stop 2>/dev/null || true
-
+        run: cd packages && supabase stop 2>/dev/null || true
+​
   # ──────────────────────────────────────────────────────────
   # Migration Lint
   # ──────────────────────────────────────────────────────────
@@ -191,9 +189,9 @@ jobs:
           set -euo pipefail
           MIGRATIONS_DIR="packages/supabase/migrations"
           ERRORS=0
-
+​
           echo "=== Migration Lint ==="
-
+​
           # Check all files follow naming convention: YYYYMMDDHHMMSS_description.sql
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
@@ -202,7 +200,7 @@ jobs:
               ERRORS=$((ERRORS+1))
             fi
           done
-
+​
           # Check timestamps are in order
           PREV=""
           for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
@@ -214,7 +212,7 @@ jobs:
             fi
             PREV="$TS"
           done
-
+​
           # Warn on dangerous operations
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
@@ -228,17 +226,17 @@ jobs:
               echo "⚠️  DELETE without WHERE in $base — ensure this is intentional"
             fi
           done
-
+​
           # Summary
           TOTAL=$(ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null | wc -l)
           echo ""
           echo "Checked $TOTAL migration files, $ERRORS error(s)"
-
+​
           if [ "$ERRORS" -gt 0 ]; then
             exit 1
           fi
           echo "✅ All migrations pass lint"
-
+​
   # ──────────────────────────────────────────────────────────
   # Security Checks
   # ──────────────────────────────────────────────────────────
@@ -264,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Checking for hardcoded secrets ==="
-
+​
           # Patterns that suggest real credentials
           PATTERNS=(
             'sk_live_'
@@ -274,7 +272,7 @@ jobs:
             'ghp_[A-Za-z0-9]{36}'
             'xoxb-[0-9]'
           )
-
+​
           FOUND=0
           for pattern in "${PATTERNS[@]}"; do
             MATCHES=$(grep -rn "$pattern" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.env" \
@@ -286,7 +284,7 @@ jobs:
               FOUND=$((FOUND+1))
             fi
           done
-
+​
           if [ "$FOUND" -gt 0 ]; then
             echo "❌ Found $FOUND potential secret pattern(s) — review above"
             exit 1
