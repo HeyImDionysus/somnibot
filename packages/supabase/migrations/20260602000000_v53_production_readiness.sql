@@ -237,8 +237,6 @@ DROP FUNCTION IF EXISTS public.purge_user_data(text, text);
 -- at the database level.
 -- ============================================================
 
-ALTER TABLE role_templates       ALTER COLUMN guild_id SET NOT NULL;
-ALTER TABLE channel_templates    ALTER COLUMN guild_id SET NOT NULL;
 ALTER TABLE discord_id_map       ALTER COLUMN guild_id SET NOT NULL;
 ALTER TABLE reaction_roles       ALTER COLUMN guild_id SET NOT NULL;
 ALTER TABLE automod_rules        ALTER COLUMN guild_id SET NOT NULL;
