@@ -5,18 +5,14 @@
  * and giveaways (create → enter → end → winners). Real Supabase.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { requireSupabase } from './helpers.js';
 
 let supa: SupabaseClient;
 const GUILD_ID = `test-polls-guild-${Date.now()}`;
 
 beforeAll(async () => {
-  supa = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  supa = await requireSupabase();
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -27,8 +23,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Clean up in dependency order
-  // Get all poll IDs for this guild to clean up votes and options
   const { data: pollRows } = await supa.from('polls').select('id').eq('guild_id', GUILD_ID);
   const pollIds = (pollRows ?? []).map((p) => p.id);
   if (pollIds.length > 0) {
@@ -98,15 +92,14 @@ describe('Polls lifecycle', () => {
     const { error } = await supa.from('poll_votes').insert({
       poll_id: pollId,
       option_id: optionAId,
-      user_id: 'voter-1', // already voted for this option
+      user_id: 'voter-1',
     });
 
     expect(error).not.toBeNull();
-    expect(error!.code).toBe('23505'); // unique_violation
+    expect(error!.code).toBe('23505');
   });
 
   it('tallies votes correctly', async () => {
-    // Count votes per option
     const { data: tsVotes } = await supa
       .from('poll_votes')
       .select('id')
@@ -119,8 +112,8 @@ describe('Polls lifecycle', () => {
       .eq('poll_id', pollId)
       .eq('option_id', optionBId);
 
-    expect(tsVotes!.length).toBe(2);   // TypeScript got 2 votes
-    expect(rustVotes!.length).toBe(1); // Rust got 1 vote
+    expect(tsVotes!.length).toBe(2);
+    expect(rustVotes!.length).toBe(1);
   });
 
   it('closes a poll', async () => {
@@ -166,7 +159,6 @@ describe('Giveaways lifecycle', () => {
   });
 
   it('adds entries to the giveaway', async () => {
-    // Use the giveaway_add_entry RPC or direct update
     const { data, error } = await supa
       .from('giveaways')
       .update({
@@ -212,6 +204,6 @@ describe('Giveaways lifecycle', () => {
       });
 
     expect(error).not.toBeNull();
-    expect(error!.code).toBe('23514'); // check_violation
+    expect(error!.code).toBe('23514');
   });
 });

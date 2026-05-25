@@ -5,22 +5,17 @@
  * No mocks. Validates real DB constraints, RLS, and cascade behavior.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { requireSupabase } from './helpers.js';
 
 let supa: SupabaseClient;
 const TEST_GUILD_ID = `test-guild-${Date.now()}`;
 
-beforeAll(() => {
-  supa = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+beforeAll(async () => {
+  supa = await requireSupabase();
 });
 
 afterAll(async () => {
-  // Cascade cleanup — delete guild removes guild_config, members, etc.
   await supa.from('guild_config').delete().eq('guild_id', TEST_GUILD_ID);
   await supa.from('guild').delete().eq('id', TEST_GUILD_ID);
 });
@@ -53,7 +48,6 @@ describe('Guild lifecycle', () => {
     expect(error).toBeNull();
     expect(data).toBeDefined();
     expect(data!.guild_id).toBe(TEST_GUILD_ID);
-    // Defaults should be applied
     expect(data!.onboarding_enabled).toBe(true);
     expect(data!.levels_enabled).toBe(false);
     expect(data!.music_enabled).toBe(true);
@@ -67,7 +61,6 @@ describe('Guild lifecycle', () => {
       .single();
 
     expect(error).not.toBeNull();
-    // FK violation
     expect(error!.code).toBe('23503');
   });
 

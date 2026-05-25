@@ -1,15 +1,13 @@
 /**
- * Integration test: Moderation — infractions, audit logs, automod rules.
+ * Integration test: Moderation — infractions, audit logs.
  *
  * Tests the core moderation data pipeline: creating infractions,
  * querying active warnings, pardoning, and audit log entries.
  * All against a real Supabase instance.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { requireSupabase } from './helpers.js';
 
 let supa: SupabaseClient;
 const GUILD_ID = `test-mod-guild-${Date.now()}`;
@@ -17,9 +15,7 @@ const MOD_ID = 'moderator-001';
 const OFFENDER_ID = 'offender-001';
 
 beforeAll(async () => {
-  supa = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  supa = await requireSupabase();
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -36,7 +32,6 @@ afterAll(async () => {
 
 describe('Infractions', () => {
   let warnId: string;
-  let muteId: string;
 
   it('creates a warning infraction', async () => {
     const { data, error } = await supa
@@ -59,7 +54,7 @@ describe('Infractions', () => {
   });
 
   it('creates a mute infraction with duration', async () => {
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const { data, error } = await supa
       .from('infractions')
       .insert({
@@ -77,7 +72,6 @@ describe('Infractions', () => {
     expect(error).toBeNull();
     expect(data!.type).toBe('mute');
     expect(data!.duration_minutes).toBe(60);
-    muteId = data!.id;
   });
 
   it('rejects invalid infraction type (CHECK constraint)', async () => {
@@ -90,7 +84,7 @@ describe('Infractions', () => {
     });
 
     expect(error).not.toBeNull();
-    expect(error!.code).toBe('23514'); // check_violation
+    expect(error!.code).toBe('23514');
   });
 
   it('queries active infractions for a member', async () => {
@@ -103,7 +97,7 @@ describe('Infractions', () => {
       .order('created_at', { ascending: false });
 
     expect(error).toBeNull();
-    expect(data!.length).toBe(2); // warn + mute
+    expect(data!.length).toBe(2);
     expect(data!.map((d) => d.type)).toContain('warn');
     expect(data!.map((d) => d.type)).toContain('mute');
   });
@@ -162,8 +156,7 @@ describe('Audit logs', () => {
     expect(data!.details).toEqual({ reason: 'Spamming', channel: '#general' });
   });
 
-  it('queries audit logs for a guild', async () => {
-    // Add another action
+  it('queries audit logs for a guild ordered by timestamp', async () => {
     await supa.from('audit_logs').insert({
       guild_id: GUILD_ID,
       actor_type: 'bot',

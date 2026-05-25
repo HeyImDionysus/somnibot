@@ -1,23 +1,20 @@
 /**
- * Integration test: Action queue — claim, process, dead-letter lifecycle.
+ * Integration test: Action queue — enqueue, claim, complete, dead-letter.
  *
  * The bot_action_queue is the backbone of async task processing.
- * Tests the bot_action_queue_claim RPC (atomic claim with SELECT FOR UPDATE SKIP LOCKED)
- * and the dead-letter queue flow.
+ * Columns: id, guild_id, action (TEXT), payload (JSONB), status, retry_count,
+ *          created_at, started_at, completed_at, result, error_message.
+ * bot_action_queue_claim(p_action_id UUID) atomically claims a single action.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { requireSupabase } from './helpers.js';
 
 let supa: SupabaseClient;
 const GUILD_ID = `test-queue-guild-${Date.now()}`;
 
 beforeAll(async () => {
-  supa = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  supa = await requireSupabase();
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -33,86 +30,89 @@ afterAll(async () => {
 });
 
 describe('Action queue', () => {
+  let actionId: string;
+
   it('enqueues an action', async () => {
     const { data, error } = await supa
       .from('bot_action_queue')
       .insert({
         guild_id: GUILD_ID,
-        action_type: 'SEND_WELCOME_DM',
+        action: 'SEND_WELCOME_DM',
         payload: { user_id: 'new-member-123', message: 'Welcome!' },
         status: 'pending',
-        attempts: 0,
-        max_attempts: 3,
       })
       .select()
       .single();
 
     expect(error).toBeNull();
-    expect(data!.action_type).toBe('SEND_WELCOME_DM');
+    expect(data!.action).toBe('SEND_WELCOME_DM');
     expect(data!.status).toBe('pending');
-    expect(data!.attempts).toBe(0);
+    actionId = data!.id;
   });
 
-  it('claims a pending action via RPC', async () => {
+  it('claims a pending action via bot_action_queue_claim RPC', async () => {
+    // RPC takes a single UUID, atomically moves pending → processing
     const { data, error } = await supa.rpc('bot_action_queue_claim', {
-      p_guild_id: GUILD_ID,
-      p_limit: 5,
+      p_action_id: actionId,
     });
 
     expect(error).toBeNull();
     expect(data).toBeDefined();
 
-    // Should claim the action we just enqueued
     const claimed = Array.isArray(data) ? data : [data];
-    expect(claimed.length).toBeGreaterThanOrEqual(1);
+    expect(claimed.length).toBe(1);
+    expect(claimed[0].id).toBe(actionId);
+    expect(claimed[0].status).toBe('processing');
+    expect(claimed[0].action).toBe('SEND_WELCOME_DM');
+  });
 
-    const item = claimed[0];
-    expect(item.action_type).toBe('SEND_WELCOME_DM');
+  it('does not re-claim an already processing action', async () => {
+    // Try claiming the same action again — should return empty
+    const { data, error } = await supa.rpc('bot_action_queue_claim', {
+      p_action_id: actionId,
+    });
+
+    expect(error).toBeNull();
+    const rows = Array.isArray(data) ? data : [];
+    expect(rows.length).toBe(0);
   });
 
   it('marks an action as completed', async () => {
-    // Get the pending/processing item
-    const { data: items } = await supa
-      .from('bot_action_queue')
-      .select('id')
-      .eq('guild_id', GUILD_ID)
-      .limit(1);
-
     const { data, error } = await supa
       .from('bot_action_queue')
       .update({
         status: 'completed',
         completed_at: new Date().toISOString(),
+        result: { delivered: true },
       })
-      .eq('id', items![0].id)
+      .eq('id', actionId)
       .select()
       .single();
 
     expect(error).toBeNull();
     expect(data!.status).toBe('completed');
+    expect(data!.result).toEqual({ delivered: true });
   });
 
-  it('enqueues multiple actions and claims in batch', async () => {
+  it('enqueues multiple actions and queries by status', async () => {
     const actions = Array.from({ length: 3 }, (_, i) => ({
       guild_id: GUILD_ID,
-      action_type: 'ASSIGN_ROLE',
+      action: 'ASSIGN_ROLE',
       payload: { user_id: `user-${i}`, role_id: 'role-member' },
       status: 'pending' as const,
-      attempts: 0,
-      max_attempts: 3,
     }));
 
     await supa.from('bot_action_queue').insert(actions);
 
-    const { data } = await supa.rpc('bot_action_queue_claim', {
-      p_guild_id: GUILD_ID,
-      p_limit: 10,
-    });
+    const { data, error } = await supa
+      .from('bot_action_queue')
+      .select('id, action, status')
+      .eq('guild_id', GUILD_ID)
+      .eq('status', 'pending');
 
-    const claimed = Array.isArray(data) ? data : [data];
-    // Should claim all 3 pending ASSIGN_ROLE actions
-    const roleActions = claimed.filter((a: any) => a.action_type === 'ASSIGN_ROLE');
-    expect(roleActions.length).toBe(3);
+    expect(error).toBeNull();
+    expect(data!.length).toBe(3);
+    expect(data!.every((a) => a.action === 'ASSIGN_ROLE')).toBe(true);
   });
 });
 
@@ -123,11 +123,9 @@ describe('Dead-letter queue', () => {
       .from('bot_action_queue')
       .insert({
         guild_id: GUILD_ID,
-        action_type: 'SEND_NOTIFICATION',
+        action: 'SEND_NOTIFICATION',
         payload: { channel: 'announcements', text: 'Server maintenance' },
         status: 'failed',
-        attempts: 3,
-        max_attempts: 3,
         error_message: 'Discord API 50013: Missing Permissions',
       })
       .select()
@@ -139,17 +137,17 @@ describe('Dead-letter queue', () => {
       .insert({
         guild_id: GUILD_ID,
         original_id: failed!.id,
-        action_type: failed!.action_type,
+        action: failed!.action,
         payload: failed!.payload,
         error_message: failed!.error_message,
-        attempts: failed!.attempts,
+        retry_count: 3,
       })
       .select()
       .single();
 
     expect(error).toBeNull();
-    expect(dlqEntry!.action_type).toBe('SEND_NOTIFICATION');
+    expect(dlqEntry!.action).toBe('SEND_NOTIFICATION');
     expect(dlqEntry!.error_message).toContain('Missing Permissions');
-    expect(dlqEntry!.attempts).toBe(3);
+    expect(dlqEntry!.retry_count).toBe(3);
   });
 });
