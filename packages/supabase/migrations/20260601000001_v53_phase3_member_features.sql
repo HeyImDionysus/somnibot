@@ -3,7 +3,7 @@
 
 -- ─── 3.7: Per-Feature Embed Overrides ────────────────────
 CREATE TABLE IF NOT EXISTS feature_embed_overrides (
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   feature_key TEXT NOT NULL CHECK (feature_key IN (
     'welcome', 'goodbye', 'level_up', 'moderation',
     'economy', 'music', 'tickets', 'giveaways', 'achievements'
@@ -25,7 +25,7 @@ CREATE POLICY "feature_embed_overrides_guild_rls"
 
 -- ─── 3.2: Tutorial System ────────────────────────────────
 CREATE TABLE IF NOT EXISTS tutorial_configs (
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   enabled BOOLEAN DEFAULT false,
   auto_trigger BOOLEAN DEFAULT false,
   trigger_mode TEXT DEFAULT 'first_command' CHECK (trigger_mode IN ('first_command', 'join', 'disabled')),
@@ -41,7 +41,7 @@ CREATE POLICY "tutorial_configs_guild_rls"
 
 CREATE TABLE IF NOT EXISTS tutorial_steps (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  guild_id TEXT NOT NULL REFERENCES guild(guild_id) ON DELETE CASCADE,
+  guild_id TEXT NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
   step_order INT NOT NULL DEFAULT 0,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
@@ -91,7 +91,6 @@ RETURNS TABLE (
   item_id UUID,
   item_name TEXT,
   item_description TEXT,
-  item_rarity TEXT,
   item_category TEXT,
   price BIGINT,
   quantity INT,
@@ -110,9 +109,8 @@ BEGIN
       ml.item_id,
       ei.name AS item_name,
       ei.description AS item_description,
-      ei.rarity AS item_rarity,
       ei.category AS item_category,
-      ml.price,
+      ml.price_per_unit AS price,
       ml.quantity,
       ml.created_at
     FROM economy_market_listings ml
@@ -120,14 +118,14 @@ BEGIN
     WHERE ml.guild_id = p_guild_id
       AND ml.status = 'active'
       AND (p_query IS NULL OR ei.name ILIKE '%' || p_query || '%')
-      AND (p_min_price IS NULL OR ml.price >= p_min_price)
-      AND (p_max_price IS NULL OR ml.price <= p_max_price)
+      AND (p_min_price IS NULL OR ml.price_per_unit >= p_min_price)
+      AND (p_max_price IS NULL OR ml.price_per_unit <= p_max_price)
       AND (p_category IS NULL OR ei.category = p_category)
-      AND (p_rarity IS NULL OR ei.rarity = p_rarity)
+      AND (p_rarity IS NULL OR ei.category = p_rarity)
   )
   SELECT
     f.id, f.seller_id, f.item_id, f.item_name, f.item_description,
-    f.item_rarity, f.item_category, f.price, f.quantity, f.created_at,
+    f.item_category, f.price, f.quantity, f.created_at,
     (SELECT count(*) FROM filtered)::BIGINT AS total_count
   FROM filtered f
   ORDER BY
