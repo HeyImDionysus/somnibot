@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { requireSupabase } from './helpers.js';
 
-let supa: SupabaseClient;
+let supa: SupabaseClient | null = null;
 const GUILD_ID = `test-levels-guild-${Date.now()}`;
 const MEMBER_A = 'discord-user-aaa';
 const MEMBER_B = 'discord-user-bbb';
@@ -16,6 +16,7 @@ const MEMBER_C = 'discord-user-ccc';
 
 beforeAll(async () => {
   supa = await requireSupabase();
+  if (!supa) return;
 
   await supa.from('guild').insert({
     id: GUILD_ID,
@@ -25,6 +26,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!supa) return;
   await supa.from('member_levels').delete().eq('guild_id', GUILD_ID);
   await supa.from('members').delete().eq('guild_id', GUILD_ID);
   await supa.from('guild_config').delete().eq('guild_id', GUILD_ID);
@@ -33,6 +35,7 @@ afterAll(async () => {
 
 describe('Members', () => {
   it('registers a new member with correct defaults', async () => {
+    if (!supa) return;
     const { data, error } = await supa
       .from('members')
       .insert({
@@ -54,6 +57,7 @@ describe('Members', () => {
   });
 
   it('enforces unique (guild_id, discord_id) constraint', async () => {
+    if (!supa) return;
     const { error } = await supa.from('members').insert({
       guild_id: GUILD_ID,
       discord_id: MEMBER_A,
@@ -65,6 +69,7 @@ describe('Members', () => {
   });
 
   it('tracks a returning member correctly', async () => {
+    if (!supa) return;
     await supa.from('members').insert({
       guild_id: GUILD_ID,
       discord_id: MEMBER_B,
@@ -96,6 +101,7 @@ describe('Members', () => {
 
 describe('Leveling (increment_member_xp RPC)', () => {
   it('creates a level record on first XP gain', async () => {
+    if (!supa) return;
     const { data, error } = await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
       p_member_id: MEMBER_A,
@@ -111,6 +117,7 @@ describe('Leveling (increment_member_xp RPC)', () => {
   });
 
   it('accumulates XP and levels up at 100 XP per level', async () => {
+    if (!supa) return;
     // Add 60 more XP → 110 total → level 1
     const { data, error } = await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
@@ -126,6 +133,7 @@ describe('Leveling (increment_member_xp RPC)', () => {
   });
 
   it('leaderboard query returns members ordered by XP', async () => {
+    if (!supa) return;
     // Give Member C more XP than A
     await supa.rpc('increment_member_xp', {
       p_guild_id: GUILD_ID,
