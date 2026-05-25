@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for services/action-queue.ts — the action queue listener that
  * processes dashboard-initiated operations (role/channel CRUD, embeds,
@@ -66,7 +65,7 @@ vi.mock('../services/reconciliation.js', () => ({
   runReconciliation: vi.fn(async () => {}),
 }));
 
-import { startActionQueueListener, getDeployStatus } from '../services/action-queue.js';
+import { startActionQueueListener } from '../services/action-queue.js';
 import { writeGuildSnapshot } from '../services/guild-snapshot.js';
 import { writeAuditLog } from '../services/audit.js';
 

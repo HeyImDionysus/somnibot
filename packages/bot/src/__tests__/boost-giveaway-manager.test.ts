@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for ../features/giveaways/giveaway-manager.js — instantiation and lifecycle.
  */
@@ -132,7 +131,7 @@ function makeDiscordClient() {
 
 describe('GiveawayManager', () => {
   it('instantiates without errors', () => {
-    const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any);
+    const manager = new GiveawayManager(makeGuild() as any, makeSupa() as any, {} as any, { emit: vi.fn() } as any);
     expect(manager).toBeDefined();
   });
   

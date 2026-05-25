@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for features/discord-ux/modal-handlers.ts — handles Discord modal
  * submissions for ticket creation, report filing, warn reasons, etc.
@@ -109,7 +108,7 @@ describe('modal-handlers', () => {
         warn_reason: 'Spamming in chat',
       });
       const client = { supabase: makeSupa() } as any;
-      await handleModalSubmit(interaction, client);
+      await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
     });
 
     it('handles report modal (report_message_MSG_ID)', async () => {
@@ -118,7 +117,7 @@ describe('modal-handlers', () => {
         report_details: 'Multiple offensive words',
       });
       const client = { supabase: makeSupa() } as any;
-      await handleModalSubmit(interaction, client);
+      await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
     });
 
     it('handles ticket create modal (create_ticket_from_MSG_ID)', async () => {
@@ -127,13 +126,13 @@ describe('modal-handlers', () => {
         ticket_description: 'I have a question',
       });
       const client = { supabase: makeSupa() } as any;
-      await handleModalSubmit(interaction, client);
+      await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
     });
 
     it('handles unknown modal ID gracefully', async () => {
       const interaction = makeModalInteraction('unknown_modal_xyz', {});
       const client = { supabase: makeSupa() } as any;
-      await handleModalSubmit(interaction, client);
+      await handleModalSubmit(interaction, {} as any, {} as any, { emit: vi.fn() } as any, client);
     });
   });
 });

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for services/commerce-fulfillment.ts — the post-payment
  * fulfillment pipeline handling purchases, subscriptions, cancellations,
@@ -121,7 +120,7 @@ describe('CommerceFulfillmentService', () => {
     });
 
     it('reports error when entitlement grant fails', async () => {
-      mockGrant.mockResolvedValueOnce(null);
+      mockGrant.mockResolvedValueOnce(null as any);
       const result = await service.fulfill(basePayload);
       expect(result.success).toBe(false);
       expect(result.errors).toContain('Failed to create entitlement');
@@ -138,7 +137,7 @@ describe('CommerceFulfillmentService', () => {
     });
 
     it('reports error when subscription grant fails', async () => {
-      mockGrant.mockResolvedValueOnce(null);
+      mockGrant.mockResolvedValueOnce(null as any);
       const payload = { ...basePayload, fulfillment_type: 'subscription_activated' };
       const result = await service.fulfill(payload);
       expect(result.success).toBe(false);

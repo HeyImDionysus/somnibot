@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Wide coverage sweep — imports & calls functions across many mid-coverage files.
  * Each test drives real code through guard clauses and early paths.
@@ -43,7 +42,7 @@ vi.mock('discord.js', () => {
       first() { return [...this.values()][0]; }
       sort(fn: any) { return this; }
       toJSON() { return [...this.values()]; }
-      size: 0;
+      size!: 0;
     },
     bold: (s: string) => `**${s}**`,
     inlineCode: (s: string) => `\`${s}\``,
@@ -138,8 +137,8 @@ describe('escalation deep coverage', () => {
   it('checkEscalation', async () => {
     try {
       const mod = await import('../features/moderation/escalation.js');
-      const fn = mod.checkEscalation || mod.default;
-      if (fn) await fn('g1', 'u1', makeSupa() as any, makeValkey() as any);
+      const fn = mod.getEscalationAction;
+      if (fn) fn([{ threshold: 3, action: 'warn' as const, dmMember: true }], 2);
     } catch { /* expected */ }
   });
 
@@ -159,8 +158,8 @@ describe('automod-actions deep coverage', () => {
   it('handleAutoModAction', async () => {
     try {
       const mod = await import('../features/moderation/automod-actions.js');
-      const fn = mod.handleAutoModAction || mod.executeAutoModAction || mod.default;
-      if (fn) await fn({ type: 'warn', userId: 'u1', reason: 'spam', guildId: 'g1' }, makeSupa() as any, makeValkey() as any, { emit: vi.fn() });
+      const fn = mod.executeAutoModAction;
+      if (fn) await fn({} as any, {} as any, { rule: 'test' } as any, 'violation', {} as any);
     } catch { /* expected */ }
   });
 });
@@ -169,19 +168,19 @@ describe('automod-actions deep coverage', () => {
 describe('GatheringManager deep coverage', () => {
   it('gather', async () => {
     const { GatheringManager } = await import('../features/gathering/gathering-manager.js');
-    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-    try { await mgr.gather('u1'); } catch { /* expected */ }
+    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
+    try { await mgr.gather('u1', {} as any); } catch { /* expected */ }
   });
 
   it('viewInventory', async () => {
     const { GatheringManager } = await import('../features/gathering/gathering-manager.js');
-    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-    try { await mgr.viewInventory('u1'); } catch { /* expected */ }
+    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
+    try { await mgr.gather('u1', {} as any); } catch { /* expected */ }
   });
 
   it('getConfig', async () => {
     const { GatheringManager } = await import('../features/gathering/gathering-manager.js');
-    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new GatheringManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
     try { await mgr.getConfig(); } catch { /* expected */ }
   });
 });
@@ -191,16 +190,16 @@ describe('FishingManager deep coverage', () => {
   it('cast', async () => {
     try {
       const { FishingManager } = await import('../features/fishing/fishing-manager.js');
-      const mgr = new FishingManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.cast('u1');
+      const mgr = new FishingManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
+      await mgr.fish('u1');
     } catch { /* expected */ }
   });
 
   it('viewBag', async () => {
     try {
       const { FishingManager } = await import('../features/fishing/fishing-manager.js');
-      const mgr = new FishingManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.viewBag('u1');
+      const mgr = new FishingManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
+      await mgr.getCollection('u1');
     } catch { /* expected */ }
   });
 });
@@ -210,15 +209,15 @@ describe('LotteryManager deep coverage', () => {
   it('buyTicket', async () => {
     try {
       const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
-      const mgr = new LotteryManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.buyTicket(makeInt() as any);
+      const mgr = new LotteryManager(makeSupa() as any);
+      await mgr.buyTickets(makeInt() as any, 1);
     } catch { /* expected */ }
   });
 
   it('viewLottery', async () => {
     try {
       const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
-      const mgr = new LotteryManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+      const mgr = new LotteryManager(makeSupa() as any);
       await mgr.viewLottery(makeInt() as any);
     } catch { /* expected */ }
   });
@@ -226,8 +225,8 @@ describe('LotteryManager deep coverage', () => {
   it('drawLottery', async () => {
     try {
       const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
-      const mgr = new LotteryManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.drawLottery('g1');
+      const mgr = new LotteryManager(makeSupa() as any);
+      await (mgr as any).checkAndDraw('g1');
     } catch { /* expected */ }
   });
 });
@@ -237,15 +236,15 @@ describe('TriviaManager deep coverage', () => {
   it('startTrivia', async () => {
     try {
       const { TriviaManager } = await import('../features/trivia/trivia-manager.js');
-      const mgr = new TriviaManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.startTrivia(makeInt() as any);
+      const mgr = new TriviaManager(makeSupa() as any, makeValkey() as any);
+      await mgr.startRound(makeInt() as any);
     } catch { /* expected */ }
   });
 
   it('handleAnswer', async () => {
     try {
       const { TriviaManager } = await import('../features/trivia/trivia-manager.js');
-      const mgr = new TriviaManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+      const mgr = new TriviaManager(makeSupa() as any, makeValkey() as any);
       await mgr.handleAnswer({ customId: 'trivia:answer:0', user: { id: 'u1' }, guildId: 'g1', deferUpdate: vi.fn(), update: vi.fn(), reply: vi.fn() } as any);
     } catch { /* expected */ }
   });
@@ -257,7 +256,7 @@ describe('GiveawayManager deep coverage', () => {
     try {
       const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
       const mgr = new GiveawayManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.create(makeInt() as any, 'Test Giveaway', 1, 60000);
+      await mgr.create({ channelId: 'c1', prize: 'Test', winnerCount: 1, durationMs: 60000, creatorId: 'u1' });
     } catch { /* expected */ }
   });
 
@@ -266,7 +265,7 @@ describe('GiveawayManager deep coverage', () => {
       const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
       const mgr = new GiveawayManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
       const btn = { customId: 'giveaway_enter:g1', user: { id: 'u1' }, guildId: 'g1', deferUpdate: vi.fn(), reply: vi.fn(), update: vi.fn() };
-      await mgr.enter(btn as any);
+      await mgr.handleEntry(btn as any);
     } catch { /* expected */ }
   });
 
@@ -274,8 +273,8 @@ describe('GiveawayManager deep coverage', () => {
     try {
       const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
       const mgr = new GiveawayManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
-      await mgr.end(makeInt() as any, 'g1');
-      await mgr.reroll(makeInt() as any, 'g1');
+      await mgr.endGiveaway('giveaway-1');
+      await mgr.reroll('giveaway-1', 1);
     } catch { /* expected */ }
   });
 });
@@ -311,7 +310,7 @@ describe('TempChannelManager deep coverage', () => {
   it('module loads + construct', async () => {
     try {
       const { TempChannelManager } = await import('../features/temp-channels/temp-channel-manager.js');
-      const mgr = new TempChannelManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+      const mgr = new TempChannelManager({ id: 'g1' } as any, makeSupa() as any);
       expect(mgr).toBeDefined();
     } catch { /* expected */ }
   });
@@ -349,10 +348,10 @@ describe('button-roles deep coverage', () => {
   it('handleButtonRole', async () => {
     try {
       const mod = await import('../features/reaction-roles/button-roles.js');
-      const fn = mod.handleButtonRole || mod.handleButtonRoleClick || mod.default;
+      const fn = mod.handleButtonRoleInteraction;
       if (fn) {
         const btn = { customId: 'btnrole:r1', guildId: 'g1', user: { id: 'u1' }, member: { roles: { cache: new Map(), add: vi.fn(), remove: vi.fn() } }, deferReply: vi.fn(), reply: vi.fn(), editReply: vi.fn() };
-        await fn(btn, makeSupa() as any);
+        await fn(btn as any, makeSupa() as any);
       }
     } catch { /* expected */ }
   });
@@ -435,7 +434,7 @@ describe('guild-init deep coverage', () => {
 
 // ── Deploy Listener ──────────────────────────────────────
 describe('deploy-listener deep coverage', () => {
-  it('getDeployStatus', async () => {
+  it('', async () => {
     const { getDeployStatus } = await import('../deploy/deploy-listener.js');
     const status = getDeployStatus();
     expect(status === null || typeof status === 'object').toBe(true);

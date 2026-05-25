@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/giveaways/giveaway-manager.ts — create, handleEntry, endGiveaway, reroll.
  * 211 uncovered statements at 41.1%.
@@ -81,7 +80,7 @@ describe('GiveawayManager deep', () => {
     const mgr = new GiveawayManager(makeGuild(), supa, makeValkey(), makeEventBus());
     await mgr.create({
       channelId: 'ch-1',
-      hostId: 'user-1',
+      creatorId: 'user-1',
       prize: '🎁 Amazing Prize',
       winnerCount: 1,
       durationMs: 60000,

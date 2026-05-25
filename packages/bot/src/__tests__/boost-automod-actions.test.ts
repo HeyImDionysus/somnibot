@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for features/moderation/automod-actions.ts — executeAutoModAction.
  * 165 uncovered statements at 37.5%.
@@ -67,25 +66,25 @@ describe('automod-actions', () => {
   it('executes delete action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction('delete', msg, supa, { rule: 'test-rule' } as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
     expect(msg.delete).toHaveBeenCalled();
   });
 
   it('executes warn action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction('warn', msg, supa, { rule: 'test-rule' } as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
   });
 
   it('executes mute action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction('mute', msg, supa, { rule: 'test-rule', duration: '5m' } as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule', duration: '5m' } as any, 'spam detected', {} as any);
   });
 
   it('executes delete_and_warn action', async () => {
     const msg = makeMessage();
     const supa = { from: vi.fn(() => makeChain()) } as any;
-    await executeAutoModAction('delete_and_warn', msg, supa, { rule: 'test-rule' } as any);
+    await executeAutoModAction({} as any, msg, { rule: 'test-rule' } as any, 'spam detected', {} as any);
   });
 });

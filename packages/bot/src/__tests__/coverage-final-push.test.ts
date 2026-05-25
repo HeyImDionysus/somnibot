@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Final push — targets remaining low-coverage files to cross 60%.
  * Focuses on: migration-runner, diagnostics-service, button-roles,

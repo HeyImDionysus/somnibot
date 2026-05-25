@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Coverage-driving tests — call real methods on managers to exercise deep code paths.
  * Targets the biggest remaining uncovered files.
@@ -41,7 +40,7 @@ function makeSupa(overrides: Record<string, any> = {}) {
       economy_gathering_enabled: true, economy_crafting_enabled: true,
       economy_farming_enabled: true, economy_fishing_enabled: true,
       economy_heist_enabled: true, economy_market_enabled: true,
-      market_enabled: true, market_max_price: 100000,
+      market_max_price: 100000,
       market_max_listings_per_user: 10, market_tax_rate: 5,
       farming_max_plots: 6, farming_water_cooldown_ms: 3600000,
       crafting_max_queue: 5,
@@ -217,42 +216,42 @@ describe('FarmingManager deep coverage', () => {
         { id: 'c1', name: 'Wheat', emoji: '🌾', grow_time_ms: 3600000, harvest_item_id: 'wheat', harvest_qty_min: 1, harvest_qty_max: 3 },
       ],
     });
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.viewFarm('u1'); } catch { /* expected */ }
   });
 
   it('plant', async () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeSupa();
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.plant('u1', 'wheat'); } catch { /* expected */ }
   });
 
   it('water', async () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeSupa();
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.water('u1'); } catch { /* expected */ }
   });
 
   it('harvest', async () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeSupa();
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.harvest('u1'); } catch { /* expected */ }
   });
 
   it('fertilize', async () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeSupa();
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.fertilize('u1', 1); } catch { /* expected */ }
   });
 
   it('getConfig', async () => {
     const { FarmingManager } = await import('../features/farming/farming-manager.js');
     const supa = makeSupa();
-    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new FarmingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.getConfig(); } catch { /* expected */ }
   });
 });
@@ -266,21 +265,21 @@ describe('CraftingManager deep coverage', () => {
         { id: 'r1', name: 'Sword', description: 'A sharp sword', emoji: '⚔️', result_item_id: 'sword', result_qty: 1, ingredients: [{ item_name: 'Iron', quantity: 3 }], level_required: 1 },
       ],
     });
-    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.listRecipes(); } catch { /* expected */ }
   });
 
   it('craft', async () => {
     const { CraftingManager } = await import('../features/crafting/crafting-manager.js');
     const supa = makeSupa();
-    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.craft('u1', 'Sword'); } catch { /* expected */ }
   });
 
   it('getConfig', async () => {
     const { CraftingManager } = await import('../features/crafting/crafting-manager.js');
     const supa = makeSupa();
-    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new CraftingManager({ id: 'g1' } as any, supa as any, makeValkey() as any);
     try { await mgr.getConfig(); } catch { /* expected */ }
   });
 });
@@ -291,7 +290,7 @@ describe('HeistManager deep coverage', () => {
     const { HeistManager } = await import('../features/heist/heist-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new HeistManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, valkey as any);
     try { await mgr.startHeist(makeInteraction() as any); } catch { /* expected */ }
   });
 
@@ -299,7 +298,7 @@ describe('HeistManager deep coverage', () => {
     const { HeistManager } = await import('../features/heist/heist-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new HeistManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, valkey as any);
     try { await mgr.joinHeist(makeInteraction() as any); } catch { /* expected */ }
   });
 
@@ -307,7 +306,7 @@ describe('HeistManager deep coverage', () => {
     const { HeistManager } = await import('../features/heist/heist-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new HeistManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, valkey as any);
     try { await mgr.viewHeist(makeInteraction() as any); } catch { /* expected */ }
   });
 
@@ -315,13 +314,13 @@ describe('HeistManager deep coverage', () => {
     const { HeistManager } = await import('../features/heist/heist-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new HeistManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(supa as any, {} as any, valkey as any);
     try { await mgr.resumePendingHeists('g1'); } catch { /* expected */ }
   });
 
   it('registerHeistManager', async () => {
     const { registerHeistManager, invalidateHeistCache, getHeistManager, HeistManager } = await import('../features/heist/heist-manager.js');
-    const mgr = new HeistManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new HeistManager(makeSupa() as any, {} as any, makeValkey() as any);
     registerHeistManager(mgr);
     expect(getHeistManager()).toBe(mgr);
     invalidateHeistCache();
@@ -339,7 +338,7 @@ describe('AdventureManager deep coverage', () => {
       ],
     });
     const valkey = makeValkey();
-    const mgr = new AdventureManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new AdventureManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.startAdventure(makeInteraction() as any); } catch { /* expected */ }
   });
 
@@ -347,13 +346,13 @@ describe('AdventureManager deep coverage', () => {
     const { AdventureManager } = await import('../features/adventures/adventure-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new AdventureManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
-    try { await mgr.handleChoice(makeButton('adventure:choice:0') as any); } catch { /* expected */ }
+    const mgr = new AdventureManager({ id: 'g1' } as any, supa as any, valkey as any);
+    try { await mgr.handleChoice(makeButton('adventure:choice:0') as any, 'session-1', 0); } catch { /* expected */ }
   });
 
   it('registerAdventureManager', async () => {
     const { registerAdventureManager, getAdventureManager, invalidateAdventureCache, AdventureManager } = await import('../features/adventures/adventure-manager.js');
-    const mgr = new AdventureManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new AdventureManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
     registerAdventureManager(mgr);
     expect(getAdventureManager()).toBe(mgr);
     invalidateAdventureCache();
@@ -366,7 +365,7 @@ describe('MarketManager deep coverage', () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.listItem(makeInteraction() as any, 'Sword', 100, 1); } catch { /* expected */ }
   });
 
@@ -378,7 +377,7 @@ describe('MarketManager deep coverage', () => {
       ],
     });
     const valkey = makeValkey();
-    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.browse(); } catch { /* expected */ }
   });
 
@@ -386,7 +385,7 @@ describe('MarketManager deep coverage', () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.buy('u1', 'abc', 1); } catch { /* expected */ }
   });
 
@@ -394,7 +393,7 @@ describe('MarketManager deep coverage', () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.myListings('u1'); } catch { /* expected */ }
   });
 
@@ -402,13 +401,13 @@ describe('MarketManager deep coverage', () => {
     const { MarketManager } = await import('../features/market/market-manager.js');
     const supa = makeSupa();
     const valkey = makeValkey();
-    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, supa as any, valkey as any);
     try { await mgr.cancelListing('u1', 'abc'); } catch { /* expected */ }
   });
 
   it('registerMarketManager', async () => {
     const { registerMarketManager, invalidateMarketCache, MarketManager } = await import('../features/market/market-manager.js');
-    const mgr = new MarketManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn() } as any);
+    const mgr = new MarketManager({ id: 'g1' } as any, makeSupa() as any, makeValkey() as any);
     registerMarketManager(mgr);
     invalidateMarketCache();
   });
@@ -510,7 +509,7 @@ describe('MusicPlayerManager deep coverage', () => {
   it('play', async () => {
     const { MusicPlayerManager } = await import('../features/music/music-player.js');
     const mgr = new MusicPlayerManager({ id: 'g1' } as any, makeShoukaku() as any, makeSupa() as any, makeValkey() as any, { emit: vi.fn(), on: vi.fn() } as any);
-    try { await mgr.play(makeInteraction() as any, 'test search query'); } catch { /* expected */ }
+    try { await mgr.play(makeInteraction() as any, 'test search query', {} as any, {} as any); } catch { /* expected */ }
   });
 
   it('reloadConfig', async () => {
@@ -537,11 +536,7 @@ describe('repair-actions deep coverage', () => {
       },
     };
     try {
-      await repairDriftItem(guild as any, supa as any, {
-        id: 'd1', guild_id: 'g1', entity_type: 'role', entity_key: 'mod',
-        discord_id: 'r1', drift_type: 'modified', details: { name: { expected: 'Mod', actual: 'Admin' } },
-        created_at: new Date().toISOString(),
-      });
+      await repairDriftItem(guild as any, supa as any, { type: 'ROLE_MODIFIED' as any, severity: 'warning' as any, entityType: 'role', entityName: 'mod', entityDiscordId: 'r1', description: 'name mismatch', details: { name: { expected: 'Mod', actual: 'Admin' } }, suggestedAction: 'repair' });
     } catch { /* expected */ }
   });
 
@@ -549,11 +544,7 @@ describe('repair-actions deep coverage', () => {
     const { acceptDriftItem } = await import('../sync/repair-actions.js');
     const supa = makeSupa();
     try {
-      await acceptDriftItem({ id: 'g1', roles: { cache: new Map() }, channels: { cache: new Map() } } as any, supa as any, {
-        id: 'd1', guild_id: 'g1', entity_type: 'role', entity_key: 'mod',
-        discord_id: 'r1', drift_type: 'modified', details: { name: { expected: 'Mod', actual: 'Admin' } },
-        created_at: new Date().toISOString(),
-      });
+      await acceptDriftItem({ id: 'g1', roles: { cache: new Map() }, channels: { cache: new Map() } } as any, supa as any, { type: 'ROLE_MODIFIED' as any, severity: 'warning' as any, entityType: 'role', entityName: 'mod', entityDiscordId: 'r1', description: 'name mismatch', details: { name: { expected: 'Mod', actual: 'Admin' } }, suggestedAction: 'repair' });
     } catch { /* expected */ }
   });
 
@@ -561,7 +552,7 @@ describe('repair-actions deep coverage', () => {
     const { ignoreDriftItem } = await import('../sync/repair-actions.js');
     const supa = makeSupa();
     try {
-      await ignoreDriftItem(supa as any, 'd1');
+      await ignoreDriftItem(supa as any, 'd1', {} as any);
     } catch { /* expected */ }
   });
 
@@ -594,7 +585,7 @@ describe('sync-engine deep coverage', () => {
       roles: { cache: new Map([['r1', { id: 'r1', name: 'Mod', color: 0, hoist: false, mentionable: false, managed: false, permissions: { bitfield: 0n }, position: 1 }]]) },
       channels: { cache: new Map([['c1', { id: 'c1', name: 'general', type: 0, parentId: null, position: 0 }]]) },
     };
-    try { await runSyncCycle(guild as any, supa as any); } catch { /* expected */ }
+    try { await runSyncCycle(guild as any, supa as any, {} as any, {} as any); } catch { /* expected */ }
   });
 });
 
@@ -609,9 +600,7 @@ describe('ticket-interactions deep coverage', () => {
     try {
       await handleTicketInteraction(
         makeButton('ticket:open:panel1') as any,
-        { id: 'g1', channels: { cache: new Map() } } as any,
-        supa as any,
-        eventBus as any,
+        {} as any,
       );
     } catch { /* expected */ }
   });
@@ -623,9 +612,7 @@ describe('ticket-interactions deep coverage', () => {
     try {
       await handleTicketInteraction(
         makeButton('ticket:close:ticket1') as any,
-        { id: 'g1', channels: { cache: new Map() } } as any,
-        supa as any,
-        eventBus as any,
+        {} as any,
       );
     } catch { /* expected */ }
   });
@@ -637,9 +624,7 @@ describe('ticket-interactions deep coverage', () => {
     try {
       await handleTicketInteraction(
         makeButton('ticket:claim:ticket1') as any,
-        { id: 'g1', channels: { cache: new Map() } } as any,
-        supa as any,
-        eventBus as any,
+        {} as any,
       );
     } catch { /* expected */ }
   });
@@ -651,9 +636,7 @@ describe('ticket-interactions deep coverage', () => {
     try {
       await handleTicketInteraction(
         makeButton('ticket:reopen:ticket1') as any,
-        { id: 'g1', channels: { cache: new Map() } } as any,
-        supa as any,
-        eventBus as any,
+        {} as any,
       );
     } catch { /* expected */ }
   });
@@ -665,9 +648,7 @@ describe('ticket-interactions deep coverage', () => {
     try {
       await handleTicketInteraction(
         makeButton('ticket:transcript:ticket1') as any,
-        { id: 'g1', channels: { cache: new Map() } } as any,
-        supa as any,
-        eventBus as any,
+        {} as any,
       );
     } catch { /* expected */ }
   });
@@ -685,7 +666,7 @@ describe('deployer deep coverage', () => {
     return {
       id: 'g1', name: 'Test Guild', memberCount: 50,
       roles: {
-        cache: new Map([
+        cache: new Map<string, any>([
           ['everyone', { id: 'g1', name: '@everyone', position: 0, managed: false, color: 0, hoist: false, mentionable: false, permissions: { bitfield: 0n }, edit: vi.fn().mockResolvedValue({}) }],
           ['bot-role', botRole],
         ]),
@@ -710,8 +691,8 @@ describe('deployer deep coverage', () => {
     const supa = makeSupa();
     const desiredState = {
       roles: [
-        { key: 'mod', name: 'Moderator', tier: 'custom', permissions: '0', color: 0x5865f2, hoist: true, mentionable: false },
-        { key: 'member', name: 'Member', tier: 'custom', permissions: '0', color: 0, hoist: false, mentionable: false },
+        { key: 'mod', name: 'Moderator', tier: 'custom', permissions: '0', color: 0x5865f2, hoist: true, mentionable: false, position: 0 },
+        { key: 'member', name: 'Member', tier: 'custom', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 },
       ],
       categories: [
         { key: 'info', name: 'Information', position: 0 },
@@ -723,7 +704,7 @@ describe('deployer deep coverage', () => {
       ],
       everyonePermissions: '0',
     };
-    try { await deployServerState(guild, supa as any, desiredState as any, { dryRun: true }); } catch { /* expected */ }
+    try { await deployServerState(guild, supa as any, desiredState as any, { dryRun: true, cleanExisting: false }); } catch { /* expected */ }
   });
 
   it('deploys with permission overrides', async () => {
@@ -731,7 +712,7 @@ describe('deployer deep coverage', () => {
     const guild = makeGuild() as any;
     const supa = makeSupa();
     const desiredState = {
-      roles: [{ key: 'mod', name: 'Mod', tier: 'custom', permissions: '268435456', color: 0, hoist: false, mentionable: false }],
+      roles: [{ key: 'mod', name: 'Mod', tier: 'custom', permissions: '268435456', color: 0, hoist: false, mentionable: false, position: 0 }],
       categories: [],
       channels: [{
         key: 'modchat', name: 'mod-chat', type: 0, categoryKey: null, position: 0,
@@ -739,6 +720,6 @@ describe('deployer deep coverage', () => {
       }],
       everyonePermissions: '0',
     };
-    try { await deployServerState(guild, supa as any, desiredState as any, { dryRun: false }); } catch { /* expected */ }
+    try { await deployServerState(guild, supa as any, desiredState as any, { dryRun: false, cleanExisting: false }); } catch { /* expected */ }
   });
 });

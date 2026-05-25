@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for deploy/deployer.ts — the server state deployment pipeline.
  * 378 uncovered statements. Tests pre-flight checks, dry-run mode,
@@ -167,7 +166,7 @@ describe('deployer', () => {
       const result = await deployServerState(
         guild,
         makeSupa() as any,
-        { everyonePermissions: '0', roles: [{ key: 'r1', name: 'VIP', tier: 'premium', permissions: '0', color: 0xFF0000, hoist: true, mentionable: false }], categories: [], channels: [] },
+        { everyonePermissions: '0', roles: [{ key: 'r1', name: 'VIP', tier: 'premium', permissions: '0', color: 0xFF0000, hoist: true, mentionable: false, position: 0 }], categories: [], channels: [] },
         { cleanExisting: false, dryRun: true },
       );
 
@@ -183,7 +182,7 @@ describe('deployer', () => {
       const desiredState = {
         everyonePermissions: '0',
         roles: [
-          { key: 'vip', name: 'VIP', tier: 'premium', permissions: '0', color: 0xFF0000, hoist: true, mentionable: false },
+          { key: 'vip', name: 'VIP', tier: 'premium', permissions: '0', color: 0xFF0000, hoist: true, mentionable: false, position: 0 },
         ],
         categories: [
           { key: 'cat-main', name: 'Main' },
@@ -196,7 +195,7 @@ describe('deployer', () => {
       const result = await deployServerState(
         guild,
         supa as any,
-        desiredState,
+        desiredState as any,
         { cleanExisting: false, dryRun: false },
       );
 
@@ -230,7 +229,7 @@ describe('deployer', () => {
         makeSupa() as any,
         {
           everyonePermissions: '0',
-          roles: [{ key: 'fail', name: 'FailRole', tier: 'basic', permissions: '0', color: 0, hoist: false, mentionable: false }],
+          roles: [{ key: 'fail', name: 'FailRole', tier: 'basic', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 }],
           categories: [],
           channels: [],
         },

@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for ../features/lottery/lottery-manager.js — instantiation and lifecycle.
  */
@@ -137,7 +136,7 @@ function makeDiscordClient() {
 
 describe('LotteryManager', () => {
   it('instantiates without errors', () => {
-    const manager = new LotteryManager(makeGuild() as any, makeSupa() as any, makeValkey());
+    const manager = new LotteryManager(makeSupa() as any);
     expect(manager).toBeDefined();
   });
   

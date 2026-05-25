@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep coverage tests for services/action-queue.ts — exercises all action handlers
  * via startActionQueueListener with mock pending actions.
@@ -145,7 +144,7 @@ function makeGuild() {
       create: vi.fn().mockResolvedValue({ id: 'new-role', name: 'NewRole', position: 3 }),
     },
     channels: {
-      cache: new Map([
+      cache: new Map<string, any>([
         ['ch-1', mockChannel],
         ['cat-1', mockCategory],
       ]),
@@ -168,7 +167,7 @@ describe('action-queue deep routing', () => {
   it('startActionQueueListener processes pending create_role action', async () => {
     const actions = [{
       id: 'act-1', guild_id: 'guild-1', action: 'create_role', status: 'pending',
-      payload: { name: 'NewRole', tier: 'custom', color: 0xff0000, hoist: true, mentionable: false },
+      payload: { name: 'NewRole', tier: 'custom', color: 0xff0000, hoist: true, mentionable: false, position: 0 },
       created_at: new Date().toISOString(), retry_count: 0,
     }];
     const guild = makeGuild();

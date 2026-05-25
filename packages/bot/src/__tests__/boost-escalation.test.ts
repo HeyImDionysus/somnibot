@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Tests for features/moderation/escalation.ts — getEscalationAction and executeEscalation.
  * 176 uncovered statements at 17%.
@@ -45,8 +44,8 @@ describe('escalation', () => {
 
     it('returns action for matching threshold', () => {
       const thresholds = [
-        { count: 3, action: 'mute', duration: '1h' },
-        { count: 5, action: 'ban' },
+        { warningThreshold: 3, action: 'mute', duration: '1h' },
+        { warningThreshold: 5, action: 'ban' },
       ];
       const result = getEscalationAction(thresholds as any, 3);
       expect(result).toBeDefined();
@@ -54,8 +53,8 @@ describe('escalation', () => {
 
     it('returns highest matching threshold', () => {
       const thresholds = [
-        { count: 3, action: 'mute', duration: '1h' },
-        { count: 5, action: 'ban' },
+        { warningThreshold: 3, action: 'mute', duration: '1h' },
+        { warningThreshold: 5, action: 'ban' },
       ];
       const result = getEscalationAction(thresholds as any, 7);
       expect(result).toBeDefined();
@@ -77,9 +76,9 @@ describe('escalation', () => {
       };
       const client = { supabase: { from: vi.fn(() => makeChain()) } } as any;
       const config = {
-        escalationChain: [{ count: 3, action: 'mute', durationMinutes: 60 }],
+        escalationChain: [{ threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true }],
         infractionExpiryDays: 30,
-        modLogChannelId: null,
+        modLogChannelId: null as any,
       };
       await executeEscalation(client, member as any, 'Test reason', config);
     });

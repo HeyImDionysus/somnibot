@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep path coverage — targets the lowest-coverage files with the most uncovered statements.
  * Uses proper mock shapes to push past guards into business logic.
@@ -198,7 +197,7 @@ describe('escalation deep coverage', () => {
           { threshold: 6, action: 'ban', dmMember: true },
         ],
         infractionExpiryDays: 30,
-        modLogChannelId: null,
+        modLogChannelId: null as any,
       });
     } catch { /* expected */ }
   });
@@ -294,7 +293,7 @@ describe('automod-actions deep coverage', () => {
     };
     try {
       await executeAutoModAction(client as any, message as any, rule as any, 'Link detected', {
-        escalationChain: [], infractionExpiryDays: 30, modLogChannelId: null,
+        escalationChain: [], infractionExpiryDays: 30, modLogChannelId: null as any,
       });
     } catch { /* expected */ }
   });
@@ -632,7 +631,7 @@ describe('AutomationEngine deep coverage', () => {
 // ── Deploy Listener ──────────────────────────────────────────
 
 describe('deploy-listener deep coverage', () => {
-  it('getDeployStatus returns null initially', async () => {
+  it(' returns null initially', async () => {
     const { getDeployStatus } = await import('../deploy/deploy-listener.js');
     expect(getDeployStatus()).toBeNull();
   });
@@ -670,19 +669,8 @@ describe('PollsManager deep coverage', () => {
         guild_config: { guild_id: 'g1', polls_enabled: true },
         polls: { id: 'poll1' },
       });
-      const mgr = new PollsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.createPoll({
-        guild: { id: 'g1' }, guildId: 'g1', user: { id: 'u1' }, channelId: 'ch1',
-        channel: { id: 'ch1', send: vi.fn().mockResolvedValue({ id: 'msg1', react: vi.fn() }) },
-        replied: false, deferred: false,
-        reply: vi.fn().mockResolvedValue({}), editReply: vi.fn().mockResolvedValue({}),
-        deferReply: vi.fn().mockResolvedValue({}),
-        options: {
-          getString: vi.fn((k: string) => k === 'question' ? 'Best color?' : k === 'options' ? 'Red,Blue,Green' : null),
-          getInteger: vi.fn().mockReturnValue(null),
-          getChannel: vi.fn().mockReturnValue(null),
-        },
-      } as any);
+      const mgr = new PollsManager(supa as any);
+      await mgr.createPoll({ guildId: 'g1', user: { id: 'u1' }, reply: vi.fn(), deferReply: vi.fn(), editReply: vi.fn(), options: { getString: vi.fn() } } as any, 'Best color?', ['Red', 'Blue', 'Green'], false);
     } catch { /* expected */ }
   });
 
@@ -694,8 +682,8 @@ describe('PollsManager deep coverage', () => {
         polls: { id: 'poll1', status: 'active', options: ['Red', 'Blue', 'Green'], multi_vote: false },
         poll_votes: [],
       });
-      const mgr = new PollsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.vote({
+      const mgr = new PollsManager(supa as any);
+      await mgr.handlePollVote({
         customId: 'poll:vote:0', user: { id: 'u1' }, guildId: 'g1',
         deferUpdate: vi.fn(), update: vi.fn(), reply: vi.fn(), editReply: vi.fn(),
         message: { id: 'msg1' },
@@ -713,8 +701,8 @@ describe('PetsManager deep coverage', () => {
         guild_config: { guild_id: 'g1', pets_enabled: true },
         user_pets: { id: 'pet1', user_id: 'u1', guild_id: 'g1', name: 'Buddy', species: 'dog', level: 5, xp: 100, happiness: 80, hunger: 50, health: 100, last_fed: new Date().toISOString(), last_played: new Date().toISOString() },
       });
-      const mgr = new PetsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.viewPet('u1');
+      const mgr = new PetsManager(supa as any);
+      await mgr.viewPet({ user: { id: 'u1' }, guildId: 'g1', reply: vi.fn(), deferReply: vi.fn(), editReply: vi.fn() } as any);
     } catch { /* expected */ }
   });
 
@@ -725,8 +713,8 @@ describe('PetsManager deep coverage', () => {
         guild_config: { guild_id: 'g1', pets_enabled: true },
         user_pets: { id: 'pet1', user_id: 'u1', guild_id: 'g1', name: 'Buddy', species: 'dog', level: 5, hunger: 50 },
       });
-      const mgr = new PetsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.feedPet('u1');
+      const mgr = new PetsManager(supa as any);
+      await mgr.feedPet({ user: { id: 'u1' }, guildId: 'g1', reply: vi.fn(), deferReply: vi.fn(), editReply: vi.fn() } as any);
     } catch { /* expected */ }
   });
 
@@ -737,8 +725,8 @@ describe('PetsManager deep coverage', () => {
         guild_config: { guild_id: 'g1', pets_enabled: true },
         user_pets: { id: 'pet1', user_id: 'u1', name: 'Buddy', species: 'cat', happiness: 60 },
       });
-      const mgr = new PetsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.playWithPet('u1');
+      const mgr = new PetsManager(supa as any);
+      await mgr.playWithPet({ user: { id: 'u1' }, guildId: 'g1', reply: vi.fn(), deferReply: vi.fn(), editReply: vi.fn() } as any);
     } catch { /* expected */ }
   });
 
@@ -750,8 +738,8 @@ describe('PetsManager deep coverage', () => {
         user_pets: [],
         pet_species: [{ id: 's1', name: 'Dog', emoji: '🐕', base_stats: { health: 100, happiness: 80 } }],
       });
-      const mgr = new PetsManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
-      await mgr.adoptPet('u1', 'Dog', 'Buddy');
+      const mgr = new PetsManager(supa as any);
+      await mgr.buyPet({} as any);
     } catch { /* expected */ }
   });
 });
@@ -776,8 +764,8 @@ describe('ScheduledMessageRunner deep coverage', () => {
         },
         guildId: 'g1',
       };
-      const runner = new ScheduledMessageRunner(client as any);
-      await runner.tick();
+      const runner = new ScheduledMessageRunner(client as any, {} as any);
+      await (runner as any).tick();
     } catch { /* expected */ }
   });
 });
@@ -803,7 +791,7 @@ describe('payment-handler deep coverage', () => {
         store_products: { id: 'prod1', name: 'VIP Role', guild_id: 'g1', active: true },
         store_prices: { id: 'price1', product_id: 'prod1', amount: 500, currency: 'coins' },
       });
-      await handleBuyButton(interaction as any, supa);
+      await handleBuyButton(interaction as any, supa, {} as any, {} as any, {} as any, {} as any, {} as any);
     } catch { /* expected */ }
   });
 });
@@ -816,7 +804,7 @@ describe('GamesManager deep coverage', () => {
       const supa = smartSupa({
         guild_config: { guild_id: 'g1', games_enabled: true, economy_max_bet: 5000 },
       });
-      const mgr = new GamesManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+      const mgr = new GamesManager(supa as any);
       const int = {
         guildId: 'g1', user: { id: 'u1', displayAvatarURL: () => 'url' },
         replied: false, deferred: false,
@@ -824,7 +812,7 @@ describe('GamesManager deep coverage', () => {
         deferReply: vi.fn().mockResolvedValue({}),
         options: { getString: vi.fn().mockReturnValue('heads'), getInteger: vi.fn().mockReturnValue(100) },
       };
-      await mgr.coinflip(int as any);
+      await mgr.coinflip(int as any, {} as any);
     } catch { /* expected */ }
   });
 
@@ -834,7 +822,7 @@ describe('GamesManager deep coverage', () => {
       const supa = smartSupa({
         guild_config: { guild_id: 'g1', games_enabled: true, economy_max_bet: 5000 },
       });
-      const mgr = new GamesManager({ id: 'g1' } as any, supa, makeValkey(), { emit: vi.fn() } as any);
+      const mgr = new GamesManager(supa as any);
       const int = {
         guildId: 'g1', user: { id: 'u1', displayAvatarURL: () => 'url' },
         replied: false, deferred: false,
@@ -842,7 +830,7 @@ describe('GamesManager deep coverage', () => {
         deferReply: vi.fn().mockResolvedValue({}),
         options: { getInteger: vi.fn().mockReturnValue(50) },
       };
-      await mgr.slots(int as any);
+      await mgr.slots(int as any, {} as any);
     } catch { /* expected */ }
   });
 

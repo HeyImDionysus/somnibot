@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/gathering/gathering-manager.ts — gather.
  * 157 uncovered statements at 48.9%.
@@ -48,7 +47,7 @@ describe('GatheringManager deep', () => {
     const supa = makeSupa({
       guild_config: { guild_id: guildId, gathering_enabled: true, gathering_cooldown_seconds: 30 },
     });
-    const mgr = new GatheringManager(guildId, supa);
+    const mgr = new GatheringManager(guildId as any, supa, {} as any);
     const config = await mgr.getConfig();
     expect(config).toBeDefined();
   });
@@ -60,7 +59,7 @@ describe('GatheringManager deep', () => {
         { id: 'l1', source_type: 'mine', item_id: 'ore-1', item_name: 'Iron Ore', emoji: '⛏️', rarity: 'common', weight: 100, min_qty: 1, max_qty: 3 },
       ],
     });
-    const mgr = new GatheringManager(guildId, supa);
+    const mgr = new GatheringManager(guildId as any, supa, {} as any);
     const result = await mgr.gather('user-1', 'mine');
     expect(result).toBeDefined();
   });

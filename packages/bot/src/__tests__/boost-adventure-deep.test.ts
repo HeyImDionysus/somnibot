@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Deep tests for features/adventures/adventure-manager.ts — startAdventure, handleChoice.
  * 336 uncovered statements at 52.3%.
@@ -129,6 +128,6 @@ describe('AdventureManager deep', () => {
       followUp: vi.fn().mockResolvedValue({}),
       message: { edit: vi.fn().mockResolvedValue({}) },
     } as any;
-    await mgr.handleChoice(btn);
+    await mgr.handleChoice(btn, 'session-1', 0);
   });
 });
