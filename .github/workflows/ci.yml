@@ -138,6 +138,30 @@ jobs:
         run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=60 --reporter=verbose
 
   # ──────────────────────────────────────────────────────────
+  # Dashboard Tests — vitest (route handlers, rate limiting)
+  # ──────────────────────────────────────────────────────────
+  test-dashboard:
+    name: Dashboard Tests
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Build shared
+        run: pnpm --filter @somnibot/shared build
+      - name: Run dashboard tests
+        run: pnpm --filter @somnibot/dashboard test -- --reporter=verbose
+
+  # ──────────────────────────────────────────────────────────
   # Integration Tests — real Supabase
   # ──────────────────────────────────────────────────────────
   integration-test:
