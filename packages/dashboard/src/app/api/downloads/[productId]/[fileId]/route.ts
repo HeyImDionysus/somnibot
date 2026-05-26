@@ -100,9 +100,20 @@ export async function GET(
     }
   });
 
-  // If external URL, redirect
+  // If external URL, redirect — V6 Audit §2.4: enforce HTTPS
   if (file.external_url) {
-    return NextResponse.redirect(file.external_url);
+    try {
+      const externalUrl = new URL(file.external_url);
+      if (externalUrl.protocol !== 'https:') {
+        return NextResponse.json(
+          { error: 'External download URLs must use HTTPS' },
+          { status: 400 },
+        );
+      }
+      return NextResponse.redirect(file.external_url);
+    } catch {
+      return NextResponse.json({ error: 'Invalid external URL' }, { status: 400 });
+    }
   }
 
   // If Supabase storage path, generate signed URL

@@ -11,6 +11,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
+import { z } from 'zod';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 
 function hashToken(token: string): string {
@@ -38,13 +39,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
     }
 
-    // Parse request body
-    const body = await request.json().catch(() => null);
-    if (!body || typeof body.productId !== 'string' || typeof body.fileId !== 'string') {
-      return NextResponse.json({ error: 'productId and fileId are required' }, { status: 400 });
+    // Parse request body — V6 Audit §7.1: Zod validation
+    const bodySchema = z.object({
+      productId: z.string().uuid(),
+      fileId: z.string().uuid(),
+    });
+    const parsed = bodySchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'productId (uuid) and fileId (uuid) are required' },
+        { status: 400 },
+      );
     }
 
-    const { productId, fileId } = body;
+    const { productId, fileId } = parsed.data;
 
     // Verify entitlement exists
     const { data: entitlement } = await admin

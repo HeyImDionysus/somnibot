@@ -170,6 +170,12 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing promotion id' }, { status: 400 });
   }
 
+  // V6 Audit §2.3: Validate UUID format before sending to DB
+  const uuidCheck = z.string().uuid().safeParse(id);
+  if (!uuidCheck.success) {
+    return NextResponse.json({ success: false, error: 'Invalid promotion id format' }, { status: 400 });
+  }
+
   const { error } = await supabase
     .from('promotions')
     .delete()
