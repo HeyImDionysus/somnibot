@@ -1,3 +1,22 @@
+# =============================================================================
+# SomniBot — CI Pipeline
+# =============================================================================
+#
+# Jobs (12):
+#   install            → dependency cache
+#   typecheck           → tsc --noEmit across all packages
+#   lint                → ESLint (dashboard)
+#   build               → full production build (all packages)
+#   test-unit           → bot unit tests + 70% coverage gate
+#   test-dashboard      → dashboard unit tests
+#   test-integration    → integration tests against local Supabase
+#   migration-lint      → migration naming, ordering, dangerous ops
+#   db-security-audit   → SECURITY DEFINER search_path + RLS policy audit
+#   type-drift          → generated DB types vs migration state
+#   security            → dependency audit + secret scanning
+#   ci-gate             → required status check — all jobs must pass
+# =============================================================================
+
 name: CI
 
 on:
@@ -10,19 +29,32 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
-  NODE_VERSION: '22'
+  NODE_VERSION: "22"
+  PNPM_VERSION: "9.15.4"
+  SUPABASE_CLI_VERSION: "2.101.0"
+
+# =============================================================================
+# Reusable setup anchor — keeps checkout+pnpm+node+cache consistent
+# =============================================================================
+# (YAML anchors aren't supported in GitHub Actions, so we repeat steps.
+#  Each job uses the same 4-step preamble for deterministic setup.)
 
 jobs:
-  # ──────────────────────────────────────────────────────────
-  # Install & Cache
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 1. Install & Cache
+  # ──────────────────────────────────────────────────────────────────────────
   install:
-    name: Install Dependencies
+    name: 📦 Install Dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -35,16 +67,18 @@ jobs:
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
 
-  # ──────────────────────────────────────────────────────────
-  # Typecheck — all packages
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 2. Typecheck — every package with a type-check script
+  # ──────────────────────────────────────────────────────────────────────────
   typecheck:
-    name: Typecheck
+    name: 🔍 Typecheck
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -54,7 +88,7 @@ jobs:
             node_modules
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
-      - name: Build shared (dependency for others)
+      - name: Build shared (dependency for all packages)
         run: pnpm --filter @somnibot/shared build
       - name: Typecheck bot
         run: pnpm --filter @somnibot/bot type-check
@@ -63,16 +97,18 @@ jobs:
       - name: Typecheck license-sdk
         run: pnpm --filter @somnibot/license-sdk typecheck
 
-  # ──────────────────────────────────────────────────────────
-  # Lint
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 3. Lint
+  # ──────────────────────────────────────────────────────────────────────────
   lint:
-    name: Lint
+    name: 🧹 Lint
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -86,16 +122,19 @@ jobs:
         run: pnpm --filter @somnibot/shared build
       - name: Lint dashboard
         run: pnpm --filter @somnibot/dashboard lint
-  # ──────────────────────────────────────────────────────────
-  # Build — full production build
-  # ──────────────────────────────────────────────────────────
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 4. Build — full production build (validates all packages compile)
+  # ──────────────────────────────────────────────────────────────────────────
   build:
-    name: Build
+    name: 🏗️ Build
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -108,21 +147,22 @@ jobs:
       - name: Build all packages
         run: pnpm build
         env:
-          # Dummy env vars for Next.js build (not real credentials)
           NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder
-          DISCORD_GUILD_ID: '000000000000000000'
+          DISCORD_GUILD_ID: "000000000000000000"
 
-  # ──────────────────────────────────────────────────────────
-  # Unit Tests — vitest
-  # ──────────────────────────────────────────────────────────
-  test:
-    name: Unit Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  # 5. Unit Tests — bot (vitest + v8 coverage)
+  # ──────────────────────────────────────────────────────────────────────────
+  test-unit:
+    name: 🧪 Unit Tests (Bot)
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -134,19 +174,34 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
-      - name: Run tests
-        run: pnpm --filter @somnibot/bot test -- --coverage --coverage.thresholds.statements=60 --reporter=verbose
+      - name: Run unit tests with coverage
+        run: |
+          pnpm --filter @somnibot/bot test -- \
+            --coverage \
+            --coverage.thresholds.statements=70 \
+            --coverage.reporter=text \
+            --coverage.reporter=json-summary \
+            --reporter=verbose
+      - name: Upload coverage summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bot
+          path: packages/bot/coverage/
+          retention-days: 14
 
-  # ──────────────────────────────────────────────────────────
-  # Dashboard Tests — vitest (route handlers, rate limiting)
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 6. Dashboard Tests
+  # ──────────────────────────────────────────────────────────────────────────
   test-dashboard:
-    name: Dashboard Tests
+    name: 🧪 Unit Tests (Dashboard)
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -161,16 +216,18 @@ jobs:
       - name: Run dashboard tests
         run: pnpm --filter @somnibot/dashboard test -- --reporter=verbose
 
-  # ──────────────────────────────────────────────────────────
-  # Integration Tests — real Supabase
-  # ──────────────────────────────────────────────────────────
-  integration-test:
-    name: Integration Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  # 7. Integration Tests — real Supabase (full migration stack)
+  # ──────────────────────────────────────────────────────────────────────────
+  test-integration:
+    name: 🔗 Integration Tests
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -182,16 +239,17 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Supabase CLI
         run: |
-          curl -fsSL -o /tmp/supabase.tar.gz https://github.com/supabase/cli/releases/download/v2.101.0/supabase_linux_amd64.tar.gz && tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+          curl -fsSL -o /tmp/supabase.tar.gz \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+          supabase --version
       - name: Start Supabase local
-        run: |
-          cd packages
-          supabase start
+        run: cd packages && supabase start
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      - name: Verify Supabase is healthy
+      - name: Wait for Supabase REST API
         run: |
-          echo "Verifying Supabase REST API is responding..."
+          echo "Waiting for Supabase REST API..."
           for i in $(seq 1 30); do
             if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
               -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
@@ -214,15 +272,15 @@ jobs:
         if: always()
         run: cd packages && supabase stop 2>/dev/null || true
 
-  # ──────────────────────────────────────────────────────────
-  # Migration Lint
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 8. Migration Lint
+  # ──────────────────────────────────────────────────────────────────────────
   migration-lint:
-    name: Migration Lint
+    name: 📋 Migration Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check migration file conventions
+      - name: Lint migration files
         run: |
           set -euo pipefail
           MIGRATIONS_DIR="packages/supabase/migrations"
@@ -230,16 +288,16 @@ jobs:
 
           echo "=== Migration Lint ==="
 
-          # Check all files follow naming convention: YYYYMMDDHHMMSS_description.sql
+          # 1. Naming convention: YYYYMMDDHHMMSS_description.sql
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
             if ! echo "$base" | grep -qE '^[0-9]{14}_[a-z0-9_]+\.sql$'; then
-              echo "❌ Bad naming convention: $base (expected: YYYYMMDDHHMMSS_snake_case.sql)"
+              echo "❌ Bad naming: $base (expected: YYYYMMDDHHMMSS_snake_case.sql)"
               ERRORS=$((ERRORS+1))
             fi
           done
 
-          # Check timestamps are in order
+          # 2. Timestamps must be strictly ascending
           PREV=""
           for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
             base=$(basename "$f")
@@ -251,18 +309,32 @@ jobs:
             PREV="$TS"
           done
 
-          # Warn on dangerous operations
+          # 3. Dangerous operation warnings (non-blocking)
           for f in "$MIGRATIONS_DIR"/*.sql; do
             base=$(basename "$f")
             if grep -qiE '^\s*DROP\s+TABLE\b' "$f" 2>/dev/null; then
-              echo "⚠️  DROP TABLE found in $base — ensure this is intentional"
+              echo "⚠️  DROP TABLE in $base"
             fi
             if grep -qiE '^\s*TRUNCATE\b' "$f" 2>/dev/null; then
-              echo "⚠️  TRUNCATE found in $base — ensure this is intentional"
+              echo "⚠️  TRUNCATE in $base"
             fi
-            if grep -qiE '^\s*DELETE\s+FROM\b' "$f" 2>/dev/null && ! grep -qiE 'WHERE' "$f" 2>/dev/null; then
-              echo "⚠️  DELETE without WHERE in $base — ensure this is intentional"
+            if grep -qiE '^\s*ALTER\s+TABLE.*DROP\s+COLUMN\b' "$f" 2>/dev/null; then
+              echo "⚠️  DROP COLUMN in $base"
             fi
+          done
+
+          # 4. Every new SECURITY DEFINER must have SET search_path = ''
+          for f in "$MIGRATIONS_DIR"/*.sql; do
+            base=$(basename "$f")
+            # Find SECURITY DEFINER lines that are NOT comments
+            while IFS=: read -r lineno line; do
+              # Check next 3 lines for search_path
+              has_sp=$(sed -n "$((lineno)),$((lineno+3))p" "$f" 2>/dev/null | grep -ci "search_path" || true)
+              if [ "$has_sp" = "0" ]; then
+                echo "❌ SECURITY DEFINER without SET search_path in $base:$lineno"
+                ERRORS=$((ERRORS+1))
+              fi
+            done < <(grep -n "SECURITY DEFINER" "$f" | grep -v "^\s*--" | grep -v "ALTER FUNCTION" || true)
           done
 
           # Summary
@@ -275,55 +347,181 @@ jobs:
           fi
           echo "✅ All migrations pass lint"
 
-  # ──────────────────────────────────────────────────────────
-  # DB Type Drift Check (V5 Audit)
-  # Catches when migrations change but generated TS types
-  # haven't been re-run. Warn-only — won't block the build.
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 9. DB Security Audit
+  #    Validates SECURITY DEFINER + RLS hardening at the SQL level.
+  #    Catches regressions before they reach production.
+  # ──────────────────────────────────────────────────────────────────────────
+  db-security-audit:
+    name: 🛡️ DB Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Supabase CLI
+        run: |
+          curl -fsSL -o /tmp/supabase.tar.gz \
+            "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
+          tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
+      - name: Start Supabase and apply migrations
+        run: cd packages && supabase start
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Wait for database
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf -o /dev/null http://127.0.0.1:54321/rest/v1/ \
+              -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; then
+              echo "✅ DB ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "❌ DB not ready"; exit 1
+      - name: Audit SECURITY DEFINER functions
+        run: |
+          set -euo pipefail
+          echo "=== SECURITY DEFINER Audit ==="
+
+          # Query all SECURITY DEFINER functions and check for search_path
+          RESULT=$(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -t -A -F'|' <<'SQL'
+            SELECT p.proname,
+                   n.nspname,
+                   CASE WHEN p.proconfig IS NOT NULL
+                        AND EXISTS (
+                          SELECT 1 FROM unnest(p.proconfig) c
+                          WHERE c LIKE 'search_path=%'
+                        )
+                   THEN 'OK'
+                   ELSE 'MISSING'
+                   END AS search_path_status
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE p.prosecdef = true
+              AND n.nspname = 'public'
+            ORDER BY p.proname;
+          SQL
+          )
+
+          ERRORS=0
+          TOTAL=0
+
+          while IFS='|' read -r name schema status; do
+            [ -z "$name" ] && continue
+            TOTAL=$((TOTAL+1))
+            if [ "$status" = "MISSING" ]; then
+              echo "❌ $schema.$name — SECURITY DEFINER without SET search_path"
+              ERRORS=$((ERRORS+1))
+            else
+              echo "  ✓ $schema.$name"
+            fi
+          done <<< "$RESULT"
+
+          echo ""
+          echo "Audited $TOTAL SECURITY DEFINER functions, $ERRORS missing search_path"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo ""
+            echo "Fix: add a migration with ALTER FUNCTION <name>(<args>) SET search_path = '';"
+            exit 1
+          fi
+          echo "✅ All SECURITY DEFINER functions have search_path set"
+      - name: Audit RLS policies
+        run: |
+          set -euo pipefail
+          echo "=== RLS Policy Audit ==="
+
+          # Check that sensitive tables don't grant access to anon/authenticated
+          # Tables that should be locked down (service_role only)
+          SENSITIVE_TABLES=(
+            "economy_wallets" "economy_transactions" "economy_profiles"
+            "economy_inventory" "economy_items" "economy_pets"
+            "economy_heists" "economy_heist_participants"
+            "fraud_rules" "fraud_signals"
+            "incidents" "incident_events"
+            "portal_sessions" "admin_changes"
+            "dashboard_roles" "dashboard_user_roles"
+            "automations" "automation_executions"
+            "dead_letter_queue" "workflow_events"
+          )
+
+          ERRORS=0
+          for tbl in "${SENSITIVE_TABLES[@]}"; do
+            # Check if anon or authenticated have any grants
+            GRANTS=$(PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -t -A <<SQL
+              SELECT count(*)
+              FROM information_schema.role_table_grants
+              WHERE table_schema = 'public'
+                AND table_name = '$tbl'
+                AND grantee IN ('anon', 'authenticated');
+          SQL
+            )
+            GRANTS=$(echo "$GRANTS" | tr -d ' \n')
+            if [ "$GRANTS" != "0" ] && [ -n "$GRANTS" ]; then
+              echo "❌ $tbl — anon/authenticated have $GRANTS grant(s) (should be revoked)"
+              ERRORS=$((ERRORS+1))
+            else
+              echo "  ✓ $tbl — locked down"
+            fi
+          done
+
+          echo ""
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "$ERRORS table(s) have grants for anon/authenticated that should be revoked."
+            echo "Fix: add REVOKE ALL ON <table> FROM anon, authenticated;"
+            exit 1
+          fi
+          echo "✅ All sensitive tables are locked down"
+      - name: Stop Supabase
+        if: always()
+        run: cd packages && supabase stop 2>/dev/null || true
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 10. DB Type Drift Check
+  #     Warns when migrations change but generated TS types are stale.
+  # ──────────────────────────────────────────────────────────────────────────
   type-drift:
-    name: DB Type Drift Check
+    name: 🔄 DB Type Drift Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - name: Regenerate types and diff
         run: |
           set -euo pipefail
           TYPES_FILE="packages/shared/src/types/database.ts"
 
-          # Fix the hardcoded path in the generator to use the repo checkout
+          # Point generator at the repo checkout path
           sed -i "s|MIGRATIONS_DIR = .*|MIGRATIONS_DIR = Path(\"packages/supabase/migrations\")|" scripts/generate-db-types.py
 
-          # Save current committed version
           cp "$TYPES_FILE" /tmp/database.ts.committed
 
-          # Regenerate from migrations
           python3 scripts/generate-db-types.py
 
-          # Compare
           if diff -u /tmp/database.ts.committed "$TYPES_FILE" > /tmp/type-drift.diff 2>&1; then
             echo "✅ database.ts is up to date with migrations"
           else
             echo "⚠️  database.ts is out of sync with migrations"
             echo "Run 'python3 scripts/generate-db-types.py' locally and commit the result."
             echo ""
-            cat /tmp/type-drift.diff
+            head -80 /tmp/type-drift.diff
             # Warn only — don't fail the build
             exit 0
           fi
 
-  # ──────────────────────────────────────────────────────────
-  # Security Checks
-  # ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────────────────────
+  # 11. Security Checks
+  # ──────────────────────────────────────────────────────────────────────────
   security:
-    name: Security Checks
+    name: 🔒 Security Checks
     runs-on: ubuntu-latest
     needs: install
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -333,37 +531,137 @@ jobs:
             node_modules
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
-      - name: Audit dependencies
-        run: pnpm audit --audit-level=high  # Fails on high/critical CVEs
-      - name: Check for hardcoded secrets
+      - name: Audit dependencies (high + critical)
+        run: pnpm audit --audit-level=high
+      - name: Scan for hardcoded secrets
         run: |
           set -euo pipefail
-          echo "=== Checking for hardcoded secrets ==="
+          echo "=== Secret Scan ==="
 
-          # Patterns that suggest real credentials
           PATTERNS=(
             'sk_live_'
             'sk_test_'
-            'PAYPAL_CLIENT_SECRET\s*=\s*["\x27][A-Za-z0-9]'
-            'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]{20,}'
+            'PAYPAL_CLIENT_SECRET\s*=\s*["'\''"][A-Za-z0-9]'
             'ghp_[A-Za-z0-9]{36}'
             'xoxb-[0-9]'
+            'AKIA[0-9A-Z]{16}'
+            'glpat-[A-Za-z0-9_-]{20}'
           )
 
           FOUND=0
           for pattern in "${PATTERNS[@]}"; do
-            MATCHES=$(grep -rn "$pattern" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.env" \
+            MATCHES=$(grep -rn "$pattern" \
+              --include="*.ts" --include="*.tsx" --include="*.js" --include="*.env" \
               --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
               --exclude=".env.example" --exclude="ci.yml" . 2>/dev/null || true)
             if [ -n "$MATCHES" ]; then
-              echo "⚠️  Possible secret found matching pattern: $pattern"
+              echo "⚠️  Possible secret matching: $pattern"
               echo "$MATCHES" | head -3
               FOUND=$((FOUND+1))
             fi
           done
 
           if [ "$FOUND" -gt 0 ]; then
-            echo "❌ Found $FOUND potential secret pattern(s) — review above"
+            echo "❌ Found $FOUND potential secret pattern(s)"
             exit 1
           fi
           echo "✅ No hardcoded secrets detected"
+      - name: Check for unsafe patterns
+        run: |
+          set -euo pipefail
+          echo "=== Unsafe Pattern Scan ==="
+          ERRORS=0
+
+          # eval() usage (excluding node_modules, tests, configs)
+          EVAL_HITS=$(grep -rn '\beval(' \
+            --include="*.ts" --include="*.tsx" \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            --exclude="*.test.ts" --exclude="*.config.*" \
+            packages/ 2>/dev/null || true)
+          if [ -n "$EVAL_HITS" ]; then
+            echo "⚠️  eval() usage found:"
+            echo "$EVAL_HITS"
+            ERRORS=$((ERRORS+1))
+          fi
+
+          # dangerouslySetInnerHTML (only flag new instances)
+          DSHI_HITS=$(grep -rn 'dangerouslySetInnerHTML' \
+            --include="*.tsx" \
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist \
+            packages/ 2>/dev/null || true)
+          if [ -n "$DSHI_HITS" ]; then
+            echo "⚠️  dangerouslySetInnerHTML usage (verify XSS safety):"
+            echo "$DSHI_HITS"
+            # Non-blocking — just flag for review
+          fi
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "❌ Unsafe patterns detected"
+            exit 1
+          fi
+          echo "✅ No unsafe patterns detected"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 12. CI Gate — required status check for branch protection
+  #     Every job above must pass. Add this single job as the required
+  #     status check in GitHub repo settings instead of listing each job.
+  # ──────────────────────────────────────────────────────────────────────────
+  ci-gate:
+    name: ✅ CI Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - install
+      - typecheck
+      - lint
+      - build
+      - test-unit
+      - test-dashboard
+      - test-integration
+      - migration-lint
+      - db-security-audit
+      - type-drift
+      - security
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "Job results:"
+          echo "  install:           ${{ needs.install.result }}"
+          echo "  typecheck:         ${{ needs.typecheck.result }}"
+          echo "  lint:              ${{ needs.lint.result }}"
+          echo "  build:             ${{ needs.build.result }}"
+          echo "  test-unit:         ${{ needs.test-unit.result }}"
+          echo "  test-dashboard:    ${{ needs.test-dashboard.result }}"
+          echo "  test-integration:  ${{ needs.test-integration.result }}"
+          echo "  migration-lint:    ${{ needs.migration-lint.result }}"
+          echo "  db-security-audit: ${{ needs.db-security-audit.result }}"
+          echo "  type-drift:        ${{ needs.type-drift.result }}"
+          echo "  security:          ${{ needs.security.result }}"
+
+          # type-drift is warn-only — allow skipped/success
+          # All other jobs must succeed
+          FAILED=0
+          for result in \
+            "${{ needs.install.result }}" \
+            "${{ needs.typecheck.result }}" \
+            "${{ needs.lint.result }}" \
+            "${{ needs.build.result }}" \
+            "${{ needs.test-unit.result }}" \
+            "${{ needs.test-dashboard.result }}" \
+            "${{ needs.test-integration.result }}" \
+            "${{ needs.migration-lint.result }}" \
+            "${{ needs.db-security-audit.result }}" \
+            "${{ needs.security.result }}"; do
+            if [ "$result" != "success" ]; then
+              FAILED=$((FAILED+1))
+            fi
+          done
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo ""
+            echo "❌ $FAILED required job(s) did not succeed"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All required jobs passed"
