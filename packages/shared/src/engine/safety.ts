@@ -212,18 +212,48 @@ export function validateRolePermissions(
 }
 
 /**
- * Check if a permission change would lock out the owner.
+ * Check if a permission change would lock out the server.
  * Returns true if the change is safe.
+ *
+ * V6 Audit §11.4: Real implementation — verifies that after the change,
+ * at least one role still has ADMINISTRATOR or the full admin permission set.
+ * This prevents the scenario where the last admin role has its permissions
+ * stripped, leaving no one able to manage the server when the owner is away.
  */
 export function isLockoutSafe(
-  _ownerRoleIds: string[],
-  _allRoles: RoleConfig[],
-  _changingRoleId: string,
-  _newPermissions: bigint,
+  ownerRoleIds: string[],
+  allRoles: RoleConfig[],
+  changingRoleId: string,
+  newPermissions: bigint,
 ): boolean {
-  // Owner always has all permissions regardless of roles (Discord server owner).
-  // So lockout is not technically possible for the owner.
-  // But we still check that at least one admin role exists to manage the server
-  // when the owner is not around.
+  // Build a simulated role set with the proposed change applied
+  const simulatedRoles = allRoles.map((role) => {
+    if (role.id === changingRoleId) {
+      return { ...role, permissions: newPermissions };
+    }
+    return role;
+  });
+
+  // Check if at least one admin-tier role retains management permissions
+  // after the change. The owner always has implicit permissions, but we
+  // need at least one role for delegates.
+  const MANAGE_PERMS = DISCORD_PERMISSIONS.MANAGE_GUILD |
+    DISCORD_PERMISSIONS.MANAGE_ROLES |
+    DISCORD_PERMISSIONS.MANAGE_CHANNELS;
+
+  const hasAdminCapableRole = simulatedRoles.some((role) => {
+    // Skip the @everyone tier — it's not assignable
+    if (role.tier === 'everyone' || role.tier === 'cosmetic') return false;
+
+    const perms = role.permissions;
+    // Either has ADMINISTRATOR (full bypass) or all three management perms
+    return (perms & DISCORD_PERMISSIONS.ADMINISTRATOR) !== 0n ||
+      (perms & MANAGE_PERMS) === MANAGE_PERMS;
+  });
+
+  if (!hasAdminCapableRole) {
+    return false; // Unsafe: no role would have admin capability after this change
+  }
+
   return true;
 }
