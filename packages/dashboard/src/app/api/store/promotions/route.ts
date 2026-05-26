@@ -107,14 +107,36 @@ export async function PUT(req: NextRequest) {
 
   const supabase = createAdminSupabase();
 
-  // Validate with promotion.create schema (all fields optional for update) + required id
-  const promoUpdateSchema = schemas.promotion.create.partial().extend({ id: z.string().uuid() });
+  // Validate shape — use innerType() to get the raw ZodObject before .refine(),
+  // so .partial() works correctly. Cross-field validation is done manually below.
+  const promoUpdateSchema = schemas.promotion.create.innerType().partial().extend({ id: z.string().uuid() });
   const parsed = await parseBody(req, promoUpdateSchema);
   if (!parsed.ok) return parsed.response;
   const { id, ...updates } = parsed.data;
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing promotion id' }, { status: 400 });
+  }
+
+  // If value is being updated, enforce percent ≤ 100 using the effective type
+  // (either from the payload or fetched from DB).
+  if (updates.value !== undefined) {
+    let effectiveType = updates.type;
+    if (!effectiveType) {
+      const { data: existing } = await supabase
+        .from('promotions')
+        .select('type')
+        .eq('id', id)
+        .eq('guild_id', guildId)
+        .single();
+      effectiveType = existing?.type;
+    }
+    if (effectiveType === 'percent' && updates.value > 100) {
+      return NextResponse.json(
+        { success: false, error: 'Percent discount cannot exceed 100%' },
+        { status: 400 },
+      );
+    }
   }
 
   const { data, error } = await supabase
