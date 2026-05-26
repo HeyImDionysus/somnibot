@@ -276,6 +276,45 @@ jobs:
           echo "✅ All migrations pass lint"
 
   # ──────────────────────────────────────────────────────────
+  # DB Type Drift Check (V5 Audit)
+  # Catches when migrations change but generated TS types
+  # haven't been re-run. Warn-only — won't block the build.
+  # ──────────────────────────────────────────────────────────
+  type-drift:
+    name: DB Type Drift Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Regenerate types and diff
+        run: |
+          set -euo pipefail
+          TYPES_FILE="packages/shared/src/types/database.ts"
+
+          # Fix the hardcoded path in the generator to use the repo checkout
+          sed -i "s|MIGRATIONS_DIR = .*|MIGRATIONS_DIR = Path(\"packages/supabase/migrations\")|" scripts/generate-db-types.py
+
+          # Save current committed version
+          cp "$TYPES_FILE" /tmp/database.ts.committed
+
+          # Regenerate from migrations
+          python3 scripts/generate-db-types.py
+
+          # Compare
+          if diff -u /tmp/database.ts.committed "$TYPES_FILE" > /tmp/type-drift.diff 2>&1; then
+            echo "✅ database.ts is up to date with migrations"
+          else
+            echo "⚠️  database.ts is out of sync with migrations"
+            echo "Run 'python3 scripts/generate-db-types.py' locally and commit the result."
+            echo ""
+            cat /tmp/type-drift.diff
+            # Warn only — don't fail the build
+            exit 0
+          fi
+
+  # ──────────────────────────────────────────────────────────
   # Security Checks
   # ──────────────────────────────────────────────────────────
   security:
@@ -295,7 +334,7 @@ jobs:
             packages/*/node_modules
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Audit dependencies
-        run: pnpm audit --audit-level=high || true  # Don't block on moderate
+        run: pnpm audit --audit-level=high  # Fails on high/critical CVEs
       - name: Check for hardcoded secrets
         run: |
           set -euo pipefail
