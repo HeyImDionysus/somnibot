@@ -2,6 +2,7 @@
  * Shared test utilities for dashboard API tests.
  */
 import { vi } from 'vitest';
+import { NextResponse } from 'next/server';
 
 export function createMockSupabase() {
   const mock = {
@@ -40,5 +41,51 @@ export function buildRequest(path: string, opts: { method?: string; body?: unkno
       ...(opts.headers ?? {}),
     },
     ...(opts.body ? { body: JSON.stringify(opts.body) } : {}),
+  });
+}
+
+/**
+ * Mock `checkAdminRateLimit` to pass (return null = not rate limited).
+ */
+export function mockRateLimitPass(fn: ReturnType<typeof vi.fn>) {
+  fn.mockResolvedValue(null);
+}
+
+/**
+ * Mock `checkAdminRateLimit` to reject with 429.
+ */
+export function mockRateLimited(fn: ReturnType<typeof vi.fn>) {
+  fn.mockResolvedValue(
+    NextResponse.json(
+      { error: 'Too many requests', retryAfterMs: 60000 },
+      { status: 429, headers: { 'Retry-After': '60', 'X-RateLimit-Remaining': '0' } },
+    ),
+  );
+}
+
+/**
+ * Mock `requireGuildOwner` to return success with a default guild context.
+ */
+export function mockAuthSuccess(fn: ReturnType<typeof vi.fn>, ctx?: { userId?: string; discordId?: string; guildId?: string }) {
+  fn.mockResolvedValue({
+    ok: true,
+    ctx: {
+      userId: ctx?.userId ?? 'user-1',
+      discordId: ctx?.discordId ?? '123456789',
+      guildId: ctx?.guildId ?? 'guild-1',
+    },
+  });
+}
+
+/**
+ * Mock `requireGuildOwner` to return 401 Unauthorized.
+ */
+export function mockAuthUnauthorized(fn: ReturnType<typeof vi.fn>) {
+  fn.mockResolvedValue({
+    ok: false,
+    response: NextResponse.json(
+      { error: 'Unauthorized — no valid session' },
+      { status: 401 },
+    ),
   });
 }
