@@ -67,7 +67,13 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
   const host = request.headers.get('host') ?? '';
   const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
   if (!isLocalhost) {
-    console.warn('[Middleware] SESSION_TOKEN is set but request host is not localhost — ignoring local-mode auth');
+    // V6 Audit §1.4: Loud warning when SESSION_TOKEN is set in a non-local deployment.
+    // This should NEVER happen in production — SESSION_TOKEN is only for Electron launcher.
+    console.error(
+      '[Middleware] SECURITY WARNING: SESSION_TOKEN is set but request host is not localhost (' +
+      host + '). This env var must ONLY be set by the Electron launcher for local-mode. ' +
+      'Remove SESSION_TOKEN from your production environment immediately.',
+    );
     return null;
   }
 

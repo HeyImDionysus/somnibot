@@ -98,12 +98,13 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
 
   // Skip exempt routes
   const path = request.nextUrl.pathname;
+  // V6 Audit §1.1: Removed /api/setup — setup route uses parseBody() which
+    // needs CSRF protection. Setup is POST-only with Supabase auth.
   const exemptPrefixes = [
     '/api/paypal/webhook',
     '/api/license/',
     '/api/portal/',
     '/api/auth/',
-    '/api/setup',
     '/api/downloads/',
     '/api/csrf',
   ];

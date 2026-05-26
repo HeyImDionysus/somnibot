@@ -218,6 +218,25 @@ export async function processAntiRaid(
   // Check raid mode state
   const raidActive = await isRaidModeActive(guild.id);
 
+  // V6 Audit §8.6: Restore verification level when raid mode expires
+  if (!raidActive && config.anti_raid_action === 'lockdown') {
+    try {
+      const valkey = getValkey();
+      const prevLevelKey = `antiraid:prevlevel:${guild.id}`;
+      const prevLevel = await valkey.get(prevLevelKey).catch(() => null);
+      if (prevLevel !== null) {
+        const level = parseInt(prevLevel, 10);
+        if (!isNaN(level) && guild.verificationLevel !== level) {
+          await guild.setVerificationLevel(level, 'Anti-raid lockdown ended: restoring verification level');
+          log.info(`Lockdown ended: restored verification to ${level} for guild ${guild.id}`);
+        }
+        await valkey.del(prevLevelKey).catch(() => {});
+      }
+    } catch {
+      // Best-effort restore
+    }
+  }
+
   // Check if threshold exceeded — activate raid mode
   if (joinCount >= config.anti_raid_join_threshold && !raidActive) {
     await activateRaidMode(guild.id);
@@ -261,8 +280,38 @@ export async function processAntiRaid(
         return true;
       }
 
-      // Lockdown mode doesn't kick — it just logs (actual Discord lockdown
-      // would require guild verification level changes which is a higher privilege)
+      if (action === 'lockdown') {
+        // V6 Audit §8.6: Implement real lockdown — raise verification level
+        try {
+          const valkey = getValkey();
+          const prevLevelKey = `antiraid:prevlevel:${guild.id}`;
+
+          // Store the current verification level so we can restore it later
+          const alreadyStored = await valkey.get(prevLevelKey).catch(() => null);
+          if (!alreadyStored) {
+            await valkey.set(prevLevelKey, String(guild.verificationLevel), 'PX', RAID_MODE_COOLDOWN + 60_000);
+          }
+
+          // Raise to VERY_HIGH (requires phone verification)
+          if (guild.verificationLevel < 4) {
+            await guild.setVerificationLevel(4, 'Anti-raid lockdown: join flood detected');
+            log.info(`Lockdown: raised verification to VERY_HIGH for guild ${guild.id}`);
+          }
+
+          const embed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('🔒 Anti-Raid: Lockdown Activated')
+            .setDescription(
+              \`Server verification level raised to **Very High** (phone verification required).\n\` +
+              \`Will auto-restore when raid mode expires.\`,
+            )
+            .setTimestamp();
+
+          await logRaidEvent(guild, config, embed);
+        } catch (err) {
+          log.error('Failed to activate lockdown:', { error: String(err) });
+        }
+      }
     } catch (err) {
       log.error(`Failed to ${config.anti_raid_action} during raid:`, err);
     }
