@@ -4,36 +4,70 @@
 import { vi } from 'vitest';
 import { NextResponse } from 'next/server';
 
-export function createMockSupabase() {
-  const mock = {
-    from: vi.fn(),
-    auth: { getUser: vi.fn(), getSession: vi.fn() },
-  };
-  return mock;
-}
-
-export function registerTable(mock: ReturnType<typeof createMockSupabase>, _table: string) {
+function createQueryChain() {
   const chain: Record<string, ReturnType<typeof vi.fn>> = {
     select: vi.fn().mockReturnThis(),
     eq: vi.fn().mockReturnThis(),
     neq: vi.fn().mockReturnThis(),
     gt: vi.fn().mockReturnThis(),
     lt: vi.fn().mockReturnThis(),
+    gte: vi.fn().mockReturnThis(),
+    lte: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
+    is: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data: null }),
     single: vi.fn().mockResolvedValue({ data: null }),
     insert: vi.fn().mockResolvedValue({ error: null }),
     update: vi.fn().mockReturnThis(),
+    upsert: vi.fn().mockResolvedValue({ error: null }),
     delete: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
+    range: vi.fn().mockReturnThis(),
+    match: vi.fn().mockReturnThis(),
+    then: undefined as unknown as ReturnType<typeof vi.fn>,
   };
-  mock.from.mockReturnValue(chain);
+  // Remove undefined entries
+  delete (chain as Record<string, unknown>).then;
   return chain;
 }
 
-export function buildRequest(path: string, opts: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) {
-  return new Request(`http://localhost${path}`, {
+export function createMockSupabase() {
+  const _query = createQueryChain();
+  const _tables: Record<string, Record<string, ReturnType<typeof vi.fn>>> = {};
+
+  const mock = {
+    from: vi.fn().mockImplementation((table: string) => {
+      return _tables[table] ?? _query;
+    }),
+    auth: { getUser: vi.fn(), getSession: vi.fn() },
+    _query,
+    _tables,
+  };
+  return mock;
+}
+
+export function registerTable(mock: ReturnType<typeof createMockSupabase>, table: string) {
+  const chain = createQueryChain();
+  mock._tables[table] = chain;
+  return chain;
+}
+
+export function buildRequest(
+  path: string,
+  opts: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    searchParams?: Record<string, string>;
+  } = {},
+) {
+  let url = `http://localhost${path}`;
+  if (opts.searchParams) {
+    const sp = new URLSearchParams(opts.searchParams);
+    url += `?${sp.toString()}`;
+  }
+  return new Request(url, {
     method: opts.method ?? 'GET',
     headers: {
       'Content-Type': 'application/json',
