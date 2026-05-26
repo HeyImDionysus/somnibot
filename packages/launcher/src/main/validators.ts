@@ -135,9 +135,24 @@ export async function validateSupabase(
   if (!secretKey.trim()) return { ok: false, error: 'Supabase Secret Key is required.' };
   if (!publishableKey.trim()) return { ok: false, error: 'Supabase Publishable Key is required.' };
 
-  // Validate URL format
+  // Validate URL format — V6 Audit §10.3: enforce HTTPS + valid domain
   try {
-    new URL(url.trim());
+    const parsed = new URL(url.trim());
+
+    // Must use HTTPS (except localhost for local development)
+    const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol !== 'https:' && !isLocalDev) {
+      return { ok: false, error: 'Supabase URL must use HTTPS.' };
+    }
+
+    // Must be a Supabase domain or localhost
+    const isSupabaseDomain = parsed.hostname.endsWith('.supabase.co') || parsed.hostname.endsWith('.supabase.com');
+    if (!isSupabaseDomain && !isLocalDev) {
+      return {
+        ok: false,
+        error: 'Supabase URL must be a *.supabase.co domain or localhost. Got: ' + parsed.hostname,
+      };
+    }
   } catch {
     return { ok: false, error: 'Invalid Supabase URL. Expected something like "https://your-project.supabase.co".' };
   }
