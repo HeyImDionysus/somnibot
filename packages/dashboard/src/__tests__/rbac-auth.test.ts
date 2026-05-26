@@ -16,7 +16,7 @@ import { createServerSupabase } from '@/lib/supabase/server';
 
 // ── Permission helpers (pure logic, no mocking needed) ──────
 
-import { hasPermission, hasRouteAccess, SYSTEM_ROLES, ROUTE_PERMISSIONS } from '@somnibot/shared/constants/rbac';
+import { hasPermission, hasRouteAccess, SYSTEM_ROLES, ROUTE_PERMISSIONS } from '@somnibot/shared/constants';
 import type { DashboardPermission } from '@somnibot/shared';
 
 describe('hasPermission()', () => {

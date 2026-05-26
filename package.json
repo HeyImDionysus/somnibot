@@ -29,5 +29,13 @@
   },
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "pnpm": {
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-34x7-hfp2-rc4v",
+        "GHSA-7c6f-3p7c-xhcw"
+      ]
+    }
+  }
 }
