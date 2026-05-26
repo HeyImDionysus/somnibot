@@ -43,8 +43,8 @@ function makeReq(body: Record<string, unknown> = {}) {
       'x-forwarded-for': '1.2.3.4',
     },
     body: JSON.stringify({
-      key: 'SOMNI-TEST-1234-ABCD',
-      product_id: 'prod-1',
+      license_key: 'SOMNI-TEST-1234-ABCD',
+      product_id: '00000000-0000-4000-a000-000000000001',
       ...body,
     }),
   });
@@ -78,7 +78,7 @@ describe('POST /api/license/validate', () => {
       data: {
         id: 'key-1',
         status: 'suspended',
-        product_id: 'prod-1',
+        product_id: '00000000-0000-4000-a000-000000000001',
         failed_attempts: 0,
       },
       error: null,
