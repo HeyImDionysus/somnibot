@@ -73,7 +73,7 @@ let isValidating = false;
 async function init() {
   // Show version
   try {
-    const ver = window.somnibot.getVersion();
+    const ver = await window.somnibot.getVersion();
     versionEl.textContent = `v${ver}`;
   } catch {
     versionEl.textContent = 'dev';

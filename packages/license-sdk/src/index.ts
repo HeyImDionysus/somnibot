@@ -38,7 +38,13 @@ export interface SomniLicenseConfig {
   appVersion?: string;
   /** How long (ms) to cache a valid response locally. Default: 60000 (1 min) */
   cacheTtlMs?: number;
-  /** Offline grace period (ms) before a cached validation expires. Default: 86400000 (24h) */
+  /**
+   * Offline grace period (ms) before a cached validation expires. Default: 86400000 (24h).
+   *
+   * Note: This uses client-side Date.now() and can be bypassed by clock manipulation.
+   * The server-side heartbeat system is the authoritative enforcement mechanism.
+   * This grace period is a UX convenience for intermittent connectivity.
+   */
   offlineGraceMs?: number;
 }
 
