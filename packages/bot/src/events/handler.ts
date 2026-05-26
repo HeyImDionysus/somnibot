@@ -124,7 +124,10 @@ export function registerEvents(client: SomniClient): void {
   });
 
   process.on('uncaughtException', (error) => {
-    log.error('Uncaught exception — process may be unstable', { error: String(error) });
+    log.error('Uncaught exception — process is now unstable, exiting', { error: String(error) });
+    // V6 Audit §6.3: Must exit after uncaughtException — Node state is unreliable.
+    // Allow 1s for the log to flush, then force-exit.
+    setTimeout(() => process.exit(1), 1_000);
   });
 
   // ── Ready ──────────────────────────────────────────────

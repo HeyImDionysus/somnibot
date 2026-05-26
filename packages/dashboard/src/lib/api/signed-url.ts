@@ -10,7 +10,7 @@
  * 3. Signed URL encodes: productId, fileId, customerId, expiry, HMAC
  * 4. GET /api/downloads/[productId]/[fileId] verifies HMAC instead of raw token
  */
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 
 let _downloadSecret: string | undefined;
 function getDownloadSecret(): string {
@@ -87,16 +87,9 @@ export function verifySignedDownloadUrl(
     .update(payload)
     .digest('hex');
 
-  // Constant-time comparison
+  // Constant-time comparison — V6 Audit §9.8: direct import, no try/catch fallback
   if (sig.length !== expected.length) return null;
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  try {
-    const { timingSafeEqual } = require('crypto');
-    if (!timingSafeEqual(a, b)) return null;
-  } catch {
-    if (sig !== expected) return null;
-  }
+  if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
 
   return { customerId, guildId };
 }

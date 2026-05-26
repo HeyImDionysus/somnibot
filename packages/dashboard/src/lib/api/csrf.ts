@@ -14,7 +14,7 @@
  *
  * Local-mode (Electron launcher) is exempt since it's bound to localhost.
  */
-import { createHmac, randomBytes } from 'crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 
@@ -60,16 +60,9 @@ export function verifyCsrfToken(
     .update(`${nonce}:${sessionId}`)
     .digest('hex');
 
-  // Constant-time comparison
+  // Constant-time comparison — V6 Audit §9.8: direct import, no try/catch fallback
   if (token.length !== expected.length) return false;
-  const a = Buffer.from(token);
-  const b = Buffer.from(expected);
-  try {
-    const { timingSafeEqual } = require('crypto');
-    return timingSafeEqual(a, b);
-  } catch {
-    return token === expected;
-  }
+  return timingSafeEqual(Buffer.from(token), Buffer.from(expected));
 }
 
 /**

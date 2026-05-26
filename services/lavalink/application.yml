@@ -11,7 +11,7 @@ lavalink:
       soundcloud: true
       twitch: true
       vimeo: true
-      http: true
+      http: false  # V6 Audit §2.1: disable arbitrary HTTP source to prevent SSRF
       local: false
     filters:
       volume: true
