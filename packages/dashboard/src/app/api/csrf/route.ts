@@ -23,8 +23,8 @@ export async function GET() {
     sessionId = 'local-session';
   } else {
     const supabase = await createServerSupabase();
-    const { data: { session } } = await supabase.auth.getSession();
-    sessionId = session?.access_token?.slice(-16) ?? randomBytes(8).toString('hex');
+    const { data: { user } } = await supabase.auth.getUser();
+    sessionId = user?.id?.slice(-16) ?? randomBytes(8).toString('hex');
   }
 
   const { token, nonce } = generateCsrfToken(sessionId);

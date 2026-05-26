@@ -353,7 +353,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Save any additional credentials passed in
-    const { credentials } = body as { credentials?: Record<string, string> };
+    const credentials = (body as Record<string, unknown>).credentials as Record<string, string> | undefined;
     if (credentials) {
       for (const [key, value] of Object.entries(credentials)) {
         if (!value?.trim()) continue;
