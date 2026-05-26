@@ -9,6 +9,8 @@
     "start": "next start",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf .next .turbo"
   },
   "dependencies": {
@@ -42,6 +44,7 @@
     "eslint-config-next": "^15.1.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^2.1.0"
   }
 }
