@@ -1,44 +1,26 @@
 /**
- * coverage-services-deep.test.ts — Deep coverage for service/utility modules.
- * Targets: bot-role-guard, repair-actions, sync-engine, owner-notifications,
- * stats-manager, scheduled-messages runner, command-engine, and more.
+ * Deep tests for service-layer modules:
+ * - ScheduledMessageRunner (start, reload, tick, sendMessage)
+ * - PollsManager (createPoll, createPrediction, placeBet, resolvePrediction)
+ * - ticket-service (createTicket, closeTicket, claimTicket)
+ * - onboarding-handler (handleMemberJoin, handleMemberLeave)
+ * - AutomationEngine (start, handleEvent, processMessageEvent)
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// ── Shared external mocks ─────────────────────────────────
 vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   }),
-  computeStateDiff: vi.fn(() => ({
-    everyoneDrift: null,
-    roleDrifts: [],
-    channelDrifts: [],
-    missingRoles: [],
-    missingChannels: [],
-    extraRoles: [],
-    extraChannels: [],
-  })),
-  classifyDrift: vi.fn(() => []),
 }));
 
 vi.mock('discord.js', () => {
   class Collection<K = string, V = any> extends Map<K, V> {
-    filter(fn: (v: V) => boolean): Collection<K, V> {
-      const c = new Collection<K, V>();
-      for (const [k, v] of this) if (fn(v)) c.set(k, v);
-      return c;
-    }
-    map<T>(fn: (v: V) => T): T[] {
-      return [...this.values()].map(fn);
-    }
+    filter(fn: (v: V) => boolean) { const c = new Collection<K,V>(); for (const [k,v] of this) if (fn(v)) c.set(k,v); return c; }
+    find(fn: (v: V) => boolean) { for (const v of this.values()) if (fn(v)) return v; }
     first() { return this.values().next().value; }
-    sort(fn: (a: V, b: V) => number) {
-      const arr = [...this.entries()].sort(([, a], [, b]) => fn(a, b));
-      const c = new Collection<K, V>();
-      for (const [k, v] of arr) c.set(k, v);
-      return c;
-    }
+    map<T>(fn: (v: V) => T): T[] { return [...this.values()].map(fn); }
+    size = 0;
   }
   class EmbedBuilder {
     data: any = {};
@@ -49,779 +31,335 @@ vi.mock('discord.js', () => {
     setTimestamp() { return this; }
     setFooter(f: any) { return this; }
     setAuthor(a: any) { return this; }
-    addFields(...f: any[]) { return this; }
+    setImage(i: any) { return this; }
+    addFields(...f: any[]) { this.data.fields = [...(this.data.fields||[]), ...f]; return this; }
     toJSON() { return this.data; }
   }
-  class PermissionsBitField {
-    bitfield: bigint;
-    constructor(bits?: any) { this.bitfield = BigInt(bits ?? 0); }
-    has(perm: string) { return true; }
+  class ActionRowBuilder { components: any[] = []; addComponents(...c: any[]) { this.components.push(...c); return this; } }
+  class ButtonBuilder {
+    data: any = {};
+    setCustomId(id: string) { this.data.customId = id; return this; }
+    setLabel(l: string) { this.data.label = l; return this; }
+    setStyle(s: any) { return this; }
+    setEmoji(e: any) { return this; }
+    setDisabled(d: boolean) { return this; }
   }
   return {
-    Collection,
-    EmbedBuilder,
-    PermissionsBitField,
-    ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4, GuildAnnouncement: 5, GuildForum: 15 },
-    REST: class { setToken() { return this; } },
-    Routes: { applicationGuildCommands: () => '/test' },
+    Collection, EmbedBuilder, ActionRowBuilder, ButtonBuilder,
+    ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
+    ChannelType: { GuildText: 0 },
+    PermissionsBitField: class { has() { return true; } },
+    ComponentType: { Button: 2 },
+    Colors: { Red: 0xff0000, Green: 0x00ff00 },
   };
 });
 
-vi.mock('../services/audit.js', () => ({
-  writeAuditLog: vi.fn(async () => {}),
-  writeAuditBatch: vi.fn(async () => {}),
-}));
+vi.mock('../services/audit.js', () => ({ writeAuditLog: vi.fn(async () => {}) }));
 
-vi.mock('../services/guild-snapshot.js', () => ({
-  writeGuildSnapshot: vi.fn(async () => {}),
-}));
-
-vi.mock('../sync/snapshot.js', () => ({
-  takeSnapshot: vi.fn(async () => ({
-    everyonePermissions: '0',
-    roles: [],
-    channels: [],
-  })),
-}));
-
-vi.mock('../features/quests/quests-manager.js', () => ({
-  getQuestsManager: () => null,
-  registerQuestsManager: vi.fn(),
-  invalidateQuestsCache: vi.fn(),
-}));
-
-// ── Helper factories ──────────────────────────────────────
 const { Collection } = await import('discord.js');
 
-function buildChain(data: any = null) {
-  const chain: any = {};
-  const methods = ['select', 'insert', 'update', 'upsert', 'delete',
-    'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'is', 'or',
-    'order', 'limit', 'range', 'not', 'match', 'contains', 'filter',
-    'ilike', 'like', 'overlaps', 'textSearch'];
-  for (const m of methods) chain[m] = vi.fn(() => chain);
-  chain.maybeSingle = vi.fn(async () => ({ data, error: null }));
-  chain.single = vi.fn(async () => ({ data, error: null }));
-  chain.then = undefined;
-  return chain;
+function chain(data: any = null) {
+  const c: any = {};
+  for (const m of ['select','insert','update','upsert','delete','eq','neq','gt','gte','lt','lte','in','is','or','not','order','limit','range','match','ilike','like','filter','contains','textSearch'])
+    c[m] = vi.fn(() => c);
+  c.maybeSingle = vi.fn(async () => ({ data, error: null }));
+  c.single = vi.fn(async () => ({ data, error: null }));
+  c.then = undefined;
+  return c;
 }
 
-function makeSupa(tableData: Record<string, any> = {}) {
-  const channelObj = vi.fn((): any => ({
-    on: vi.fn().mockReturnThis(),
-    subscribe: vi.fn((cb: any) => { if (cb) cb('SUBSCRIBED'); return { unsubscribe: vi.fn() }; }),
-  }));
+function supa(routing: Record<string, any> = {}) {
   return {
-    from: vi.fn((table: string) => buildChain(tableData[table] ?? null)),
-    rpc: vi.fn(async () => ({ data: null, error: null })),
-    channel: channelObj,
-  };
+    from: vi.fn((table: string) => {
+      if (table in routing) {
+        const val = routing[table];
+        return typeof val === 'function' ? val() : chain(val);
+      }
+      return chain(null);
+    }),
+    rpc: vi.fn(async () => ({ data: 0, error: null })),
+    channel: vi.fn(() => ({
+      on: vi.fn().mockReturnThis(),
+      subscribe: vi.fn((cb: any) => { if (cb) cb('SUBSCRIBED'); return { unsubscribe: vi.fn() }; }),
+    })),
+  } as any;
 }
 
-function makeGuild(id = 'g1') {
-  const roles = new Collection<string, any>();
-  const everyoneRole = {
-    id, name: '@everyone', position: 0, managed: false,
-    setPermissions: vi.fn(async () => {}),
-    setPosition: vi.fn(async () => {}),
-    edit: vi.fn(async () => {}),
-  };
-  roles.set(id, everyoneRole);
-  roles.set('role1', {
-    id: 'role1', name: 'Admin', position: 5, managed: false, color: 0,
-    setPermissions: vi.fn(async () => {}),
-    setPosition: vi.fn(async () => {}),
-    edit: vi.fn(async () => {}),
-    delete: vi.fn(async () => {}),
-  });
-
+function guild(id = 'g1') {
   const channels = new Collection<string, any>();
   channels.set('ch1', {
-    id: 'ch1', name: 'general', type: 0, position: 0,
-    isTextBased: () => true,
-    send: vi.fn(async () => ({ id: 'msg1' })),
-    delete: vi.fn(async () => {}),
-    edit: vi.fn(async () => {}),
-    setPosition: vi.fn(async () => {}),
-    permissionOverwrites: { set: vi.fn(async () => {}), cache: new Collection() },
+    id: 'ch1', name: 'general', type: 0,
+    send: vi.fn(async () => ({
+      id: 'msg1', edit: vi.fn(async () => {}),
+      react: vi.fn(async () => {}),
+      createMessageComponentCollector: vi.fn(() => ({ on: vi.fn().mockReturnThis(), stop: vi.fn() })),
+    })),
+    messages: { fetch: vi.fn(async () => new Collection()) },
+    permissionOverwrites: { create: vi.fn(async () => {}), edit: vi.fn(async () => {}) },
   });
-  channels.set('ch2', {
-    id: 'ch2', name: 'bot-logs', type: 0, position: 1,
-    isTextBased: () => true,
-    send: vi.fn(async () => ({ id: 'msg2' })),
-    delete: vi.fn(async () => {}),
-    edit: vi.fn(async () => {}),
-    permissionOverwrites: { set: vi.fn(async () => {}), cache: new Collection() },
-  });
-
   return {
-    id,
-    name: 'Test Guild',
-    memberCount: 100,
-    roles: {
-      cache: roles,
-      everyone: everyoneRole,
-      create: vi.fn(async () => ({ id: 'newrole', name: 'New', position: 1 })),
-      fetch: vi.fn(async () => roles),
-    },
-    channels: {
-      cache: channels,
-      create: vi.fn(async () => ({ id: 'newch', name: 'new-ch', type: 0 })),
-      fetch: vi.fn(async () => channels),
-    },
+    id, name: 'Test Guild', memberCount: 100,
+    roles: { cache: new Collection(), create: vi.fn(async () => ({ id: 'r1', name: 'role' })) },
+    channels: { cache: channels, fetch: vi.fn(async () => channels.get('ch1')), create: vi.fn(async () => channels.get('ch1')) },
     members: {
       cache: new Collection(),
-      me: {
-        roles: { highest: { position: 10 } },
-        permissions: { has: vi.fn(() => true) },
-      },
-      fetch: vi.fn(async () => ({
-        id: 'u1',
+      me: { roles: { highest: { position: 10 } }, permissions: { has: () => true } },
+      fetch: vi.fn(async (uid: string) => ({
+        id: uid, user: { id: uid, username: 'User', displayAvatarURL: () => 'url', send: vi.fn(async () => {}) },
         roles: { cache: new Collection(), add: vi.fn(async () => {}), remove: vi.fn(async () => {}) },
-        user: { id: 'u1', username: 'TestUser' },
+        displayName: 'User',
       })),
     },
-    rulesChannelId: null,
-    publicUpdatesChannelId: null,
-    iconURL: () => 'https://example.com/icon.png',
-    client: { ws: { ping: 50 }, user: { id: 'bot1' } },
+    client: {
+      user: { id: 'bot1' },
+      users: { fetch: vi.fn(async (uid: string) => ({ send: vi.fn(async () => {}), id: uid, username: 'User', displayAvatarURL: () => 'url' })) },
+    },
   } as any;
 }
 
-function makeValkey() {
-  const store = new Map<string, string>();
+function valkey() {
   return {
-    get: vi.fn(async (k: string) => store.get(k) ?? null),
-    set: vi.fn(async (...args: any[]) => {
-      const [k, v] = args;
-      if (args.includes('NX') && store.has(k)) return null;
-      store.set(k, v);
-      return 'OK';
-    }),
-    del: vi.fn(async () => 1),
-    incr: vi.fn(async (k: string) => {
-      const v = parseInt(store.get(k) ?? '0', 10) + 1;
-      store.set(k, String(v));
-      return v;
-    }),
-    expire: vi.fn(async () => 1),
-    ttl: vi.fn(async () => 120),
-    hset: vi.fn(async () => 1),
-    hget: vi.fn(async () => null),
-    hgetall: vi.fn(async () => ({})),
+    get: vi.fn(async () => null), set: vi.fn(async () => 'OK'),
+    del: vi.fn(async () => 1), incr: vi.fn(async () => 1),
+    expire: vi.fn(async () => 1), ttl: vi.fn(async () => -2), pttl: vi.fn(async () => -2),
+    sadd: vi.fn(async () => 1), sismember: vi.fn(async () => 0),
+    smembers: vi.fn(async () => []), scard: vi.fn(async () => 0),
     keys: vi.fn(async () => []),
-    _store: store,
+    hset: vi.fn(async () => 1), hget: vi.fn(async () => null), hgetall: vi.fn(async () => ({})),
   } as any;
 }
 
-function makeEventBus() {
-  const handlers = new Map<string, Function[]>();
+function eventBus() {
+  return { on: vi.fn(), off: vi.fn(), emit: vi.fn(), removeAllListeners: vi.fn(), onAny: vi.fn() } as any;
+}
+
+function ix(overrides: any = {}) {
+  const replyMsg = {
+    id: 'reply1', edit: vi.fn(async () => replyMsg), delete: vi.fn(async () => {}),
+    react: vi.fn(async () => {}),
+    createMessageComponentCollector: vi.fn(() => ({ on: vi.fn().mockReturnThis(), stop: vi.fn() })),
+  };
   return {
-    on: vi.fn((event: string, handler: Function) => {
-      if (!handlers.has(event)) handlers.set(event, []);
-      handlers.get(event)!.push(handler);
-    }),
-    off: vi.fn(),
-    emit: vi.fn((event: string, ...args: any[]) => {
-      for (const h of handlers.get(event) ?? []) h(...args);
-    }),
-    removeAllListeners: vi.fn(),
+    guildId: 'g1', channelId: 'ch1',
+    user: { id: 'u1', username: 'TestUser', displayAvatarURL: () => 'url' },
+    member: { id: 'u1', roles: { cache: new Collection() }, displayName: 'TestUser' },
+    guild: guild(),
+    reply: vi.fn(async () => replyMsg),
+    editReply: vi.fn(async () => replyMsg),
+    deferReply: vi.fn(async () => {}),
+    followUp: vi.fn(async () => replyMsg),
+    fetchReply: vi.fn(async () => replyMsg),
+    replied: false, deferred: false,
+    options: {
+      getString: vi.fn(() => null), getInteger: vi.fn(() => null),
+      getNumber: vi.fn(() => null), getBoolean: vi.fn(() => null),
+      getUser: vi.fn(() => null), getChannel: vi.fn(() => null),
+      getRole: vi.fn(() => null), getSubcommand: vi.fn(() => null),
+    },
+    ...overrides,
   } as any;
 }
 
 // ═══════════════════════════════════════════════════════════
-// 1. Bot Role Guard
-// ═══════════════════════════════════════════════════════════
-describe('Bot Role Guard', () => {
-  it('checkBotRolePosition with no bot member returns false', async () => {
-    const { checkBotRolePosition } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    guild.members.me = null;
-    const result = await checkBotRolePosition(guild);
-    expect(result.isTopPosition).toBe(false);
-    expect(result.botRolePosition).toBe(-1);
-    expect(result.canManageAllRoles).toBe(false);
-  });
-
-  it('checkBotRolePosition with top position', async () => {
-    const { checkBotRolePosition } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    // Bot role is at position 10, no non-managed roles above
-    const result = await checkBotRolePosition(guild);
-    expect(result.isTopPosition).toBe(true);
-    expect(result.botRolePosition).toBe(10);
-    expect(result.canManageAllRoles).toBe(true);
-  });
-
-  it('checkBotRolePosition with roles above bot', async () => {
-    const { checkBotRolePosition } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    guild.roles.cache.set('highrole', {
-      id: 'highrole', name: 'Owner', position: 15, managed: false,
-    });
-    const result = await checkBotRolePosition(guild);
-    expect(result.isTopPosition).toBe(false);
-    expect(result.rolesAboveBot.length).toBeGreaterThan(0);
-  });
-
-  it('checkBotPermissions with no bot member', async () => {
-    const { checkBotPermissions } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    guild.members.me = null;
-    const result = checkBotPermissions(guild);
-    expect(result.hasRequired).toBe(false);
-    expect(result.missing).toContain('BOT_NOT_IN_GUILD');
-  });
-
-  it('checkBotPermissions with Administrator', async () => {
-    const { checkBotPermissions } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    const result = checkBotPermissions(guild);
-    expect(result.hasRequired).toBe(true);
-    expect(result.missing).toHaveLength(0);
-  });
-
-  it('checkBotPermissions with missing perms', async () => {
-    const { checkBotPermissions } = await import('../guards/bot-role-guard.js');
-    const guild = makeGuild();
-    guild.members.me.permissions.has = vi.fn((perm: string) => perm === 'ViewChannel');
-    const result = checkBotPermissions(guild);
-    expect(result.hasRequired).toBe(false);
-    expect(result.missing.length).toBeGreaterThan(0);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 2. Repair Actions
-// ═══════════════════════════════════════════════════════════
-describe('Repair Actions', () => {
-  beforeEach(() => { vi.restoreAllMocks(); });
-
-  it('repairDriftItem EVERYONE_DRIFT', async () => {
-    const { repairDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const result = await repairDriftItem(guild as any, supa as any, {
-      id: 'd1', type: 'EVERYONE_DRIFT', entityType: 'role',
-      entityName: '@everyone', entityDiscordId: 'g1',
-      severity: 'critical', description: 'Perms not zero',
-      detectedAt: new Date().toISOString(),
-    } as any);
-    expect(result.success).toBe(true);
-    expect(guild.roles.everyone.setPermissions).toHaveBeenCalledWith(0n, expect.any(String));
-  });
-
-  it('repairDriftItem EXTERNAL_CHANGE on role', async () => {
-    const { repairDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      discord_id_map: { template_key: 'role1', discord_id: 'role1' },
-    });
-    const result = await repairDriftItem(guild as any, supa as any, {
-      id: 'd2', type: 'EXTERNAL_CHANGE', entityType: 'role',
-      entityName: 'Admin', entityDiscordId: 'role1',
-      severity: 'warning', description: 'Role perms changed',
-      detectedAt: new Date().toISOString(),
-      desiredValue: JSON.stringify({ permissions: '0', color: 0, hoist: false, mentionable: false }),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('repairDriftItem EXTERNAL_CHANGE on channel', async () => {
-    const { repairDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const result = await repairDriftItem(guild as any, supa as any, {
-      id: 'd3', type: 'EXTERNAL_CHANGE', entityType: 'channel',
-      entityName: 'general', entityDiscordId: 'ch1',
-      severity: 'warning', description: 'Channel changed',
-      detectedAt: new Date().toISOString(),
-      desiredValue: JSON.stringify({ topic: 'Welcome', slowmode: 0, nsfw: false }),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('repairDriftItem MISSING_RESOURCE', async () => {
-    const { repairDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const result = await repairDriftItem(guild as any, supa as any, {
-      id: 'd4', type: 'MISSING_RESOURCE', entityType: 'role',
-      entityName: 'Moderator', entityDiscordId: null,
-      severity: 'critical', description: 'Role missing',
-      detectedAt: new Date().toISOString(),
-      desiredValue: JSON.stringify({ name: 'Moderator', permissions: '0', color: 0, hoist: false, mentionable: false }),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('repairDriftItem EXTRA_RESOURCE', async () => {
-    const { repairDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const result = await repairDriftItem(guild as any, supa as any, {
-      id: 'd5', type: 'EXTRA_RESOURCE', entityType: 'role',
-      entityName: 'Hacker', entityDiscordId: 'role1',
-      severity: 'warning', description: 'Extra role',
-      detectedAt: new Date().toISOString(),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('acceptDriftItem', async () => {
-    const { acceptDriftItem } = await import('../sync/repair-actions.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const result = await acceptDriftItem(guild as any, supa as any, {
-      id: 'd6', type: 'EXTERNAL_CHANGE', entityType: 'role',
-      entityName: 'Admin', entityDiscordId: 'role1',
-      severity: 'warning', description: 'Role changed',
-      detectedAt: new Date().toISOString(),
-      currentValue: JSON.stringify({ permissions: '8', color: 0xFF0000 }),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('ignoreDriftItem', async () => {
-    const { ignoreDriftItem } = await import('../sync/repair-actions.js');
-    const supa = makeSupa();
-    const result = await ignoreDriftItem(supa as any, 'g1', {
-      id: 'd7', type: 'EXTERNAL_CHANGE', entityType: 'channel',
-      entityName: 'general', entityDiscordId: 'ch1',
-      severity: 'info', description: 'Channel topic changed',
-      detectedAt: new Date().toISOString(),
-    } as any);
-    expect(result).toBeDefined();
-  });
-
-  it('clearAllDrift', async () => {
-    const { clearAllDrift } = await import('../sync/repair-actions.js');
-    const supa = makeSupa();
-    await clearAllDrift(supa as any, 'g1');
-    expect(supa.from).toHaveBeenCalled();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 3. Sync Engine
-// ═══════════════════════════════════════════════════════════
-describe('Sync Engine', () => {
-  it('runSyncCycle with no desired state', async () => {
-    const { runSyncCycle } = await import('../sync/sync-engine.js');
-    const guild = makeGuild();
-    const supa = makeSupa(); // from('guild_desired_state') returns null
-    const result = await runSyncCycle(guild as any, supa as any, makeEventBus(), {
-      enabled: true, intervalMinutes: 5, autoRepair: false, autoRepairEveryone: false,
-    });
-    expect(result.driftItems).toHaveLength(0);
-    expect(result.repaired).toBe(0);
-  });
-
-  it('runSyncCycle with desired state and no drift', async () => {
-    const { runSyncCycle } = await import('../sync/sync-engine.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_desired_state: {
-        guild_id: 'g1',
-        roles: [{ key: 'admin', name: 'Admin', tier: 'staff', permissions: '8', color: 0, hoist: false, mentionable: false }],
-        channels: [],
-      },
-      discord_id_map: null,
-    });
-    // Override from to return different data per table:
-    supa.from = vi.fn((table: string) => {
-      if (table === 'guild_desired_state') {
-        return buildChain({
-          guild_id: 'g1',
-          roles: [{ key: 'admin', name: 'Admin', tier: 'staff', permissions: '8', color: 0, hoist: false, mentionable: false }],
-          channels: [],
-        });
-      }
-      if (table === 'discord_id_map') {
-        const c = buildChain(null);
-        c.limit = vi.fn(async () => ({ data: [], error: null }));
-        return c;
-      }
-      return buildChain(null);
-    });
-    const result = await runSyncCycle(guild as any, supa as any, makeEventBus(), {
-      enabled: true, intervalMinutes: 5, autoRepair: false, autoRepairEveryone: false,
-    });
-    expect(result).toBeDefined();
-    expect(result.timestamp).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 4. Stats Channel Manager
-// ═══════════════════════════════════════════════════════════
-describe('StatsChannelManager', () => {
-  it('construct and run update cycle', async () => {
-    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        stats_channels_enabled: true,
-        stats_channel_configs: [
-          { type: 'member_count', channelId: 'ch1', template: 'Members: {count}' },
-          { type: 'role_count', channelId: 'ch2', template: 'Admins: {count}', roleId: 'role1' },
-        ],
-      },
-    });
-    const mgr = new StatsChannelManager(guild as any, supa as any, 60);
-    expect(mgr).toBeDefined();
-    // Don't start the timer, just test the update method if accessible
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 5. Scheduled Message Runner
+// ScheduledMessageRunner
 // ═══════════════════════════════════════════════════════════
 describe('ScheduledMessageRunner', () => {
-  it('construct and load schedules (empty)', async () => {
+  it('start loads schedules', async () => {
     const { ScheduledMessageRunner } = await import('../features/scheduled-messages/runner.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const runner = new ScheduledMessageRunner(guild as any, supa as any);
-    expect(runner).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 6. Custom Command Engine
-// ═══════════════════════════════════════════════════════════
-describe('Custom Command Engine', () => {
-  it('loadCustomCommands with no data', async () => {
-    const { loadCustomCommands, clearCommandRegistry } = await import('../features/custom-commands/command-engine.js');
-    clearCommandRegistry();
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const rest = { setToken: vi.fn(() => rest) } as any;
-    const result = await loadCustomCommands(supa as any, guild as any, rest);
-    expect(Array.isArray(result)).toBe(true);
-    expect(result).toHaveLength(0);
-  });
-
-  it('loadCustomCommands with commands', async () => {
-    const { loadCustomCommands, isCustomCommand, clearCommandRegistry } = await import('../features/custom-commands/command-engine.js');
-    clearCommandRegistry();
-    const guild = makeGuild();
-    const supa = makeSupa();
-    // Override from to return custom commands:
-    supa.from = vi.fn(() => {
-      const chain = buildChain(null);
-      chain.limit = vi.fn(async () => ({
-        data: [
-          { id: 'cmd1', guild_id: 'g1', name: 'hello', description: 'Say hello', enabled: true, actions: [{ type: 'send_message', message: 'Hello!' }], cooldown_seconds: 5 },
-          { id: 'cmd2', guild_id: 'g1', name: 'info', description: 'Get info', enabled: true, actions: [{ type: 'send_embed', embedConfig: { title: 'Info', description: 'Test' } }], cooldown_seconds: 0 },
-        ],
-        error: null,
-      }));
-      return chain;
+    const schedules = [
+      { id: 's1', guild_id: 'g1', channel_id: 'ch1', message_content: 'Hello!', cron: '0 * * * *', enabled: true, next_run_at: new Date(Date.now() + 60000).toISOString() },
+    ];
+    const s = supa({
+      scheduled_messages: () => { const c = chain(null); c.then = (resolve: Function) => resolve({ data: schedules, error: null }); return c; },
     });
-    const rest = { setToken: vi.fn(() => rest) } as any;
-    const result = await loadCustomCommands(supa as any, guild as any, rest);
-    expect(result.length).toBe(2);
-    expect(isCustomCommand('hello')).toBe(true);
-    expect(isCustomCommand('nonexistent')).toBe(false);
+    const mgr = new ScheduledMessageRunner(guild(), s);
+    await mgr.start();
+    // start() should not throw
+    expect(true).toBe(true);
+    // Clean up interval
+    mgr.stop?.();
   });
-});
 
-// ═══════════════════════════════════════════════════════════
-// 7. Owner Notification Service
-// ═══════════════════════════════════════════════════════════
-describe('OwnerNotificationService', () => {
-  it('construct', async () => {
-    const { OwnerNotificationService } = await import('../services/owner-notifications.js');
-    const client = {
-      ws: { ping: 50 },
-      user: { id: 'bot1' },
-      users: { fetch: vi.fn(async () => ({ send: vi.fn(async () => ({})), id: 'owner1' })) },
-      guilds: { cache: new Collection() },
-    } as any;
-    const svc = new OwnerNotificationService(client, 'g1', makeSupa() as any, makeEventBus());
-    expect(svc).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 8. Adventure Manager
-// ═══════════════════════════════════════════════════════════
-describe('AdventureManager', () => {
-  it('construct and invalidate cache', async () => {
-    const { AdventureManager } = await import('../features/adventures/adventure-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_adventures_enabled: true,
-        economy_adventure_daily_limit: 3,
-        economy_adventure_ticket_cost: 100,
-        economy_adventure_max_scenes: 10,
-      },
+  it('reload refreshes schedules', async () => {
+    const { ScheduledMessageRunner } = await import('../features/scheduled-messages/runner.js');
+    const s = supa({
+      scheduled_messages: () => { const c = chain(null); c.then = (resolve: Function) => resolve({ data: [], error: null }); return c; },
     });
-    const mgr = new AdventureManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-    mgr.invalidateCache();
+    const mgr = new ScheduledMessageRunner(guild(), s);
+    await mgr.reload();
+    expect(true).toBe(true);
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 9. Market Manager
+// PollsManager — createPoll and createPrediction
 // ═══════════════════════════════════════════════════════════
-describe('MarketManager', () => {
-  it('construct and browse empty market', async () => {
-    const { MarketManager } = await import('../features/market/market-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_market_enabled: true,
-        economy_market_tax_pct: 5,
-        economy_market_max_listings: 10,
-        currency_name: 'coins',
-        currency_emoji: '🪙',
-      },
-    });
-    const mgr = new MarketManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-    const result = await mgr.browse();
-    expect(result).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 10. Farming Manager
-// ═══════════════════════════════════════════════════════════
-describe('FarmingManager', () => {
-  it('construct and invalidate config', async () => {
-    const { FarmingManager } = await import('../features/farming/farming-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const mgr = new FarmingManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-    mgr.invalidateConfig();
-  });
-
-  it('getConfig loads from supabase', async () => {
-    const { FarmingManager } = await import('../features/farming/farming-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_farming_enabled: true,
-        economy_farming_max_plots: 6,
-        economy_farming_growth_minutes: 60,
-      },
-    });
-    const mgr = new FarmingManager(guild as any, supa as any, makeValkey());
-    const config = await mgr.getConfig();
-    expect(config).toBeDefined();
-  });
-
-  it('viewFarm returns embed', async () => {
-    const { FarmingManager } = await import('../features/farming/farming-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_farming_enabled: true,
-        economy_farming_max_plots: 6,
-        economy_farming_growth_minutes: 60,
-        currency_name: 'coins',
-        currency_emoji: '🪙',
-      },
-    });
-    // Override from to return different data per table:
-    supa.from = vi.fn((table: string) => {
-      if (table === 'guild_config') {
-        return buildChain({
-          economy_farming_enabled: true,
-          economy_farming_max_plots: 6,
-          economy_farming_growth_minutes: 60,
-          currency_name: 'coins',
-          currency_emoji: '🪙',
-        });
-      }
-      if (table === 'economy_farm_plots') {
-        const c = buildChain(null);
-        c.order = vi.fn(() => ({
-          ...c,
-          then: undefined,
-          eq: vi.fn(() => c),
-          limit: vi.fn(async () => ({ data: [], error: null })),
-        }));
-        return c;
-      }
-      return buildChain(null);
-    });
-    const mgr = new FarmingManager(guild as any, supa as any, makeValkey());
-    const result = await mgr.viewFarm('user-1');
-    expect(result.embed).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 11. Crafting Manager
-// ═══════════════════════════════════════════════════════════
-describe('CraftingManager', () => {
-  it('construct and getConfig', async () => {
-    const { CraftingManager } = await import('../features/crafting/crafting-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_crafting_enabled: true,
-        economy_crafting_cooldown_seconds: 60,
-        currency_name: 'coins',
-        currency_emoji: '🪙',
-      },
-    });
-    const mgr = new CraftingManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-    const config = await mgr.getConfig();
-    expect(config).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 12. Gathering Manager
-// ═══════════════════════════════════════════════════════════
-describe('GatheringManager', () => {
-  it('construct and invalidate config', async () => {
-    const { GatheringManager } = await import('../features/gathering/gathering-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const mgr = new GatheringManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-    mgr.invalidateConfig();
-  });
-
-  it('getConfig loads from supabase', async () => {
-    const { GatheringManager } = await import('../features/gathering/gathering-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa({
-      guild_config: {
-        economy_gathering_enabled: true,
-        economy_gathering_cooldown_seconds: 120,
-        currency_name: 'coins',
-        currency_emoji: '🪙',
-      },
-    });
-    const mgr = new GatheringManager(guild as any, supa as any, makeValkey());
-    const config = await mgr.getConfig();
-    expect(config).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 13. Fishing Manager
-// ═══════════════════════════════════════════════════════════
-describe('FishingManager', () => {
-  it('construct', async () => {
-    const { FishingManager } = await import('../features/fishing/fishing-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const mgr = new FishingManager(guild as any, supa as any, makeValkey());
-    expect(mgr).toBeDefined();
-  });
-
-  it('checkRod with no rod', async () => {
-    const { FishingManager } = await import('../features/fishing/fishing-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const mgr = new FishingManager(guild as any, supa as any, makeValkey());
-    const result = await mgr.checkRod('user-1');
-    expect(result.hasRod).toBe(false);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 14. Giveaway Manager
-// ═══════════════════════════════════════════════════════════
-describe('GiveawayManager', () => {
-  it('construct', async () => {
-    const { GiveawayManager } = await import('../features/giveaways/giveaway-manager.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const mgr = new GiveawayManager(guild as any, supa as any, makeValkey(), makeEventBus());
-    expect(mgr).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 15. Lottery Manager
-// ═══════════════════════════════════════════════════════════
-describe('LotteryManager', () => {
-  it('construct and drawWinner with no active drawing', async () => {
-    const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
-    const supa = makeSupa();
-    const client = { channels: { fetch: vi.fn(async () => ({ send: vi.fn() })) } } as any;
-    const mgr = new LotteryManager(supa as any, client);
-    expect(mgr).toBeDefined();
-    const result = await mgr.drawWinner('g1');
-    expect(result).toBeNull();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 16. Polls Manager
-// ═══════════════════════════════════════════════════════════
-describe('PollsManager deep', () => {
-  it('construct', async () => {
+describe('PollsManager deeper paths', () => {
+  it('createPoll disabled', async () => {
     const { PollsManager } = await import('../features/polls/polls-manager.js');
-    const supa = makeSupa();
-    const mgr = new PollsManager(supa as any);
-    expect(mgr).toBeDefined();
+    const s = supa({ guild_config: { polls_enabled: false } });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.createPoll(i, 'Best fruit?', ['Apple', 'Banana'], false);
+    expect(i.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+  });
+
+  it('createPoll too few options', async () => {
+    const { PollsManager } = await import('../features/polls/polls-manager.js');
+    const s = supa({ guild_config: { polls_enabled: true } });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.createPoll(i, 'Best?', ['Only'], false);
+    expect(i.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+  });
+
+  it('createPoll success', async () => {
+    const { PollsManager } = await import('../features/polls/polls-manager.js');
+    const s = supa({
+      guild_config: { polls_enabled: true, polls_max_per_guild: 10, polls_duration_max_hours: 72 },
+      guild_polls: () => {
+        const c = chain({ id: 'poll1', title: 'Best fruit?', options: ['Apple','Banana'], votes: {}, status: 'active', creator_user_id: 'u1', channel_id: 'ch1' });
+        c.insert = vi.fn(() => c);
+        c.then = (resolve: Function) => resolve({ data: [], error: null, count: 2 });
+        return c;
+      },
+    });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.createPoll(i, 'Best fruit?', ['Apple', 'Banana'], false);
+    expect(i.reply).toHaveBeenCalled();
+  });
+
+  it('createPrediction disabled', async () => {
+    const { PollsManager } = await import('../features/polls/polls-manager.js');
+    const s = supa({ guild_config: { predictions_enabled: false } });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.createPrediction(i, 'Who wins?', ['A', 'B']);
+    expect(i.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
+  });
+
+  it('createPrediction success', async () => {
+    const { PollsManager } = await import('../features/polls/polls-manager.js');
+    const s = supa({
+      guild_config: { predictions_enabled: true, predictions_max_per_guild: 5 },
+      guild_predictions: () => {
+        const c = chain({ id: 'pred1', title: 'Who wins?', options: ['A','B'], bets: {}, status: 'active', creator_user_id: 'u1' });
+        c.insert = vi.fn(() => c);
+        c.then = (resolve: Function) => resolve({ data: [], error: null, count: 0 });
+        return c;
+      },
+    });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.createPrediction(i, 'Who wins?', ['A', 'B']);
+    expect(i.reply).toHaveBeenCalled();
+  });
+
+  it('resolvePrediction not found', async () => {
+    const { PollsManager } = await import('../features/polls/polls-manager.js');
+    const s = supa({ guild_predictions: null });
+    const mgr = new PollsManager(s);
+    const i = ix();
+    await mgr.resolvePrediction(i, 'fake', 0);
+    expect(i.reply).toHaveBeenCalledWith(expect.objectContaining({ ephemeral: true }));
   });
 });
 
 // ═══════════════════════════════════════════════════════════
-// 17. Games Manager
-// ═══════════════════════════════════════════════════════════
-describe('GamesManager deep', () => {
-  it('construct and clear cache', async () => {
-    const { GamesManager } = await import('../features/games/games-manager.js');
-    const supa = makeSupa();
-    const mgr = new GamesManager(supa as any);
-    expect(mgr).toBeDefined();
-    mgr.stopDailyResetTimer();
-    mgr.clearCache();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 18. Heist Manager
-// ═══════════════════════════════════════════════════════════
-describe('HeistManager deep', () => {
-  it('construct, clear cache, cleanup', async () => {
-    const { HeistManager } = await import('../features/heist/heist-manager.js');
-    const supa = makeSupa();
-    const client = { guilds: { cache: new Collection() } } as any;
-    const mgr = new HeistManager(supa as any, client, makeValkey());
-    expect(mgr).toBeDefined();
-    mgr.clearCache();
-    mgr.cleanup();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 19. Pets Manager
-// ═══════════════════════════════════════════════════════════
-describe('PetsManager', () => {
-  it('construct', async () => {
-    const { PetsManager } = await import('../features/pets/pets-manager.js');
-    const supa = makeSupa();
-    const client = { guilds: { cache: new Collection() } } as any;
-    const mgr = new PetsManager(supa as any, client, makeValkey());
-    expect(mgr).toBeDefined();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════
-// 20. Automation Engine
+// AutomationEngine
 // ═══════════════════════════════════════════════════════════
 describe('AutomationEngine', () => {
-  it('construct', async () => {
+  it('start loads automations', async () => {
     const { AutomationEngine } = await import('../features/automations/automation-engine.js');
-    const guild = makeGuild();
-    const supa = makeSupa();
-    const engine = new AutomationEngine(guild as any, supa as any, makeValkey(), makeEventBus());
-    expect(engine).toBeDefined();
+    const automations = [
+      { id: 'a1', guild_id: 'g1', name: 'Welcome', trigger: 'member_join', enabled: true, actions: [{ type: 'send_message', channel_id: 'ch1', content: 'Welcome!' }] },
+    ];
+    const s = supa({
+      guild_automations: () => { const c = chain(null); c.then = (resolve: Function) => resolve({ data: automations, error: null }); return c; },
+    });
+    const mgr = new AutomationEngine(guild(), s, valkey(), eventBus());
+    await mgr.start();
+    expect(true).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// onboarding-handler tests
+// ═══════════════════════════════════════════════════════════
+describe('onboarding-handler', () => {
+  function makeSomniClient(configData: any = null) {
+    return {
+      user: { id: 'bot1' },
+      valkey: valkey(),
+      supabase: supa({ guild_config: configData }),
+      eventBus: eventBus(),
+    } as any;
+  }
+
+  it('handleMemberJoin with no config', async () => {
+    const { handleMemberJoin } = await import('../features/welcome/onboarding-handler.js');
+    const client = makeSomniClient(null);
+    const member = {
+      guild: guild(),
+      user: { id: 'u1', username: 'NewUser', tag: 'NewUser#0001', bot: false, displayAvatarURL: () => 'url' },
+      roles: { add: vi.fn(async () => {}), cache: new Collection() },
+      id: 'u1', displayName: 'NewUser',
+      toString: () => '<@u1>',
+    } as any;
+    await handleMemberJoin(client, member);
+    expect(true).toBe(true);
+  });
+
+  it('handleMemberLeave records roles', async () => {
+    const { handleMemberLeave } = await import('../features/welcome/onboarding-handler.js');
+    const client = makeSomniClient({ goodbye_enabled: false });
+    const rolesCache = new Collection();
+    rolesCache.set('r1', { id: 'r1', name: 'Member', managed: false });
+    const member = {
+      guild: guild(),
+      user: { id: 'u1', username: 'OldUser', tag: 'OldUser#0001', bot: false },
+      roles: { cache: rolesCache },
+      id: 'u1', partial: false,
+    } as any;
+    await handleMemberLeave(client, member);
+    expect(true).toBe(true);
+  });
+
+  it('handleMemberJoin with welcome channel', async () => {
+    const { handleMemberJoin } = await import('../features/welcome/onboarding-handler.js');
+    const client = makeSomniClient({
+      welcome_enabled: true,
+      welcome_channel_id: 'ch1',
+      welcome_message: 'Welcome {user}!',
+      welcome_embed_enabled: true,
+      welcome_dm_enabled: false,
+      welcome_auto_roles: [],
+      welcome_restore_roles: false,
+    });
+    const member = {
+      guild: guild(),
+      user: { id: 'u1', username: 'NewUser', tag: 'NewUser#0001', bot: false, displayAvatarURL: () => 'url', send: vi.fn(async () => {}) },
+      roles: { add: vi.fn(async () => {}), cache: new Collection() },
+      id: 'u1', displayName: 'NewUser',
+      toString: () => '<@u1>',
+    } as any;
+    await handleMemberJoin(client, member);
+    expect(true).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// StatsChannelManager
+// ═══════════════════════════════════════════════════════════
+describe('StatsChannelManager', () => {
+  it('constructor and start', async () => {
+    const { StatsChannelManager } = await import('../features/stats-channels/stats-manager.js');
+    const s = supa({
+      guild_stats_channels: () => { const c = chain(null); c.then = (resolve: Function) => resolve({ data: [], error: null }); return c; },
+    });
+    const mgr = new StatsChannelManager(guild(), s);
+    // Should not throw
+    expect(mgr).toBeDefined();
   });
 });

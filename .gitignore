@@ -36,3 +36,4 @@ coverage/
 
 # Supabase
 packages/supabase/.temp/
+packages/bot/coverage-detail/
