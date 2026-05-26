@@ -1,5 +1,5 @@
 /**
- * Auth mock helpers — set up requireGuildOwner / requirePermission mocks.
+ * Auth & rate-limit mock helpers for dashboard API tests.
  */
 import { vi } from 'vitest';
 import type { OwnerContext } from '@/lib/api/require-owner';
@@ -45,4 +45,23 @@ export function mockAuthForbidden(
       { status: 403, headers: { 'Content-Type': 'application/json' } },
     ),
   });
+}
+
+/** Mock checkAdminRateLimit to return a 429 response. */
+export function mockRateLimited(
+  checkAdminRateLimit: ReturnType<typeof vi.fn>,
+): void {
+  checkAdminRateLimit.mockResolvedValue(
+    new Response(
+      JSON.stringify({ error: 'Too many requests' }),
+      { status: 429, headers: { 'Content-Type': 'application/json' } },
+    ),
+  );
+}
+
+/** Mock checkAdminRateLimit to pass (no rate limit). */
+export function mockRateLimitPass(
+  checkAdminRateLimit: ReturnType<typeof vi.fn>,
+): void {
+  checkAdminRateLimit.mockResolvedValue(null);
 }
