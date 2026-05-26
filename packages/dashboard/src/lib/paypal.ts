@@ -24,6 +24,7 @@ export async function getPayPalToken(): Promise<string | null> {
         Authorization: `Basic ${Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
       },
       body: 'grant_type=client_credentials',
+      signal: AbortSignal.timeout(10_000), // V6 Audit §2.5: prevent hung token fetch
     });
     if (!res.ok) return null;
     const data = await res.json();

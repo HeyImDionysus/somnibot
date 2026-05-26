@@ -77,6 +77,7 @@ async function verifyWebhookSignature(
           webhook_id: PAYPAL_WEBHOOK_ID,
           webhook_event: JSON.parse(rawBody),
         }),
+        signal: AbortSignal.timeout(10_000), // V6 Audit §2.1: prevent hung connections
       },
     );
 
@@ -266,6 +267,7 @@ async function handleOrderApproved(
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
+      signal: AbortSignal.timeout(10_000), // V6 Audit §2.1: prevent hung connections
     },
   );
 
