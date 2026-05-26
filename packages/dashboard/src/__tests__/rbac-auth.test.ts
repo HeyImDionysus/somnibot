@@ -206,7 +206,9 @@ describe('requireGuildOwner — 401/403 responses', () => {
     mockQuery.limit.mockReturnThis();
     (mockAdminSupabase.from as ReturnType<typeof vi.fn>).mockReturnValue({
       select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockResolvedValue({ data: [] }),
+        eq: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue({ data: [] }),
+        }),
       }),
     });
 
