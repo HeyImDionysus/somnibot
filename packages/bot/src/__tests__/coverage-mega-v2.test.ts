@@ -149,7 +149,19 @@ function makeGuild(): any {
     },
     members: {
       cache: new Collection(),
-      fetch: vi.fn().mockResolvedValue(new Collection()),
+      fetch: vi.fn().mockResolvedValue({
+        id: 'u1',
+        roles: {
+          cache: new Collection(),
+          add: vi.fn().mockResolvedValue({}),
+          remove: vi.fn().mockResolvedValue({}),
+        },
+        user: { id: 'u1', username: 'TestUser', bot: false },
+      }),
+      me: {
+        roles: { highest: { position: 10 } },
+        permissions: { has: vi.fn(() => true) },
+      },
     },
     iconURL: () => 'https://cdn.discordapp.com/icons/g1/icon.png',
     client: { ws: { ping: 50 }, user: { id: 'bot1' } },
