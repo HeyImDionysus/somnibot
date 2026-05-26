@@ -220,7 +220,7 @@ const planCreate = z.object({
 const promotionCreate = z.object({
   name: safeName,
   type: z.enum(['percent', 'fixed']),
-  value: z.number().min(0).max(100),
+  value: z.number().min(0),  // max validated per-type via .refine() below
   coupon_code: z.string().min(1).max(32).optional(),
   applies_to_product_ids: z.array(uuid).optional(),
   applies_to_plan_ids: z.array(uuid).optional(),
@@ -230,7 +230,10 @@ const promotionCreate = z.object({
   min_purchase_cents: z.number().int().min(0).optional(),
   first_purchase_only: z.boolean().optional(),
   active: z.boolean().default(true),
-});
+}).refine(
+  (data) => data.type !== 'percent' || data.value <= 100,
+  { message: 'Percent discount cannot exceed 100%', path: ['value'] },
+);
 
 // ── Entitlement schemas ─────────────────────────────
 

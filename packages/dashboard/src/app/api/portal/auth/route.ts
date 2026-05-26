@@ -24,6 +24,17 @@ const portalAuthSchema = z.object({
   redirect_uri: z.string().url().max(2048).optional(),
 });
 
+
+const DiscordTokenSchema = z.object({
+  access_token: z.string().min(1),
+  token_type: z.string(),
+}).passthrough();
+
+const DiscordUserSchema = z.object({
+  id: z.string().min(1),
+  username: z.string(),
+}).passthrough();
+
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
@@ -57,20 +68,22 @@ async function exchangeCodeForUser(
 
   if (!tokenRes.ok) return null;
 
-  const tokenData = (await tokenRes.json()) as { access_token?: string };
-  if (!tokenData.access_token) return null;
+  const tokenRaw = await tokenRes.json();
+  const tokenParsed = DiscordTokenSchema.safeParse(tokenRaw);
+  if (!tokenParsed.success) return null;
 
   // Step 2: Fetch the authenticated user's identity
   const userRes = await fetch(`${DISCORD_API}/users/@me`, {
-    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    headers: { Authorization: `Bearer ${tokenParsed.data.access_token}` },
   });
 
   if (!userRes.ok) return null;
 
-  const user = (await userRes.json()) as { id: string; username: string };
-  if (!user.id) return null;
+  const userRaw = await userRes.json();
+  const userParsed = DiscordUserSchema.safeParse(userRaw);
+  if (!userParsed.success) return null;
 
-  return user;
+  return { id: userParsed.data.id, username: userParsed.data.username };
 }
 
 export async function POST(request: NextRequest) {
@@ -207,7 +220,7 @@ export async function GET(request: NextRequest) {
         session_id: session.id,
         customer_id: session.customer_id,
         discord_id: session.discord_id,
-        customer: (session as Record<string, unknown>).customers,
+        customer: (session as { customers?: unknown }).customers ?? null,
       },
     });
   } catch (e) {
