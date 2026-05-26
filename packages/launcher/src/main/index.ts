@@ -200,9 +200,7 @@ function registerIpcHandlers(): void {
   });
 
   // ── App info ──
-  ipcMain.on('get-version', (event) => {
-    event.returnValue = app.getVersion();
-  });
+  ipcMain.handle('get-version', () => app.getVersion());
 
   // ── Phase 6: First-run onboarding ──
   ipcMain.handle('is-first-run', () => {

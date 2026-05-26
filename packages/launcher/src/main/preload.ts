@@ -83,7 +83,7 @@ export interface SomniBotAPI {
   onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => void;
 
   // App
-  getVersion: () => string;
+  getVersion: () => Promise<string>;
 }
 
 contextBridge.exposeInMainWorld('somnibot', {
@@ -178,5 +178,5 @@ contextBridge.exposeInMainWorld('somnibot', {
   },
 
   // App
-  getVersion: () => ipcRenderer.sendSync('get-version'),
+  getVersion: () => ipcRenderer.invoke('get-version'),
 } satisfies SomniBotAPI);
