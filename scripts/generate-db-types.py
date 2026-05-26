@@ -799,7 +799,7 @@ def main():
     
     result = "\n".join(lines)
     
-    out_path = Path("/work/temp/database.generated.ts")
+    out_path = MIGRATIONS_DIR.parent.parent / "shared" / "src" / "types" / "database.ts"
     out_path.write_text(result)
     print(f"Generated types written to {out_path}")
     print(f"Total lines: {len(result.splitlines())}")
