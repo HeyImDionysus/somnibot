@@ -16,7 +16,7 @@ import { createServerSupabase } from '@/lib/supabase/server';
 
 // ── Permission helpers (pure logic, no mocking needed) ──────
 
-import { hasPermission, hasRouteAccess, SYSTEM_ROLES, ROUTE_PERMISSIONS } from '@somnibot/shared/constants/rbac';
+import { hasPermission, hasRouteAccess, SYSTEM_ROLES, ROUTE_PERMISSIONS } from '@somnibot/shared/constants';
 import type { DashboardPermission } from '@somnibot/shared';
 
 describe('hasPermission()', () => {
@@ -206,7 +206,9 @@ describe('requireGuildOwner — 401/403 responses', () => {
     mockQuery.limit.mockReturnThis();
     (mockAdminSupabase.from as ReturnType<typeof vi.fn>).mockReturnValue({
       select: vi.fn().mockReturnValue({
-        eq: vi.fn().mockResolvedValue({ data: [] }),
+        eq: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue({ data: [] }),
+        }),
       }),
     });
 
