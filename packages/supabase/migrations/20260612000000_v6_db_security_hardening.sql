@@ -1,9 +1,12 @@
 -- ============================================================
 -- V6 Audit: DB Security Hardening
 -- ============================================================
--- 1. Fix 4 SECURITY DEFINER functions missing SET search_path = ''
+-- 1. Fix 3 SECURITY DEFINER functions missing SET search_path = ''
 -- 2. REVOKE table access from anon/authenticated on 32 sensitive tables
--- 3. REVOKE EXECUTE on the 4 patched functions from anon/authenticated/public
+-- 3. REVOKE EXECUTE on the 3 patched functions from anon/authenticated/public
+-- ============================================================
+-- NOTE: purge_user_data was removed — it was dropped in
+-- 20260602000000_v53_production_readiness.sql and no longer exists.
 -- ============================================================
 
 -- ── 1. Fix SECURITY DEFINER functions missing search_path ──────────
@@ -20,12 +23,8 @@ ALTER FUNCTION public.cleanup_old_health_metrics()
 ALTER FUNCTION public.economy_heist_join(UUID, text)
   SET search_path = '';
 
--- 1d. purge_user_data (last defined in v53_dead_table_cleanup.sql)
-ALTER FUNCTION public.purge_user_data(text, text)
-  SET search_path = '';
 
-
--- ── 2. REVOKE EXECUTE from anon/authenticated/public on the 4 patched functions ──
+-- ── 2. REVOKE EXECUTE from anon/authenticated/public on the 3 patched functions ──
 
 REVOKE ALL ON FUNCTION public.bulk_reset_economy(text, text[])
   FROM anon, authenticated, public;
@@ -34,9 +33,6 @@ REVOKE ALL ON FUNCTION public.cleanup_old_health_metrics()
   FROM anon, authenticated, public;
 
 REVOKE ALL ON FUNCTION public.economy_heist_join(UUID, text)
-  FROM anon, authenticated, public;
-
-REVOKE ALL ON FUNCTION public.purge_user_data(text, text)
   FROM anon, authenticated, public;
 
 

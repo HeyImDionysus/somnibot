@@ -259,6 +259,7 @@ CREATE OR REPLACE FUNCTION economy_heist_join(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   rows_affected INTEGER;

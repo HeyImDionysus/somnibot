@@ -12,6 +12,7 @@ CREATE OR REPLACE FUNCTION lottery_increment_jackpot(
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   new_jackpot INTEGER;

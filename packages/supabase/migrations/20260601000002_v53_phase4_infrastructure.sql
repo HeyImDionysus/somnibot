@@ -76,6 +76,7 @@ CREATE OR REPLACE FUNCTION bulk_reset_economy(
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_affected integer;

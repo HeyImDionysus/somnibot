@@ -2,8 +2,8 @@
  * Tests for isLockoutSafe — V6 Audit §11.4
  */
 import { describe, it, expect } from 'vitest';
-import { isLockoutSafe, type RoleConfig } from '../../engine/safety.js';
-import { DISCORD_PERMISSIONS } from '../../constants/permissions.js';
+import { isLockoutSafe, type RoleConfig } from '../engine/safety.js';
+import { DISCORD_PERMISSIONS } from '../constants/permissions.js';
 
 function makeRole(overrides: Partial<RoleConfig> & { id: string; name: string }): RoleConfig {
   return {

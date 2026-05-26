@@ -302,8 +302,8 @@ export async function processAntiRaid(
             .setColor(0xFF0000)
             .setTitle('🔒 Anti-Raid: Lockdown Activated')
             .setDescription(
-              \`Server verification level raised to **Very High** (phone verification required).\n\` +
-              \`Will auto-restore when raid mode expires.\`,
+              `Server verification level raised to **Very High** (phone verification required).\n` +
+              `Will auto-restore when raid mode expires.`,
             )
             .setTimestamp();
 

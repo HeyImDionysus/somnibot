@@ -441,11 +441,10 @@ describe('transcript-generator deep coverage', () => {
 
 // ── Guild Init ──────────────────────────────────────
 describe('guild-init deep coverage', () => {
-  it('module loads', async () => {
-    try {
-      const mod = await import('../guild-init.js');
-      expect(mod).toBeDefined();
-    } catch { /* expected */ }
+  it('module file exists', () => {
+    const fs = require('fs');
+    const path = require('path');
+    expect(fs.existsSync(path.resolve(__dirname, '..', 'guild-init.ts'))).toBe(true);
   });
 });
 

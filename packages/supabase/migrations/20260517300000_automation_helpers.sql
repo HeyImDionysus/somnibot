@@ -14,7 +14,8 @@ BEGIN
       last_executed_at = now()
   WHERE id = automation_uuid;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = '';
 
 -- Index for execution log queries
 CREATE INDEX IF NOT EXISTS idx_automation_executions_automation_id

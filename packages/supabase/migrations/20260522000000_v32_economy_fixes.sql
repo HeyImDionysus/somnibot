@@ -15,6 +15,7 @@ CREATE OR REPLACE FUNCTION economy_add_balance(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 BEGIN
   INSERT INTO economy_wallets (guild_id, user_id, wallet, bank, total_earned, updated_at)
@@ -39,6 +40,7 @@ CREATE OR REPLACE FUNCTION economy_subtract_balance(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   rows_affected INTEGER;
