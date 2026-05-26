@@ -21,6 +21,8 @@ function buildCspHeader(nonce: string): string {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: https://cdn.discordapp.com",
     "font-src 'self'",
+    // connect-src: External API calls (Discord, PayPal) go through server-side
+    // routes. Add origins here only for direct client-side fetches.
     "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
     "frame-ancestors 'none'",
     "base-uri 'self'",
