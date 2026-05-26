@@ -31,6 +31,7 @@ interface AntiRaidConfig {
   anti_raid_join_window_seconds: number;
   anti_raid_account_age_days: number;
   anti_raid_action: 'kick' | 'ban' | 'lockdown';
+  anti_raid_ban_delete_seconds: number;
   anti_raid_log_channel_id: string | null;
   mod_log_channel_id: string | null;
 }
@@ -64,7 +65,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_log_channel_id, mod_log_channel_id',
+      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -75,6 +76,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     anti_raid_join_window_seconds: data?.anti_raid_join_window_seconds ?? 10,
     anti_raid_account_age_days: data?.anti_raid_account_age_days ?? 7,
     anti_raid_action: data?.anti_raid_action ?? 'kick',
+    anti_raid_ban_delete_seconds: data?.anti_raid_ban_delete_seconds ?? 86400,
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
   };
@@ -244,7 +246,7 @@ export async function processAntiRaid(
         }).catch((e: unknown) => { log.warn('Action failed:', (e as Error)?.message ?? e); });
 
         if (action === 'ban') {
-          await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: 0 });
+          await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: config.anti_raid_ban_delete_seconds });
         } else {
           await member.kick('Anti-raid: Join flood detected');
         }

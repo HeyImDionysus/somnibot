@@ -16,6 +16,7 @@ import { createClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
+import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -59,7 +60,10 @@ async function getSetupLock(supabase: any) {
   return { isCompleted, maintenanceActive };
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(req, 'standard');
+  if (rateLimited) return rateLimited;
+
   const supabase = createSetupSupabase();
   const status = {
     supabaseConnected: false,
@@ -154,6 +158,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'write');
+  if (rateLimited) return rateLimited;
+
   const parsed = await parseBody(request, schemas.setup.action);
   if (!parsed.ok) return parsed.response;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
