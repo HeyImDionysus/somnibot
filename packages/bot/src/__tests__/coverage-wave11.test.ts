@@ -231,7 +231,7 @@ describe('ConditionEvaluator', () => {
   it('time_window pass', async () => {
     const { evaluateConditions } = await import('../features/automations/condition-evaluator.js');
     const result = await evaluateConditions(
-      [{ type: 'time_window', config: { start_hour: 0, end_hour: 23 } }],
+      [{ type: 'time_window', config: { start_hour: 0, end_hour: 24 } }],
       { member: null, guild: guild(), channelId: null, messageContent: null, supabase: {} as any, guildId: 'g1' },
     );
     expect(result).toBe(true);
