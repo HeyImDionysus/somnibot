@@ -356,23 +356,26 @@ async function checkDeviceAbuse(
   discordId: string | null,
 ): Promise<void> {
   try {
+    // V7 Audit §3.P3b — filter to active sessions only to prevent false positives
+    // on long-lived licenses with many historical (deactivated) devices.
     const { count } = await supabase
       .from('license_sessions')
       .select('*', { count: 'exact', head: true })
-      .eq('license_key_id', licenseKeyId);
+      .eq('license_key_id', licenseKeyId)
+      .eq('active', true);
 
-    const totalDevices = count || 0;
+    const activeDevices = count || 0;
 
-    if (totalDevices > maxDevices * 3) {
+    if (activeDevices > maxDevices * 3) {
       await supabase.from('fraud_signals').insert({
         guild_id: guildId,
         signal_type: 'device_abuse',
-        severity: totalDevices > maxDevices * 5 ? 'critical' : 'high',
+        severity: activeDevices > maxDevices * 5 ? 'critical' : 'high',
         entity_type: 'license_key',
         entity_id: licenseKeyId,
         discord_id: discordId,
-        description: `${totalDevices} total device sessions on a ${maxDevices}-device license`,
-        evidence: { total_sessions: totalDevices, max_devices: maxDevices, ratio: totalDevices / maxDevices },
+        description: `${activeDevices} active device sessions on a ${maxDevices}-device license`,
+        evidence: { active_sessions: activeDevices, max_devices: maxDevices, ratio: activeDevices / maxDevices },
         status: 'open',
       });
     }

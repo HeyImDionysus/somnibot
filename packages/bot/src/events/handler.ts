@@ -107,6 +107,7 @@ import type { FarmingManager } from '../features/farming/farming-manager.js';
 import type { FishingManager } from '../features/fishing/fishing-manager.js';
 import type { AdventureManager } from '../features/adventures/adventure-manager.js';
 import type { MarketManager } from '../features/market/market-manager.js';
+import { registerCommand, lookupCommand } from './command-registry.js';
 
 /**
  * Register all Discord gateway event listeners.
@@ -114,8 +115,31 @@ import type { MarketManager } from '../features/market/market-manager.js';
  * Phase 4: onboarding detection, welcome/goodbye flows.
  * Phase 8: Automation engine event wiring.
  * Phase 9: Levels/XP, reaction roles, custom commands.
+ *
+ * V7 Audit §6.P3a — Slash command dispatch uses command-registry.ts
+ * for a data-driven lookup instead of a monolithic switch statement.
  */
 const log = createLogger('Events');
+
+// ── V7 Audit §6.P3a — Register slash command handlers ──────────────
+// Moderation
+registerCommand('warn', handleWarnCommand);
+registerCommand('mute', handleMuteCommand);
+registerCommand('kick', handleKickCommand);
+registerCommand('ban', handleBanCommand);
+registerCommand('pardon', handlePardonCommand);
+registerCommand('infractions', handleInfractionsCommand);
+registerCommand('purge', (i) => handlePurgeCommand(i));
+registerCommand('xp', handleXpAdminCommand);
+
+// Utility
+registerCommand('help', handleHelpCommand);
+registerCommand('forgetme', (i, c) => handleForgetMeCommand(i, c.supabase, i.guildId!));
+registerCommand('privacy', (i) => handlePrivacyCommand(i));
+registerCommand('mydata', (i) => handleMyDataCommand(i));
+registerCommand('tutorial', (i) => handleTutorialCommand(i));
+registerCommand('setup', handleSetupCommand);
+registerCommand('ticket', handleTicketCommand);
 
 export function registerEvents(client: SomniClient): void {
   // Safety nets: prevent unhandled errors from crashing the bot silently
@@ -765,55 +789,10 @@ export function registerEvents(client: SomniClient): void {
 
       // Handle slash commands
       if (interaction.isChatInputCommand()) {
-        // Phase 14: Moderation commands
-        switch (interaction.commandName) {
-          case 'warn':
-            await handleWarnCommand(interaction, client);
-            return;
-          case 'mute':
-            await handleMuteCommand(interaction, client);
-            return;
-          case 'kick':
-            await handleKickCommand(interaction, client);
-            return;
-          case 'ban':
-            await handleBanCommand(interaction, client);
-            return;
-          case 'pardon':
-            await handlePardonCommand(interaction, client);
-            return;
-          case 'infractions':
-            await handleInfractionsCommand(interaction, client);
-            return;
-          case 'purge':
-            await handlePurgeCommand(interaction);
-            return;
-          case 'xp':
-            await handleXpAdminCommand(interaction, client);
-            return;
-          case 'help':
-            await handleHelpCommand(interaction, client);
-            return;
-          case 'setup':
-            await handleSetupCommand(interaction, client);
-            return;
-          case 'forgetme':
-            await handleForgetMeCommand(interaction, client.supabase, interaction.guildId!);
-            return;
-          case 'privacy':
-            await handlePrivacyCommand(interaction);
-            return;
-          case 'mydata':
-            await handleMyDataCommand(interaction);
-            return;
-          case 'tutorial':
-            await handleTutorialCommand(interaction);
-            return;
-        }
-
-        // Phase 7: Ticket commands
-        if (interaction.commandName === 'ticket') {
-          await handleTicketCommand(interaction, client);
+        // V7 Audit §6.P3a — data-driven command dispatch via registry
+        const registeredHandler = lookupCommand(interaction.commandName);
+        if (registeredHandler) {
+          await registeredHandler(interaction, client);
           return;
         }
 

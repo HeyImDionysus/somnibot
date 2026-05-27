@@ -9,6 +9,7 @@
  * Architecture doc §30.5.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
@@ -22,16 +23,36 @@ const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 // with paypal-* signature headers missing; verifyWebhookSignature would
 // always fail, so we accept a constant-time match on X-Replay-Secret
 // instead. Must match the derivation in the replay route.
+//
+// V7 Audit §2.P2a: WEBHOOK_REPLAY_SECRET is the preferred env var.
+// HMAC derivation from NEXTAUTH_SECRET is kept as a fallback for
+// backwards compatibility, but a dedicated secret is strongly recommended.
 let _replaySecret: string | undefined;
 function getReplaySecret(): string {
   if (_replaySecret) return _replaySecret;
-  const secret = process.env.WEBHOOK_REPLAY_SECRET
-    || (process.env.NEXTAUTH_SECRET
-      ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-      : undefined);
-  if (!secret) throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret');
-  _replaySecret = secret;
-  return secret;
+
+  // Prefer dedicated env var
+  if (process.env.WEBHOOK_REPLAY_SECRET) {
+    _replaySecret = process.env.WEBHOOK_REPLAY_SECRET;
+    return _replaySecret;
+  }
+
+  // Fallback: derive from NEXTAUTH_SECRET (log a warning so operators notice)
+  if (process.env.NEXTAUTH_SECRET) {
+    console.warn(
+      '[PayPalWebhook] WEBHOOK_REPLAY_SECRET not set — deriving from NEXTAUTH_SECRET. ' +
+      'Set a dedicated WEBHOOK_REPLAY_SECRET env var for better security isolation.',
+    );
+    _replaySecret = createHmac('sha256', process.env.NEXTAUTH_SECRET)
+      .update('webhook-replay-secret')
+      .digest('hex');
+    return _replaySecret;
+  }
+
+  throw new Error(
+    'Missing WEBHOOK_REPLAY_SECRET (or NEXTAUTH_SECRET fallback). ' +
+    'Cannot authenticate internal replay requests.',
+  );
 }
 
 function isInternalReplay(req: NextRequest): boolean {
@@ -154,9 +175,20 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // V7 Audit §7.P2a — Zod-validated webhook payload shape
   let event: { event_type: string; resource: Record<string, unknown>; id?: string };
   try {
-    event = JSON.parse(rawBody);
+    const raw = JSON.parse(rawBody);
+    const paypalEventSchema = z.object({
+      event_type: z.string().min(1),
+      resource: z.record(z.unknown()),
+      id: z.string().optional(),
+    });
+    const parsed = paypalEventSchema.safeParse(raw);
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Invalid webhook payload shape' }, { status: 400 });
+    }
+    event = parsed.data;
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }

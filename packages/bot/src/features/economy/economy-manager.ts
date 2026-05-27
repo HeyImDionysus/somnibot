@@ -1255,20 +1255,10 @@ export class EconomyManager {
       }));
     }
 
-    // Fallback: fetch all wallets and sort client-side (covers pre-migration state)
-    const { data } = await this.supabase
-      .from('economy_wallets')
-      .select('user_id, wallet, bank')
-      .eq('guild_id', this.guild.id)
-      .order('wallet', { ascending: false })
-      .limit(500);
-
-    return (data ?? []).map((row: Record<string, unknown>) => ({
-      user_id: row.user_id as string,
-      net_worth: (row.wallet as number) + (row.bank as number),
-      wallet: row.wallet as number,
-      bank: row.bank as number,
-    })).sort((a: { net_worth: number }, b: { net_worth: number }) => b.net_worth - a.net_worth).slice(0, limit);
+    // V7 Audit §4.P3a — economy_leaderboard RPC is required (migration applied).
+    // Log the error instead of silently falling back to a 500-row client-side sort.
+    log.error(`economy_leaderboard RPC failed for guild ${this.guild.id}:`, rpcError?.message ?? 'unknown');
+    return [];
   }
 
   // ── Internal helpers ────────────────────────────────────

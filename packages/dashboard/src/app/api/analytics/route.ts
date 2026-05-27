@@ -6,9 +6,15 @@
  *   period: '7d' | '30d' | '90d' | '1y' | 'all' (default: '30d')
  */
 import { NextResponse, type NextRequest } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+
+/** V7 Audit §7.P3a — Zod-validated query params for /api/analytics */
+const analyticsQuerySchema = z.object({
+  period: z.enum(['7d', '30d', '90d', '1y', 'all']).default('30d'),
+});
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -17,7 +23,9 @@ export async function GET(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.view_analytics');
     const { searchParams } = new URL(request.url);
-    const period = searchParams.get('period') || '30d';
+    const { period } = analyticsQuerySchema.parse({
+      period: searchParams.get('period') ?? undefined,
+    });
 
     const admin = createAdminSupabase();
 

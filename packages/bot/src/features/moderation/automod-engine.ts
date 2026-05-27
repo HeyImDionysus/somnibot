@@ -67,6 +67,16 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
     (a, b) => ((b as unknown as Record<string, number>).priority ?? 0) - ((a as unknown as Record<string, number>).priority ?? 0),
   );
 
+  // V7 Audit §14.P3b — warn when a guild has an unusually large rule set.
+  // High rule counts increase per-message evaluation time and may indicate
+  // misconfiguration (e.g., auto-generated rules that should be consolidated).
+  if (rules.length > 100) {
+    log.warn(
+      `Guild ${guildId} has ${rules.length} active automod rules (>100). ` +
+      'Consider consolidating rules for better performance.',
+    );
+  }
+
   try {
     await client.valkey.setex(
       cacheKey,

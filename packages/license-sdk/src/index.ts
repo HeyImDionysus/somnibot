@@ -84,6 +84,42 @@ export class SomniLicense {
   private sessionId: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * V7 Audit §3.P3a — Server-time anchor for offline grace.
+   *
+   * On each successful validation/heartbeat response, we record both the
+   * server's Date header and the local monotonic timestamp (performance.now
+   * when available, Date.now fallback). Offline grace checks use the delta
+   * between the recorded monotonic timestamp and the current one, making
+   * the grace period immune to system clock manipulation.
+   */
+  private serverTimeAnchor: { serverEpoch: number; localMono: number } | null = null;
+
+  /** Get a monotonic-ish timestamp (ms). Falls back to Date.now in non-browser envs without performance. */
+  private mono(): number {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  /** Record server time from a fetch Response's Date header. */
+  private anchorServerTime(res: Response): void {
+    const dateHeader = res.headers.get('date');
+    if (dateHeader) {
+      const serverEpoch = new Date(dateHeader).getTime();
+      if (!isNaN(serverEpoch)) {
+        this.serverTimeAnchor = { serverEpoch, localMono: this.mono() };
+      }
+    }
+  }
+
+  /** Elapsed ms since the server time anchor, using monotonic clock. */
+  private elapsedSinceAnchor(): number {
+    if (!this.serverTimeAnchor) return Infinity;
+    return this.mono() - this.serverTimeAnchor.localMono;
+  }
+
   constructor(config: SomniLicenseConfig) {
     this.config = {
       cacheTtlMs: 60_000,
@@ -121,6 +157,9 @@ export class SomniLicense {
         this.cacheExpiry = Date.now() + (this.config.cacheTtlMs ?? 60_000);
         this.sessionId = data.session_id ?? null;
 
+        // V7 Audit §3.P3a — anchor server time on successful validation
+        this.anchorServerTime(res);
+
         // Auto-start heartbeat if interval provided
         if (data.heartbeat_interval_seconds && data.heartbeat_interval_seconds > 0) {
           this.startHeartbeat(data.heartbeat_interval_seconds);
@@ -129,11 +168,13 @@ export class SomniLicense {
 
       return data;
     } catch (err) {
-      // Offline — check grace period
-      if (
-        this.cachedResult?.valid &&
-        Date.now() < this.cacheExpiry + (this.config.offlineGraceMs ?? 86_400_000)
-      ) {
+      // Offline — check grace period using monotonic elapsed time
+      // V7 Audit §3.P3a: Uses server-time-anchored monotonic clock instead of
+      // raw Date.now() to prevent clock-manipulation bypass.
+      const graceMs = this.config.offlineGraceMs ?? 86_400_000;
+      const elapsed = this.elapsedSinceAnchor();
+
+      if (this.cachedResult?.valid && elapsed < graceMs) {
         return { ...this.cachedResult, status: 'offline_grace' };
       }
 
@@ -165,7 +206,10 @@ export class SomniLicense {
 
       const data: HeartbeatResponse = await res.json();
 
-      if (!data.valid) {
+      // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
+      if (data.valid) {
+        this.anchorServerTime(res);
+      } else {
         this.cachedResult = null;
         this.stopHeartbeat();
       }

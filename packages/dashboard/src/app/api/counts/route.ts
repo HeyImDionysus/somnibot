@@ -5,28 +5,35 @@
  * GAP 4: Operator UX — Sidebar live badges
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
-const ALLOWED_TABLES = new Set([
+const ALLOWED_TABLES = [
   'tickets',
   'orders',
   'giveaways',
   'infractions',
   'incidents',
-]);
+] as const;
+
+/** V7 Audit §7.P3a — Zod-validated query params for /api/counts */
+const countsQuerySchema = z.object({
+  table: z.enum(ALLOWED_TABLES),
+});
 
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
   if (rateLimited) return rateLimited;
 
   const { searchParams } = new URL(req.url);
-  const table = searchParams.get('table');
+  const parsed = countsQuerySchema.safeParse({ table: searchParams.get('table') });
 
-  if (!table || !ALLOWED_TABLES.has(table)) {
+  if (!parsed.success) {
     return NextResponse.json({ count: 0 });
   }
+  const { table } = parsed.data;
 
   try {
     const ctx = await requirePermission(null);
