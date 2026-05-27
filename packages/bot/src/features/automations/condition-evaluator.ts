@@ -149,9 +149,18 @@ async function evaluateCondition(
         // Limit pattern length to prevent catastrophic backtracking
         if (raw.length > 200) return false;
         const pattern = new RegExp(raw, 'i');
-        // Run with a short input slice to bound execution time
-        return pattern.test(ctx.messageContent.slice(0, 2000));
+        // V5 Audit [V5-3]: Guard against catastrophic backtracking.
+        // Run regex in a bounded context with a timeout.
+        const input = ctx.messageContent.slice(0, 2000);
+        const { runInNewContext } = await import('node:vm');
+        const result = runInNewContext(
+          'pattern.test(input)',
+          { pattern, input },
+          { timeout: 50 }, // 50ms max execution time
+        );
+        return Boolean(result);
       } catch {
+        // Timeout, invalid regex, or other error — treat as non-match
         return false;
       }
     }

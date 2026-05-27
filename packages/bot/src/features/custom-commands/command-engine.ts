@@ -179,15 +179,17 @@ export async function handleCustomCommand(
       switch (action.type) {
         case 'send_message': {
           const content = replaceVariables(action.message ?? '', interaction);
+          // V5 Audit [V5-1]: Restrict allowedMentions to prevent mass-pings via admin templates.
+          const mentionOpts = { allowedMentions: { parse: [] as const } };
           if (!replied) {
-            await interaction.reply({ content, ephemeral: cmd.ephemeral });
+            await interaction.reply({ content, ephemeral: cmd.ephemeral, ...mentionOpts });
             replied = true;
           } else {
             const targetChannel = action.channelId
               ? guild.channels.cache.get(action.channelId)
               : interaction.channel;
             if (targetChannel && 'send' in targetChannel) {
-              await targetChannel.send(content);
+              await targetChannel.send({ content, ...mentionOpts });
             }
           }
           break;
@@ -245,7 +247,8 @@ export async function handleCustomCommand(
           if (action.message) {
             const content = replaceVariables(action.message, interaction);
             try {
-              await interaction.user.send(content);
+              // V5 Audit [V5-1]: Restrict mentions in DMs.
+              await interaction.user.send({ content, allowedMentions: { parse: [] } });
             } catch {
               // DMs may be disabled
             }
