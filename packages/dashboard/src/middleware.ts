@@ -31,13 +31,21 @@ function buildCspHeader(nonce: string): string {
 }
 
 /**
- * Apply CSP nonce headers to a response.
- * The nonce is also set as a request header so the root layout
- * can read it via headers() to pass to Script components.
+ * Apply security headers to a response.
+ *
+ * Includes CSP with per-request nonce, plus standard hardening headers:
+ * - HSTS: enforce HTTPS for 1 year (includeSubDomains, preload-ready)
+ * - X-Content-Type-Options: prevent MIME-type sniffing
+ * - Referrer-Policy: don't leak full URL on cross-origin navigation
+ * - X-Frame-Options: block framing (defense-in-depth alongside CSP frame-ancestors)
  */
 function applyCspHeaders(response: NextResponse, nonce: string): void {
   response.headers.set('Content-Security-Policy', buildCspHeader(nonce));
   response.headers.set('x-nonce', nonce);
+  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  response.headers.set('X-Frame-Options', 'DENY');
 }
 
 /* ------------------------------------------------------------------ */

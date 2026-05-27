@@ -27,7 +27,7 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('AutoModEngine');
 
-const RULES_CACHE_KEY = 'automod:rules';
+const RULES_CACHE_PREFIX = 'automod:rules:';
 const RULES_CACHE_TTL = 60; // seconds
 
 // ── Spam tracking (Valkey-backed) ──
@@ -39,8 +39,10 @@ const DUP_KEY_PREFIX = 'automod:dup:';
  * Load auto-mod rules from cache or database.
  */
 async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomodRule[]> {
+  const cacheKey = `${RULES_CACHE_PREFIX}${guildId}`;
+
   try {
-    const cached = await client.valkey.get(RULES_CACHE_KEY);
+    const cached = await client.valkey.get(cacheKey);
     if (cached) {
       return JSON.parse(cached) as DbAutomodRule[];
     }
@@ -67,7 +69,7 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
 
   try {
     await client.valkey.setex(
-      RULES_CACHE_KEY,
+      cacheKey,
       RULES_CACHE_TTL,
       JSON.stringify(rules),
     );
@@ -79,12 +81,28 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
 }
 
 /**
- * Invalidate the auto-mod rules cache.
+ * Invalidate the auto-mod rules cache for a specific guild.
  * Called when rules are updated via dashboard.
+ *
+ * @param guildId - If omitted, a scan-based wildcard delete is attempted
+ *                  as a fallback (e.g. during global config reloads).
  */
-export async function invalidateRulesCache(client: SomniClient): Promise<void> {
+export async function invalidateRulesCache(client: SomniClient, guildId?: string): Promise<void> {
   try {
-    await client.valkey.del(RULES_CACHE_KEY);
+    if (guildId) {
+      await client.valkey.del(`${RULES_CACHE_PREFIX}${guildId}`);
+    } else {
+      // Wildcard fallback: delete all guild-scoped automod rule caches.
+      // Uses SCAN to avoid blocking Valkey with a KEYS command.
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await client.valkey.scan(cursor, 'MATCH', `${RULES_CACHE_PREFIX}*`, 'COUNT', '100');
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await client.valkey.del(...keys);
+        }
+      } while (cursor !== '0');
+    }
   } catch {
     // Non-fatal
   }
