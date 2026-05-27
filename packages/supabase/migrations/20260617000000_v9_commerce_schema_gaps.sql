@@ -32,8 +32,13 @@ ALTER TABLE public.products
   CHECK (delivery_type IN ('file', 'link', 'access_pass', 'license_key', 'mixed'));
 
 -- ── 3. Rebuild increment_customer_totals ────────────────────
--- Same signature (UUID, NUMERIC) so PostgREST resolves it the
--- same way.  Now also bumps total_orders by 1.
+-- Drop the legacy INT overload (created in audit_v5_atomic_ops).
+-- Having both (UUID, INT) and (UUID, NUMERIC) makes PostgREST
+-- return PGRST203 "could not choose the best candidate".
+-- We keep only the NUMERIC version.
+DROP FUNCTION IF EXISTS public.increment_customer_totals(UUID, INT);
+
+-- Now also bumps total_orders by 1.
 CREATE OR REPLACE FUNCTION public.increment_customer_totals(
   p_customer_id UUID,
   p_amount NUMERIC
