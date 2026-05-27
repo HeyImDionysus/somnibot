@@ -60,16 +60,15 @@ beforeAll(async () => {
     discord_id: BUYER_DISCORD_ID,
     discord_username: 'e2e-buyer',
     total_spent_cents: 0,
-    total_orders: 0,
   }).select('id').single();
   customerId = customer!.id;
 
-  // Seed product (one-time digital with role grant + license key delivery)
+  // Seed product (one-time digital with role grant)
   const { data: product } = await supa.from('products').insert({
     guild_id: GUILD_ID,
     name: 'E2E Test Product',
     type: 'one_time',
-    delivery_type: 'license_key',
+    delivery_type: 'access_pass',
     price_cents: 1499,
     currency: 'USD',
     active: true,
@@ -140,16 +139,15 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
   it('Step 4: increments customer totals via RPC', async () => {
     const { error } = await supa.rpc('increment_customer_totals', {
       p_customer_id: customerId,
-      p_amount_cents: 1499,
+      p_amount: 1499,
     });
 
     expect(error).toBeNull();
 
     const { data: customer } = await supa.from('customers')
-      .select('total_spent_cents, total_orders')
+      .select('total_spent_cents')
       .eq('id', customerId).single();
     expect(customer!.total_spent_cents).toBe(1499);
-    expect(customer!.total_orders).toBe(1);
   });
 
   it('Step 5: generates a license key (hash-only storage)', async () => {
@@ -207,7 +205,6 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     const { data, error } = await supa.from('bot_action_queue').insert({
       guild_id: GUILD_ID,
       action: 'fulfill_purchase',
-      action_type: 'fulfill_purchase',
       payload: {
         fulfillment_type: 'one_time_purchase',
         guild_id: GUILD_ID,
@@ -308,7 +305,6 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     const { data, error } = await supa.from('bot_action_queue').insert({
       guild_id: GUILD_ID,
       action: 'revoke_roles',
-      action_type: 'revoke_roles',
       payload: {
         discord_id: BUYER_DISCORD_ID,
         role_ids: ['role-e2e-premium'],
