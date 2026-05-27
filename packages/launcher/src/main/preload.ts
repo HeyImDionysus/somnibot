@@ -46,28 +46,28 @@ export interface SomniBotAPI {
   // Links
   openExternal: (url: string) => Promise<void>;
 
-  // Events — process status
-  onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => void;
-  onBotLog: (callback: (log: { type: string; line: string }) => void) => void;
-  onDashboardLog: (callback: (log: { type: string; line: string }) => void) => void;
+  // Events — process status (return cleanup function for React unmount)
+  onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => () => void;
+  onBotLog: (callback: (log: { type: string; line: string }) => void) => () => void;
+  onDashboardLog: (callback: (log: { type: string; line: string }) => void) => () => void;
 
   // Auto-updater — actions
   checkForUpdates: () => Promise<{ ok: boolean; error?: string }>;
   downloadUpdate: () => Promise<{ ok: boolean; error?: string }>;
   installUpdate: () => Promise<void>;
 
-  // Auto-updater — events
-  onUpdaterChecking: (callback: () => void) => void;
-  onUpdateAvailable: (callback: (info: { version: string }) => void) => void;
-  onUpdateNotAvailable: (callback: () => void) => void;
+  // Auto-updater — events (return cleanup function for React unmount)
+  onUpdaterChecking: (callback: () => void) => () => void;
+  onUpdateAvailable: (callback: (info: { version: string }) => void) => () => void;
+  onUpdateNotAvailable: (callback: () => void) => () => void;
   onDownloadProgress: (callback: (progress: {
     percent: number;
     transferred: number;
     total: number;
     bytesPerSecond: number;
-  }) => void) => void;
-  onUpdateDownloaded: (callback: () => void) => void;
-  onUpdateError: (callback: (info: { message: string }) => void) => void;
+  }) => void) => () => void;
+  onUpdateDownloaded: (callback: () => void) => () => void;
+  onUpdateError: (callback: (info: { message: string }) => void) => () => void;
 
   // Phase 6: First-run onboarding
   isFirstRun: () => Promise<boolean>;
@@ -79,9 +79,9 @@ export interface SomniBotAPI {
   checkJava: () => Promise<{ available: boolean; version?: string; error?: string }>;
   downloadLavalink: () => Promise<{ ok: boolean; error?: string }>;
   getLavalinkInfo: () => Promise<{ status: string; jarPresent: boolean; error: string }>;
-  onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => void;
-  onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => void;
-  onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => void;
+  onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => () => void;
+  onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => () => void;
+  onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => () => void;
 
   // App
   getVersion: () => Promise<string>;
@@ -118,14 +118,21 @@ contextBridge.exposeInMainWorld('somnibot', {
   },
 
   // Events — process status
+  // V8 Audit §10.P3a: Return cleanup functions to prevent listener leaks on unmount
   onStatusUpdate: (callback: (status: Record<string, unknown>) => void) => {
-    ipcRenderer.on('status-update', (_event, status) => callback(status));
+    const handler = (_event: Electron.IpcRendererEvent, status: Record<string, unknown>) => callback(status);
+    ipcRenderer.on('status-update', handler);
+    return () => { ipcRenderer.removeListener('status-update', handler); };
   },
   onBotLog: (callback: (log: { type: string; line: string }) => void) => {
-    ipcRenderer.on('bot-log', (_event, log) => callback(log));
+    const handler = (_event: Electron.IpcRendererEvent, log: { type: string; line: string }) => callback(log);
+    ipcRenderer.on('bot-log', handler);
+    return () => { ipcRenderer.removeListener('bot-log', handler); };
   },
   onDashboardLog: (callback: (log: { type: string; line: string }) => void) => {
-    ipcRenderer.on('dashboard-log', (_event, log) => callback(log));
+    const handler = (_event: Electron.IpcRendererEvent, log: { type: string; line: string }) => callback(log);
+    ipcRenderer.on('dashboard-log', handler);
+    return () => { ipcRenderer.removeListener('dashboard-log', handler); };
   },
 
   // Auto-updater — actions
@@ -133,15 +140,21 @@ contextBridge.exposeInMainWorld('somnibot', {
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
 
-  // Auto-updater — events
+  // Auto-updater — events (V8 Audit §10.P3a: return cleanup functions)
   onUpdaterChecking: (callback: () => void) => {
-    ipcRenderer.on('updater:checking', () => callback());
+    const handler = () => callback();
+    ipcRenderer.on('updater:checking', handler);
+    return () => { ipcRenderer.removeListener('updater:checking', handler); };
   },
   onUpdateAvailable: (callback: (info: { version: string }) => void) => {
-    ipcRenderer.on('updater:available', (_event, info) => callback(info));
+    const handler = (_event: Electron.IpcRendererEvent, info: { version: string }) => callback(info);
+    ipcRenderer.on('updater:available', handler);
+    return () => { ipcRenderer.removeListener('updater:available', handler); };
   },
   onUpdateNotAvailable: (callback: () => void) => {
-    ipcRenderer.on('updater:not-available', () => callback());
+    const handler = () => callback();
+    ipcRenderer.on('updater:not-available', handler);
+    return () => { ipcRenderer.removeListener('updater:not-available', handler); };
   },
   onDownloadProgress: (callback: (progress: {
     percent: number;
@@ -149,13 +162,19 @@ contextBridge.exposeInMainWorld('somnibot', {
     total: number;
     bytesPerSecond: number;
   }) => void) => {
-    ipcRenderer.on('updater:progress', (_event, progress) => callback(progress));
+    const handler = (_event: Electron.IpcRendererEvent, progress: { percent: number; transferred: number; total: number; bytesPerSecond: number }) => callback(progress);
+    ipcRenderer.on('updater:progress', handler);
+    return () => { ipcRenderer.removeListener('updater:progress', handler); };
   },
   onUpdateDownloaded: (callback: () => void) => {
-    ipcRenderer.on('updater:downloaded', () => callback());
+    const handler = () => callback();
+    ipcRenderer.on('updater:downloaded', handler);
+    return () => { ipcRenderer.removeListener('updater:downloaded', handler); };
   },
   onUpdateError: (callback: (info: { message: string }) => void) => {
-    ipcRenderer.on('updater:error', (_event, info) => callback(info));
+    const handler = (_event: Electron.IpcRendererEvent, info: { message: string }) => callback(info);
+    ipcRenderer.on('updater:error', handler);
+    return () => { ipcRenderer.removeListener('updater:error', handler); };
   },
 
   // Phase 6: First-run onboarding
@@ -169,13 +188,19 @@ contextBridge.exposeInMainWorld('somnibot', {
   downloadLavalink: () => ipcRenderer.invoke('download-lavalink'),
   getLavalinkInfo: () => ipcRenderer.invoke('get-lavalink-info'),
   onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => {
-    ipcRenderer.on('lavalink-status', (_event, info) => callback(info));
+    const handler = (_event: Electron.IpcRendererEvent, info: { status: string; jarPresent: boolean; error: string }) => callback(info);
+    ipcRenderer.on('lavalink-status', handler);
+    return () => { ipcRenderer.removeListener('lavalink-status', handler); };
   },
   onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => {
-    ipcRenderer.on('lavalink-log', (_event, log) => callback(log));
+    const handler = (_event: Electron.IpcRendererEvent, log: { type: string; line: string }) => callback(log);
+    ipcRenderer.on('lavalink-log', handler);
+    return () => { ipcRenderer.removeListener('lavalink-log', handler); };
   },
   onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => {
-    ipcRenderer.on('lavalink-download-progress', (_event, progress) => callback(progress));
+    const handler = (_event: Electron.IpcRendererEvent, progress: { percent: number; downloadedMB: string; totalMB: string }) => callback(progress);
+    ipcRenderer.on('lavalink-download-progress', handler);
+    return () => { ipcRenderer.removeListener('lavalink-download-progress', handler); };
   },
 
   // App

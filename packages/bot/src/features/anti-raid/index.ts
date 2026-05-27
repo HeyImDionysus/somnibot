@@ -21,6 +21,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import { randomUUID } from 'node:crypto';
 import { getValkey } from '../../services/valkey.js';
 
 const log = createLogger('AntiRaid');
@@ -137,7 +138,8 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
     // Atomic pipeline: remove expired entries, add current, count, set expiry
     const pipeline = valkey.pipeline();
     pipeline.zremrangebyscore(key, '-inf', String(windowStart));
-    pipeline.zadd(key, String(now), `${now}:${Math.random().toString(36).slice(2, 8)}`);
+    // V8 Audit §8.P3a: Use crypto.randomUUID() for collision-proof member uniqueness
+    pipeline.zadd(key, String(now), `${now}:${randomUUID().slice(0, 8)}`);
     pipeline.zcard(key);
     pipeline.pexpire(key, windowMs + 10_000); // TTL slightly longer than window
     const results = await pipeline.exec();

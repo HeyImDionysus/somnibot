@@ -7,6 +7,12 @@ export default defineConfig({
     globals: true,
     include: ['src/__tests__/**/*.test.ts'],
     exclude: ['src/__tests__/smoke/**'],
+    // V8 Audit §13.P3a: Add coverage gate for dashboard
+    coverage: {
+      provider: 'v8',
+      include: ['src/lib/**/*.ts'],
+      exclude: ['src/__tests__/**', 'src/**/*.d.ts'],
+    },
   },
   resolve: {
     alias: {
