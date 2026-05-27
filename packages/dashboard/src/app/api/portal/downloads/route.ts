@@ -9,6 +9,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -34,6 +35,13 @@ export async function GET(request: NextRequest) {
   try {
     const session = await getPortalCustomer(request);
     if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // V6 Audit §7.1: Rate-limit portal data reads per token
+    const token = request.headers.get('x-portal-token')!;
+    const rl = await rateLimits.portalData(hashToken(token));
+    if (rl.limited) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+    }
 
     const admin = createAdminSupabase();
 

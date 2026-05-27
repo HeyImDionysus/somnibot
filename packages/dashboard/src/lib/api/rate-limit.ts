@@ -279,4 +279,8 @@ export const rateLimits = {
   /** Portal auth: 10 login attempts per 5 minutes per IP */
   portalAuth: (ip: string) =>
     checkRateLimit(`portal:auth:${ip}`, 10, 300_000),
+
+  /** Portal data: 30 reads per minute per token hash (V6 Audit §7.1) */
+  portalData: (tokenHash: string) =>
+    checkRateLimit(`portal:data:${tokenHash}`, 30, 60_000),
 } as const;

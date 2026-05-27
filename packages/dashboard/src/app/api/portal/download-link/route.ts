@@ -13,6 +13,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { z } from 'zod';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -37,6 +38,12 @@ export async function POST(request: NextRequest) {
 
     if (!session) {
       return NextResponse.json({ error: 'Invalid or expired session' }, { status: 401 });
+    }
+
+    // V6 Audit §7.1: Rate-limit portal data reads per token
+    const rl = await rateLimits.portalData(hashToken(token));
+    if (rl.limited) {
+      return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
     }
 
     // Parse request body — V6 Audit §7.1: Zod validation
