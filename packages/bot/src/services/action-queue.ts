@@ -784,6 +784,47 @@ async function processAction(
     }
   }
 
+  // V5 Audit §6.5: On transient failures, schedule an immediate retry with
+  // exponential backoff (30s → 60s → 120s) before giving up and marking as
+  // failed. The stale-recovery sweep catches crash failures (5-min timeout),
+  // but handler-level errors should retry sooner.
+  if (!result.success) {
+    const { data: currentRow } = await supabase
+      .from('bot_action_queue')
+      .select('retry_count')
+      .eq('id', action.id)
+      .maybeSingle();
+
+    const retryCount = (currentRow?.retry_count ?? 0) + 1;
+    const isTransient = !result.error?.includes('Unknown action') &&
+                        !result.error?.includes('Missing required');
+
+    if (isTransient && retryCount <= 3) {
+      const backoffMs = Math.min(30_000 * Math.pow(2, retryCount - 1), 120_000);
+      log.info(`Scheduling retry #${retryCount} for ${action.id} in ${backoffMs / 1000}s`);
+
+      await supabase
+        .from('bot_action_queue')
+        .update({
+          status: 'pending',
+          retry_count: retryCount,
+          error_message: result.error ?? null,
+        })
+        .eq('id', action.id);
+
+      // Re-process after backoff (non-blocking)
+      setTimeout(async () => {
+        try {
+          await processAction(guild, supabase, action);
+        } catch (e) {
+          log.error(`Retry #${retryCount} failed for ${action.id}:`, e);
+        }
+      }, backoffMs);
+
+      return; // Don't mark as failed yet — retry scheduled
+    }
+  }
+
   // Mark completed/failed
   await supabase
     .from('bot_action_queue')
