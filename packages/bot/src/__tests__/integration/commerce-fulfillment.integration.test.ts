@@ -196,6 +196,7 @@ describe('Commerce fulfillment lifecycle', () => {
       .from('bot_action_queue')
       .insert({
         guild_id: GUILD_ID,
+        action: 'fulfill_purchase',
         action_type: 'fulfill_purchase',
         payload: {
           fulfillment_type: 'one_time_purchase',
@@ -218,7 +219,7 @@ describe('Commerce fulfillment lifecycle', () => {
       .single();
 
     expect(error).toBeNull();
-    expect(data!.action_type).toBe('fulfill_purchase');
+    expect(data!.action).toBe('fulfill_purchase');
     expect(data!.status).toBe('pending');
 
     // Verify the payload is intact
@@ -251,7 +252,7 @@ describe('Commerce fulfillment lifecycle', () => {
       .from('bot_action_queue')
       .select('*')
       .eq('guild_id', GUILD_ID)
-      .eq('action_type', 'fulfill_purchase')
+      .eq('action', 'fulfill_purchase')
       .limit(1000);
     expect(actions!.length).toBeGreaterThanOrEqual(1);
   });
