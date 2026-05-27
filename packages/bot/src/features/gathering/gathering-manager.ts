@@ -346,16 +346,16 @@ export class GatheringManager {
     let bestInvId: string | null = null;
     let bestDurability: number | null = null;
 
-    for (const inv of items as Record<string, unknown>[]) {
+    for (const inv of items as { id: string; durability_remaining: number | null; economy_items: { use_effect?: { type: string; tier?: number } } }[]) {
       const effect = inv.economy_items?.use_effect;
       if (!effect || typeof effect !== 'object') continue;
-      if ((effect as Record<string, unknown>).type !== toolEffect) continue;
+      if (effect.type !== toolEffect) continue;
 
-      const tier = ((effect as Record<string, unknown>).tier as number) ?? 1;
+      const tier = effect.tier ?? 1;
       if (tier > bestTier) {
         bestTier = tier;
-        bestInvId = inv.id as string;
-        bestDurability = inv.durability_remaining as number | null;
+        bestInvId = inv.id;
+        bestDurability = inv.durability_remaining;
       }
     }
 

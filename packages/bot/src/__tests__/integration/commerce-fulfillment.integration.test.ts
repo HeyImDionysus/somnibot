@@ -3,7 +3,7 @@
  *
  * V7 Audit §13.4: Tests the end-to-end flow from order creation through
  * payment capture, entitlement granting, and fulfillment queue insertion.
- * Covers: order → payment → customer totals → license key → entitlement → action queue.
+ * Covers: order → payment → customer totals → license key → action queue.
  *
  * NOTE: This doesn't call real PayPal APIs — it simulates the database-side
  * operations that handlePaymentCaptured() performs, then verifies each step.
@@ -14,10 +14,13 @@ import { requireSupabase } from './helpers.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 let supa!: SupabaseClient;
-const GUILD_ID = `test-commerce-guild-${Date.now()}`;
-const CUSTOMER_ID = `test-customer-${Date.now()}`;
-const PRODUCT_ID = `test-product-${Date.now()}`;
+// guild.id is TEXT (Discord snowflake), commerce tables use UUID with defaults
+const GUILD_ID = `test-commerce-${Date.now()}`;
 const DISCORD_ID = '999888777666555444';
+
+// These will be set by the seed inserts (DB generates UUIDs)
+let customerId: string;
+let productId: string;
 
 beforeAll(async () => {
   supa = await requireSupabase();
@@ -29,28 +32,28 @@ beforeAll(async () => {
     owner_discord_id: '123456789',
   });
 
-  // Seed customer
-  await supa.from('customers').insert({
-    id: CUSTOMER_ID,
+  // Seed customer (let DB generate UUID)
+  const { data: customer } = await supa.from('customers').insert({
     guild_id: GUILD_ID,
     discord_id: DISCORD_ID,
-    username: 'test-buyer',
+    discord_username: 'test-buyer',
     total_spent_cents: 0,
-    order_count: 0,
-  });
+  }).select('id').single();
+  customerId = customer!.id;
 
-  // Seed product
-  await supa.from('products').insert({
-    id: PRODUCT_ID,
+  // Seed product (let DB generate UUID)
+  const { data: product } = await supa.from('products').insert({
     guild_id: GUILD_ID,
     name: 'Test Digital Product',
+    type: 'one_time',
+    delivery_type: 'access_pass',
     price_cents: 999,
     currency: 'USD',
-    status: 'active',
-    type: 'digital',
+    active: true,
     granted_role_ids: ['role-123'],
     granted_channel_ids: [],
-  });
+  }).select('id').single();
+  productId = product!.id;
 });
 
 afterAll(async () => {
@@ -59,8 +62,8 @@ afterAll(async () => {
   await supa.from('license_keys').delete().eq('guild_id', GUILD_ID);
   await supa.from('payments').delete().eq('guild_id', GUILD_ID);
   await supa.from('orders').delete().eq('guild_id', GUILD_ID);
-  await supa.from('products').delete().eq('id', PRODUCT_ID);
-  await supa.from('customers').delete().eq('id', CUSTOMER_ID);
+  await supa.from('products').delete().eq('id', productId);
+  await supa.from('customers').delete().eq('id', customerId);
   await supa.from('guild').delete().eq('id', GUILD_ID);
 });
 
@@ -73,9 +76,9 @@ describe('Commerce fulfillment lifecycle', () => {
       .from('orders')
       .insert({
         order_number: orderNumber,
-        customer_id: CUSTOMER_ID,
+        customer_id: customerId,
         guild_id: GUILD_ID,
-        product_id: PRODUCT_ID,
+        product_id: productId,
         amount_cents: 999,
         currency: 'USD',
         status: 'pending',
@@ -93,7 +96,7 @@ describe('Commerce fulfillment lifecycle', () => {
   it('marks the order as completed (simulating PAYMENT.CAPTURE.COMPLETED)', async () => {
     const { error } = await supa
       .from('orders')
-      .update({ status: 'completed', updated_at: new Date().toISOString() })
+      .update({ status: 'completed' })
       .eq('id', orderId);
 
     expect(error).toBeNull();
@@ -109,7 +112,7 @@ describe('Commerce fulfillment lifecycle', () => {
       .from('payments')
       .insert({
         order_id: orderId,
-        customer_id: CUSTOMER_ID,
+        customer_id: customerId,
         guild_id: GUILD_ID,
         paypal_payment_id: captureId,
         amount_cents: 999,
@@ -126,7 +129,7 @@ describe('Commerce fulfillment lifecycle', () => {
 
   it('increments customer totals via RPC', async () => {
     const { error } = await supa.rpc('increment_customer_totals', {
-      p_customer_id: CUSTOMER_ID,
+      p_customer_id: customerId,
       p_amount: 999,
     });
 
@@ -135,7 +138,7 @@ describe('Commerce fulfillment lifecycle', () => {
     const { data } = await supa
       .from('customers')
       .select('total_spent_cents')
-      .eq('id', CUSTOMER_ID)
+      .eq('id', customerId)
       .single();
     expect(data!.total_spent_cents).toBe(999);
   });
@@ -159,8 +162,8 @@ describe('Commerce fulfillment lifecycle', () => {
       .from('license_keys')
       .insert({
         order_id: orderId,
-        customer_id: CUSTOMER_ID,
-        product_id: PRODUCT_ID,
+        customer_id: customerId,
+        product_id: productId,
         guild_id: GUILD_ID,
         key_hash: hash,
         key_prefix: 'SMNI',
@@ -194,9 +197,9 @@ describe('Commerce fulfillment lifecycle', () => {
         payload: {
           fulfillment_type: 'one_time_purchase',
           guild_id: GUILD_ID,
-          customer_id: CUSTOMER_ID,
+          customer_id: customerId,
           discord_id: DISCORD_ID,
-          product_id: PRODUCT_ID,
+          product_id: productId,
           product_name: 'Test Digital Product',
           order_id: orderId,
           order_number: orderNumber,
@@ -233,7 +236,7 @@ describe('Commerce fulfillment lifecycle', () => {
     expect(payments![0]!.amount_cents).toBe(999);
 
     // Customer totals incremented
-    const { data: customer } = await supa.from('customers').select('*').eq('id', CUSTOMER_ID).single();
+    const { data: customer } = await supa.from('customers').select('*').eq('id', customerId).single();
     expect(customer!.total_spent_cents).toBe(999);
 
     // License key linked to order

@@ -143,7 +143,9 @@ export class QuestsManager {
       .limit(1000);
 
     for (const p of active ?? []) {
-      if ((p.template as Record<string, unknown> | null)?.action_type === actionType) {
+      const tmpl = p.template as { action_type: string } | { action_type: string }[] | null;
+      const actionMatch = Array.isArray(tmpl) ? tmpl[0]?.action_type : tmpl?.action_type;
+      if (actionMatch === actionType) {
         await Promise.resolve(this.supabase.rpc('economy_quest_increment_progress', {
           p_id: p.id,
           p_amount: amount,

@@ -214,7 +214,7 @@ export class FishingManager {
       .limit(1);
 
     if (!data || data.length === 0) return null;
-    const inv = data[0] as Record<string, unknown>;
+    const inv = data[0] as { item_id: string; quantity: number; economy_items: { name: string } };
 
     // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
     // /fish call already consumed the last bait, the RPC returns false
@@ -423,7 +423,7 @@ export class FishingManager {
       .limit(1000);
 
     const caught = new Map<string, { count: number; maxWeight: number }>();
-    for (const c of (catches ?? []) as Record<string, unknown>[]) {
+    for (const c of (catches ?? []) as { species_id: string; weight: number }[]) {
       const entry = caught.get(c.species_id) ?? { count: 0, maxWeight: 0 };
       entry.count++;
       entry.maxWeight = Math.max(entry.maxWeight, c.weight);
