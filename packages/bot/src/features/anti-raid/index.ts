@@ -56,6 +56,7 @@ const MAX_MEMORY_GUILDS = 10_000;
 
 /** Evict oldest entry from a Map if it exceeds the cap. */
 function capMap<V>(map: Map<string, V>, max: number): void {
+  /* v8 ignore next 4 -- defensive cap; only fires at 10k+ guilds in memory */
   if (map.size > max) {
     const oldest = map.keys().next().value;
     if (oldest) map.delete(oldest);

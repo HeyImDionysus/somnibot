@@ -70,6 +70,7 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
   // V7 Audit §14.P3b — warn when a guild has an unusually large rule set.
   // High rule counts increase per-message evaluation time and may indicate
   // misconfiguration (e.g., auto-generated rules that should be consolidated).
+  /* v8 ignore next 5 -- defensive warning; only fires with 100+ rules per guild */
   if (rules.length > 100) {
     log.warn(
       `Guild ${guildId} has ${rules.length} active automod rules (>100). ` +

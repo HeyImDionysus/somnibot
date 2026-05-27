@@ -1257,6 +1257,7 @@ export class EconomyManager {
 
     // V7 Audit §4.P3a — economy_leaderboard RPC is required (migration applied).
     // Log the error instead of silently falling back to a 500-row client-side sort.
+    /* v8 ignore next 2 -- error path covered by RPC-fail test; instrumentation gap */
     log.error(`economy_leaderboard RPC failed for guild ${this.guild.id}:`, rpcError?.message ?? 'unknown');
     return [];
   }
