@@ -12,6 +12,7 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
+import { randomInt } from 'node:crypto';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -510,11 +511,12 @@ export class GiveawayManager {
 
   private pickRandom(arr: string[], count: number): string[] {
     if (arr.length === 0) return [];
-    // Fisher-Yates (Knuth) shuffle — produces a uniform distribution.
-    // The previous .sort(() => Math.random() - 0.5) is a known-biased approach.
+    // V6 Audit §4.3: Use crypto.randomInt() for winner selection because
+    // giveaways can award real commerce products (auto-fulfilled via
+    // CrossFeatureBridge). Fisher-Yates (Knuth) shuffle — uniform distribution.
     const shuffled = [...arr];
     for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = randomInt(i + 1);
       [shuffled[i]!, shuffled[j]!] = [shuffled[j]!, shuffled[i]!];
     }
     return shuffled.slice(0, Math.min(count, shuffled.length));

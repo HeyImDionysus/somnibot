@@ -219,24 +219,6 @@ export class LotteryManager {
       return;
     }
 
-    // Check existing tickets
-    const { data: existingTickets } = await this.supabase
-      .from('economy_lottery_tickets')
-      .select('id')
-      .eq('drawing_id', drawing.id)
-      .eq('guild_id', guildId)
-      .eq('user_id', userId)
-      .limit(1000);
-
-    const existingCount = existingTickets?.length ?? 0;
-    if (existingCount + count > maxTickets) {
-      await interaction.reply({
-        content: `❌ You already have ${existingCount} ticket(s). Max is ${maxTickets}.`,
-        ephemeral: true,
-      });
-      return;
-    }
-
     // Deduct balance — bail if insufficient funds
     const { error: debitErr } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
@@ -249,63 +231,36 @@ export class LotteryManager {
       return;
     }
 
-    // V48-M3: insert tickets and refund on failure. Previously the
-    // insert error was swallowed — a transient DB error would debit the
-    // user but produce no tickets and no jackpot increment, robbing
-    // them. We also no longer mutate the jackpot if ticket insert
-    // failed (otherwise winners get coins from nowhere).
-    const tickets = Array.from({ length: count }, () => ({
-      drawing_id: drawing.id,
-      guild_id: guildId,
-      user_id: userId,
-      ticket_number: Math.floor(Math.random() * 10000),
-    }));
-
-    const { error: ticketsErr } = await this.supabase
-      .from('economy_lottery_tickets')
-      .insert(tickets);
-    if (ticketsErr) {
-      log.error('ticket insert failed, refunding user:', ticketsErr.message);
-      const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
-      });
-      if (refundErr) {
-        log.error('CRITICAL: ticket insert failed AND refund failed', {
-          guildId, userId, totalCost, ticketsErr, refundErr,
-        });
-      }
-      await interaction.reply({
-        content: '❌ Failed to record your tickets — your coins were refunded.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // Atomically increment jackpot to prevent TOCTOU race
-    const { data: newJackpot, error: jackpotErr } = await this.supabase.rpc('lottery_increment_jackpot', {
-      p_drawing_id: drawing.id, p_amount: totalCost,
+    // V6 Audit §4.2: Atomic ticket purchase + jackpot increment via RPC.
+    // Replaces the TOCTOU-vulnerable SELECT-then-INSERT pattern and the
+    // separate jackpot-increment call. The RPC locks the drawing row,
+    // checks existing count, inserts tickets, and increments the jackpot
+    // in a single transaction — no partial state on failure.
+    const { data: newJackpot, error: buyErr } = await this.supabase.rpc('lottery_buy_tickets', {
+      p_drawing_id: drawing.id,
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_count: count,
+      p_max: maxTickets,
+      p_cost: totalCost,
     });
-    if (jackpotErr) {
-      // Tickets exist but jackpot is short. Best-effort compensate by
-      // deleting just-inserted tickets and refunding the user so the
-      // pool stays consistent with what was paid in.
-      log.error('jackpot increment failed, rolling back tickets:', jackpotErr.message);
-      await this.supabase
-        .from('economy_lottery_tickets')
-        .delete()
-        .eq('drawing_id', drawing.id)
-        .eq('user_id', userId)
-        .in('ticket_number', tickets.map((t) => t.ticket_number));
+    if (buyErr) {
+      // RPC failed — entire transaction rolled back, no tickets inserted,
+      // no jackpot changed. Just refund the balance debit.
+      const isLimitExceeded = buyErr.message?.includes('would exceed max tickets');
+      log.error('lottery_buy_tickets failed, refunding user:', buyErr.message);
       const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
       });
       if (refundErr) {
-        log.error('CRITICAL: jackpot increment failed AND refund failed', {
-          guildId, userId, totalCost, jackpotErr, refundErr,
+        log.error('CRITICAL: lottery_buy_tickets failed AND refund failed', {
+          guildId, userId, totalCost, buyErr, refundErr,
         });
       }
       await interaction.reply({
-        content: '❌ Failed to update the jackpot — your coins were refunded.',
+        content: isLimitExceeded
+          ? `❌ You already have the maximum number of tickets for this drawing (max ${maxTickets}).`
+          : '❌ Failed to record your tickets — your coins were refunded.',
         ephemeral: true,
       });
       return;
