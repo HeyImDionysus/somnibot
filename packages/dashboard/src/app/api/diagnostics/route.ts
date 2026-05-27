@@ -91,38 +91,28 @@ export async function GET(request: NextRequest) {
     .eq('acknowledged', false);
 
   // V53 Phase 2: Health metrics for sparklines (last 24h)
-  // V5C-4: Reduced from 2000 → 500 rows. The dashboard sparklines only need
-  // ~288 points per metric (one per 5 min over 24h). Cursor-based pagination
-  // via ?metrics_after= for clients that need the full dataset.
-  const metricsAfter = request.nextUrl.searchParams.get('metrics_after');
-  const metricsQuery = supabase
+  // V5C-4: Cap at 500 rows. Query DESC so the cap keeps the *newest* points
+  // (sparklines care about recent trends, not the start of the window).
+  // Results are reversed into chronological order before grouping.
+  const { data: healthMetrics } = await supabase
     .from('health_metrics')
     .select('metric_type, value_ms, recorded_at')
     .eq('guild_id', guildId)
     .gte('recorded_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-    .order('recorded_at', { ascending: true })
+    .order('recorded_at', { ascending: false })
     .limit(500);
 
-  if (metricsAfter) {
-    metricsQuery.gt('recorded_at', metricsAfter);
-  }
-
-  const { data: healthMetrics } = await metricsQuery;
+  // Reverse into chronological order so sparklines render left-to-right
+  const chronological = (healthMetrics ?? []).reverse();
 
   // Group metrics by type
   const metricsByType: Record<string, Array<{ value: number; time: string }>> = {};
-  for (const m of healthMetrics ?? []) {
+  for (const m of chronological) {
     if (!metricsByType[m.metric_type]) {
       metricsByType[m.metric_type] = [];
     }
     metricsByType[m.metric_type]!.push({ value: Number(m.value_ms), time: m.recorded_at });
   }
-
-  // Build cursor for pagination: last recorded_at in the returned metrics.
-  const metricsArray = healthMetrics ?? [];
-  const nextCursor = metricsArray.length === 500
-    ? metricsArray[metricsArray.length - 1]?.recorded_at ?? null
-    : null;
 
   return NextResponse.json({
     success: true,
@@ -165,7 +155,6 @@ export async function GET(request: NextRequest) {
         pendingCount: dlqCount ?? 0,
       },
       healthMetrics: metricsByType,
-      metricsNextCursor: nextCursor,
     },
   });
 }
