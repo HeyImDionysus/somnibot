@@ -162,7 +162,7 @@ describe('GiveawayManager deep flows', () => {
       },
     });
     const mgr = new GiveawayManager(guild(), s, valkey(), eventBus());
-    const result = await mgr.create({ channelId: 'ch1', prize: 'Xbox', winnerCount: 1, durationMs: 3600000, hostId: 'u1' });
+    const result = await mgr.create({ channelId: 'ch1', prize: 'Xbox', winnerCount: 1, durationMs: 3600000, creatorId: 'u1' });
     expect(result).toBeDefined();
   });
 
@@ -376,7 +376,7 @@ describe('sync-engine', () => {
   it('runSyncCycle no desired state', async () => {
     const { runSyncCycle } = await import('../sync/sync-engine.js');
     const s = supa({ guild_desired_state: null });
-    const result = await runSyncCycle(guild() as any, s, eventBus(), { dryRun: false });
+    const result = await runSyncCycle(guild() as any, s, eventBus(), { enabled: true, intervalMinutes: 60, autoRepair: false, autoRepairEveryone: false });
     expect(result).toBeDefined();
   });
 

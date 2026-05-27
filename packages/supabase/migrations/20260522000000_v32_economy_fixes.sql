@@ -18,12 +18,12 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-  INSERT INTO economy_wallets (guild_id, user_id, wallet, bank, total_earned, updated_at)
+  INSERT INTO public.economy_wallets (guild_id, user_id, wallet, bank, total_earned, updated_at)
   VALUES (p_guild_id, p_user_id, p_amount, 0, p_amount, NOW())
   ON CONFLICT (guild_id, user_id)
   DO UPDATE SET
-    wallet       = economy_wallets.wallet + p_amount,
-    total_earned = economy_wallets.total_earned + p_amount,
+    wallet       = public.economy_wallets.wallet + p_amount,
+    total_earned = public.economy_wallets.total_earned + p_amount,
     updated_at   = NOW();
 END;
 $$;
@@ -45,7 +45,7 @@ AS $$
 DECLARE
   rows_affected INTEGER;
 BEGIN
-  UPDATE economy_wallets
+  UPDATE public.economy_wallets
   SET wallet      = wallet - p_amount,
       total_spent = total_spent + p_amount,
       updated_at  = NOW()

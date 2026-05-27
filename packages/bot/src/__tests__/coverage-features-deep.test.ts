@@ -532,7 +532,7 @@ describe('FishingManager deep', () => {
         economy_fishing_enabled: true, currency_name: 'coins', currency_emoji: '🪙',
       },
     });
-    supa.rpc = vi.fn(async () => ({
+    (supa as any).rpc = vi.fn(async () => ({
       data: [
         { user_id: 'u1', total_caught: 50, rarest_rarity: 'legendary' },
       ],

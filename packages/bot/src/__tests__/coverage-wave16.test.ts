@@ -394,7 +394,7 @@ describe('FarmingManager plant & harvest', () => {
       .mockReturnValueOnce(mockSupabaseChain(null)); // delete plot
     
     const mgr = new FarmingManager(mockGuild(), supa, mockValkey());
-    const result = await mgr.harvest('u1', 1);
+    const result = await mgr.harvest('u1');
     expect(result).toBeDefined();
   });
 });

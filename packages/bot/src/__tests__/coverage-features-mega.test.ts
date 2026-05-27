@@ -300,7 +300,7 @@ describe('CraftingManager deep', () => {
       economy_recipes: () => { const c = chain(null); c.then = (resolve: Function) => resolve({ data: recipes, error: null }); return c; },
     });
     const mgr = new CraftingManager(guild(), s, valkey());
-    const result = await mgr.getRecipes();
+    const result = await (mgr as any).getRecipes();
     expect(result).toBeDefined();
   });
 

@@ -349,7 +349,7 @@ describe('LotteryManager deep', () => {
   });
 
   it('clearCache works', () => {
-    const { LotteryManager } = (globalThis as any).__vitest_mocker__ ? {} : {};
+    // LotteryManager already imported above — clearCache tested separately
     // Already imported above, reuse
   });
 });
@@ -367,13 +367,13 @@ describe('PollsManager createPoll', () => {
     const pollData = { id: 'poll1', guild_id: 'g1', question: 'Test?', options: ['Yes', 'No'], message_id: null };
     supa.from.mockReturnValue(mockSupabaseChain(pollData));
     
-    const mgr = new PollsManager(g, supa);
+    const mgr = new PollsManager(supa);
     
     // createPoll(interaction, question, options, channelId, duration, allowMultiple)
     const interaction = mockChatInputInteraction({ guild: g });
     
     try {
-      await mgr.createPoll(interaction, 'Test question?', ['Yes', 'No'], 'ch1', 60, false);
+      await mgr.createPoll(interaction, 'Test question?', ['Yes', 'No'], false);
     } catch {
       // May fail on channel.send mock - that's ok, we're testing the code path
     }

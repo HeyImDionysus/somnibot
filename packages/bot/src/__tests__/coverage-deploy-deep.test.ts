@@ -201,8 +201,8 @@ describe('deployer deep coverage', () => {
         { key: 'cat-staff', name: 'Staff', position: 1 },
       ],
       channels: [
-        { key: 'general', name: 'general', type: 0, position: 0, categoryKey: 'cat-general', topic: 'General chat', slowmode: 0, nsfw: false, overrides: [{ roleKey: 'everyone', allow: '0', deny: '0' }] },
-        { key: 'admin-chat', name: 'admin-chat', type: 0, position: 1, categoryKey: 'cat-staff', topic: null, slowmode: 0, nsfw: false, overrides: [{ roleKey: 'admin', allow: '2048', deny: '0' }, { roleKey: 'everyone', allow: '0', deny: '1024' }] },
+        { key: 'general', name: 'general', type: 0, position: 0, categoryKey: 'cat-general', topic: 'General chat', slowmode: 0, nsfw: false, templateId: 'tpl-general', overrides: [{ roleKey: 'everyone', allow: '0', deny: '0' }] },
+        { key: 'admin-chat', name: 'admin-chat', type: 0, position: 1, categoryKey: 'cat-staff', topic: null, slowmode: 0, nsfw: false, templateId: 'tpl-admin-chat', overrides: [{ roleKey: 'admin', allow: '2048', deny: '0' }, { roleKey: 'everyone', allow: '0', deny: '1024' }] },
       ],
     }, { cleanExisting: false, dryRun: false, onProgress: progressFn });
 
@@ -265,7 +265,7 @@ describe('deployer deep coverage', () => {
       roles: [],
       categories: [],
       channels: [
-        { key: 'rules', name: 'rules', type: 0, position: 0, topic: 'Server rules', slowmode: 0, nsfw: false, overrides: [] },
+        { key: 'rules', name: 'rules', type: 0, position: 0, categoryKey: null, topic: 'Server rules', slowmode: 0, nsfw: false, templateId: 'tpl-rules', overrides: [] },
       ],
     }, { cleanExisting: false, dryRun: false });
     expect(result.success).toBe(true);

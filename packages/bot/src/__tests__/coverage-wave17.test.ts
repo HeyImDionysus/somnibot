@@ -225,10 +225,10 @@ describe('PollsManager deeper', () => {
       .mockReturnValueOnce(mockSupabaseChain({ id: 'poll1', guild_id: 'g1', status: 'active', options: ['Yes', 'No'], allow_multiple: false }))
       .mockReturnValueOnce(mockSupabaseChain(null))  // existing votes check
       .mockReturnValueOnce(mockSupabaseChain(null));  // insert vote
-    const mgr = new PollsManager(g, supa);
+    const mgr = new PollsManager(supa);
     const int = mockButtonInteraction({ customId: 'poll:vote:poll1:0' });
     try {
-      await mgr.handleVote(int, 'poll1', 0);
+      await (mgr as any).handlePollVote(int);
     } catch {
       // May not have handleVote — check what methods exist
     }
@@ -240,9 +240,9 @@ describe('PollsManager deeper', () => {
     const g = mockGuild();
     const supa = mockSupabase();
     supa.from.mockReturnValue(mockSupabaseChain({ id: 'poll1', guild_id: 'g1', status: 'active', question: 'Test?', options: ['Yes', 'No'], votes: {} }));
-    const mgr = new PollsManager(g, supa);
+    const mgr = new PollsManager(supa);
     try {
-      await mgr.endPoll(mockChatInputInteraction({ guild: g }), 'poll1');
+      await (mgr as any).closePoll(mockChatInputInteraction({ guild: mockGuild() }), 'poll1');
     } catch {
       // Method may have different signature
     }
@@ -307,7 +307,7 @@ describe('GatheringManager deeper', () => {
       .mockReturnValueOnce(mockSupabaseChain({ guild_id: 'g1', gathering_enabled: true, gathering_cooldown: 60, gathering_min_items: 1, gathering_max_items: 5, gathering_base_value: 10 }))
       .mockReturnValueOnce(mockSupabaseChain(null)); // insert gather result
     const mgr = new GatheringManager(mockGuild(), supa, mockValkey());
-    const result = await mgr.gather('u1');
+    const result = await mgr.gather('u1', 'forest' as any);
     expect(result).toBeDefined();
   });
 });

@@ -263,7 +263,7 @@ describe('PollsManager', () => {
   it('constructs', async () => {
     const { PollsManager } = await import('../features/polls/polls-manager.js');
     const supa = { from: vi.fn(() => chain(null)) } as any;
-    const mgr = new PollsManager(makeGuild(), supa);
+    const mgr = new PollsManager(supa);
     expect(mgr).toBeDefined();
   });
 });

@@ -265,7 +265,7 @@ DECLARE
   rows_affected INTEGER;
 BEGIN
   -- Only append if user is not already a participant
-  UPDATE economy_heists
+  UPDATE public.economy_heists
   SET participants = array_append(participants, p_user_id)
   WHERE id = p_heist_id
     AND NOT (p_user_id = ANY(participants));
@@ -274,7 +274,7 @@ BEGIN
 
   -- Only increment success_chance if the participant was actually added
   IF rows_affected > 0 THEN
-    UPDATE economy_heists
+    UPDATE public.economy_heists
     SET success_chance = LEAST(95, success_chance + 7)
     WHERE id = p_heist_id;
   END IF;

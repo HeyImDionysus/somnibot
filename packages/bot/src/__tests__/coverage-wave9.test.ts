@@ -270,7 +270,7 @@ describe('withCooldown', () => {
   it('creates cooldown-wrapped handler', async () => {
     const { withCooldown } = await import('../features/discord-native/interaction-handler.js');
     const handler = vi.fn(async () => {});
-    const wrapped = withCooldown(5, handler);
+    const wrapped = withCooldown(handler, 5000);
     expect(typeof wrapped).toBe('function');
   });
 });

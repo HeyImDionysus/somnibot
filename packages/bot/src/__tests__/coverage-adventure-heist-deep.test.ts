@@ -274,7 +274,7 @@ describe('AdventureManager startAdventure deep', () => {
       return origFrom(table);
     });
     // economy_subtract_balance fails:
-    supa.rpc = vi.fn(async () => ({ data: null, error: { message: 'insufficient funds' } }));
+    (supa as any).rpc = vi.fn(async () => ({ data: null, error: { message: 'insufficient funds' } }));
     const mgr = new AdventureManager(makeGuild(), supa as any, makeValkey());
     const { embed } = await mgr.startAdventure('u1');
     expect(embed.data.description).toContain('cost');
@@ -403,7 +403,7 @@ describe('PetsManager deep', () => {
   it('construct', async () => {
     const { PetsManager } = await import('../features/pets/pets-manager.js');
     const supa = makeTableSupa();
-    const mgr = new PetsManager(supa as any, null, makeValkey());
+    const mgr = new PetsManager(supa as any, undefined, makeValkey());
     expect(mgr).toBeDefined();
   });
 });

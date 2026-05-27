@@ -8,7 +8,7 @@ RETURNS BIGINT
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = ''
-AS $$ SELECT nextval('ticket_number_seq'); $$;
+AS $$ SELECT nextval('public.ticket_number_seq'); $$;
 
 CREATE TABLE IF NOT EXISTS ticket_transcripts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

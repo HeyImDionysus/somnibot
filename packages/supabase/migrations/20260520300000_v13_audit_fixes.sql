@@ -26,7 +26,7 @@ RETURNS BIGINT
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = ''
-AS $$ SELECT nextval('incident_number_seq'); $$;
+AS $$ SELECT nextval('public.incident_number_seq'); $$;
 
 -- ── Bug 2: reconciliation_runs missing guild_id column ──────────
 -- In multi-guild deployments every guild sees every other guild's

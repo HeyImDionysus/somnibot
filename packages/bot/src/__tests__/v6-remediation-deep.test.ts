@@ -805,7 +805,7 @@ describe('AutomationEngine deep', () => {
       channel: { id: 'ch1', send: vi.fn() }, guild: makeGuild(),
       member: { roles: { cache: new Map() } }, mentions: { users: new Map(), roles: new Map() },
     } as any;
-    await mgr.processMessageEvent(msg);
+    await mgr.processMessageEvent({ type: 'message.sent', guildId: 'g1', data: {} } as any, msg);
     expect(true).toBe(true);
   });
 

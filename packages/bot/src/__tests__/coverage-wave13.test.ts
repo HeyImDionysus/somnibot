@@ -322,7 +322,7 @@ describe('DeployListener', () => {
     }));
     
     const { getDeployStatus } = await import('../deploy/deploy-listener.js');
-    const result = await getDeployStatus('g1');
+    const result = getDeployStatus();
     expect(result).toBeNull();
   });
 });

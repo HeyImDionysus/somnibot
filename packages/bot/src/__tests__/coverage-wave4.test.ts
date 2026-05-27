@@ -410,7 +410,7 @@ describe('AlertService', () => {
     vk.incr = vi.fn(async () => 3); // below default threshold
     const svc = new AlertService(vk, alertSupa(), guild());
     await svc.init();
-    await svc.recordFailure('auto1', new Error('Test failure'));
+    await svc.recordFailure('auto1', 'test-auto', 'Test failure');
   });
 
   it('recordFailure exceeds threshold triggers alert', async () => {
@@ -419,7 +419,7 @@ describe('AlertService', () => {
     vk.incr = vi.fn(async () => 5); // at threshold
     const svc = new AlertService(vk, alertSupa(), guild(), { failureThreshold: 5 });
     await svc.init();
-    await svc.recordFailure('auto1', new Error('Threshold reached'));
+    await svc.recordFailure('auto1', 'test-auto', 'Threshold reached');
   });
 
   it('getFailureCount', async () => {
@@ -444,7 +444,7 @@ describe('AlertService', () => {
     const { AlertService } = await import('../services/alert-service.js');
     const svc = new AlertService(valkey(), alertSupa(), guild());
     await svc.init();
-    await svc.postAlert({ title: 'Test Alert', message: 'Something happened', severity: 'warning' });
+    await svc.postAlert('test-alert', 'warning', 'Test Alert', 'Something happened');
   });
 });
 

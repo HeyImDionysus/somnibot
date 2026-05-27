@@ -298,7 +298,7 @@ describe('InfractionService deep', () => {
   it('createInfraction', async () => {
     const { createInfraction } = await import('../features/moderation/infraction-service.js');
     const result = await createInfraction(modSupa(), {
-      guild_id: 'g1', user_id: 'u2', moderator_id: 'u1',
+      guildId: 'g1', memberId: 'u2', moderatorId: 'u1',
       type: 'warn', reason: 'Test warning',
     });
     expect(result).toBeDefined();
@@ -333,10 +333,10 @@ describe('InfractionService deep', () => {
 // Escalation
 // ═══════════════════════════════════════════════
 describe('Escalation deep', () => {
-  const steps = [
-    { threshold: 3, action: 'mute', duration_minutes: 60 },
-    { threshold: 5, action: 'kick' },
-    { threshold: 7, action: 'ban' },
+  const steps: import('@somnibot/shared').EscalationStep[] = [
+    { threshold: 3, action: 'mute', durationMinutes: 60, dmMember: true },
+    { threshold: 5, action: 'kick', dmMember: true },
+    { threshold: 7, action: 'ban', dmMember: true },
   ];
 
   it('getEscalationAction below threshold', async () => {
@@ -386,11 +386,12 @@ describe('ModLog deep', () => {
         return chain(null);
       }),
     };
-    await postModLogEntry(g, s, {
+    await postModLogEntry(g as any, {
       action: 'warn',
-      moderator: { id: 'u1', username: 'Mod', displayAvatarURL: () => 'url' } as any,
-      target: { id: 'u2', username: 'User', displayAvatarURL: () => 'url' } as any,
+      moderator: 'Mod',
+      member: { id: 'u2', user: { tag: 'User#0', displayAvatarURL: () => 'url' } } as any,
       reason: 'Spamming',
+      channelId: 'ch1',
     });
   });
 
@@ -403,11 +404,12 @@ describe('ModLog deep', () => {
         return chain(null);
       }),
     };
-    await postModLogEntry(g, s, {
+    await postModLogEntry(g as any, {
       action: 'kick',
-      moderator: { id: 'u1', username: 'Mod', displayAvatarURL: () => 'url' } as any,
-      target: { id: 'u2', username: 'User', displayAvatarURL: () => 'url' } as any,
+      moderator: 'Mod',
+      member: { id: 'u2', user: { tag: 'User#0', displayAvatarURL: () => 'url' } } as any,
       reason: 'Being rude',
+      channelId: null,
     });
   });
 
@@ -420,12 +422,13 @@ describe('ModLog deep', () => {
         return chain(null);
       }),
     };
-    await postModLogEntry(g, s, {
+    await postModLogEntry(g as any, {
       action: 'ban',
-      moderator: { id: 'u1', username: 'Mod', displayAvatarURL: () => 'url' } as any,
-      target: { id: 'u2', username: 'User', displayAvatarURL: () => 'url' } as any,
+      moderator: 'Mod',
+      member: { id: 'u2', user: { tag: 'User#0', displayAvatarURL: () => 'url' } } as any,
       reason: 'Repeated offenses',
-      duration: '7d',
+      duration: 10080,
+      channelId: 'ch1',
     });
   });
 });
@@ -558,8 +561,9 @@ describe('AuditService deep', () => {
     const service = new AuditService('g1', s, eb);
     await service.log({
       action: 'member.warn',
-      actor_id: 'u1',
-      target_id: 'u2',
+      actorType: 'user' as const,
+      actorId: 'u1',
+      targetId: 'u2',
       details: { reason: 'Spamming' },
     });
   });
@@ -580,7 +584,8 @@ describe('AuditService deep', () => {
     const service = new AuditService('g1', s, eb);
     await service.log({
       action: 'config.update',
-      actor_id: 'u1',
+      actorType: 'user' as const,
+      actorId: 'u1',
       details: { setting: 'levels_enabled', value: true },
     });
   });
@@ -612,8 +617,8 @@ describe('Welcome services', () => {
 
   it('member-service handleJoin', async () => {
     try {
-      const mod = await import('../features/welcome/member-service.js');
-      const fn = mod.handleMemberAdd || mod.handleJoin || mod.default;
+      const mod = await import('../features/welcome/member-service.js') as any;
+      const fn = mod.handleMemberAdd || mod.handleJoin || mod.recordMemberJoin || mod.default;
       if (fn) {
         const member = {
           id: 'u1', guild: guild(),
@@ -630,8 +635,8 @@ describe('Welcome services', () => {
 
   it('goodbye-service handleLeave', async () => {
     try {
-      const mod = await import('../features/welcome/goodbye-service.js');
-      const fn = mod.handleMemberRemove || mod.handleLeave || mod.default;
+      const mod = await import('../features/welcome/goodbye-service.js') as any;
+      const fn = mod.handleMemberRemove || mod.handleLeave || mod.executeGoodbyeFlow || mod.default;
       if (fn) {
         const member = {
           id: 'u1', guild: guild(),

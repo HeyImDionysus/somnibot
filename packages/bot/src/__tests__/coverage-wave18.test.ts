@@ -93,7 +93,7 @@ describe('PetsManager battle & prestige', () => {
       .mockReturnValueOnce(mockSupabaseChain(null)); // xp
     supa.rpc.mockResolvedValue({ data: null, error: null });
     const mgr = new PetsManager(supa, undefined, mockValkey());
-    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser('u2') } });
+    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser({ id: 'u2' }) } });
     await mgr.battlePet(int);
     expect(int.reply).toHaveBeenCalled();
   });
@@ -104,7 +104,7 @@ describe('PetsManager battle & prestige', () => {
       .mockReturnValueOnce(mockSupabaseChain({ guild_id: 'g1', economy_pets_enabled: true, economy_pet_battle_enabled: true }))
       .mockReturnValueOnce(mockSupabaseChain(null)); // no pet
     const mgr = new PetsManager(supa, undefined, mockValkey());
-    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser('u2') } });
+    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser({ id: 'u2' }) } });
     await mgr.battlePet(int);
     expect(int.reply).toHaveBeenCalled();
   });
@@ -113,7 +113,7 @@ describe('PetsManager battle & prestige', () => {
     const supa = mockSupabase();
     supa.from.mockReturnValueOnce(mockSupabaseChain({ guild_id: 'g1', economy_pets_enabled: true, economy_pet_battle_enabled: true }));
     const mgr = new PetsManager(supa, undefined, mockValkey());
-    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser('u1') } });
+    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser({ id: 'u1' }) } });
     await mgr.battlePet(int);
     expect(int.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("yourself") }));
   });
@@ -125,7 +125,7 @@ describe('PetsManager battle & prestige', () => {
       .mockReturnValueOnce(mockSupabaseChain({ id: 'p1', name: 'Rex', status: 'sick', attack: 5, speed: 3, health: 20, level: 2 }))
       .mockReturnValueOnce(mockSupabaseChain({ id: 'p2', name: 'Fido', status: 'happy' }));
     const mgr = new PetsManager(supa, undefined, mockValkey());
-    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser('u2') } });
+    const int = mockChatInputInteraction({ userId: 'u1', options: { user: mockUser({ id: 'u2' }) } });
     await mgr.battlePet(int);
     expect(int.reply).toHaveBeenCalled();
   });
@@ -176,9 +176,9 @@ describe('Escalation getEscalationAction', () => {
   it('returns matching step for high warning count', async () => {
     const { getEscalationAction } = await import('../features/moderation/escalation.js');
     const chain = [
-      { threshold: 3, action: 'mute' as const, durationMinutes: 60 },
-      { threshold: 5, action: 'kick' as const },
-      { threshold: 7, action: 'ban' as const },
+      { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+      { threshold: 5, action: 'kick' as const, dmMember: true },
+      { threshold: 7, action: 'ban' as const, dmMember: true },
     ];
     const step = getEscalationAction(chain, 6);
     expect(step).not.toBeNull();
@@ -188,9 +188,9 @@ describe('Escalation getEscalationAction', () => {
   it('returns highest matching step', async () => {
     const { getEscalationAction } = await import('../features/moderation/escalation.js');
     const chain = [
-      { threshold: 2, action: 'mute' as const, durationMinutes: 30 },
-      { threshold: 5, action: 'kick' as const },
-      { threshold: 8, action: 'ban' as const },
+      { threshold: 2, action: 'mute' as const, durationMinutes: 30, dmMember: true },
+      { threshold: 5, action: 'kick' as const, dmMember: true },
+      { threshold: 8, action: 'ban' as const, dmMember: true },
     ];
     expect(getEscalationAction(chain, 10)!.action).toBe('ban');
     expect(getEscalationAction(chain, 5)!.action).toBe('kick');
@@ -312,7 +312,7 @@ describe('GiveawayManager', () => {
     const supa = mockSupabase();
     const guild = mockGuild();
     const bus = mockEventBus();
-    const mgr = new GiveawayManager(guild as any, supa, bus as any);
+    const mgr = new GiveawayManager(guild as any, supa, mockValkey() as any, bus as any);
     expect(mgr).toBeDefined();
   });
 });
