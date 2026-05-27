@@ -16,12 +16,28 @@ import { checkRateLimit } from './rate-limit';
 const usedNonces = new Map<string, number>(); // nonce → expiresAtMs
 let lastNonceCleanup = Date.now();
 
+/**
+ * V7 Audit §2.P3a — Maximum entries in the nonce fallback store.
+ * Prevents unbounded memory growth during Valkey outage + high download volume.
+ */
+const MAX_NONCE_ENTRIES = 10_000;
+
 function cleanupNonces(): void {
   const now = Date.now();
   if (now - lastNonceCleanup < 60_000) return; // clean every ~60s
   lastNonceCleanup = now;
   for (const [nonce, expiry] of usedNonces) {
     if (now > expiry) usedNonces.delete(nonce);
+  }
+
+  // V7 Audit §2.P3a — hard cap eviction (oldest first via Map insertion order)
+  if (usedNonces.size > MAX_NONCE_ENTRIES) {
+    const excess = usedNonces.size - MAX_NONCE_ENTRIES;
+    const iter = usedNonces.keys();
+    for (let i = 0; i < excess; i++) {
+      const { value } = iter.next();
+      if (value) usedNonces.delete(value);
+    }
   }
 }
 

@@ -1,0 +1,15 @@
+# ============================================================
+# SomniBot — Dashboard Railway Configuration
+# V7 Audit §9.P3b — Dedicated deploy config for the dashboard service.
+# ============================================================
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "packages/dashboard/Dockerfile"
+
+[deploy]
+startCommand = "node packages/dashboard/server.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath = "/api/health"
+healthcheckTimeout = 15

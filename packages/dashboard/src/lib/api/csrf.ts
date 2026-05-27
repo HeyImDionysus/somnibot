@@ -21,6 +21,29 @@ import { cookies } from 'next/headers';
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
 const CSRF_HEADER_NAME = 'x-csrf-token';
 
+/**
+ * V7 Audit §1.P3a — Centralized CSRF exempt route prefixes.
+ *
+ * Routes listed here skip CSRF verification on mutating requests because
+ * they use an alternative authentication mechanism:
+ * - paypal/webhook  → PayPal API signature verification
+ * - license/*       → API-key + per-key rate limiting
+ * - portal/*        → Portal session token auth
+ * - auth/*          → OAuth provider callback (state param)
+ * - downloads/*     → HMAC-signed URL + single-use nonce
+ * - csrf            → GET-only token issuance
+ *
+ * V6 Audit §1.1: /api/setup intentionally NOT exempt (uses parseBody + Supabase auth).
+ */
+const CSRF_EXEMPT_PREFIXES: readonly string[] = [
+  '/api/paypal/webhook',
+  '/api/license/',
+  '/api/portal/',
+  '/api/auth/',
+  '/api/downloads/',
+  '/api/csrf',
+] as const;
+
 /** Secret used to sign CSRF tokens. Fails closed — refuses to serve without an explicit secret. */
 let _csrfSecret: string | undefined;
 function getCsrfSecret(): string {
@@ -89,19 +112,10 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
     if (isLocalhost) return null;
   }
 
-  // Skip exempt routes
+  // Skip exempt routes — centralized list for easy auditing.
+  // V7 Audit §1.P3a: Moved from inline array to module-level constant.
   const path = request.nextUrl.pathname;
-  // V6 Audit §1.1: Removed /api/setup — setup route uses parseBody() which
-    // needs CSRF protection. Setup is POST-only with Supabase auth.
-  const exemptPrefixes = [
-    '/api/paypal/webhook',
-    '/api/license/',
-    '/api/portal/',
-    '/api/auth/',
-    '/api/downloads/',
-    '/api/csrf',
-  ];
-  if (exemptPrefixes.some((prefix) => path.startsWith(prefix))) return null;
+  if (CSRF_EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix))) return null;
 
   // Get token from header
   const headerToken = request.headers.get(CSRF_HEADER_NAME);

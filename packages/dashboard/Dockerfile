@@ -4,7 +4,9 @@
 # ============================================================
 
 # --- Stage 1: Install & Build ---
-FROM node:22-alpine AS builder
+# V7 Audit §9.P3a — switched from alpine to slim for better native module
+# compatibility (e.g., bcrypt, sharp, canvas) and glibc support.
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -34,7 +36,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm turbo build --filter=@somnibot/dashboard
 
 # --- Stage 2: Production Runtime ---
-FROM node:22-alpine AS runtime
+FROM node:22-slim AS runtime
 
 WORKDIR /app
 

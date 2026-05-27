@@ -14,8 +14,45 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
+import os from 'node:os';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
+
+/**
+ * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
+ * Only essential system vars (PATH, LANG, TZ, etc.) are passed to child
+ * processes; everything else comes from the explicit envVars parameter.
+ */
+const SAFE_PARENT_ENV_KEYS = [
+  'PATH',
+  'LANG',
+  'LC_ALL',
+  'TZ',
+  'HOME',
+  'USERPROFILE',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  // Windows-specific
+  'APPDATA',
+  'LOCALAPPDATA',
+  'PROGRAMFILES',
+  'SystemRoot',
+  'COMSPEC',
+  // macOS / Linux
+  'SHELL',
+  'XDG_RUNTIME_DIR',
+  'XDG_CONFIG_HOME',
+] as const;
+
+function safeParentEnv(): Record<string, string> {
+  const filtered: Record<string, string> = {};
+  for (const key of SAFE_PARENT_ENV_KEYS) {
+    const val = process.env[key];
+    if (val !== undefined) filtered[key] = val;
+  }
+  return filtered;
+}
 import {
   getLavalinkStatus,
   getLavalinkPid,
@@ -178,8 +215,10 @@ function startBotProcess(envVars: Record<string, string>): void {
   botStatus = 'starting';
   broadcastStatus();
 
+  // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
+  // Avoids leaking parent-process env (cloud provider secrets, etc.) to children.
   botProcess = fork(entryPath, [], {
-    env: { ...process.env, ...envVars },
+    env: { ...safeParentEnv(), ...envVars },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
@@ -272,8 +311,9 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   dashboardStatus = 'starting';
   broadcastStatus();
 
+  // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   dashboardProcess = fork(entryPath, [], {
-    env: { ...process.env, ...envVars },
+    env: { ...safeParentEnv(), ...envVars },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });

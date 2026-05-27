@@ -7,22 +7,41 @@
  * - Validates event ID format.
  */
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createHmac } from 'crypto';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
-// Derive replay secret from NEXTAUTH_SECRET — no extra env var needed
+/** V7 Audit §7.P2a — Zod schema for replay event ID path param. */
+const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
+
+// V7 Audit §2.P2a: Prefer dedicated WEBHOOK_REPLAY_SECRET env var.
+// Falls back to HMAC derivation from NEXTAUTH_SECRET for backwards compat.
 let _replaySecret: string | undefined;
 function getReplaySecret(): string {
   if (_replaySecret) return _replaySecret;
-  const secret = process.env.WEBHOOK_REPLAY_SECRET
-    || (process.env.NEXTAUTH_SECRET
-      ? createHmac('sha256', process.env.NEXTAUTH_SECRET).update('webhook-replay-secret').digest('hex')
-      : undefined);
-  if (!secret) throw new Error('Missing WEBHOOK_REPLAY_SECRET or NEXTAUTH_SECRET — cannot derive replay secret');
-  _replaySecret = secret;
-  return secret;
+
+  if (process.env.WEBHOOK_REPLAY_SECRET) {
+    _replaySecret = process.env.WEBHOOK_REPLAY_SECRET;
+    return _replaySecret;
+  }
+
+  if (process.env.NEXTAUTH_SECRET) {
+    console.warn(
+      '[WebhookReplay] WEBHOOK_REPLAY_SECRET not set — deriving from NEXTAUTH_SECRET. ' +
+      'Set a dedicated WEBHOOK_REPLAY_SECRET env var for better security isolation.',
+    );
+    _replaySecret = createHmac('sha256', process.env.NEXTAUTH_SECRET)
+      .update('webhook-replay-secret')
+      .digest('hex');
+    return _replaySecret;
+  }
+
+  throw new Error(
+    'Missing WEBHOOK_REPLAY_SECRET (or NEXTAUTH_SECRET fallback). ' +
+    'Cannot derive replay secret.',
+  );
 }
 
 export async function POST(
@@ -34,15 +53,17 @@ export async function POST(
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const { id } = await params;
+  const { id: rawId } = await params;
 
-  // Validate ID format (prevent injection)
-  if (!id || id.length > 128 || !/^[\w-]+$/.test(id)) {
+  // V7 Audit §7.P2a — Zod-validated event ID
+  const parsed = eventIdSchema.safeParse(rawId);
+  if (!parsed.success) {
     return NextResponse.json(
       { success: false, error: 'Invalid event ID format' },
       { status: 400 },
     );
   }
+  const id = parsed.data;
 
   const supabase = createAdminSupabase();
 

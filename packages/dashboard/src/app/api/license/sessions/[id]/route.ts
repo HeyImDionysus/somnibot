@@ -1,10 +1,15 @@
 /**
  * DELETE /api/license/sessions/[id] — Remotely revoke a device session (admin).
+ *
+ * V7 Audit §7.P2a — Added Zod validation for path parameter.
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+
+const sessionIdSchema = z.string().uuid('Session ID must be a valid UUID');
 
 export async function DELETE(
   _req: NextRequest,
@@ -14,7 +19,15 @@ export async function DELETE(
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
 
-  const { id: sessionId } = await params;
+  const { id: rawId } = await params;
+  const parsed = sessionIdSchema.safeParse(rawId);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { success: false, error: 'Invalid session ID format' },
+      { status: 400 },
+    );
+  }
+  const sessionId = parsed.data;
   const supabase = createAdminSupabase();
 
   // V47-C2: license_sessions has no guild_id column — verify ownership via

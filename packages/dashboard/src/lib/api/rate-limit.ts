@@ -156,6 +156,13 @@ interface RateLimitEntry {
 
 const memStore = new Map<string, RateLimitEntry>();
 
+/**
+ * V7 Audit §1.P3b — Maximum entries in the in-memory rate-limit store.
+ * Prevents unbounded memory growth during Valkey outage under heavy load.
+ * When the cap is hit, the oldest entries are evicted (FIFO via Map iteration order).
+ */
+const MEM_STORE_MAX_ENTRIES = 50_000;
+
 const CLEANUP_INTERVAL = 5 * 60 * 1000;
 let lastCleanup = Date.now();
 
@@ -167,6 +174,16 @@ function cleanup(windowMs: number): void {
   for (const [key, entry] of memStore) {
     if (now - entry.windowStart > windowMs * 2) {
       memStore.delete(key);
+    }
+  }
+
+  // V7 Audit §1.P3b — hard cap eviction if cleanup didn't free enough
+  if (memStore.size > MEM_STORE_MAX_ENTRIES) {
+    const excess = memStore.size - MEM_STORE_MAX_ENTRIES;
+    const iter = memStore.keys();
+    for (let i = 0; i < excess; i++) {
+      const { value } = iter.next();
+      if (value) memStore.delete(value);
     }
   }
 }
@@ -182,6 +199,11 @@ function checkRateLimitMemory(
   const entry = memStore.get(key);
 
   if (!entry || now - entry.windowStart > windowMs) {
+    // V7 Audit §1.P3b — evict oldest entry if at capacity before inserting
+    if (!entry && memStore.size >= MEM_STORE_MAX_ENTRIES) {
+      const oldest = memStore.keys().next().value;
+      if (oldest) memStore.delete(oldest);
+    }
     memStore.set(key, { hits: 1, windowStart: now });
     return { limited: false, remaining: maxHits - 1, retryAfterMs: 0 };
   }

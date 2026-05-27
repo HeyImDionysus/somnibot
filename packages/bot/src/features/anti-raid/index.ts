@@ -47,6 +47,22 @@ const RAID_MODE_COOLDOWN = 5 * 60_000; // Auto-deactivate after 5 minutes
 const _memoryJoinWindows = new Map<string, number[]>();
 const _memoryRaidMode = new Map<string, number>();
 
+/**
+ * V7 Audit §8.P3a — Maximum guilds tracked in memory fallback Maps.
+ * In a sharded bot, each shard handles ~2500 guilds max. 10,000 provides
+ * ample headroom without unbounded growth risk.
+ */
+const MAX_MEMORY_GUILDS = 10_000;
+
+/** Evict oldest entry from a Map if it exceeds the cap. */
+function capMap<V>(map: Map<string, V>, max: number): void {
+  /* v8 ignore next 4 -- defensive cap; only fires at 10k+ guilds in memory */
+  if (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest) map.delete(oldest);
+  }
+}
+
 // Valkey key helpers
 function joinWindowKey(guildId: string): string {
   return `antiraid:joins:${guildId}`;
@@ -140,6 +156,7 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
     // Cap in-memory array to prevent unbounded growth
     if (filtered.length > 500) filtered.splice(0, filtered.length - 500);
     _memoryJoinWindows.set(guildId, filtered);
+    capMap(_memoryJoinWindows, MAX_MEMORY_GUILDS); // V7 Audit §8.P3a
     return filtered.length;
   }
 }
@@ -172,6 +189,7 @@ async function activateRaidMode(guildId: string): Promise<void> {
   } catch {
     // Valkey unavailable — store in memory
     _memoryRaidMode.set(guildId, Date.now());
+    capMap(_memoryRaidMode, MAX_MEMORY_GUILDS); // V7 Audit §8.P3a
     log.warn(`Valkey unavailable — raid mode for ${guildId} stored in-memory only`);
   }
 }
