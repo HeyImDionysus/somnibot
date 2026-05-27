@@ -54,7 +54,10 @@ COPY --from=builder /app/packages/bot/dist ./packages/bot/dist
 
 # Copy migration files (for auto-migration on first boot)
 # V8 Audit §9.P3a: Read-only to limit exposure; only migration-runner reads them
-COPY --chmod=444 packages/supabase/migrations ./packages/supabase/migrations
+# Directories need +x (search bit) for readdirSync; files are read-only 444
+COPY packages/supabase/migrations ./packages/supabase/migrations
+RUN find ./packages/supabase/migrations -type d -exec chmod 555 {} + \
+ && find ./packages/supabase/migrations -type f -exec chmod 444 {} +
 
 # Copy node_modules from builder (already resolved by pnpm)
 COPY --from=builder /app/node_modules ./node_modules
