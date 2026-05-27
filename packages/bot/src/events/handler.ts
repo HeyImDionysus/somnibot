@@ -375,49 +375,21 @@ export function registerEvents(client: SomniClient): void {
     }
   }, 30 * 60 * 1000);
 
-  // Data retention prune (every 6 hours)
+  // Data retention prune (every 6 hours) — single RPC for all guilds
   setInterval(async () => {
-    for (const ctx of client.router.all()) {
-      try { await pruneExpiredData(client.supabase, ctx.guildId); }
-      catch (err) { log.error('Data retention prune error', { guildId: ctx.guildId, error: String(err) }); }
+    try {
+      const { data, error } = await client.supabase.rpc('prune_expired_data');
+      if (error) throw error;
+      const counts = data as Record<string, number> | null;
+      const total = counts ? Object.values(counts).reduce((s, n) => s + n, 0) : 0;
+      if (total > 0) log.info('Data pruned (batch)', counts);
+    } catch (err) {
+      log.error('Data retention prune error', { error: String(err) });
     }
   }, 6 * 60 * 60 * 1000);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
-
-async function pruneExpiredData(
-  supabase: import('@supabase/supabase-js').SupabaseClient,
-  guildId: string,
-): Promise<void> {
-  const now = new Date();
-
-  const auditCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();
-  const { count: auditCount } = await supabase
-    .from('audit_logs')
-    .delete({ count: 'exact' })
-    .eq('guild_id', guildId)
-    .lt('created_at', auditCutoff);
-
-  const { count: sessionCount } = await supabase
-    .from('portal_sessions')
-    .delete({ count: 'exact' })
-    .eq('guild_id', guildId)
-    .lt('expires_at', now.toISOString());
-
-  const webhookCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const { count: webhookCount } = await supabase
-    .from('webhook_events')
-    .delete({ count: 'exact' })
-    .eq('guild_id', guildId)
-    .in('status', ['processed', 'ignored'])
-    .lt('created_at', webhookCutoff);
-
-  const total = (auditCount ?? 0) + (sessionCount ?? 0) + (webhookCount ?? 0);
-  if (total > 0) {
-    log.info('Data pruned', { guildId, auditLogs: auditCount ?? 0, sessions: sessionCount ?? 0, webhookEvents: webhookCount ?? 0 });
-  }
-}
 
 /** Per-guild moderation config cache */
 const _modConfigCache = new Map<string, {
@@ -425,6 +397,11 @@ const _modConfigCache = new Map<string, {
   time: number;
 }>();
 const MOD_CONFIG_TTL = 60_000;
+/**
+ * V8 Audit §14.P3c — Cap cache size to prevent unbounded growth at scale.
+ * When the map exceeds this limit the oldest entry (first inserted) is evicted.
+ */
+const MOD_CONFIG_MAX_ENTRIES = 10_000;
 
 async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
   escalationChain: EscalationStep[];
@@ -447,6 +424,11 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
     infractionExpiryDays: (data?.infraction_expiry_days as number) ?? 30,
     modLogChannelId: (data?.mod_log_channel_id as string) ?? null,
   };
+  // Evict oldest entry if at capacity (Map preserves insertion order)
+  if (_modConfigCache.size >= MOD_CONFIG_MAX_ENTRIES) {
+    const oldest = _modConfigCache.keys().next().value;
+    if (oldest !== undefined) _modConfigCache.delete(oldest);
+  }
   _modConfigCache.set(id, { data: result, time: now });
   return result;
 }
