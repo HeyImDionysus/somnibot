@@ -626,7 +626,8 @@ btnRestoreCloud.addEventListener('click', async () => {
   hideMessage();
 
   try {
-    const result = await window.somnibot.pullFromSupabase(url, key);
+    // V5 Audit §10.P3a: Secret stays in main process — no args needed
+    const result = await window.somnibot.pullFromSupabase();
 
     if (!result.ok) {
       showMessage('error', result.error || 'Could not restore credentials from Supabase.');

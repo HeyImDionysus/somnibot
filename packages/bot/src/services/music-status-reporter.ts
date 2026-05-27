@@ -13,6 +13,10 @@ const log = createLogger('MusicStatus');
 
 export class MusicStatusReporter {
   private timer: NodeJS.Timeout | null = null;
+  // V5 Audit §12.P3a: Track consecutive failures to avoid silent error streams.
+  private consecutiveFailures = 0;
+  private static readonly MAX_CONSECUTIVE_FAILURES = 5;
+  private disabled = false;
 
   constructor(
     private musicPlayer: MusicPlayerManager,
@@ -21,8 +25,11 @@ export class MusicStatusReporter {
   ) {}
 
   start(intervalMs: number = 15_000): void {
+    this.consecutiveFailures = 0;
+    this.disabled = false;
     this.report().catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
     this.timer = setInterval(() => {
+      if (this.disabled) return;
       this.report().catch((err) => {
         log.error('Error:', { error: String(err) });
       });
@@ -35,12 +42,14 @@ export class MusicStatusReporter {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.disabled = false;
+    this.consecutiveFailures = 0;
   }
 
   private async report(): Promise<void> {
     const status = await this.musicPlayer.getStatus();
 
-    await this.supabase
+    const { error } = await this.supabase
       .from('bot_diagnostics')
       .upsert(
         {
@@ -55,9 +64,21 @@ export class MusicStatusReporter {
           snapshot_at: new Date().toISOString(),
         },
         { onConflict: 'guild_id,type' },
-      )
-      .then(({ error }) => {
-        if (error) log.warn('Upsert error:', error.message);
-      });
+      );
+
+    if (error) {
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= MusicStatusReporter.MAX_CONSECUTIVE_FAILURES) {
+        log.error(
+          `Music status reporter disabled after ${this.consecutiveFailures} consecutive failures. Last error: ${error.message}`,
+        );
+        this.disabled = true;
+      } else {
+        log.warn(`Upsert error (${this.consecutiveFailures}/${MusicStatusReporter.MAX_CONSECUTIVE_FAILURES}):`, error.message);
+      }
+    } else {
+      // Reset on success
+      this.consecutiveFailures = 0;
+    }
   }
 }

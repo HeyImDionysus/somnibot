@@ -1,0 +1,53 @@
+# V5 Audit §13.P3c — Test environment for integration tests.
+# Provides Supabase (Postgres + GoTrue + PostgREST) and Valkey
+# so integration tests can run without external dependencies.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   pnpm test:integration
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  # Supabase local dev stack — official CLI manages this, but
+  # for CI we use the lightweight Postgres-only approach.
+  supabase-db:
+    image: supabase/postgres:15.6.1.139
+    ports:
+      - "54322:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  supabase-api:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      supabase-db:
+        condition: service_healthy
+    ports:
+      - "54321:3000"
+    environment:
+      PGRST_DB_URI: postgres://postgres:postgres@supabase-db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: "super-secret-jwt-token-with-at-least-32-characters-long"
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  supabase-db-data:
