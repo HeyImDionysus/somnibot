@@ -1,10 +1,10 @@
 -- ============================================================
--- V8 Audit §5.P2a — REVOKE EXECUTE on 26 SECURITY DEFINER RPCs
+-- V8 Audit §5.P2a — REVOKE EXECUTE on 26 security-definer RPCs
 -- ============================================================
 -- These functions were created in migrations after v42 and never
 -- added to any REVOKE block. Since PostgreSQL grants EXECUTE to
 -- PUBLIC by default, they are callable via PostgREST RPC by any
--- user with the anon key — despite being SECURITY DEFINER.
+-- user with the anon key — despite being security-definer.
 --
 -- Fix: REVOKE from anon, authenticated, and PUBLIC; GRANT to
 -- service_role only (the bot and dashboard both use service_role).
