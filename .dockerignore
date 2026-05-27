@@ -1,0 +1,15 @@
+# V5 Audit §9.P3b: Prevent leaking dev artifacts into Docker build context
+node_modules
+.git
+.github
+*.md
+!README.md
+.env*
+.vscode
+.idea
+coverage
+dist
+*.log
+.turbo
+.next
+out

@@ -316,11 +316,29 @@ export async function processAntiRaid(
             log.info(`Lockdown: raised verification to VERY_HIGH for guild ${guild.id}`);
           }
 
+          // V5 Audit §8.P3a: Revoke all active invites during lockdown
+          // to prevent raiders from using existing invite links.
+          let revokedCount = 0;
+          try {
+            const invites = await guild.invites.fetch();
+            const deletePromises = invites.map((inv) =>
+              inv.delete('Anti-raid lockdown: revoking active invites').catch(() => null),
+            );
+            const results = await Promise.allSettled(deletePromises);
+            revokedCount = results.filter((r) => r.status === 'fulfilled').length;
+            if (revokedCount > 0) {
+              log.info(`Lockdown: revoked ${revokedCount} invite(s) for guild ${guild.id}`);
+            }
+          } catch (invErr) {
+            log.warn('Failed to revoke invites during lockdown:', { error: String(invErr) });
+          }
+
           const embed = new EmbedBuilder()
             .setColor(0xFF0000)
             .setTitle('🔒 Anti-Raid: Lockdown Activated')
             .setDescription(
               `Server verification level raised to **Very High** (phone verification required).\n` +
+              (revokedCount > 0 ? `${revokedCount} active invite(s) revoked.\n` : '') +
               `Will auto-restore when raid mode expires.`,
             )
             .setTimestamp();

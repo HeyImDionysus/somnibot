@@ -33,7 +33,8 @@ export interface SomniBotAPI {
   }>;
 
   // Cloud sync
-  pullFromSupabase: (supabaseUrl: string, supabaseSecretKey: string) => Promise<{
+  // V5 Audit §10.P3a: No args — main process owns the secret
+  pullFromSupabase: () => Promise<{
     ok: boolean;
     credentials?: Record<string, string>;
     error?: string;
@@ -101,8 +102,8 @@ contextBridge.exposeInMainWorld('somnibot', {
   getStatus: () => ipcRenderer.invoke('get-status'),
 
   // Cloud sync
-  pullFromSupabase: (supabaseUrl: string, supabaseSecretKey: string) =>
-    ipcRenderer.invoke('pull-from-supabase', supabaseUrl, supabaseSecretKey),
+  // V5 Audit §10.P3a: Secret stays in main process
+  pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
 
   // Dashboard
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),

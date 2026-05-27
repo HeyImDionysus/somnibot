@@ -170,7 +170,7 @@ const SEARCH_EMPTY = [
 
 export class EconomyManager {
   private configCache: EconomyConfig | null = null;
-  private configCacheTTL = 30_000; // 30s
+  private configCacheTTL = 10_000; // 10s — V5 Audit §4.P3b: reduced from 30s to narrow stale-config window
   private configCacheTime = 0;
 
   constructor(

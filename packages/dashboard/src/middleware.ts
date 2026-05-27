@@ -42,7 +42,7 @@ function buildCspHeader(nonce: string): string {
 function applyCspHeaders(response: NextResponse, nonce: string): void {
   response.headers.set('Content-Security-Policy', buildCspHeader(nonce));
   response.headers.set('x-nonce', nonce);
-  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   response.headers.set('X-Frame-Options', 'DENY');

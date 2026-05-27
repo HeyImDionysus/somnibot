@@ -366,28 +366,30 @@ async function handlePaymentCaptured(
   const amountValue = (resource as unknown as PayPalCaptureResource).amount?.value;
   const amountCents = amountValue ? Math.round(parseFloat(amountValue) * 100) : order.amount_cents;
 
-  // V5 Audit [2.2]: Verify captured amount matches the pending order's expected price.
-  // If PayPal captures a different amount (e.g., manipulated checkout), log a critical
-  // warning. We still process the order to avoid losing the payment, but the mismatch
-  // is flagged for manual review.
+  // V5 Audit §2.P2a: Verify captured amount matches the pending order's expected price.
+  // If PayPal captures a different amount (e.g., partial capture, currency rounding,
+  // or checkout manipulation), flag the order for manual review instead of auto-fulfilling.
+  let amountMismatch = false;
   if (amountValue && order.amount_cents > 0) {
     const expectedCents = order.amount_cents;
     if (amountCents !== expectedCents) {
+      amountMismatch = true;
       console.error(
         `[Webhook] AMOUNT MISMATCH: PayPal captured ${amountCents} cents but order ${order.id} ` +
         `expected ${expectedCents} cents. Customer ${meta.customer_id}, product ${meta.product_id}. ` +
-        `Processing anyway — flag for manual review.`,
+        `Order flagged as pending_review — manual intervention required.`,
       );
     }
   }
 
-  // Mark order completed
+  // Mark order completed (or pending_review if amount mismatch)
+  const orderStatus = amountMismatch ? 'pending_review' : 'completed';
   await supabase
     .from('orders')
-    .update({ status: 'completed', updated_at: new Date().toISOString() })
+    .update({ status: orderStatus, updated_at: new Date().toISOString() })
     .eq('id', order.id);
 
-  // Create payment record
+  // Create payment record — always record the payment even on mismatch
   await supabase.from('payments').insert({
     order_id: order.id,
     customer_id: meta.customer_id,
@@ -395,8 +397,17 @@ async function handlePaymentCaptured(
     paypal_payment_id: paypalCaptureId,
     amount_cents: amountCents,
     currency: order.currency,
-    status: 'completed',
+    status: amountMismatch ? 'pending_review' : 'completed',
   });
+
+  // V5 Audit §2.P2a: Skip fulfillment on amount mismatch — require manual review.
+  if (amountMismatch) {
+    console.warn(
+      `[Webhook] Skipping auto-fulfillment for order ${order.order_number} due to amount mismatch. ` +
+      `Resolve via dashboard → Orders → pending_review.`,
+    );
+    return;
+  }
 
   // Update customer totals
   const { error: rpcError } = await supabase.rpc('increment_customer_totals', {

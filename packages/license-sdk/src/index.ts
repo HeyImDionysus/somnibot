@@ -46,6 +46,15 @@ export interface SomniLicenseConfig {
    * This grace period is a UX convenience for intermittent connectivity.
    */
   offlineGraceMs?: number;
+  /**
+   * V5 Audit §3.P3a — Override the server-provided heartbeat interval (seconds).
+   * When set, the SDK uses this interval instead of the `heartbeat_interval_seconds`
+   * returned by the validation endpoint. Useful for deployments with non-standard
+   * network conditions or stricter/relaxed SLAs.
+   *
+   * Must be > 0. Values under 30s are clamped to 30s to avoid excessive traffic.
+   */
+  heartbeatIntervalSeconds?: number;
 }
 
 export interface ValidationResponse {
@@ -160,9 +169,12 @@ export class SomniLicense {
         // V7 Audit §3.P3a — anchor server time on successful validation
         this.anchorServerTime(res);
 
-        // Auto-start heartbeat if interval provided
-        if (data.heartbeat_interval_seconds && data.heartbeat_interval_seconds > 0) {
-          this.startHeartbeat(data.heartbeat_interval_seconds);
+        // Auto-start heartbeat — prefer config override, then server-provided interval.
+        // V5 Audit §3.P3a: heartbeatIntervalSeconds config option.
+        const hbInterval = this.config.heartbeatIntervalSeconds
+          ?? data.heartbeat_interval_seconds;
+        if (hbInterval && hbInterval > 0) {
+          this.startHeartbeat(hbInterval);
         }
       }
 
@@ -291,9 +303,11 @@ export class SomniLicense {
 
   private startHeartbeat(intervalSeconds: number): void {
     this.stopHeartbeat();
+    // V5 Audit §3.P3a: Clamp to minimum 30s to prevent excessive traffic
+    const clamped = Math.max(intervalSeconds, 30);
     this.heartbeatTimer = setInterval(
       () => void this.heartbeat(),
-      intervalSeconds * 1000,
+      clamped * 1000,
     );
   }
 

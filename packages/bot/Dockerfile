@@ -60,8 +60,12 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages/bot/node_modules ./packages/bot/node_modules
 COPY --from=builder /app/packages/shared/node_modules ./packages/shared/node_modules
 
-# Non-root user for security
-USER bun
+# V5 Audit §9.P3a: Create non-root user explicitly instead of relying
+# on the base image's default user. Ensures consistent UID across updates.
+RUN addgroup --system --gid 1001 somni && \
+    adduser --system --uid 1001 --ingroup somni somni && \
+    chown -R somni:somni /app
+USER somni
 
 ENV NODE_ENV=production
 

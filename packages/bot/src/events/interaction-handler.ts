@@ -1,0 +1,601 @@
+/**
+ * Interaction Handler — Routes all Discord interaction events.
+ *
+ * V5 Audit §6.P3a — Extracted from the 1210-line handler.ts monolith
+ * into a dedicated module for maintainability.
+ *
+ * Handles: buttons, select menus, context menus, modals, autocomplete,
+ * and slash commands (via command-registry + inline feature-gated dispatch).
+ */
+
+import { EmbedBuilder } from 'discord.js';
+import type { Interaction } from 'discord.js';
+import { createLogger } from '@somnibot/shared';
+import type { SomniClient } from '../client.js';
+import { lookupCommand } from './command-registry.js';
+
+// Feature handler imports — buttons & UI
+import { handleTicketInteraction } from '../features/tickets/index.js';
+import { handleSetupButton, handleSetupModal, handleReconfigureSelect } from '../features/setup-wizard/index.js';
+import { handleButtonRoleInteraction } from '../features/reaction-roles/button-roles.js';
+import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import { handleAdventureButton } from '../features/adventures/adventure-buttons.js';
+
+// Feature handler imports — context menus & modals
+import { handleViewProfile, handleWarnUser, handleViewPurchases, handleCreateTicketFromMessage, handleReportMessage } from '../features/discord-ux/index.js';
+import { handleModalSubmit } from '../features/discord-ux/modal-handlers.js';
+import { handleAutocomplete } from '../features/discord-ux/autocomplete.js';
+import { handleHelpCategorySelect } from '../features/help/index.js';
+
+// Feature handler imports — slash commands
+import { handleStoreCommand } from '../features/commerce/store-command.js';
+import { handleLicenseCommand } from '../features/commerce/license-commands.js';
+import { handleMusicCommand } from '../features/music/commands.js';
+import { handleTempChannelCommand } from '../features/temp-channels/commands.js';
+import { handleGiveawayCommand } from '../features/giveaways/commands.js';
+import { handleEconomyCommand } from '../features/economy/commands.js';
+import { handleTimersCommand } from '../features/economy/timers-command.js';
+import { handleGatheringCommand } from '../features/gathering/commands.js';
+import { handleCraftingCommand } from '../features/crafting/commands.js';
+import { handleFarmingCommand } from '../features/farming/commands.js';
+import { handleFishingCommand } from '../features/fishing/commands.js';
+import { handleAdventureCommand } from '../features/adventures/commands.js';
+import { handleMarketCommand } from '../features/market/commands.js';
+import { handleTriviaCommand } from '../features/trivia/commands.js';
+import { handleGameCommand } from '../features/games/commands.js';
+import { handleLotteryCommand } from '../features/lottery/commands.js';
+import { handlePollCommand, handlePredictCommand } from '../features/polls/commands.js';
+import { handlePetCommand } from '../features/pets/commands.js';
+import { handleQuestCommand } from '../features/quests/commands.js';
+import { handleHeistCommand } from '../features/heist/commands.js';
+import { handleAchievementCommand } from '../features/achievements/commands.js';
+import { handleProfileCommand } from '../features/profiles/commands.js';
+import { isCustomCommand, handleCustomCommand } from '../features/custom-commands/index.js';
+
+// Manager type imports
+import type { TempChannelManager } from '../features/temp-channels/temp-channel-manager.js';
+import type { GiveawayManager } from '../features/giveaways/giveaway-manager.js';
+import type { MusicPlayerManager } from '../features/music/music-player.js';
+import type { EconomyManager } from '../features/economy/economy-manager.js';
+import type { TriviaManager } from '../features/trivia/trivia-manager.js';
+import type { GamesManager } from '../features/games/games-manager.js';
+import type { LotteryManager } from '../features/lottery/lottery-manager.js';
+import type { PollsManager } from '../features/polls/polls-manager.js';
+import type { PetsManager } from '../features/pets/pets-manager.js';
+import type { QuestsManager } from '../features/quests/quests-manager.js';
+import type { HeistManager } from '../features/heist/heist-manager.js';
+import type { AchievementsManager } from '../features/achievements/achievements-manager.js';
+import type { ProfilesManager } from '../features/profiles/profiles-manager.js';
+import type { GatheringManager } from '../features/gathering/gathering-manager.js';
+import type { CraftingManager } from '../features/crafting/crafting-manager.js';
+import type { FarmingManager } from '../features/farming/farming-manager.js';
+import type { FishingManager } from '../features/fishing/fishing-manager.js';
+import type { AdventureManager } from '../features/adventures/adventure-manager.js';
+import type { MarketManager } from '../features/market/market-manager.js';
+
+const log = createLogger('InteractionHandler');
+
+/** Helper to get a typed manager from the client */
+function getManager<T>(client: SomniClient, key: string): T | undefined {
+  return (client as unknown as Record<string, unknown>)[key] as T | undefined;
+}
+
+/**
+ * Handle a single interactionCreate event.
+ * Exported for the main event wiring in handler.ts.
+ */
+export async function handleInteraction(interaction: Interaction, client: SomniClient): Promise<void> {
+  if (!interaction.guild) return;
+
+  try {
+    // ── Setup wizard ──
+    if (interaction.isButton() && interaction.customId.startsWith('setup:')) {
+      await handleSetupButton(interaction, client);
+      return;
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId === 'setup:reconfigure') {
+      await handleReconfigureSelect(interaction, client);
+      return;
+    }
+
+    // ── Button & Select Menu routing ──
+    if (interaction.isButton() || interaction.isStringSelectMenu()) {
+      const handled = await handleTicketInteraction(interaction, client);
+      if (handled) return;
+
+      if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
+        const mgr = getManager<GiveawayManager>(client, '_giveawayManager');
+        if (mgr && await mgr.handleEntry(interaction)) return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('btnrole:')) {
+        if (await handleButtonRoleInteraction(interaction, client.supabase)) return;
+      }
+
+      // Commerce buy buttons — gated by store_enabled
+      if (interaction.isButton() && interaction.customId.startsWith('store:buy:')) {
+        const { data: storeCfg } = await client.supabase
+          .from('guild_config')
+          .select('store_enabled')
+          .eq('guild_id', interaction.guildId!)
+          .maybeSingle();
+        if (storeCfg?.store_enabled === false) {
+          await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+          return;
+        }
+        const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
+        const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
+        const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
+        const dashboardUrl = process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://dashboard.somnibot.com';
+        if (paypalClientId) {
+          await handleBuyButton(interaction, client.supabase, interaction.guildId!, paypalApiBase, paypalClientId, paypalClientSecret, dashboardUrl);
+          return;
+        }
+      }
+
+      // Music buttons
+      if (interaction.isButton() && interaction.customId.startsWith('music:')) {
+        const musicMgr = getManager<MusicPlayerManager>(client, '_musicPlayer');
+        if (musicMgr) {
+          if (interaction.customId.startsWith('music:queue_page:')) {
+            const page = parseInt(interaction.customId.split(':')[2] ?? '1', 10);
+            const queue = await musicMgr.queueManager.getQueue(interaction.guildId!);
+            if (queue) {
+              const { buildQueueEmbed } = await import('../features/music/music-embeds.js');
+              const { embeds, components } = buildQueueEmbed(queue, page);
+              await interaction.update({ embeds, components: components as never[] });
+            } else {
+              await interaction.reply({ content: '📭 No active queue.', ephemeral: true });
+            }
+            return;
+          }
+          const result = await musicMgr.handleButton(interaction.customId, interaction.user.id);
+          await interaction.reply({ content: result.message, ephemeral: true });
+          return;
+        }
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('adventure:')) {
+        await handleAdventureButton(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('trivia:')) {
+        const trivMgr = getManager<TriviaManager>(client, '_triviaManager');
+        if (trivMgr) await trivMgr.handleAnswer(interaction);
+        return;
+      }
+
+      if (interaction.isButton() && interaction.customId.startsWith('poll:')) {
+        const pollMgr = getManager<PollsManager>(client, '_pollsManager');
+        if (pollMgr) await pollMgr.handlePollVote(interaction);
+        return;
+      }
+
+      // Economy quick-action buttons
+      if (interaction.isButton() && interaction.customId.startsWith('econ_')) {
+        await handleEconomyButton(interaction, client);
+        return;
+      }
+
+      // Emit button.clicked event for automations
+      if (interaction.isButton()) {
+        client.eventBus.emit('button.clicked', interaction.guild!.id, {
+          discordId: interaction.user.id,
+          username: interaction.user.username,
+          buttonId: interaction.customId,
+          channelId: interaction.channelId ?? '',
+          messageId: interaction.message?.id ?? '',
+        });
+      }
+    }
+
+    // ── Context Menu Commands ──
+    if (interaction.isUserContextMenuCommand()) {
+      switch (interaction.commandName) {
+        case 'View Profile':
+          await handleViewProfile(interaction, client.supabase, interaction.guildId!);
+          return;
+        case 'Warn User':
+          await handleWarnUser(interaction);
+          return;
+        case 'View Purchases':
+          await handleViewPurchases(interaction, client.supabase, interaction.guildId!);
+          return;
+      }
+    }
+
+    if (interaction.isMessageContextMenuCommand()) {
+      switch (interaction.commandName) {
+        case 'Create Ticket':
+          await handleCreateTicketFromMessage(interaction);
+          return;
+        case 'Report Message':
+          await handleReportMessage(interaction);
+          return;
+      }
+    }
+
+    // ── Modal Submissions ──
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('setup:modal:')) {
+        await handleSetupModal(interaction, client);
+        return;
+      }
+      const guild = interaction.guild;
+      if (guild) {
+        await handleModalSubmit(interaction, guild, client.supabase, client.eventBus, client);
+      }
+      return;
+    }
+
+    // ── Autocomplete ──
+    if (interaction.isAutocomplete()) {
+      await handleAutocomplete(interaction, client.supabase, client.shoukaku, interaction.guildId!);
+      return;
+    }
+
+    // ── Help select menu ──
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === 'help:category') {
+        await handleHelpCategorySelect(interaction, client);
+        return;
+      }
+    }
+
+    // ── Slash Commands ──
+    if (interaction.isChatInputCommand()) {
+      await handleSlashCommand(interaction, client);
+    }
+  } catch (err) {
+    log.error('Interaction handler error:', { error: String(err) });
+    try {
+      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
+      }
+    } catch {
+      // Ignore reply failures
+    }
+  }
+}
+
+// ── Slash Command Dispatch ──────────────────────────────────────────
+
+async function handleSlashCommand(
+  interaction: import('discord.js').ChatInputCommandInteraction,
+  client: SomniClient,
+): Promise<void> {
+  // Data-driven registry first (V7 Audit §6.P3a)
+  const registeredHandler = lookupCommand(interaction.commandName);
+  if (registeredHandler) {
+    await registeredHandler(interaction, client);
+    return;
+  }
+
+  // Level commands
+  if (interaction.commandName === 'rank') {
+    const { handleRankCommand } = await import('../features/levels/commands.js');
+    await handleRankCommand(interaction, client);
+    return;
+  }
+  if (interaction.commandName === 'leaderboard') {
+    const { handleLeaderboardCommand } = await import('../features/levels/commands.js');
+    await handleLeaderboardCommand(interaction, client);
+    return;
+  }
+
+  // Temp channel commands
+  if (interaction.commandName === 'voice') {
+    const mgr = getManager<TempChannelManager>(client, '_tempChannelManager');
+    if (mgr) { await handleTempChannelCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '❌ Temp channels are not enabled.', ephemeral: true }); }
+    return;
+  }
+
+  // Giveaway commands
+  if (interaction.commandName === 'giveaway') {
+    const mgr = getManager<GiveawayManager>(client, '_giveawayManager');
+    if (mgr) { await handleGiveawayCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '❌ Giveaways are not enabled.', ephemeral: true }); }
+    return;
+  }
+
+  // Music commands
+  const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause', 'filter']);
+  if (musicCommands.has(interaction.commandName)) {
+    const mgr = getManager<MusicPlayerManager>(client, '_musicPlayer');
+    if (mgr) { await handleMusicCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true }); }
+    return;
+  }
+
+  // Commerce commands — gated by store_enabled
+  if (interaction.commandName === 'store' || interaction.commandName === 'license') {
+    const { data: storeFlagCfg } = await client.supabase
+      .from('guild_config')
+      .select('store_enabled')
+      .eq('guild_id', interaction.guildId!)
+      .maybeSingle();
+    if (storeFlagCfg?.store_enabled === false) {
+      await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
+      return;
+    }
+    if (interaction.commandName === 'store') {
+      await handleStoreCommand(interaction, client.supabase, interaction.guildId!, process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com');
+      return;
+    }
+    await handleLicenseCommand(interaction, client.supabase, interaction.guildId!);
+    return;
+  }
+
+  // Timers command
+  if (interaction.commandName === 'timers') {
+    await handleTimersCommand(interaction);
+    return;
+  }
+
+  // Economy commands — gated by economy_enabled
+  const economyCommands = new Set([
+    'balance', 'daily', 'weekly', 'monthly', 'work', 'crime', 'beg', 'search',
+    'deposit', 'withdraw', 'pay', 'rob', 'passive', 'shop', 'buy', 'sell',
+    'inventory', 'use', 'economy-leaderboard', 'collect-income',
+  ]);
+  if (economyCommands.has(interaction.commandName)) {
+    const mgr = getManager<EconomyManager>(client, '_economyManager');
+    if (mgr) { await handleEconomyCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Gathering commands — /hunt, /dig, /mine
+  const gatheringCommands = new Set(['hunt', 'dig', 'mine']);
+  if (gatheringCommands.has(interaction.commandName)) {
+    const mgr = getManager<GatheringManager>(client, '_gatheringManager');
+    if (mgr) { await handleGatheringCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The gathering system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Crafting commands — /craft, /recipes
+  const craftingCommands = new Set(['craft', 'recipes']);
+  if (craftingCommands.has(interaction.commandName)) {
+    const mgr = getManager<CraftingManager>(client, '_craftingManager');
+    if (mgr) { await handleCraftingCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The crafting system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Farming
+  if (interaction.commandName === 'farm') {
+    const mgr = getManager<FarmingManager>(client, '_farmingManager');
+    if (mgr) { await handleFarmingCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The farming system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Fishing
+  if (interaction.commandName === 'fish') {
+    const mgr = getManager<FishingManager>(client, '_fishingManager');
+    if (mgr) { await handleFishingCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The fishing system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Adventures
+  if (interaction.commandName === 'adventure') {
+    const mgr = getManager<AdventureManager>(client, '_adventureManager');
+    if (mgr) { await handleAdventureCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The adventure system is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Market
+  if (interaction.commandName === 'market') {
+    const mgr = getManager<MarketManager>(client, '_marketManager');
+    if (mgr) { await handleMarketCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 The market is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Trivia
+  if (interaction.commandName === 'trivia') {
+    const mgr = getManager<TriviaManager>(client, '_triviaManager');
+    if (mgr) { await handleTriviaCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Trivia is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Mini-games
+  const gameNames = ['coinflip', 'slots', 'rps', 'dice', 'blackjack', 'highlow', 'scratch', 'guess'];
+  if (gameNames.includes(interaction.commandName)) {
+    const mgr = getManager<GamesManager>(client, '_gamesManager');
+    if (mgr) { await handleGameCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Mini-games are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Lottery
+  if (interaction.commandName === 'lottery') {
+    const mgr = getManager<LotteryManager>(client, '_lotteryManager');
+    if (mgr) { await handleLotteryCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Lottery is not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Polls & Predictions
+  if (interaction.commandName === 'poll') {
+    const mgr = getManager<PollsManager>(client, '_pollsManager');
+    if (mgr) { await handlePollCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Polls are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+  if (interaction.commandName === 'predict') {
+    const mgr = getManager<PollsManager>(client, '_pollsManager');
+    if (mgr) { await handlePredictCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Predictions are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Pets
+  if (interaction.commandName === 'pet') {
+    const mgr = getManager<PetsManager>(client, '_petsManager');
+    if (mgr) { await handlePetCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Quests
+  if (interaction.commandName === 'quests') {
+    const mgr = getManager<QuestsManager>(client, '_questsManager');
+    if (mgr) { await handleQuestCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Quests are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Heist
+  if (interaction.commandName === 'heist') {
+    const mgr = getManager<HeistManager>(client, '_heistManager');
+    if (mgr) { await handleHeistCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Achievements & Prestige
+  if (interaction.commandName === 'badges' || interaction.commandName === 'prestige') {
+    const mgr = getManager<AchievementsManager>(client, '_achievementsManager');
+    if (mgr) { await handleAchievementCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Achievements are not enabled on this server.', ephemeral: true }); }
+    return;
+  }
+
+  // Profiles
+  if (['profile', 'title', 'bio'].includes(interaction.commandName)) {
+    const mgr = getManager<ProfilesManager>(client, '_profilesManager');
+    if (mgr) { await handleProfileCommand(interaction, mgr); }
+    else { await interaction.reply({ content: '🚫 Profiles are not available.', ephemeral: true }); }
+    return;
+  }
+
+  // Custom commands (check registry)
+  if (isCustomCommand(interaction.commandName)) {
+    await handleCustomCommand(interaction, client.supabase, client.valkey, interaction.guild);
+    return;
+  }
+}
+
+// ── Economy Quick-Action Buttons ────────────────────────────────────
+
+async function handleEconomyButton(
+  interaction: import('discord.js').ButtonInteraction,
+  client: SomniClient,
+): Promise<void> {
+  const econMgr = getManager<EconomyManager>(client, '_economyManager');
+  if (!econMgr) {
+    await interaction.reply({ content: '🚫 Economy is not enabled.', ephemeral: true });
+    return;
+  }
+
+  switch (interaction.customId) {
+    case 'econ_daily': {
+      await interaction.deferReply({ ephemeral: true });
+      const cfg = await econMgr.loadConfig();
+      const result = await econMgr.claimTimedReward(interaction.user.id, 'daily');
+      if (result.success) {
+        const embed = new EmbedBuilder()
+          .setColor(0x2ecc71)
+          .setTitle(`${cfg.currency_emoji} Daily Reward`)
+          .setDescription(result.message)
+          .setTimestamp();
+        await interaction.editReply({ embeds: [embed] });
+      } else {
+        await interaction.editReply({ content: result.message });
+      }
+      return;
+    }
+    case 'econ_balance': {
+      const user = interaction.user;
+      const cfg = await econMgr.loadConfig();
+      const wallet = await econMgr.getOrCreateWallet(user.id);
+      const netWorth = wallet.wallet + wallet.bank;
+      const embed = new EmbedBuilder()
+        .setAuthor({ name: `${user.displayName}'s Balance`, iconURL: user.displayAvatarURL() })
+        .setColor(0x5865F2)
+        .addFields(
+          { name: '💰 Wallet', value: `${cfg.currency_emoji} ${wallet.wallet.toLocaleString()}`, inline: true },
+          { name: '🏦 Bank', value: `${cfg.currency_emoji} ${wallet.bank.toLocaleString()} / ${wallet.bank_max.toLocaleString()}`, inline: true },
+          { name: '📊 Net Worth', value: `${cfg.currency_emoji} ${netWorth.toLocaleString()}`, inline: true },
+        )
+        .setTimestamp();
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+    case 'econ_inventory': {
+      const items = await econMgr.getInventory(interaction.user.id);
+      if (items.length === 0) {
+        await interaction.reply({ content: '📦 Your inventory is empty.', ephemeral: true });
+      } else {
+        const lines = items.map((item) => {
+          const durStr = item.durability_remaining !== null ? ` [${item.durability_remaining} uses]` : '';
+          return `${item.item_emoji} **${item.item_name}** ×${item.quantity}${durStr}`;
+        });
+        const embed = new EmbedBuilder()
+          .setColor(0x9b59b6)
+          .setAuthor({ name: `${interaction.user.displayName}'s Inventory`, iconURL: interaction.user.displayAvatarURL() })
+          .setDescription(lines.join('\n'))
+          .setFooter({ text: `${items.length} items` })
+          .setTimestamp();
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+      return;
+    }
+    case 'econ_shop': {
+      const cfg = await econMgr.loadConfig();
+      const shopItems = await econMgr.getShopItems();
+      if (shopItems.length === 0) {
+        await interaction.reply({ content: '🏪 The shop is empty!', ephemeral: true });
+      } else {
+        const shopLines = shopItems.slice(0, 15).map((item) => {
+          const stockStr = item.stock !== null ? ` (${item.stock} left)` : '';
+          return `${item.emoji} **${item.name}** — ${cfg.currency_emoji} ${item.price.toLocaleString()}${stockStr}`;
+        });
+        const embed = new EmbedBuilder()
+          .setColor(0xf39c12)
+          .setTitle('🏪 Shop')
+          .setDescription(shopLines.join('\n'))
+          .setFooter({ text: `${shopItems.length} items • Use /buy <item> to purchase` })
+          .setTimestamp();
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+      return;
+    }
+    case 'econ_timers': {
+      const timersClient = interaction.client as unknown as SomniClient;
+      const userId = interaction.user.id;
+      const guildId = timersClient.guildId;
+      const valkey = timersClient.valkey;
+      if (!valkey) {
+        await interaction.reply({ content: '⏱️ Cooldown tracking unavailable.', ephemeral: true });
+        return;
+      }
+      const keys = ['daily', 'weekly', 'monthly', 'work', 'crime', 'beg', 'search', 'rob'];
+      const ttls = await Promise.all(
+        keys.map(async (k) => {
+          const ttl = await valkey.ttl(`economy:${guildId}:${userId}:${k}`);
+          return { key: k, ttl };
+        }),
+      );
+      const active = ttls.filter((t) => t.ttl > 0);
+      if (active.length === 0) {
+        await interaction.reply({ content: '⏱️ No active cooldowns! All commands are available.', ephemeral: true });
+      } else {
+        const lines = active.map((t) => {
+          const m = Math.floor(t.ttl / 60);
+          const s = t.ttl % 60;
+          return `⏳ **${t.key}** — ${m > 0 ? `${m}m ` : ''}${s}s`;
+        });
+        await interaction.reply({ content: `⏱️ *Active Cooldowns*\n${lines.join('\n')}`, ephemeral: true });
+      }
+      return;
+    }
+  }
+}

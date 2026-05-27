@@ -103,7 +103,9 @@ function registerIpcHandlers(): void {
       discordClientSecret: config.discordClientSecret,
       discordGuildId: config.discordGuildId,
       supabaseUrl: config.supabaseUrl,
-      supabaseSecretKey: config.supabaseSecretKey,
+      // V5 Audit §10.P3a: Mask secret key — renderer only needs to know if it's set,
+      // not the actual value. Supabase operations are handled in the main process.
+      supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
       supabasePublishableKey: config.supabasePublishableKey,
     };
   });
@@ -195,9 +197,11 @@ function registerIpcHandlers(): void {
   });
 
   // ── Cloud sync ──
-  ipcMain.handle('pull-from-supabase', async (_event, supabaseUrl: string, supabaseSecretKey: string) => {
+  // V5 Audit §10.P3a: Use main-process config for secret — renderer never receives it.
+  ipcMain.handle('pull-from-supabase', async () => {
+    const cfg = getConfig();
     const { pullFromSupabase } = await import('./supabase-sync.js');
-    const result = await pullFromSupabase(supabaseUrl, supabaseSecretKey);
+    const result = await pullFromSupabase(cfg.supabaseUrl, cfg.supabaseSecretKey);
     if (result.ok && result.credentials) {
       saveConfig(result.credentials);
     }
