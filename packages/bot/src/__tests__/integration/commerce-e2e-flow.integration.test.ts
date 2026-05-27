@@ -54,27 +54,30 @@ beforeAll(async () => {
     owner_discord_id: '000000000000000001',
   });
 
-  // Seed customer
-  const { data: customer } = await supa.from('customers').insert({
+  // Seed customer — both counters start at 0
+  const { data: customer, error: custErr } = await supa.from('customers').insert({
     guild_id: GUILD_ID,
     discord_id: BUYER_DISCORD_ID,
     discord_username: 'e2e-buyer',
     total_spent_cents: 0,
+    total_orders: 0,
   }).select('id').single();
+  if (custErr) throw new Error(`Customer seed failed: ${custErr.message}`);
   customerId = customer!.id;
 
-  // Seed product (one-time digital with role grant)
-  const { data: product } = await supa.from('products').insert({
+  // Seed product — license_key delivery type (the flow generates keys)
+  const { data: product, error: prodErr } = await supa.from('products').insert({
     guild_id: GUILD_ID,
     name: 'E2E Test Product',
     type: 'one_time',
-    delivery_type: 'access_pass',
+    delivery_type: 'license_key',
     price_cents: 1499,
     currency: 'USD',
     active: true,
     granted_role_ids: ['role-e2e-premium'],
     granted_channel_ids: ['chan-e2e-vip'],
   }).select('id').single();
+  if (prodErr) throw new Error(`Product seed failed: ${prodErr.message}`);
   productId = product!.id;
 });
 
@@ -136,25 +139,23 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     expect(error).toBeNull();
   });
 
-  it('Step 4: increments customer totals (simulating RPC outcome)', async () => {
-    // In production, increment_customer_totals() RPC handles this atomically.
-    // We simulate the outcome with a direct update to avoid PostgREST overload
-    // ambiguity (the RPC signature is audited by db-security-audit CI job).
-    const { error: updateErr } = await supa
-      .from('customers')
-      .update({
-        total_spent_cents: 1499,
-        first_purchase_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', customerId);
+  it('Step 4: increments customer totals via RPC', async () => {
+    // Call the actual increment_customer_totals RPC — no shortcuts.
+    // The RPC takes (p_customer_id UUID, p_amount NUMERIC).
+    const { error: rpcErr } = await supa.rpc('increment_customer_totals', {
+      p_customer_id: customerId,
+      p_amount: 1499,
+    });
 
-    expect(updateErr).toBeNull();
+    expect(rpcErr).toBeNull();
 
+    // Verify both counters were updated atomically
     const { data: customer } = await supa.from('customers')
-      .select('total_spent_cents')
+      .select('total_spent_cents, total_orders, first_purchase_at')
       .eq('id', customerId).single();
     expect(customer!.total_spent_cents).toBe(1499);
+    expect(customer!.total_orders).toBe(1);
+    expect(customer!.first_purchase_at).not.toBeNull();
   });
 
   it('Step 5: generates a license key (hash-only storage)', async () => {
@@ -246,9 +247,10 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     expect(payment!.status).toBe('completed');
     expect(payment!.paypal_payment_id).toBe(captureId);
 
-    // Customer totals match
+    // Customer totals match (both spend and order count)
     const { data: customer } = await supa.from('customers').select('*').eq('id', customerId).single();
     expect(customer!.total_spent_cents).toBe(1499);
+    expect(customer!.total_orders).toBe(1);
 
     // Entitlement active, linked to all the right things
     const { data: ent } = await supa.from('entitlements').select('*').eq('id', entitlementId).single();
@@ -262,6 +264,10 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     const { data: key } = await supa.from('license_keys').select('*').eq('id', licenseKeyId).single();
     expect(key!.status).toBe('active');
     expect(key!.key_hash).toBe(keyHash);
+
+    // Product uses the license_key delivery type
+    const { data: prod } = await supa.from('products').select('delivery_type').eq('id', productId).single();
+    expect(prod!.delivery_type).toBe('license_key');
 
     // Fulfillment action in queue
     const { data: actions } = await supa.from('bot_action_queue').select('*')
