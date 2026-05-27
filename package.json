@@ -44,6 +44,9 @@
         "GHSA-jjp3-mq3x-295m",
         "GHSA-9wfr-w7mm-pc7f"
       ]
+    },
+    "overrides": {
+      "tmp": ">=0.2.6"
     }
   }
 }
