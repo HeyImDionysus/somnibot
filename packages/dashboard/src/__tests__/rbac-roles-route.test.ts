@@ -228,13 +228,34 @@ describe('DELETE /api/rbac/roles', () => {
 
   it('allows deletion of custom roles', async () => {
     mockPermissionSuccess();
-    const chain = mockQueryChain();
-    chain.single.mockResolvedValue({
-      data: { is_system: false },
-      error: null,
+
+    // The DELETE handler calls .from('dashboard_roles') twice:
+    // 1) SELECT to check is_system → .single()
+    // 2) DELETE .delete().eq().eq() → resolves with { error: null }
+    let callCount = 0;
+    const selectChain = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      single: vi.fn().mockResolvedValue({ data: { is_system: false }, error: null }),
+    };
+    const deleteChain = {
+      delete: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockImplementation(function (this: typeof deleteChain) {
+        // The second .eq() is terminal — return a thenable
+        callCount++;
+        if (callCount >= 2) {
+          return Promise.resolve({ error: null });
+        }
+        return deleteChain;
+      }),
+    };
+
+    let fromCallCount = 0;
+    mockSupabase.from.mockImplementation(() => {
+      fromCallCount++;
+      if (fromCallCount === 1) return selectChain;
+      return deleteChain;
     });
-    // delete chain completes
-    chain.eq.mockResolvedValue({ error: null });
 
     const res = await DELETE(
       buildRequest('/api/rbac/roles?id=custom-role-id', { method: 'DELETE' }),
