@@ -12,6 +12,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { z } from 'zod';
+import { parseBody } from '@/lib/api/validation';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 import { rateLimits } from '@/lib/api/rate-limit';
 
@@ -46,18 +47,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
     }
 
-    // Parse request body — V6 Audit §7.1: Zod validation
-    const bodySchema = z.object({
+    // V8 Audit §7.P3a: Use centralized parseBody() for consistency
+    const downloadLinkSchema = z.object({
       productId: z.string().uuid(),
       fileId: z.string().uuid(),
     });
-    const parsed = bodySchema.safeParse(await request.json().catch(() => null));
-    if (!parsed.success) {
-      return NextResponse.json(
-        { error: 'productId (uuid) and fileId (uuid) are required' },
-        { status: 400 },
-      );
-    }
+    const parsed = await parseBody(request, downloadLinkSchema);
+    if (!parsed.ok) return parsed.response;
 
     const { productId, fileId } = parsed.data;
 

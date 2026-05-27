@@ -53,7 +53,8 @@ COPY packages/bot/package.json ./packages/bot/
 COPY --from=builder /app/packages/bot/dist ./packages/bot/dist
 
 # Copy migration files (for auto-migration on first boot)
-COPY packages/supabase/migrations ./packages/supabase/migrations
+# V8 Audit §9.P3a: Read-only to limit exposure; only migration-runner reads them
+COPY --chmod=444 packages/supabase/migrations ./packages/supabase/migrations
 
 # Copy node_modules from builder (already resolved by pnpm)
 COPY --from=builder /app/node_modules ./node_modules

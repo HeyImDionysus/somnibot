@@ -14,6 +14,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { randomIntRange, randomChance, cryptoShuffle, randomPick } from '../../utils/random.js';
 
 const log = createLogger('Games');
 
@@ -31,18 +32,12 @@ const SLOT_PAYOUTS: Record<string, number> = {
 };
 
 /**
- * Random integer in [min, max] range.
- *
- * Design decision: Math.random() is intentionally used for all virtual-currency
- * game outcomes. These games involve no real-money prizes — only server-scoped
- * virtual coins with no cash-out. crypto.getRandomValues() is reserved for
- * security-critical paths (license key generation — see key-generator.ts).
- * If real-value prizes are ever introduced, switch to CSPRNG.
- * (V5 audit finding 4.1 — documented)
+ * V8 Audit §4.P3a — Switched from Math.random() to centralized CSPRNG helpers
+ * (randomIntRange, randomChance, cryptoShuffle) for consistency with the
+ * project-wide crypto randomness policy. These games are virtual-currency only
+ * with no real-money prizes, but uniformity across the codebase reduces the
+ * risk of accidentally using Math.random() in a security-critical path.
  */
-function randomInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
 
 // ── Blackjack helpers ─────────────────────────────────────
 
@@ -60,7 +55,7 @@ function makeDeck(): Card[] {
   }
   // Shuffle
   for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = randomIntRange(0, i);
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
   return deck;
@@ -237,8 +232,8 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
 
-      const win = Math.random() < 0.5;
-      const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
+      const win = randomChance(50);
+      const result = randomChance(50) ? 'Heads' : 'Tails';
 
       if (win) {
         const ok = await this.adjustBalance(guildId, userId, amount);
@@ -277,9 +272,9 @@ export class GamesManager {
       const userId = interaction.user.id;
 
       const reels = [
-        SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)],
-        SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)],
-        SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)],
+        SLOT_SYMBOLS[randomIntRange(0, SLOT_SYMBOLS.length - 1)],
+        SLOT_SYMBOLS[randomIntRange(0, SLOT_SYMBOLS.length - 1)],
+        SLOT_SYMBOLS[randomIntRange(0, SLOT_SYMBOLS.length - 1)],
       ];
 
       let multiplier = 0;
@@ -336,7 +331,7 @@ export class GamesManager {
 
       const choices = ['rock', 'paper', 'scissors'];
       const emojis: Record<string, string> = { rock: '🪨', paper: '📄', scissors: '✂️' };
-      const botChoice = choices[randomInt(0, 2)];
+      const botChoice = choices[randomIntRange(0, 2)];
 
       const wins: Record<string, string> = { rock: 'scissors', paper: 'rock', scissors: 'paper' };
       let result: 'win' | 'lose' | 'tie';
@@ -380,8 +375,8 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
 
-      const playerRoll = randomInt(1, 6) + randomInt(1, 6);
-      const botRoll = randomInt(1, 6) + randomInt(1, 6);
+      const playerRoll = randomIntRange(1, 6) + randomIntRange(1, 6);
+      const botRoll = randomIntRange(1, 6) + randomIntRange(1, 6);
 
       if (playerRoll > botRoll) {
         const ok = await this.adjustBalance(guildId, userId, amount);
@@ -647,8 +642,8 @@ export class GamesManager {
       return;
     }
 
-    const number = randomInt(1, 100);
-    const nextNumber = randomInt(1, 100);
+    const number = randomIntRange(1, 100);
+    const nextNumber = randomIntRange(1, 100);
     const answer = nextNumber > number ? 'higher' : nextNumber < number ? 'lower' : 'same';
 
     await interaction.reply({
@@ -673,7 +668,7 @@ export class GamesManager {
       const userId = interaction.user.id;
 
       const symbols = ['🍒', '🍋', '💎', '⭐', '7️⃣', '🔔'];
-      const grid = Array.from({ length: 9 }, () => symbols[randomInt(0, symbols.length - 1)]);
+      const grid = Array.from({ length: 9 }, () => symbols[randomIntRange(0, symbols.length - 1)]);
 
       // Count matches
       const counts = new Map<string, number>();
@@ -734,8 +729,8 @@ export class GamesManager {
       const guildId = interaction.guildId!;
       const userId = interaction.user.id;
 
-      const target = randomInt(1, 100);
-      const playerGuess = interaction.options.getInteger('number') ?? randomInt(1, 100);
+      const target = randomIntRange(1, 100);
+      const playerGuess = interaction.options.getInteger('number') ?? randomIntRange(1, 100);
       const diff = Math.abs(target - playerGuess);
 
       let multiplier = 0;

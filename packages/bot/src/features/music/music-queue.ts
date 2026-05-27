@@ -6,6 +6,7 @@
  * Stores full queue state as JSON in Valkey so the queue survives
  * bot restarts. Each guild has exactly one queue.
  */
+import { randomInt } from 'node:crypto';
 import type Valkey from 'iovalkey';
 
 // ── Types ─────────────────────────────────────────────────
@@ -171,9 +172,9 @@ export class MusicQueueManager {
     const queue = await this.getQueue(guildId);
     if (!queue) return false;
     const upcoming = queue.entries.splice(queue.currentIndex + 1);
-    // Fisher-Yates shuffle
+    // Fisher-Yates shuffle — V8 Audit §12.P3a: crypto.randomInt for consistency
     for (let i = upcoming.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = randomInt(i + 1);
       [upcoming[i], upcoming[j]] = [upcoming[j]!, upcoming[i]!];
     }
     queue.entries.push(...upcoming);

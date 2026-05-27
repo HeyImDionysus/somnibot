@@ -68,8 +68,11 @@ services:
     volumes:
       - valkey-data:/data
     command: valkey-server --save 60 1 --loglevel warning --requirepass ${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in .env}
+    # V8 Audit §9.P3b: Use REDISCLI_AUTH env var so password doesn't appear in docker inspect
+    environment:
+      - REDISCLI_AUTH=${VALKEY_PASSWORD}
     healthcheck:
-      test: ["CMD", "valkey-cli", "-a", "${VALKEY_PASSWORD}", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 15s
       timeout: 5s
       retries: 3

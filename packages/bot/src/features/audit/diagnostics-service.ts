@@ -11,6 +11,7 @@
  * After each snapshot, evaluates alert thresholds via AlertManager.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { randomInt } from 'node:crypto';
 import type { SomniClient } from '../../client.js';
 import { AlertManager, type AlertThresholds } from './alert-manager.js';
 import { createLogger } from '@somnibot/shared';
@@ -220,7 +221,8 @@ export class DiagnosticsService {
     }
 
     // Cleanup old metrics periodically (every ~10 snapshots ≈ 10 min)
-    if (Math.random() < 0.1) {
+    // V8 Audit §14.P3a: crypto.randomInt for consistency with CSPRNG policy
+    if (randomInt(100) < 10) {
       try {
         await this.supabase.rpc('cleanup_old_health_metrics');
       } catch {
