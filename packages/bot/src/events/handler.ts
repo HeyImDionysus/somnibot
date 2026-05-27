@@ -134,17 +134,20 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Channel Events (Drift Detection) ──
   client.on('channelCreate', async (channel) => {
-    try { if (channel.guild) await handleChannelCreate(client, channel); }
+    if (!('guild' in channel)) return;
+    try { await handleChannelCreate(client, channel); }
     catch (err) { log.error('channelCreate handler error:', { error: String(err) }); }
   });
 
   client.on('channelUpdate', async (oldChannel, newChannel) => {
-    try { await handleChannelUpdate(client, oldChannel, newChannel); }
+    if (!('guild' in newChannel)) return;
+    try { await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel); }
     catch (err) { log.error('channelUpdate handler error:', { error: String(err) }); }
   });
 
   client.on('channelDelete', async (channel) => {
-    try { if (channel.guild) await handleChannelDelete(client, channel); }
+    if (!('guild' in channel)) return;
+    try { await handleChannelDelete(client, channel); }
     catch (err) { log.error('channelDelete handler error:', { error: String(err) }); }
   });
 

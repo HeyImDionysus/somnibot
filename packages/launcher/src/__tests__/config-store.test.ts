@@ -2,8 +2,7 @@
  * V5 Audit §13.P3b — Launcher unit tests for config-store logic.
  *
  * Tests the pure-function parts of config-store (validation, defaults,
- * sensitive field masking). Full E2E tests with Electron + Playwright
- * will be added once the CI Electron runner is available.
+ * sensitive field masking, and mask-aware save filtering).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -15,6 +14,8 @@ const SENSITIVE_KEYS = [
   'discordClientSecret',
   'supabaseSecretKey',
 ] as const;
+
+const MASK = '••••••••';
 
 const REQUIRED_FOR_LAUNCH = [
   'discordToken',
@@ -44,10 +45,21 @@ function maskSensitive(config: LauncherConfig): Record<string, unknown> {
   const masked: Record<string, unknown> = { ...config };
   for (const key of SENSITIVE_KEYS) {
     if (typeof masked[key] === 'string' && (masked[key] as string).length > 0) {
-      masked[key] = '••••••••';
+      masked[key] = MASK;
     }
   }
   return masked;
+}
+
+/** Strips mask placeholders so save-config never overwrites real secrets. */
+function stripMaskedFields(config: Partial<LauncherConfig>): Partial<LauncherConfig> {
+  const sanitized = { ...config };
+  for (const key of SENSITIVE_KEYS) {
+    if (sanitized[key] === MASK) {
+      delete sanitized[key];
+    }
+  }
+  return sanitized;
 }
 
 describe('Launcher Config', () => {
@@ -80,9 +92,9 @@ describe('Launcher Config', () => {
 
   it('masks sensitive fields for display', () => {
     const masked = maskSensitive(validConfig);
-    expect(masked.discordToken).toBe('••••••••');
-    expect(masked.discordClientSecret).toBe('••••••••');
-    expect(masked.supabaseSecretKey).toBe('••••••••');
+    expect(masked.discordToken).toBe(MASK);
+    expect(masked.discordClientSecret).toBe(MASK);
+    expect(masked.supabaseSecretKey).toBe(MASK);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
     expect(masked.discordGuildId).toBe(validConfig.discordGuildId);
@@ -93,5 +105,44 @@ describe('Launcher Config', () => {
     const masked = maskSensitive(emptyConfig);
     expect(masked.discordToken).toBe('');
     expect(masked.discordClientSecret).toBe('');
+  });
+
+  it('strips mask placeholders before save so real secrets are preserved', () => {
+    // Simulate what happens: renderer sends back masked values from get-config
+    const fromRenderer: Partial<LauncherConfig> = {
+      discordToken: MASK,
+      discordApplicationId: '12345',
+      discordClientSecret: MASK,
+      discordGuildId: '67890-new',
+      supabaseUrl: 'https://updated.supabase.co',
+      supabaseSecretKey: MASK,
+      supabasePublishableKey: 'new-pub-key',
+    };
+
+    const sanitized = stripMaskedFields(fromRenderer);
+
+    // Masked fields should be stripped (not saved, so store keeps the real value)
+    expect(sanitized).not.toHaveProperty('discordToken');
+    expect(sanitized).not.toHaveProperty('discordClientSecret');
+    expect(sanitized).not.toHaveProperty('supabaseSecretKey');
+
+    // Non-masked fields are preserved
+    expect(sanitized.discordApplicationId).toBe('12345');
+    expect(sanitized.discordGuildId).toBe('67890-new');
+    expect(sanitized.supabaseUrl).toBe('https://updated.supabase.co');
+    expect(sanitized.supabasePublishableKey).toBe('new-pub-key');
+  });
+
+  it('preserves real values when user enters a new secret (not the mask)', () => {
+    const fromRenderer: Partial<LauncherConfig> = {
+      discordToken: 'brand-new-token',
+      supabaseSecretKey: 'brand-new-secret',
+    };
+
+    const sanitized = stripMaskedFields(fromRenderer);
+
+    // Real values (not the mask) should be kept
+    expect(sanitized.discordToken).toBe('brand-new-token');
+    expect(sanitized.supabaseSecretKey).toBe('brand-new-secret');
   });
 });

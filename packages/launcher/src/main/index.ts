@@ -111,7 +111,17 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
-    saveConfig(config);
+    // V5 Audit §10.P3a: Never overwrite a real secret with the mask placeholder.
+    // The renderer receives '••••••••' for masked fields; if it sends that value
+    // back, strip it so the real secret in the config store is preserved.
+    const MASK = '••••••••';
+    const sanitized = { ...config };
+    for (const key of ['supabaseSecretKey', 'discordToken', 'discordClientSecret'] as const) {
+      if (sanitized[key] === MASK) {
+        delete sanitized[key];
+      }
+    }
+    saveConfig(sanitized);
   });
 
   // ── Validation ──

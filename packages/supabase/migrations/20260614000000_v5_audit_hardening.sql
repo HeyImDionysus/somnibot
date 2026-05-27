@@ -1,41 +1,26 @@
 -- V5 Production Audit — Targeted hardening fixes
 --
--- §4.P3a: Add explicit p_amount > 0 guard to economy_add_balance.
---         The CHECK constraint on economy_wallets.wallet >= 0 already
---         prevents negative balances, but this rejects the call early
---         with a clear error message.
+-- §2.P2a: Add 'pending_review' to orders.status and payments.status CHECK
+--         constraints so the PayPal amount-mismatch handler can flag orders.
 --
 -- §14.P3a: Increase data retention batch size from 10k to 50k and
 --          add a loop that processes up to 5 batches per invocation
 --          so weekly cron jobs can catch up from backlog.
 
--- ── §4.P3a: economy_add_balance — reject non-positive amounts ──
 
-CREATE OR REPLACE FUNCTION economy_add_balance(
-  p_guild_id TEXT,
-  p_user_id TEXT,
-  p_amount INT
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = ''
-AS $$
-BEGIN
-  -- V5 Audit §4.P3a: Reject non-positive amounts explicitly
-  IF p_amount <= 0 THEN
-    RAISE EXCEPTION 'economy_add_balance: amount must be positive, got %', p_amount;
-  END IF;
+-- ── §2.P2a: Add pending_review to commerce status constraints ──
 
-  INSERT INTO public.economy_wallets (guild_id, user_id, wallet, updated_at)
-  VALUES (p_guild_id, p_user_id, p_amount, now())
-  ON CONFLICT (guild_id, user_id)
-  DO UPDATE SET wallet = public.economy_wallets.wallet + p_amount, updated_at = now();
-END;
-$$;
+-- orders.status: add pending_review for amount-mismatch flagging
+ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_status_check;
+ALTER TABLE public.orders
+  ADD CONSTRAINT orders_status_check
+  CHECK (status IN ('pending', 'completed', 'refunded', 'disputed', 'cancelled', 'pending_review'));
 
-REVOKE ALL ON FUNCTION economy_add_balance(TEXT, TEXT, INT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION economy_add_balance(TEXT, TEXT, INT) TO service_role;
+-- payments.status: add pending_review for amount-mismatch flagging
+ALTER TABLE public.payments DROP CONSTRAINT IF EXISTS payments_status_check;
+ALTER TABLE public.payments
+  ADD CONSTRAINT payments_status_check
+  CHECK (status IN ('completed', 'refunded', 'reversed', 'pending', 'failed', 'pending_review'));
 
 
 -- ── §14.P3a: Improved cleanup_old_records with batch looping ──

@@ -478,7 +478,7 @@ async function handleSlashCommand(
 
   // Custom commands (check registry)
   if (isCustomCommand(interaction.commandName)) {
-    await handleCustomCommand(interaction, client.supabase, client.valkey, interaction.guild);
+    await handleCustomCommand(interaction, client.supabase, client.valkey, interaction.guild!);
     return;
   }
 }
