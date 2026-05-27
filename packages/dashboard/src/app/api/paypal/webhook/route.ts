@@ -415,26 +415,27 @@ async function handlePaymentCaptured(
     p_amount: amountCents,
   });
   if (rpcError) {
-    // Fallback: read current totals, add, and write back.
-    // Note: increment_customer_totals RPC (V5) is the atomic path and should
-    // rarely fail. This non-atomic fallback is a safety net.
-    console.warn('[Webhook] increment_customer_totals RPC failed, using fallback:', rpcError.message);
-    {
-      const { data: customer } = await supabase
-        .from('customers')
-        .select('total_spent_cents, total_orders, first_purchase_at')
-        .eq('id', meta.customer_id)
-        .single();
+    // V5 Audit §2.5: Retry the RPC once before falling back. The original
+    // read-then-write fallback was vulnerable to race conditions under
+    // concurrent webhooks for the same customer. The RPC uses atomic
+    // UPDATE ... SET col = col + $1, so retrying is safe and idempotent-ish
+    // (worst case: double-count one order, which reconciliation catches).
+    console.warn('[Webhook] increment_customer_totals RPC failed, retrying once:', rpcError.message);
 
-      await supabase
-        .from('customers')
-        .update({
-          total_spent_cents: (customer?.total_spent_cents ?? 0) + amountCents,
-          total_orders: (customer?.total_orders ?? 0) + 1,
-          first_purchase_at: customer?.first_purchase_at ?? new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', meta.customer_id);
+    const { error: retryError } = await supabase.rpc('increment_customer_totals', {
+      p_customer_id: meta.customer_id,
+      p_amount: amountCents,
+    });
+
+    if (retryError) {
+      // Both attempts failed — log prominently but don't block fulfillment.
+      // Customer totals are display-only aggregates, not used for access control.
+      // The reconciliation job will correct any drift.
+      console.error(
+        '[Webhook] increment_customer_totals failed after retry:',
+        retryError.message,
+        '— customer totals may be stale until next reconciliation run',
+      );
     }
   }
 

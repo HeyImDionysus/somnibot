@@ -93,7 +93,10 @@ export async function PATCH(request: NextRequest) {
     const body = parsed.data;
     const admin = createAdminSupabase();
 
-    // Can't modify system roles except owner
+    // V5 Audit §1.6: Block modification of ALL system roles, not just owner.
+    // System roles (owner, admin, moderator) define the baseline permission
+    // model. Allowing edits to non-owner system roles would let a user with
+    // manage_team escalate by adding permissions to e.g. the admin role.
     if (body.id) {
       const { data: existing } = await admin
         .from('dashboard_roles')
@@ -101,8 +104,11 @@ export async function PATCH(request: NextRequest) {
         .eq('id', body.id)
         .single();
 
-      if (existing?.is_system && existing.name === 'owner') {
-        return NextResponse.json({ error: 'Cannot modify owner role' }, { status: 403 });
+      if (existing?.is_system) {
+        return NextResponse.json(
+          { error: `Cannot modify system role "${existing.name}"` },
+          { status: 403 },
+        );
       }
     }
 
