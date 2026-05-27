@@ -20,7 +20,7 @@ interface Product {
   name: string;
   description: string | null;
   type: 'one_time' | 'subscription';
-  delivery_type: 'file' | 'link' | 'access_pass' | 'mixed';
+  delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
   paypal_product_id: string | null;
   price_cents: number;
   currency: string;
@@ -62,7 +62,7 @@ const emptyForm: {
   name: string;
   description: string;
   type: 'one_time' | 'subscription';
-  delivery_type: 'file' | 'link' | 'access_pass' | 'mixed';
+  delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
   price_dollars: string;
   currency: string;
   granted_role_ids: string[];
@@ -500,12 +500,13 @@ export default function StorePage() {
                 onChange={(e) =>
                   setForm({
                     ...form,
-                    delivery_type: e.target.value as 'file' | 'link' | 'access_pass' | 'mixed',
+                    delivery_type: e.target.value as 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed',
                   })
                 }
                 className="w-full rounded-input bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary outline-none"
               >
                 <option value="access_pass">Access Pass</option>
+                <option value="license_key">License Key</option>
                 <option value="file">File</option>
                 <option value="link">Link</option>
                 <option value="mixed">Mixed</option>

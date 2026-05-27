@@ -813,7 +813,7 @@ export interface DbProduct {
   name: string;
   description: string | null;
   type: 'one_time' | 'subscription';
-  delivery_type: 'file' | 'link' | 'access_pass' | 'mixed';
+  delivery_type: 'file' | 'link' | 'access_pass' | 'license_key' | 'mixed';
   paypal_product_id: string | null;
   price_cents: number;
   currency: string;
@@ -876,6 +876,7 @@ export interface DbCustomer {
   email: string | null;
   first_purchase_at: string | null;
   total_spent_cents: number;
+  total_orders: number;
   notes: string | null;
   created_at: string;
   updated_at: string;

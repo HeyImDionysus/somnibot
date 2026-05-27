@@ -21,7 +21,7 @@ interface Customer {
   discord_username: string;
   email: string | null;
   total_spent_cents: number;
-  order_count: number;
+  total_orders: number;
   created_at: string;
 }
 
@@ -247,7 +247,7 @@ export default function CustomersPage() {
                 </div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-xs text-discord-text-muted">
-                    {c.order_count} order{c.order_count !== 1 ? 's' : ''}
+                    {c.total_orders} order{c.total_orders !== 1 ? 's' : ''}
                   </span>
                   <span className="text-xs text-discord-text-muted">
                     Since {formatDate(c.created_at)}

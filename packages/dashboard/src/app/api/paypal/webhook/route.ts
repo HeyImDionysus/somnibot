@@ -422,7 +422,7 @@ async function handlePaymentCaptured(
     {
       const { data: customer } = await supabase
         .from('customers')
-        .select('total_spent_cents, first_purchase_at')
+        .select('total_spent_cents, total_orders, first_purchase_at')
         .eq('id', meta.customer_id)
         .single();
 
@@ -430,6 +430,7 @@ async function handlePaymentCaptured(
         .from('customers')
         .update({
           total_spent_cents: (customer?.total_spent_cents ?? 0) + amountCents,
+          total_orders: (customer?.total_orders ?? 0) + 1,
           first_purchase_at: customer?.first_purchase_at ?? new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
