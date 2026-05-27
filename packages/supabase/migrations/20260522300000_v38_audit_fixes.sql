@@ -17,6 +17,7 @@ CREATE OR REPLACE FUNCTION array_append_heist_participant(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   current_count INTEGER;

@@ -9,12 +9,13 @@ ALTER TABLE automations ADD COLUMN IF NOT EXISTS rate_limit_window_seconds INTEG
 CREATE OR REPLACE FUNCTION increment_automation_count(automation_uuid UUID)
 RETURNS void AS $$
 BEGIN
-  UPDATE automations
+  UPDATE public.automations
   SET execution_count = COALESCE(execution_count, 0) + 1,
       last_executed_at = now()
   WHERE id = automation_uuid;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = '';
 
 -- Index for execution log queries
 CREATE INDEX IF NOT EXISTS idx_automation_executions_automation_id

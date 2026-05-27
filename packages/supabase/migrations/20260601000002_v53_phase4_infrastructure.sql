@@ -76,12 +76,13 @@ CREATE OR REPLACE FUNCTION bulk_reset_economy(
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_affected integer;
 BEGIN
   -- Reset wallets
-  UPDATE economy_wallets
+  UPDATE public.economy_wallets
   SET wallet = 0, bank = 0, suspended = false
   WHERE guild_id = p_guild_id
     AND user_id = ANY(p_member_ids);
@@ -89,14 +90,14 @@ BEGIN
   GET DIAGNOSTICS v_affected = ROW_COUNT;
 
   -- Cancel active market listings
-  UPDATE economy_market_listings
+  UPDATE public.economy_market_listings
   SET status = 'cancelled', cancelled_at = now()
   WHERE guild_id = p_guild_id
     AND seller_id = ANY(p_member_ids)
     AND status = 'active';
 
   -- Clear inventories
-  DELETE FROM economy_inventories
+  DELETE FROM public.economy_inventories
   WHERE guild_id = p_guild_id
     AND user_id = ANY(p_member_ids);
 

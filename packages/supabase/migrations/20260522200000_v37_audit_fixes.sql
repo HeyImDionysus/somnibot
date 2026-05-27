@@ -12,11 +12,12 @@ CREATE OR REPLACE FUNCTION lottery_increment_jackpot(
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   new_jackpot INTEGER;
 BEGIN
-  UPDATE economy_lottery_drawings
+  UPDATE public.economy_lottery_drawings
   SET jackpot = jackpot + p_amount
   WHERE id = p_drawing_id
   RETURNING jackpot INTO new_jackpot;

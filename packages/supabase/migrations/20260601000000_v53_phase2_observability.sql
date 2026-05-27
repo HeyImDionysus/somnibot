@@ -59,7 +59,8 @@ CREATE OR REPLACE FUNCTION cleanup_old_health_metrics()
 RETURNS void
 LANGUAGE sql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
-  DELETE FROM health_metrics
+  DELETE FROM public.health_metrics
   WHERE recorded_at < now() - INTERVAL '24 hours';
 $$;

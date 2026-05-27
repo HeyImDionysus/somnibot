@@ -137,6 +137,10 @@ vi.mock('../features/music/music-embeds.js', () => ({
 vi.mock('../features/levels/level-announcer.js', () => ({
   announceLevelUp: vi.fn(async () => {}),
 }));
+vi.mock('../guild-init.js', () => ({
+  initGuildFeatures: vi.fn(async () => {}),
+  destroyGuildServices: vi.fn(),
+}));
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};

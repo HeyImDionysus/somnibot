@@ -37,6 +37,7 @@ CREATE OR REPLACE FUNCTION purge_user_data(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = ''
 AS $$
 DECLARE
   v_deleted JSONB := '{}'::JSONB;

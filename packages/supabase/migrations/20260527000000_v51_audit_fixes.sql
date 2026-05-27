@@ -6,9 +6,10 @@ RETURNS INTEGER
 LANGUAGE sql
 VOLATILE
 SECURITY DEFINER
+SET search_path = ''
 AS $$
   SELECT COALESCE(MAX(member_number), 0) + 1
-  FROM members
+  FROM public.members
   WHERE guild_id = p_guild_id;
 $$;
 
