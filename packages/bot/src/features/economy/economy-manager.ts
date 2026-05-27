@@ -84,11 +84,16 @@ export interface TransactionResult {
 // prevents even theoretical outcome prediction.
 
 function randInt(min: number, max: number): number {
-  return randomInt(min, max + 1); // randomInt upper bound is exclusive
+  // Guard against undefined/NaN from incomplete configs — fall back to 0..0
+  const lo = Number.isSafeInteger(min) ? min : 0;
+  const hi = Number.isSafeInteger(max) ? max : lo;
+  if (lo > hi) return lo;
+  return randomInt(lo, hi + 1); // randomInt upper bound is exclusive
 }
 
 function chance(pct: number): boolean {
-  return randomInt(0, 10000) < pct * 100;
+  const p = typeof pct === 'number' && !Number.isNaN(pct) ? pct : 0;
+  return randomInt(0, 10000) < p * 100;
 }
 
 // ── Flavor text ───────────────────────────────────────────
