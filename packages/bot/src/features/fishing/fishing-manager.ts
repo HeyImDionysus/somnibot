@@ -214,7 +214,9 @@ export class FishingManager {
       .limit(1);
 
     if (!data || data.length === 0) return null;
-    const inv = data[0] as { item_id: string; quantity: number; economy_items: { name: string } };
+    // Supabase !inner join returns a single object at runtime, but generated types
+    // may infer an array. Cast through unknown to satisfy both.
+    const inv = data[0] as unknown as { item_id: string; quantity: number; economy_items: { name: string } };
 
     // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
     // /fish call already consumed the last bait, the RPC returns false
