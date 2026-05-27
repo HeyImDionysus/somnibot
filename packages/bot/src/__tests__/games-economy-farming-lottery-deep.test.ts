@@ -302,16 +302,20 @@ describe('EconomyManager deeper', () => {
 
   it('getLeaderboard returns ranked list', async () => {
     const supa = mockSupabase();
-    const lbChain = mockSupabaseChain();
-    lbChain.then = (resolve: any) => resolve({ data: [
+    // V7 Audit §4.P3a — getLeaderboard now uses the economy_leaderboard RPC
+    // exclusively (client-side fallback removed). Mock the RPC path.
+    supa.rpc.mockResolvedValue({ data: [
       { user_id: 'u1', net_worth: 1000, wallet: 500, bank: 500 },
       { user_id: 'u2', net_worth: 800, wallet: 300, bank: 500 },
     ], error: null });
-    supa.from.mockReturnValue(lbChain);
     const mgr = makeEconMgr(supa);
     const lb = await mgr.getLeaderboard(10);
     expect(lb).toBeDefined();
     expect(lb.length).toBe(2);
+    expect(supa.rpc).toHaveBeenCalledWith('economy_leaderboard', {
+      p_guild_id: expect.any(String),
+      p_limit: 10,
+    });
   });
 
   it('sellItem returns result', async () => {
