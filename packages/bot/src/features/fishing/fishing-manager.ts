@@ -11,6 +11,8 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type { FishRarity } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { randomPick, randomFloat } from '../../utils/random.js';
+import { joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -197,7 +199,7 @@ export class FishingManager {
       .limit(1);
 
     if (!data || data.length === 0) return { hasRod: false, rodName: '' };
-    return { hasRod: true, rodName: (data[0] as any).economy_items.name };
+    return { hasRod: true, rodName: (joinProp(data[0], 'economy_items', 'name') as string) ?? 'Fishing Rod' };
   }
 
   private async consumeBait(userId: string): Promise<string | null> {
@@ -212,7 +214,7 @@ export class FishingManager {
       .limit(1);
 
     if (!data || data.length === 0) return null;
-    const inv = data[0] as any;
+    const inv = data[0] as Record<string, unknown>;
 
     // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
     // /fish call already consumed the last bait, the RPC returns false
@@ -276,7 +278,7 @@ export class FishingManager {
     const baitUsed = await this.consumeBait(userId);
 
     // Determine catch type
-    const roll = Math.random() * 100;
+    const roll = randomFloat(100);
     const junkThreshold = config.economy_fishing_junk_chance_pct;
     const treasureThreshold = junkThreshold + config.economy_fishing_treasure_chance_pct;
 
@@ -284,7 +286,7 @@ export class FishingManager {
 
     if (roll < junkThreshold) {
       // Junk catch
-      const junk = JUNK_ITEMS[Math.floor(Math.random() * JUNK_ITEMS.length)];
+      const junk = randomPick(JUNK_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
       const paid = await this.addCurrency(userId, junk.currency);
       embed = new EmbedBuilder()
@@ -297,7 +299,7 @@ export class FishingManager {
         .setFooter({ text: `Using ${rodName}${baitUsed ? ` + ${baitUsed}` : ''}` });
     } else if (roll < treasureThreshold) {
       // Treasure catch
-      const treasure = TREASURE_ITEMS[Math.floor(Math.random() * TREASURE_ITEMS.length)];
+      const treasure = randomPick(TREASURE_ITEMS);
       // V52-M2: check addCurrency return so failed credits are surfaced
       const paid = await this.addCurrency(userId, treasure.currency);
       embed = new EmbedBuilder()
@@ -350,11 +352,11 @@ export class FishingManager {
 
     // Weighted random rarity
     const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
-    let roll = Math.random() * totalWeight;
+    let remainingWeight = randomFloat(totalWeight);
     let selectedRarity: FishRarity = 'common';
     for (const [rarity, weight] of Object.entries(weights) as [FishRarity, number][]) {
-      roll -= weight;
-      if (roll <= 0) {
+      remainingWeight -= weight;
+      if (remainingWeight <= 0) {
         selectedRarity = rarity;
         break;
       }
@@ -363,11 +365,11 @@ export class FishingManager {
     // Pick random species of that rarity
     const candidates = species.filter((s) => s.rarity === selectedRarity);
     const picked = candidates.length > 0
-      ? candidates[Math.floor(Math.random() * candidates.length)]
-      : species[Math.floor(Math.random() * species.length)];
+      ? randomPick(candidates)
+      : randomPick(species);
 
     // Random weight
-    const weight = picked.min_weight + Math.random() * (picked.max_weight - picked.min_weight);
+    const weight = picked.min_weight + randomFloat(picked.max_weight - picked.min_weight);
     const weightMultiplier = weight / ((picked.min_weight + picked.max_weight) / 2);
     const price = Math.round(picked.base_price * weightMultiplier);
 
@@ -421,7 +423,7 @@ export class FishingManager {
       .limit(1000);
 
     const caught = new Map<string, { count: number; maxWeight: number }>();
-    for (const c of (catches ?? []) as any[]) {
+    for (const c of (catches ?? []) as Record<string, unknown>[]) {
       const entry = caught.get(c.species_id) ?? { count: 0, maxWeight: 0 };
       entry.count++;
       entry.maxWeight = Math.max(entry.maxWeight, c.weight);

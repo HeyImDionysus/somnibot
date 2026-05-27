@@ -5,6 +5,7 @@
  * economy_pet_decay_rate. Pets become 'sick'/'sad' at low stats.
  * Optional DM notifications to owners.
  */
+import { randomIntRange, randomFloat } from '../../utils/random.js';
 import {
   EmbedBuilder,
   type ChatInputCommandInteraction,
@@ -388,7 +389,7 @@ export class PetsManager {
       return;
     }
 
-    const xpGain = 20 + Math.floor(Math.random() * 15);
+    const xpGain = randomIntRange(20, 34);
 
     // Atomic train — prevents TOCTOU race with decay timer on energy/xp/level
     const { data: trainResult } = await this.supabase.rpc('economy_pet_train', {
@@ -453,8 +454,8 @@ export class PetsManager {
     }
 
     // Simple battle calc
-    const myPower = myPet.attack * 2 + myPet.speed + myPet.health + Math.random() * 10;
-    const theirPower = theirPet.attack * 2 + theirPet.speed + theirPet.health + Math.random() * 10;
+    const myPower = myPet.attack * 2 + myPet.speed + myPet.health + randomFloat(10);
+    const theirPower = theirPet.attack * 2 + theirPet.speed + theirPet.health + randomFloat(10);
     const iWin = myPower > theirPower;
     const reward = 100 + myPet.level * 10;
 

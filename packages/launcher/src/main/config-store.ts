@@ -15,6 +15,7 @@
 
 import Store from 'electron-store';
 import { safeStorage } from 'electron';
+import { randomBytes } from 'node:crypto';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -209,7 +210,12 @@ export function buildEnvVars(
     // Lavalink defaults
     LAVALINK_HOST: 'localhost',
     LAVALINK_PORT: '2333',
-    LAVALINK_PASSWORD: 'YOUR_LAVALINK_PASSWORD',
+    // V7 Audit §9.8: Require LAVALINK_PASSWORD from config instead of a placeholder.
+    // Lavalink refuses to start with an empty password, so fall back to a random
+    // per-launch value when the user hasn't configured one yet.
+    LAVALINK_PASSWORD: config.lavalinkEnabled
+      ? (process.env.LAVALINK_PASSWORD || randomBytes(16).toString('hex'))
+      : '',
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',

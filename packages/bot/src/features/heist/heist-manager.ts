@@ -5,6 +5,8 @@
  * Participants join with /heist join. Each additional member increases success chance.
  * Roles are randomly assigned: Hacker, Muscle, Lookout, Driver, Demolitions.
  */
+import { randomPick, randomFloat } from '../../utils/random.js';
+import { hasErrorCode } from '../../utils/db-helpers.js';
 import {
   EmbedBuilder,
   type ChatInputCommandInteraction,
@@ -175,7 +177,7 @@ export class HeistManager {
     }
 
     // Pick random target
-    const target = HEIST_TARGETS[Math.floor(Math.random() * HEIST_TARGETS.length)];
+    const target = randomPick(HEIST_TARGETS);
     const basePayout = Math.floor((config.economy_heist_base_payout ?? 500) * target.payoutMod);
     const joinWindowSecs = config.economy_heist_join_window_secs ?? 60;
     const expiresAt = new Date(Date.now() + joinWindowSecs * 1000).toISOString();
@@ -202,7 +204,7 @@ export class HeistManager {
       .single();
 
     if (heistErr || !heist) {
-      const code = (heistErr as any)?.code;
+      const code = hasErrorCode(heistErr) ? heistErr.code : undefined;
       // Always refund the entry fee — we charged it before the insert.
       const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
@@ -227,7 +229,7 @@ export class HeistManager {
     }
 
     // V53-C10: Add initiator as participant — check error, refund if insert fails
-    const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
+    const role = randomPick(HEIST_ROLES);
     const { error: initInsertErr } = await this.supabase.from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
@@ -337,7 +339,7 @@ export class HeistManager {
     }
 
     // V53-C8: Add participant — check insert, refund entry fee on failure
-    const role = HEIST_ROLES[Math.floor(Math.random() * HEIST_ROLES.length)];
+    const role = randomPick(HEIST_ROLES);
     const { error: partInsertErr } = await this.supabase.from('economy_heist_participants').insert({
       heist_id: heist.id,
       guild_id: guildId,
@@ -513,7 +515,7 @@ export class HeistManager {
       .eq('id', heistId);
 
     // Roll success
-    const roll = Math.random() * 100;
+    const roll = randomFloat(100);
     const isSuccess = roll < heist.success_chance;
 
     if (isSuccess) {
@@ -562,7 +564,7 @@ export class HeistManager {
         })
         .join('\n');
 
-      const story = SUCCESS_STORIES[Math.floor(Math.random() * SUCCESS_STORIES.length)];
+      const story = randomPick(SUCCESS_STORIES);
 
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
       if (channel) {
@@ -583,7 +585,7 @@ export class HeistManager {
         .update({ status: 'failed', resolved_at: new Date().toISOString() })
         .eq('id', heistId);
 
-      const story = FAIL_STORIES[Math.floor(Math.random() * FAIL_STORIES.length)];
+      const story = randomPick(FAIL_STORIES);
       const entryFee = config?.economy_heist_entry_fee ?? 100;
 
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
