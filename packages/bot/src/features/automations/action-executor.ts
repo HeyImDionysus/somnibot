@@ -101,7 +101,13 @@ async function executeAction(
       if (!channel || channel.type !== ChannelType.GuildText) {
         return { success: false, error: `Channel ${channelId} not found or not a text channel` };
       }
-      await (channel as TextChannel).send(message);
+      // V5 Audit [V5-2]: Restrict allowedMentions to prevent injection via template variables.
+      // Guild admins can opt-in to mentions by setting allow_mentions: true on the action config.
+      const allowMentions = config.allow_mentions === true;
+      await (channel as TextChannel).send({
+        content: message,
+        allowedMentions: allowMentions ? undefined : { parse: [] },
+      });
       return { success: true };
     }
 
@@ -111,7 +117,11 @@ async function executeAction(
       if (!allowed) return { success: false, error: 'DM rate limited' };
       const message = resolveVars(config.message as string, ctx.variables);
       try {
-        await ctx.member.send(message);
+        // V5 Audit [V5-2]: Restrict mentions in DMs too (consistent behavior).
+        await ctx.member.send({
+          content: message,
+          allowedMentions: { parse: [] },
+        });
       } catch {
         return { success: false, error: 'Could not DM user (DMs may be disabled)' };
       }
@@ -121,7 +131,12 @@ async function executeAction(
     case 'reply_to_message': {
       if (!ctx.message) return { success: false, error: 'No message context for reply' };
       const message = resolveVars(config.message as string, ctx.variables);
-      await ctx.message.reply(message);
+      // V5 Audit [V5-2]: Restrict mentions on replies to prevent injection.
+      const allowMentions = config.allow_mentions === true;
+      await ctx.message.reply({
+        content: message,
+        allowedMentions: allowMentions ? undefined : { parse: [] },
+      });
       return { success: true };
     }
 
