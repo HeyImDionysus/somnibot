@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
+import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -32,12 +33,24 @@ export async function GET(
   const cid = req.nextUrl.searchParams.get('cid');
   const gid = req.nextUrl.searchParams.get('gid');
 
+  const nonce = req.nextUrl.searchParams.get('nonce');
+
   if (sig && exp && cid && gid) {
     // Signed URL authentication (preferred — no raw token in URL)
-    const verified = verifySignedDownloadUrl(productId, fileId, sig, exp, cid, gid);
+    const verified = verifySignedDownloadUrl(productId, fileId, sig, exp, cid, gid, nonce ?? undefined);
     if (!verified) {
       return NextResponse.json({ error: 'Invalid or expired download link' }, { status: 401 });
     }
+
+    // Single-use enforcement: each nonce can only be consumed once.
+    // If the nonce was already used, reject the request.
+    if (verified.nonce) {
+      const consumed = await consumeDownloadNonce(verified.nonce, parseInt(exp, 10));
+      if (!consumed) {
+        return NextResponse.json({ error: 'Download link has already been used' }, { status: 410 });
+      }
+    }
+
     customerId = verified.customerId;
     guildId = verified.guildId;
   } else {

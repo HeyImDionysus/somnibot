@@ -376,6 +376,7 @@ describe('automod-engine', () => {
       del: vi.fn(async () => {}),
       incr: vi.fn(async () => 1),
       expire: vi.fn(async () => {}),
+      scan: vi.fn(async () => ['0', []]),
     };
   }
 
@@ -405,11 +406,18 @@ describe('automod-engine', () => {
     };
   }
 
-  it('invalidateRulesCache deletes key', async () => {
+  it('invalidateRulesCache deletes guild-scoped key', async () => {
+    const valkey = makeValkey();
+    const client = makeClient([], valkey);
+    await engine.invalidateRulesCache(client as any, 'g1');
+    expect(valkey.del).toHaveBeenCalledWith('automod:rules:g1');
+  });
+
+  it('invalidateRulesCache without guildId uses SCAN wildcard', async () => {
     const valkey = makeValkey();
     const client = makeClient([], valkey);
     await engine.invalidateRulesCache(client as any);
-    expect(valkey.del).toHaveBeenCalled();
+    expect(valkey.scan).toHaveBeenCalled();
   });
 
   it('processMessage returns false for bot messages', async () => {

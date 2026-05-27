@@ -26,7 +26,10 @@ const rbacRoleUpdate = z.object({
   priority: z.number().int().min(0).max(999).optional(),
 });
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const rateLimited = await checkAdminRateLimit(request, 'standard');
+  if (rateLimited) return rateLimited;
+
   try {
     const ctx = await requirePermission('dashboard.manage_team');
     const admin = createAdminSupabase();

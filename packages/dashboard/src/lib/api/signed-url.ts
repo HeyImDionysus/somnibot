@@ -10,7 +10,7 @@
  * 3. Signed URL encodes: productId, fileId, customerId, expiry, HMAC
  * 4. GET /api/downloads/[productId]/[fileId] verifies HMAC instead of raw token
  */
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 
 let _downloadSecret: string | undefined;
 function getDownloadSecret(): string {
@@ -40,14 +40,16 @@ export interface SignedDownloadParams {
 
 /**
  * Generate a signed download URL path (relative).
- * The signature covers all parameters + expiry so it can't be tampered with.
+ * The signature covers all parameters + expiry + a single-use nonce
+ * so it can't be tampered with or reused.
  */
 export function generateSignedDownloadUrl(
   params: SignedDownloadParams,
   expirySeconds = DEFAULT_EXPIRY_SECONDS,
 ): string {
   const expires = Math.floor(Date.now() / 1000) + expirySeconds;
-  const payload = `${params.productId}:${params.fileId}:${params.customerId}:${params.guildId}:${expires}`;
+  const nonce = randomUUID();
+  const payload = `${params.productId}:${params.fileId}:${params.customerId}:${params.guildId}:${expires}:${nonce}`;
   const signature = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
@@ -57,6 +59,7 @@ export function generateSignedDownloadUrl(
     exp: String(expires),
     cid: params.customerId,
     gid: params.guildId,
+    nonce,
   });
 
   return `/api/downloads/${params.productId}/${params.fileId}?${qs.toString()}`;
@@ -64,7 +67,7 @@ export function generateSignedDownloadUrl(
 
 /**
  * Verify a signed download URL's signature and expiry.
- * Returns the decoded customer/guild IDs on success, or null on failure.
+ * Returns the decoded customer/guild IDs + nonce on success, or null on failure.
  */
 export function verifySignedDownloadUrl(
   productId: string,
@@ -73,7 +76,8 @@ export function verifySignedDownloadUrl(
   exp: string,
   customerId: string,
   guildId: string,
-): { customerId: string; guildId: string } | null {
+  nonce?: string,
+): { customerId: string; guildId: string; nonce: string | null } | null {
   const expNum = parseInt(exp, 10);
   if (isNaN(expNum)) return null;
 
@@ -81,8 +85,12 @@ export function verifySignedDownloadUrl(
   const now = Math.floor(Date.now() / 1000);
   if (now > expNum) return null;
 
-  // Verify HMAC
-  const payload = `${productId}:${fileId}:${customerId}:${guildId}:${exp}`;
+  // Verify HMAC — nonce is included in the payload when present.
+  // Backwards-compatible: older links without a nonce still verify
+  // (they just can't be consumed via the single-use check).
+  const payload = nonce
+    ? `${productId}:${fileId}:${customerId}:${guildId}:${exp}:${nonce}`
+    : `${productId}:${fileId}:${customerId}:${guildId}:${exp}`;
   const expected = createHmac('sha256', getDownloadSecret())
     .update(payload)
     .digest('hex');
@@ -91,5 +99,5 @@ export function verifySignedDownloadUrl(
   if (sig.length !== expected.length) return null;
   if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
 
-  return { customerId, guildId };
+  return { customerId, guildId, nonce: nonce ?? null };
 }

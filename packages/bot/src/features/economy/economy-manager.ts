@@ -13,6 +13,7 @@ import { EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { randomInt } from 'node:crypto';
 
 const log = createLogger('Economy');
 
@@ -75,14 +76,24 @@ export interface TransactionResult {
   streak?: StreakData;
 }
 
-// ── Random helpers ────────────────────────────────────────
+// ── Random helpers (crypto-backed) ────────────────────────
+// V5C-6: Replaced Math.random() with crypto.randomInt() so game
+// outcomes (work, crime, beg, search) are not predictable from
+// V8's PRNG state. This is a defense-in-depth measure — the
+// economy is virtual currency only, but crypto randomness
+// prevents even theoretical outcome prediction.
 
 function randInt(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  // Guard against undefined/NaN from incomplete configs — fall back to 0..0
+  const lo = Number.isSafeInteger(min) ? min : 0;
+  const hi = Number.isSafeInteger(max) ? max : lo;
+  if (lo > hi) return lo;
+  return randomInt(lo, hi + 1); // randomInt upper bound is exclusive
 }
 
 function chance(pct: number): boolean {
-  return Math.random() * 100 < pct;
+  const p = typeof pct === 'number' && !Number.isNaN(pct) ? pct : 0;
+  return randomInt(0, 10000) < p * 100;
 }
 
 // ── Flavor text ───────────────────────────────────────────
@@ -566,7 +577,7 @@ export class EconomyManager {
     }
 
     const amount = randInt(cfg.economy_work_min, cfg.economy_work_max);
-    const job = WORK_JOBS[Math.floor(Math.random() * WORK_JOBS.length)];
+    const job = WORK_JOBS[randomInt(0, WORK_JOBS.length)];
     const updated = await this.creditWallet(userId, amount);
     if (!updated) {
       const wallet = await this.getOrCreateWallet(userId);
@@ -610,7 +621,7 @@ export class EconomyManager {
         const wallet = await this.getOrCreateWallet(userId);
         return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your crime earnings. Please try again.' };
       }
-      const story = CRIME_SUCCESS[Math.floor(Math.random() * CRIME_SUCCESS.length)];
+      const story = CRIME_SUCCESS[randomInt(0, CRIME_SUCCESS.length)];
 
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
       await this.logEconomyEvent(userId, 'crime (success)', amount);
@@ -627,7 +638,7 @@ export class EconomyManager {
       const wallet = await this.getOrCreateWallet(userId);
       const fine = Math.floor(wallet.wallet * (cfg.economy_crime_fine_pct / 100));
       const updated = fine > 0 ? (await this.debitWallet(userId, fine)) ?? wallet : wallet;
-      const story = CRIME_FAIL[Math.floor(Math.random() * CRIME_FAIL.length)];
+      const story = CRIME_FAIL[randomInt(0, CRIME_FAIL.length)];
 
       if (fine > 0) {
         await this.recordTransaction(userId, 'crime', -fine, updated.wallet, `Crime failed: ${story}`);
@@ -669,7 +680,7 @@ export class EconomyManager {
         const wallet = await this.getOrCreateWallet(userId);
         return { success: false, amount: 0, balance: wallet, message: '❌ Failed to credit your begging earnings.' };
       }
-      const story = BEG_SUCCESS[Math.floor(Math.random() * BEG_SUCCESS.length)];
+      const story = BEG_SUCCESS[randomInt(0, BEG_SUCCESS.length)];
 
       await this.recordTransaction(userId, 'beg', amount, updated.wallet, `Begged: ${story}`);
 
@@ -681,7 +692,7 @@ export class EconomyManager {
       };
     } else {
       const wallet = await this.getOrCreateWallet(userId);
-      const story = BEG_FAIL[Math.floor(Math.random() * BEG_FAIL.length)];
+      const story = BEG_FAIL[randomInt(0, BEG_FAIL.length)];
       return { success: false, amount: 0, balance: wallet, message: `😢 ${story}` };
     }
   }
@@ -703,7 +714,7 @@ export class EconomyManager {
     }
 
     if (chance(65)) {
-      const loc = SEARCH_LOCATIONS[Math.floor(Math.random() * SEARCH_LOCATIONS.length)];
+      const loc = SEARCH_LOCATIONS[randomInt(0, SEARCH_LOCATIONS.length)];
       const amount = randInt(loc.min, loc.max);
       const updated = await this.creditWallet(userId, amount);
       if (!updated) {
@@ -721,7 +732,7 @@ export class EconomyManager {
       };
     } else {
       const wallet = await this.getOrCreateWallet(userId);
-      const msg = SEARCH_EMPTY[Math.floor(Math.random() * SEARCH_EMPTY.length)];
+      const msg = SEARCH_EMPTY[randomInt(0, SEARCH_EMPTY.length)];
       return { success: false, amount: 0, balance: wallet, message: `🔍 ${msg}` };
     }
   }
