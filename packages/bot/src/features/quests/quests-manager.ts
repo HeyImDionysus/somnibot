@@ -1,6 +1,7 @@
 /**
  * QuestsManager — daily/weekly quest assignment, progress tracking, claiming.
  */
+import { cryptoShuffle } from '../../utils/random.js';
 import { EmbedBuilder, type ChatInputCommandInteraction } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
@@ -142,7 +143,9 @@ export class QuestsManager {
       .limit(1000);
 
     for (const p of active ?? []) {
-      if ((p.template as any)?.action_type === actionType) {
+      const tmpl = p.template as { action_type: string } | { action_type: string }[] | null;
+      const actionMatch = Array.isArray(tmpl) ? tmpl[0]?.action_type : tmpl?.action_type;
+      if (actionMatch === actionType) {
         await Promise.resolve(this.supabase.rpc('economy_quest_increment_progress', {
           p_id: p.id,
           p_amount: amount,
@@ -168,7 +171,7 @@ export class QuestsManager {
 
     // V49-M5: Shuffle and pick — use ON CONFLICT DO NOTHING to prevent
     // duplicate assignments from concurrent /quests calls.
-    const shuffled = templates.sort(() => Math.random() - 0.5).slice(0, count);
+    const shuffled = cryptoShuffle(templates).slice(0, count);
     const today = new Date().toISOString().slice(0, 10);
     const rows = shuffled.map((t: any) => ({
       guild_id: guildId,
@@ -218,7 +221,7 @@ export class QuestsManager {
     const needed = weeklyCount - weeklyExisting.length;
     const usedIds = new Set(weeklyExisting.map((p: any) => p.template_id));
     const available = templates.filter((t: any) => !usedIds.has(t.id));
-    const shuffled = available.sort(() => Math.random() - 0.5).slice(0, needed);
+    const shuffled = cryptoShuffle(available).slice(0, needed);
 
     if (shuffled.length === 0) return;
 

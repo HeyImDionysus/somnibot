@@ -10,6 +10,7 @@
  */
 
 import { type ChildProcess, spawn, execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -34,6 +35,19 @@ export type LavalinkStatus = 'offline' | 'starting' | 'online' | 'error' | 'down
 let lavalinkProcess: ChildProcess | null = null;
 let currentStatus: LavalinkStatus = 'offline';
 let lastError = '';
+
+// V7 Audit §9.8: Single source of truth for the managed Lavalink password.
+// Resolved once at startup — used in both application.yml and LAVALINK_PASSWORD env var.
+let _lavalinkPassword: string | null = null;
+
+/** Get the Lavalink password used for the current managed instance. */
+export function getLavalinkPassword(): string {
+  if (!_lavalinkPassword) {
+    // Prefer explicit env var; otherwise generate a random password for this launch
+    _lavalinkPassword = process.env.LAVALINK_PASSWORD || randomBytes(16).toString('hex');
+  }
+  return _lavalinkPassword;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Paths                                                              */
@@ -184,7 +198,7 @@ async function writeDefaultConfig(): Promise<void> {
     '  address: 0.0.0.0',
     'lavalink:',
     '  server:',
-    '    password: "YOUR_LAVALINK_PASSWORD"',
+    `    password: "${getLavalinkPassword()}"`,
     '    sources:',
     '      youtube: true',
     '      bandcamp: true',

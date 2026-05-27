@@ -7,6 +7,7 @@
  * IMPORTANT: This is the FAKE economy (virtual adventures).
  */
 
+import { randomPick, randomChance } from '../../utils/random.js';
 import {
   type Guild,
   type ButtonInteraction,
@@ -472,7 +473,7 @@ export class AdventureManager {
 
       if (data) {
         const sceneRows = def.scenes.map((s, i) => ({
-          adventure_id: (data as any).id,
+          adventure_id: (data as Record<string, unknown>).id as string,
           scene_index: i,
           text: s.text,
           choices: s.choices,
@@ -564,7 +565,7 @@ export class AdventureManager {
       const filtered = adventures.filter((a) => a.adventure_type === adventureType);
       if (filtered.length > 0) candidates = filtered;
     }
-    const adventure = candidates[Math.floor(Math.random() * candidates.length)];
+    const adventure = randomPick(candidates);
 
     // Get first scene
     const { data: firstScene } = await this.supabase
@@ -626,7 +627,7 @@ export class AdventureManager {
       };
     }
 
-    const sessionId = (session as any)?.id ?? null;
+    const sessionId = (session as Record<string, unknown> | null)?.id as string | null;
 
     // Build embed + buttons
     const { embed, row } = this.buildSceneEmbed(adventure, scene, sessionId, 0);
@@ -646,7 +647,7 @@ export class AdventureManager {
       .eq('id', sessionId)
       .single();
 
-    if (!session || (session as any).status !== 'active') {
+    if (!session || (session as Record<string, unknown>).status !== 'active') {
       await interaction.reply({ content: '❌ This adventure has ended.', ephemeral: true });
       return;
     }
@@ -687,7 +688,7 @@ export class AdventureManager {
 
     // Roll loot from choice
     for (const loot of choice.loot) {
-      if (Math.random() * 100 < loot.chance_pct) {
+      if (randomChance(loot.chance_pct)) {
         const existing = lootCollected.find((l) => l.item_name === loot.item_name);
         if (existing) existing.qty += loot.qty;
         else lootCollected.push({ item_name: loot.item_name, qty: loot.qty });
@@ -727,7 +728,7 @@ export class AdventureManager {
 
     // Roll scene loot
     for (const loot of next.loot) {
-      if (Math.random() * 100 < loot.chance_pct) {
+      if (randomChance(loot.chance_pct)) {
         const existing = lootCollected.find((l) => l.item_name === loot.item_name);
         if (existing) existing.qty += loot.qty;
         else lootCollected.push({ item_name: loot.item_name, qty: loot.qty });
@@ -774,7 +775,7 @@ export class AdventureManager {
     const adv = advData as Adventure;
     const { embed, row } = this.buildSceneEmbed(adv, next, sessionId, lootCollected.length);
 
-    const updatePayload: any = { embeds: [embed], components: [] as any[] };
+    const updatePayload: { embeds: EmbedBuilder[]; components: ActionRowBuilder<ButtonBuilder>[] } = { embeds: [embed], components: [] };
     if (row) updatePayload.components = [row];
     await interaction.update(updatePayload);
   }
@@ -869,7 +870,7 @@ export class AdventureManager {
         const { error: lootErr } = await this.supabase.rpc('economy_upsert_inventory', {
           p_guild_id: this.guild.id,
           p_user_id: session.user_id,
-          p_item_id: (found[0] as any).id,
+          p_item_id: (found[0] as Record<string, unknown>).id as string,
           p_quantity: item.qty,
         });
         if (lootErr) {

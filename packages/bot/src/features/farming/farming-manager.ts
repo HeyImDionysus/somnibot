@@ -10,6 +10,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -345,7 +346,7 @@ export class FarmingManager {
       user_id: userId,
       type: 'farm_harvest',
       amount: totalEarnings,
-      balance_after: (farmWallet as any)?.wallet ?? 0,
+      balance_after: walletBalance(farmWallet),
       description: `Harvested ${harvested.length} crops`,
     });
 
@@ -521,8 +522,8 @@ export class FarmingManager {
 
     if (!items) return false;
 
-    const fert = (items as any[]).find((i) =>
-      ((i.economy_items as any)?.name ?? '').toLowerCase() === 'fertilizer'
+    const fert = (items as Record<string, unknown>[]).find((i) =>
+      ((joinProp(i, 'economy_items', 'name') as string) ?? '').toLowerCase() === 'fertilizer'
     );
     if (!fert) return false;
 

@@ -6,6 +6,8 @@
  *
  * IMPORTANT: This is the "fake economy" — virtual items only.
  */
+import { randomPick, randomFloat, randomIntRange } from '../../utils/random.js';
+import { walletBalance } from '../../utils/db-helpers.js';
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import type { LootSourceType, LootRarity } from '@somnibot/shared';
@@ -268,11 +270,11 @@ export class GatheringManager {
       user_id: userId,
       type: 'gather',
       amount: totalValue,
-      balance_after: (gatherWallet as any)?.wallet ?? 0,
+      balance_after: walletBalance(gatherWallet),
       description: `${SOURCE_CONFIG[sourceType].pastVerb} ${quantity}x ${picked.item_name}`,
     });
 
-    const flavor = FLAVOR_TEXT[sourceType][Math.floor(Math.random() * FLAVOR_TEXT[sourceType].length)];
+    const flavor = randomPick(FLAVOR_TEXT[sourceType]);
     const embed = new EmbedBuilder()
       .setTitle(`${SOURCE_CONFIG[sourceType].emoji} ${sourceType.charAt(0).toUpperCase() + sourceType.slice(1)} Results`)
       .setDescription(
@@ -344,16 +346,16 @@ export class GatheringManager {
     let bestInvId: string | null = null;
     let bestDurability: number | null = null;
 
-    for (const inv of items as any[]) {
+    for (const inv of items as { id: string; durability_remaining: number | null; economy_items: { use_effect?: { type: string; tier?: number } } }[]) {
       const effect = inv.economy_items?.use_effect;
       if (!effect || typeof effect !== 'object') continue;
-      if ((effect as Record<string, unknown>).type !== toolEffect) continue;
+      if (effect.type !== toolEffect) continue;
 
-      const tier = ((effect as Record<string, unknown>).tier as number) ?? 1;
+      const tier = effect.tier ?? 1;
       if (tier > bestTier) {
         bestTier = tier;
-        bestInvId = inv.id as string;
-        bestDurability = inv.durability_remaining as number | null;
+        bestInvId = inv.id;
+        bestDurability = inv.durability_remaining;
       }
     }
 
@@ -398,7 +400,7 @@ export class GatheringManager {
 
   private weightedRandom(entries: LootEntry[]): LootEntry {
     const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
-    let roll = Math.random() * totalWeight;
+    let roll = randomFloat(totalWeight);
     for (const entry of entries) {
       roll -= entry.weight;
       if (roll <= 0) return entry;
@@ -407,7 +409,7 @@ export class GatheringManager {
   }
 
   private randomInt(min: number, max: number): number {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+    return randomIntRange(min, max);
   }
 
   private formatCooldown(seconds: number): string {

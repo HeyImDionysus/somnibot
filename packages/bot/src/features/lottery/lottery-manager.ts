@@ -9,6 +9,7 @@ import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { randomPick } from '../../utils/random.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Lottery');
@@ -365,8 +366,8 @@ export class LotteryManager {
       return null;
     }
 
-    // Random winner
-    const winnerTicket = tickets[Math.floor(Math.random() * tickets.length)];
+    // V7 Audit §4.4: CSPRNG for winner selection (matches giveaway-manager)
+    const winnerTicket = randomPick(tickets);
 
     // Award jackpot BEFORE flipping to 'drawn' so a payout failure
     // doesn't leave the winner unpaid + the drawing permanently closed.

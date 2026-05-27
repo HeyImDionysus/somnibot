@@ -9,6 +9,7 @@
 import { type Guild, EmbedBuilder } from 'discord.js';
 import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
+import { walletBalance, joinProp } from '../../utils/db-helpers.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -263,7 +264,7 @@ export class CraftingManager {
       user_id: userId,
       type: 'craft',
       amount: 0,
-      balance_after: (craftWallet as any)?.wallet ?? 0,
+      balance_after: walletBalance(craftWallet),
       description: `Crafted ${recipe.output_qty}x ${recipe.name}`,
     });
 
@@ -367,8 +368,8 @@ export class CraftingManager {
       .limit(1000);
 
     if (!data) return [];
-    return (data as any[]).map((row) => ({
-      item_name: (row.economy_items as any)?.name ?? 'Unknown',
+    return (data as Record<string, unknown>[]).map((row) => ({
+      item_name: (joinProp(row, 'economy_items', 'name') as string) ?? 'Unknown',
       quantity: row.quantity as number,
       item_id: row.item_id as string,
     }));
@@ -386,8 +387,8 @@ export class CraftingManager {
 
     if (!items) return { success: false, itemId: '' };
 
-    const match = (items as any[]).find((i) =>
-      ((i.economy_items as any)?.name ?? '').toLowerCase() === itemName.toLowerCase()
+    const match = (items as Record<string, unknown>[]).find((i) =>
+      ((joinProp(i, 'economy_items', 'name') as string) ?? '').toLowerCase() === itemName.toLowerCase()
     );
     if (!match) return { success: false, itemId: '' };
 

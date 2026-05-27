@@ -15,6 +15,7 @@
 
 import Store from 'electron-store';
 import { safeStorage } from 'electron';
+import { getLavalinkPassword } from './lavalink-manager.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -209,7 +210,10 @@ export function buildEnvVars(
     // Lavalink defaults
     LAVALINK_HOST: 'localhost',
     LAVALINK_PORT: '2333',
-    LAVALINK_PASSWORD: 'YOUR_LAVALINK_PASSWORD',
+    // V7 Audit §9.8: Use the same password that was written to application.yml.
+    // getLavalinkPassword() is the single source of truth — resolves from
+    // LAVALINK_PASSWORD env var or a random per-launch hex, and caches the result.
+    LAVALINK_PASSWORD: config.lavalinkEnabled ? getLavalinkPassword() : '',
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',

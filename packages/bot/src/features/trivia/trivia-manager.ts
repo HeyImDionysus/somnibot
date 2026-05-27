@@ -2,6 +2,7 @@
  * TriviaManager — handles trivia rounds with streak bonuses,
  * difficulty scaling, category support, and custom question packs.
  */
+import { randomPick, cryptoShuffle } from '../../utils/random.js';
 import {
   EmbedBuilder,
   ActionRowBuilder,
@@ -166,14 +167,10 @@ export class TriviaManager {
       if (filtered.length > 0) pool = filtered;
     }
 
-    const question = pool[Math.floor(Math.random() * pool.length)];
+    const question = randomPick(pool);
 
     // Shuffle answers
-    const allAnswers = [question.correct, ...question.wrong];
-    for (let i = allAnswers.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [allAnswers[i], allAnswers[j]] = [allAnswers[j], allAnswers[i]];
-    }
+    const allAnswers = cryptoShuffle([question.correct, ...question.wrong]);
     const correctIndex = allAnswers.indexOf(question.correct);
 
     const labels = ['🅰️', '🅱️', '🅲', '🅳'];
