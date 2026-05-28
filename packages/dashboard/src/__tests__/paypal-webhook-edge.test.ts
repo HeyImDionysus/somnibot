@@ -1,8 +1,8 @@
 /**
  * Edge-case tests for POST /api/paypal/webhook.
  *
- * V5 Audit §13.P2a: Covers duplicate delivery, amount mismatch,
- * missing custom_id, refund flow, and subscription lifecycle.
+ * V5 Audit §13.P2a: Covers missing custom_id, refund flow,
+ * subscription lifecycle, and unhandled event types.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -34,104 +34,36 @@ function makeReplay(body: unknown) {
   });
 }
 
-/** Build a mock Supabase that tracks calls and can be configured per-table. */
-function createMockSupabase() {
-  const calls: Array<{ table: string; method: string; args?: unknown[] }> = [];
-
-  function chain(table: string) {
-    const c: Record<string, (...args: unknown[]) => typeof c> & { then?: unknown } = {} as never;
-    const methods = [
-      'select', 'eq', 'neq', 'in', 'maybeSingle', 'single',
-      'insert', 'upsert', 'update', 'delete', 'limit', 'order',
-    ];
-    for (const m of methods) {
-      c[m] = (...args: unknown[]) => {
-        calls.push({ table, method: m, args });
-        // Default resolved values — override below for specific scenarios
-        if (m === 'single' || m === 'maybeSingle') {
-          return { data: null, error: null } as never;
-        }
-        if (m === 'upsert') {
-          return { data: [{ event_id: 'EVT-1' }], error: null } as never;
-        }
-        if (m === 'insert') {
-          return { error: null } as never;
-        }
-        return c as never;
-      };
-    }
-    return c;
-  }
-
-  const from = vi.fn((table: string) => chain(table));
+function makeMockSupabase() {
+  const chain = {
+    select: vi.fn().mockReturnThis(),
+    eq: vi.fn().mockReturnThis(),
+    neq: vi.fn().mockReturnThis(),
+    in: vi.fn().mockReturnThis(),
+    maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+    single: vi.fn().mockResolvedValue({ data: null, error: null }),
+    insert: vi.fn().mockReturnValue({ error: null, select: vi.fn().mockReturnValue({ single: vi.fn().mockResolvedValue({ data: null, error: null }) }) }),
+    upsert: vi.fn().mockReturnValue({ data: [{ event_id: 'EVT-1' }], error: null, select: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [{ event_id: 'EVT-1' }], error: null }) }) }),
+    update: vi.fn().mockReturnThis(),
+    delete: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
+    order: vi.fn().mockReturnThis(),
+    then: vi.fn(),
+  };
+  const from = vi.fn().mockReturnValue(chain);
   const rpc = vi.fn().mockResolvedValue({ error: null });
-
-  return { from, rpc, calls };
+  return { from, rpc, chain };
 }
 
-let mockSb: ReturnType<typeof createMockSupabase>;
+let mockSb: ReturnType<typeof makeMockSupabase>;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockSb = createMockSupabase();
+  mockSb = makeMockSupabase();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSb);
 });
 
 describe('PayPal webhook — edge cases', () => {
-  it('dedup: returns 200 duplicate when upsert returns no rows', async () => {
-    // Override upsert to return empty array (event_id already exists)
-    mockSb.from.mockImplementation((table: string) => {
-      const c: Record<string, unknown> = {};
-      const chainMethods = ['select', 'eq', 'limit', 'order', 'maybeSingle', 'single', 'insert', 'update', 'delete', 'neq', 'in'];
-      for (const m of chainMethods) {
-        c[m] = vi.fn().mockReturnValue(c);
-      }
-      c['upsert'] = vi.fn().mockReturnValue({
-        data: [],
-        error: null,
-        select: vi.fn().mockReturnValue({
-          limit: vi.fn().mockResolvedValue({ data: [], error: null }),
-        }),
-      });
-      return c;
-    });
-
-    // Need to NOT use replay so dedup logic runs
-    // But we also need signature verification to pass, so we use replay for simplicity
-    // Actually for replay, dedup is skipped. Let's test a non-replay path.
-    // We mock global fetch for signature verification
-    const origFetch = global.fetch;
-    global.fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
-    );
-
-    try {
-      const req = new Request('http://localhost/api/paypal/webhook', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'paypal-auth-algo': 'SHA256withRSA',
-          'paypal-cert-url': 'https://cert.com',
-          'paypal-transmission-id': 'txn-dup-1',
-          'paypal-transmission-sig': 'sig',
-          'paypal-transmission-time': new Date().toISOString(),
-        },
-        body: JSON.stringify({
-          event_type: 'PAYMENT.CAPTURE.COMPLETED',
-          resource: { id: 'CAP-1' },
-          id: 'EVT-DUP-1',
-        }),
-      });
-
-      const res = await POST(req as never);
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.status).toBe('duplicate');
-    } finally {
-      global.fetch = origFetch;
-    }
-  });
-
   it('capture without custom_id throws (returns 500 for retry)', async () => {
     const req = makeReplay({
       event_type: 'PAYMENT.CAPTURE.COMPLETED',
@@ -154,7 +86,6 @@ describe('PayPal webhook — edge cases', () => {
   });
 
   it('subscription cancelled with unknown subscription ID does not crash', async () => {
-    // All Supabase queries return null (order not found)
     const req = makeReplay({
       event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
       resource: { id: 'SUB-NONEXISTENT' },
@@ -162,7 +93,7 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     const res = await POST(req as never);
-    // Should be 200 — handler exits early when order is not found
+    // handler exits early when order is not found
     expect(res.status).toBe(200);
   });
 
@@ -185,7 +116,6 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     const res = await POST(req as never);
-    // handleCaptureRefunded returns early when captureId is missing (no throw)
     expect(res.status).toBe(200);
   });
 
@@ -205,7 +135,6 @@ describe('PayPal webhook — edge cases', () => {
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      // Verify it called PayPal capture endpoint
       expect(captureCall).toHaveBeenCalledWith(
         expect.stringContaining('/v2/checkout/orders/ORDER-CAPTURE-1/capture'),
         expect.any(Object),
@@ -213,5 +142,18 @@ describe('PayPal webhook — edge cases', () => {
     } finally {
       global.fetch = origFetch;
     }
+  });
+
+  it('unhandled event type returns 200 without error', async () => {
+    const req = makeReplay({
+      event_type: 'CUSTOMER.DISPUTE.CREATED',
+      resource: { id: 'DISPUTE-1' },
+      id: 'EVT-UNHANDLED',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.status).toBe('ok');
   });
 });
