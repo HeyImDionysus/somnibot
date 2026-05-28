@@ -34,25 +34,35 @@ function makeReplay(body: unknown) {
   });
 }
 
+/**
+ * Build a fully chainable mock Supabase client.
+ * Every method returns the chain object itself (for .from().select().eq()...),
+ * and the chain is also a thenable that resolves to { data: null, error: null }
+ * so awaiting any chain position works.
+ */
 function makeMockSupabase() {
-  const chain = {
-    select: vi.fn().mockReturnThis(),
-    eq: vi.fn().mockReturnThis(),
-    neq: vi.fn().mockReturnThis(),
-    in: vi.fn().mockReturnThis(),
-    maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
-    single: vi.fn().mockResolvedValue({ data: null, error: null }),
-    insert: vi.fn().mockReturnValue({ error: null, select: vi.fn().mockReturnValue({ single: vi.fn().mockResolvedValue({ data: null, error: null }) }) }),
-    upsert: vi.fn().mockReturnValue({ data: [{ event_id: 'EVT-1' }], error: null, select: vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue({ data: [{ event_id: 'EVT-1' }], error: null }) }) }),
-    update: vi.fn().mockReturnThis(),
-    delete: vi.fn().mockReturnThis(),
-    limit: vi.fn().mockReturnThis(),
-    order: vi.fn().mockReturnThis(),
-    then: vi.fn(),
-  };
-  const from = vi.fn().mockReturnValue(chain);
-  const rpc = vi.fn().mockResolvedValue({ error: null });
-  return { from, rpc, chain };
+  const fromFn = vi.fn();
+  const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
+
+  function makeChain(resolvedValue?: { data: unknown; error: unknown }) {
+    const defaultResolved = resolvedValue ?? { data: null, error: null };
+
+    const handler: ProxyHandler<Record<string, unknown>> = {
+      get(_target, prop) {
+        // Make the chain thenable — when awaited, resolve with data
+        if (prop === 'then') {
+          return (resolve: (v: unknown) => void) => resolve(defaultResolved);
+        }
+        // Any chained method returns a new chain proxy
+        return (..._args: unknown[]) => new Proxy({}, handler);
+      },
+    };
+    return new Proxy({}, handler);
+  }
+
+  fromFn.mockImplementation(() => makeChain());
+
+  return { from: fromFn, rpc };
 }
 
 let mockSb: ReturnType<typeof makeMockSupabase>;
@@ -72,7 +82,6 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     const res = await POST(req as never);
-    // Should be 500 because handlePaymentCaptured throws on missing custom_id
     expect(res.status).toBe(500);
   });
 
@@ -93,7 +102,6 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     const res = await POST(req as never);
-    // handler exits early when order is not found
     expect(res.status).toBe(200);
   });
 
