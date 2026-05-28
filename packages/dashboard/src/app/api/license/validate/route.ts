@@ -167,82 +167,36 @@ export async function POST(req: NextRequest) {
   // 8. Multi-device tracking
   let sessionId: string | undefined;
 
+  // V10 Audit §3.P2a — Atomic device-limit eviction via Postgres RPC.
+  // Replaces the read-check-write sequence with a single transaction
+  // that locks the license key row, preventing concurrent validations
+  // from temporarily exceeding the device limit.
   if (device_fingerprint && licenseConfig) {
-    const { data: activeSessions } = await supabase
-      .from('license_sessions')
-      .select('*')
-      .eq('license_key_id', licenseKey.id)
-      .eq('active', true)
-      .limit(1000);
+    const { data: deviceResult, error: deviceError } = await supabase
+      .rpc('license_validate_device', {
+        p_license_key_id: licenseKey.id,
+        p_device_fingerprint: device_fingerprint,
+        p_device_name: device_name ?? null,
+        p_app_version: app_version ?? null,
+        p_ip_address: clientIp,
+        p_max_devices: licenseConfig.max_devices || 3,
+        p_device_policy: licenseConfig.device_policy || 'evict_oldest',
+      });
 
-    const sessions = activeSessions ?? [];
-    const existingSession = sessions.find(
-      (s) => s.device_fingerprint === device_fingerprint,
-    );
-
-    if (!existingSession && sessions.length >= (licenseConfig.max_devices || 3)) {
-      // ── B.5: Configurable device policy ──
-      const devicePolicy = licenseConfig.device_policy || 'evict_oldest';
-
-      if (devicePolicy === 'reject') {
-        await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
-        return NextResponse.json({
-          valid: false,
-          status: 'over_device_limit',
-          error: `Maximum ${licenseConfig.max_devices || 3} devices reached. Deactivate an existing device first.`,
-          active_devices: sessions.length,
-          max_devices: licenseConfig.max_devices || 3,
-        });
-      }
-
-      // evict_oldest: invalidate oldest session
-      const oldest = [...sessions].sort(
-        (a, b) => new Date(a.last_seen_at).getTime() - new Date(b.last_seen_at).getTime(),
-      )[0];
-
-      if (oldest) {
-        await supabase
-          .from('license_sessions')
-          .update({
-            active: false,
-            deactivated_at: new Date().toISOString(),
-            deactivation_reason: 'device_limit',
-          })
-          .eq('id', oldest.id);
-      }
-    }
-
-    const now = new Date().toISOString();
-
-    if (existingSession) {
-      const { data: updated } = await supabase
-        .from('license_sessions')
-        .update({
-          last_seen_at: now,
-          device_name: device_name ?? existingSession.device_name,
-          app_version: app_version ?? existingSession.app_version,
-          ip_address: clientIp ?? existingSession.ip_address,
-        })
-        .eq('id', existingSession.id)
-        .select('id')
-        .single();
-
-      sessionId = updated?.id;
-    } else {
-      const { data: inserted } = await supabase
-        .from('license_sessions')
-        .insert({
-          license_key_id: licenseKey.id,
-          device_fingerprint,
-          device_name: device_name ?? null,
-          app_version: app_version ?? null,
-          ip_address: clientIp,
-          active: true,
-        })
-        .select('id')
-        .single();
-
-      sessionId = inserted?.id;
+    if (deviceError) {
+      // Non-fatal: log and continue without session tracking
+      console.error('[License] Device validation RPC error:', deviceError.message);
+    } else if (deviceResult?.status === 'over_device_limit') {
+      await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
+      return NextResponse.json({
+        valid: false,
+        status: 'over_device_limit',
+        error: `Maximum ${licenseConfig.max_devices || 3} devices reached. Deactivate an existing device first.`,
+        active_devices: deviceResult.active_devices,
+        max_devices: deviceResult.max_devices,
+      });
+    } else if (deviceResult?.session_id) {
+      sessionId = deviceResult.session_id;
     }
   }
 

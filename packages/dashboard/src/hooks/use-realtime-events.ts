@@ -37,7 +37,7 @@ export function useRealtimeEvents(
     const channels: RealtimeChannel[] = [];
 
     for (const handler of handlers) {
-      const channelName = `events-${handler.table}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+      const channelName = `events-${handler.table}-${Date.now()}-${crypto.randomUUID().slice(0, 4)}`;
 
       const channel = supabase
         .channel(channelName)

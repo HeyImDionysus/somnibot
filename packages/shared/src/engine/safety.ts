@@ -238,8 +238,9 @@ export function isLockoutSafe(
     return role;
   });
 
-  // V5 Audit §11.1: Owner's roles don't count — they have implicit perms.
-  // We need at least one NON-owner role with admin capability for delegates.
+  // V10 Audit §11.P3a: If ownerRoleIds is empty (caller error or unknown owner),
+  // skip the owner-exclusion filter so the check is maximally conservative —
+  // every role is evaluated, making a false "safe" result less likely.
   const ownerSet = new Set(ownerRoleIds);
 
   const MANAGE_PERMS = DISCORD_PERMISSIONS.MANAGE_GUILD |

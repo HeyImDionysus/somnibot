@@ -17,8 +17,10 @@ function buildCspHeader(nonce: string): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    // style-src still needs unsafe-inline for Tailwind/CSS-in-JS
-    "style-src 'self' 'unsafe-inline'",
+    // V10 Audit §1.P3a — nonce for inline styles; 'unsafe-inline' kept as
+    // fallback for browsers that don't support nonce on style-src (Safari <15.4).
+    // Browsers that DO support nonce ignore 'unsafe-inline' when a nonce is present.
+    `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
     "img-src 'self' data: https://cdn.discordapp.com",
     "font-src 'self'",
     // connect-src: External API calls (Discord, PayPal) go through server-side

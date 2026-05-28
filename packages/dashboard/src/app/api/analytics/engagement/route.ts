@@ -90,8 +90,16 @@ export async function GET(request: NextRequest) {
     let avgLevel: number;
     let levelDistribution: Record<number, number>;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- RPC return type not in generated schema
-    const agg = levelAgg as any;
+    // V10 Audit §7.P3a — Typed interface for the RPC aggregate result
+    interface LevelAggResult {
+      total_members?: number;
+      total_messages?: number;
+      total_voice_minutes?: number;
+      max_level?: number;
+      avg_level?: number;
+      level_distribution?: Record<number, number>;
+    }
+    const agg = levelAgg as LevelAggResult | null;
     if (agg) {
       totalTrackedMembers = agg.total_members ?? 0;
       totalMessages = agg.total_messages ?? 0;

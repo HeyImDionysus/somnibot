@@ -1,12 +1,16 @@
 /**
  * Shared utility functions used by both bot and dashboard.
  */
+import { randomInt } from 'node:crypto';
 
 /**
  * Generate an order number in the format SMNI-XXXXX.
+ *
+ * V10 Audit §4.P3b — Uses crypto.randomInt to avoid collisions under
+ * load and for consistency with the CSPRNG policy.
  */
 export function generateOrderNumber(): string {
-  const seq = Math.floor(Math.random() * 99999) + 1;
+  const seq = randomInt(1, 100000);
   return `SMNI-${seq.toString().padStart(5, '0')}`;
 }
 

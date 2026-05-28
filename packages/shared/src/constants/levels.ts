@@ -1,6 +1,8 @@
 /**
  * Level system constants and XP curve formula.
  */
+import { randomInt } from 'node:crypto';
+
 export const LEVEL_CONFIG = {
   /** XP required to reach a given level: 5L² + 50L + 100 */
   XP_FORMULA: (level: number): number => 5 * Math.pow(level, 2) + 50 * level + 100,
@@ -68,7 +70,10 @@ export function levelProgress(totalXp: number): {
 
 /**
  * Generate a random XP value between min and max.
+ *
+ * V10 Audit §4.P3a — Uses crypto.randomInt for consistency with the
+ * rest of the codebase (all other random functions use CSPRNG).
  */
 export function randomXp(min: number = LEVEL_CONFIG.DEFAULT_MIN_XP, max: number = LEVEL_CONFIG.DEFAULT_MAX_XP): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  return randomInt(min, max + 1);
 }
