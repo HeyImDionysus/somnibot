@@ -9,6 +9,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { CSRF_COOKIE_NAME } from '@/lib/api/csrf';
 
 const rbacUserAssign = z.object({
   discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -125,7 +126,13 @@ export async function POST(request: NextRequest) {
       .single();
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ success: true, data });
+
+    // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
+    // Clearing the cookie forces a re-fetch of /api/csrf, which re-derives
+    // the token from the (now changed) session state.
+    const resp = NextResponse.json({ success: true, data });
+    resp.cookies.delete(CSRF_COOKIE_NAME);
+    return resp;
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });
@@ -151,7 +158,11 @@ export async function DELETE(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ success: true });
+
+    // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
+    const resp = NextResponse.json({ success: true });
+    resp.cookies.delete(CSRF_COOKIE_NAME);
+    return resp;
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });

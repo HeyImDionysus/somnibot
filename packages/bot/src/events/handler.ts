@@ -411,7 +411,12 @@ async function loadModConfig(client: SomniClient, guildId?: string): Promise<{
   const id = guildId ?? client.guildId;
   const now = Date.now();
   const cached = _modConfigCache.get(id);
-  if (cached && now - cached.time < MOD_CONFIG_TTL) return cached.data;
+  if (cached && now - cached.time < MOD_CONFIG_TTL) {
+    // V9 Audit §6.P3: Promote to most-recent on access for true LRU eviction.
+    _modConfigCache.delete(id);
+    _modConfigCache.set(id, cached);
+    return cached.data;
+  }
 
   const { data } = await client.supabase
     .from('guild_config')

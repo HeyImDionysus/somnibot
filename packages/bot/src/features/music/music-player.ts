@@ -223,6 +223,13 @@ export class MusicPlayerManager {
       return { success: false, message: `Queue is full (max ${this.config.maxQueueLength} tracks)` };
     }
 
+    // V9 Audit §12.P2: Per-user queue limit — prevent one user from monopolizing the queue.
+    const userQueueCount = queue.entries.filter((e) => e.requestedBy === userId).length;
+    const MAX_PER_USER = 50;
+    if (userQueueCount >= MAX_PER_USER) {
+      return { success: false, message: `You've reached the per-user limit of ${MAX_PER_USER} queued tracks` };
+    }
+
     // Resolve search query
     const searchQuery = this.resolveSearchQuery(query);
 
