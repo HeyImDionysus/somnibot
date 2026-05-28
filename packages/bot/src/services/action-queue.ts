@@ -748,12 +748,10 @@ async function processAction(
   // pick up the same row, double-creating Discord entities, double-
   // fulfilling orders, or duplicating role revokes. The RPC returns
   // the row iff status was still 'pending' when this caller flipped it.
-  // V5 Audit §6.P3a: Cast to SupabaseClient with generic to avoid `as any`.
-  // The RPC exists in the DB schema but not in the generated TS types.
-  const { data: claimed, error: claimErr } = await (supabase as SupabaseClient<never>).rpc(
-    'bot_action_queue_claim' as string,
-    { p_action_id: action.id },
-  );
+  // V5 Audit §6.P3a: Use unknown-schema cast to call RPCs not in generated types.
+  const { data: claimed, error: claimErr } = await (
+    supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
+  )('bot_action_queue_claim', { p_action_id: action.id });
   if (claimErr) {
     log.error(`Claim RPC failed for ${action.id}:`, claimErr.message);
     return;
@@ -885,14 +883,13 @@ async function recoverStaleActions(
   guild: Guild,
   supabase: SupabaseClient,
 ): Promise<void> {
-  const { data: recovered, error } = await (supabase as SupabaseClient<never>).rpc(
-    'bot_action_queue_recover_stale' as string,
-    {
-      p_guild_id: guild.id,
-      p_timeout_seconds: STALE_PROCESSING_TIMEOUT_SECS,
-      p_max_retries: ACTION_QUEUE_MAX_RETRIES,
-    },
-  );
+  const { data: recovered, error } = await (
+    supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
+  )('bot_action_queue_recover_stale', {
+    p_guild_id: guild.id,
+    p_timeout_seconds: STALE_PROCESSING_TIMEOUT_SECS,
+    p_max_retries: ACTION_QUEUE_MAX_RETRIES,
+  });
   if (error) {
     log.error('Stale recovery failed:', error.message);
     return;
