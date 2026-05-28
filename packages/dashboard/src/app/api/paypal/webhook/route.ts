@@ -19,7 +19,7 @@ import { z } from 'zod';
 import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
-import { isInternalReplay, verifyWebhookSignature } from './verify.js';
+import { isInternalReplay, verifyWebhookSignature } from './verify';
 import {
   handleOrderApproved,
   handlePaymentCaptured,
@@ -28,7 +28,7 @@ import {
   handleSubscriptionSuspended,
   handleSubscriptionPayment,
   handleCaptureRefunded,
-} from './handlers.js';
+} from './handlers';
 
 // ── Main handler ────────────────────────────────────
 

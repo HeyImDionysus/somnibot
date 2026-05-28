@@ -13,7 +13,7 @@ import {
   type PayPalCaptureResource,
   type PayPalSaleResource,
 } from '@/lib/types/paypal';
-import { generateLicenseKey, queueFulfillment } from './fulfillment.js';
+import { generateLicenseKey, queueFulfillment } from './fulfillment';
 
 // ── Order Approved ──────────────────────────────────
 
