@@ -46,11 +46,15 @@ Validates the license key against the API. Returns cached result if within TTL.
 
 Sends a keepalive for the current session. Auto-called when heartbeat interval is configured.
 
+If the network is unavailable, returns `{ valid: true, status: 'offline' }` as long as
+the offline grace period hasn't expired. Once the grace window lapses, returns
+`{ valid: false, status: 'offline_grace_expired' }` and stops the heartbeat timer.
+
 **Response:**
 ```typescript
 {
   valid: boolean;
-  status: string;
+  status: string;  // 'active', 'offline', 'offline_grace_expired', ...
   next_heartbeat_seconds: number;
 }
 ```

@@ -197,17 +197,20 @@ export function buildChannelOverwrites(
 /**
  * V8 Audit §11.P3a — Safely coerce a permission value to bigint.
  * Discord sends permissions as string-encoded integers. If the value
- * is malformed or exceeds the expected range, returns 0n instead of
+ * is malformed or exceeds the expected range, returns null instead of
  * throwing or producing an unpredictable result.
+ *
+ * V5 Audit §11.2: Returns null on parse failure instead of 0n,
+ * so callers can distinguish "no permissions" (0n) from "bad input" (null).
  */
-export function safePermissionBigInt(value: string | number | bigint): bigint {
+export function safePermissionBigInt(value: string | number | bigint): bigint | null {
   try {
     const n = BigInt(value);
     // Clamp to known permission bit space (currently 50 bits; allow up to 64)
-    if (n < 0n || n > (1n << 64n) - 1n) return 0n;
+    if (n < 0n || n > (1n << 64n) - 1n) return null;
     return n;
   } catch {
-    return 0n;
+    return null;
   }
 }
 

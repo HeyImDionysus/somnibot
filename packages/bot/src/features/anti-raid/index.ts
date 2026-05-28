@@ -71,6 +71,13 @@ function joinWindowKey(guildId: string): string {
 function raidModeKey(guildId: string): string {
   return `antiraid:raidmode:${guildId}`;
 }
+/** V5 Audit §8.2: Track raid-banned user IDs for auto-unban on cooldown. */
+function raidBannedKey(guildId: string): string {
+  return `antiraid:banned:${guildId}`;
+}
+
+// In-memory fallback for raid-banned tracking
+const _memoryRaidBanned = new Map<string, Set<string>>();
 
 async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
@@ -238,6 +245,11 @@ export async function processAntiRaid(
   // Check raid mode state
   const raidActive = await isRaidModeActive(guild.id);
 
+  // V5 Audit §8.2: Auto-unban raid-banned users when raid mode expires (ban mode)
+  if (!raidActive && config.anti_raid_action === 'ban') {
+    await processRaidUnbans(guild, config);
+  }
+
   // V6 Audit §8.6: Restore verification level when raid mode expires
   if (!raidActive && config.anti_raid_action === 'lockdown') {
     try {
@@ -286,6 +298,8 @@ export async function processAntiRaid(
 
         if (action === 'ban') {
           await member.ban({ reason: 'Anti-raid: Join flood detected', deleteMessageSeconds: config.anti_raid_ban_delete_seconds });
+          // V5 Audit §8.2: Track banned user for auto-unban when raid cools down
+          await trackRaidBan(guild.id, member.id);
         } else {
           await member.kick('Anti-raid: Join flood detected');
         }
@@ -356,6 +370,76 @@ export async function processAntiRaid(
   }
 
   return false;
+}
+
+/**
+ * V5 Audit §8.2: Track a user banned during raid mode for later auto-unban.
+ */
+async function trackRaidBan(guildId: string, userId: string): Promise<void> {
+  try {
+    const valkey = getValkey();
+    const key = raidBannedKey(guildId);
+    await valkey.sadd(key, userId);
+    // Set TTL slightly longer than raid cooldown so the set survives until cleanup
+    await valkey.pexpire(key, RAID_MODE_COOLDOWN + 60_000);
+  } catch {
+    // Fallback to in-memory
+    let set = _memoryRaidBanned.get(guildId);
+    if (!set) {
+      set = new Set();
+      _memoryRaidBanned.set(guildId, set);
+    }
+    set.add(userId);
+  }
+}
+
+/**
+ * V5 Audit §8.2: Unban users who were auto-banned during a raid.
+ * Called when raid mode expires. Best-effort — logs failures but doesn't throw.
+ */
+async function processRaidUnbans(guild: Guild, config: AntiRaidConfig): Promise<void> {
+  let userIds: string[] = [];
+  try {
+    const valkey = getValkey();
+    const key = raidBannedKey(guild.id);
+    userIds = await valkey.smembers(key);
+    if (userIds.length > 0) {
+      await valkey.del(key);
+    }
+  } catch {
+    // Fallback to in-memory
+    const set = _memoryRaidBanned.get(guild.id);
+    if (set) {
+      userIds = [...set];
+      _memoryRaidBanned.delete(guild.id);
+    }
+  }
+
+  if (userIds.length === 0) return;
+
+  let unbanned = 0;
+  for (const userId of userIds) {
+    try {
+      await guild.members.unban(userId, 'Anti-raid: Raid cooldown expired — auto-unbanning');
+      unbanned++;
+    } catch {
+      // User may have been manually unbanned or left
+    }
+  }
+
+  if (unbanned > 0) {
+    log.info(`Raid cooldown: auto-unbanned ${unbanned}/${userIds.length} user(s) for guild ${guild.id}`);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x4caf50)
+      .setTitle('🔓 Anti-Raid: Auto-Unban Complete')
+      .setDescription(
+        `Raid mode has expired. **${unbanned}** user(s) who were banned during the raid have been automatically unbanned.`,
+      )
+      .setTimestamp();
+
+    await logRaidEvent(guild, config, embed);
+  }
 }
 
 /**

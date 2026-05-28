@@ -62,6 +62,15 @@ export async function initUpdater(): Promise<void> {
   // If an update was downloaded and the user closes the app, install on next launch
   autoUpdater.autoInstallOnAppQuit = true;
 
+  // V5 Audit §10.2: Pin the update feed URL explicitly instead of relying on
+  // electron-builder.yml defaults. This prevents supply-chain attacks where a
+  // compromised build config could redirect update checks to a malicious server.
+  autoUpdater.setFeedURL({
+    provider: 'github',
+    owner: 'HeyImDionysus',
+    repo: 'somnibot',
+  });
+
   /* ── Events → Renderer ─────────────────────────────────────────── */
 
   autoUpdater.on('checking-for-update', () => {

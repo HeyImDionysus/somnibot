@@ -3,12 +3,24 @@
  *
  * V53 Phase 4 (Finding 4.3.2 — S-2)
  */
-import { NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { cookies } from 'next/headers';
+import { checkRateLimit } from '@/lib/api/rate-limit';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // V5 Audit §1.3: Rate-limit guild list endpoint (30 req/min per IP)
+  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    ?? req.headers.get('x-real-ip')
+    ?? '127.0.0.1';
+  const rl = await checkRateLimit(`guilds:list:${clientIp}`, 30, 60_000);
+  if (rl.limited) {
+    return NextResponse.json(
+      { error: 'Too many requests' },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil(rl.retryAfterMs / 1000)) } },
+    );
+  }
   const supabase = await createServerSupabase();
   const { data: { user }, error: authError } = await supabase.auth.getUser();
 

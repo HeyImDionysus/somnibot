@@ -231,7 +231,16 @@ export class SomniLicense {
 
       return data;
     } catch {
-      return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
+      // V5 Audit §3.2: Check grace period instead of unconditionally returning valid.
+      // A network error during heartbeat should still respect the offline grace window.
+      const graceMs = this.config.offlineGraceMs ?? 86_400_000;
+      const elapsed = this.elapsedSinceAnchor();
+      if (this.cachedResult?.valid && elapsed < graceMs) {
+        return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
+      }
+      this.cachedResult = null;
+      this.stopHeartbeat();
+      return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
     }
   }
 
@@ -277,8 +286,11 @@ export class SomniLicense {
   /**
    * Check if there's a cached valid result.
    */
+  /**
+   * V5 Audit §3.2: Uses monotonic clock (consistent with validate/heartbeat).
+   */
   isValid(): boolean {
-    return !!this.cachedResult?.valid && Date.now() < this.cacheExpiry;
+    return !!this.cachedResult?.valid && this.mono() < this.cacheExpiry;
   }
 
   /**

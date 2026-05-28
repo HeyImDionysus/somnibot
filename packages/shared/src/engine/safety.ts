@@ -219,6 +219,10 @@ export function validateRolePermissions(
  * at least one role still has ADMINISTRATOR or the full admin permission set.
  * This prevents the scenario where the last admin role has its permissions
  * stripped, leaving no one able to manage the server when the owner is away.
+ *
+ * V5 Audit §11.1: ownerRoleIds are excluded from the lockout check — the
+ * server owner always has implicit permissions via Discord, so roles they
+ * hold don't count toward the "delegate admin" requirement.
  */
 export function isLockoutSafe(
   ownerRoleIds: string[],
@@ -234,9 +238,10 @@ export function isLockoutSafe(
     return role;
   });
 
-  // Check if at least one admin-tier role retains management permissions
-  // after the change. The owner always has implicit permissions, but we
-  // need at least one role for delegates.
+  // V5 Audit §11.1: Owner's roles don't count — they have implicit perms.
+  // We need at least one NON-owner role with admin capability for delegates.
+  const ownerSet = new Set(ownerRoleIds);
+
   const MANAGE_PERMS = DISCORD_PERMISSIONS.MANAGE_GUILD |
     DISCORD_PERMISSIONS.MANAGE_ROLES |
     DISCORD_PERMISSIONS.MANAGE_CHANNELS;
@@ -244,6 +249,8 @@ export function isLockoutSafe(
   const hasAdminCapableRole = simulatedRoles.some((role) => {
     // Skip the @everyone tier — it's not assignable
     if (role.tier === 'everyone' || role.tier === 'cosmetic') return false;
+    // Skip owner-exclusive roles — owner has implicit permissions
+    if (ownerSet.has(role.id)) return false;
 
     const perms = role.permissions;
     // Either has ADMINISTRATOR (full bypass) or all three management perms
@@ -252,7 +259,7 @@ export function isLockoutSafe(
   });
 
   if (!hasAdminCapableRole) {
-    return false; // Unsafe: no role would have admin capability after this change
+    return false; // Unsafe: no non-owner role would have admin capability after this change
   }
 
   return true;
