@@ -84,8 +84,9 @@ const economyPatchSchema = z.object({
   economy_heist_entry_fee: z.number().int().min(0).max(1_000_000).optional(),
   economy_passive_mode_allowed: z.boolean().optional(),
   economy_pay_tax_pct: z.number().int().min(0).max(50).optional(),
-  economy_max_wallet: z.number().int().min(0).optional(),
-  economy_max_bank: z.number().int().min(0).optional(),
+  // V5 Audit §5.P3a — cap at PG INT max to prevent overflow
+  economy_max_wallet: z.number().int().min(0).max(2_147_483_647).optional(),
+  economy_max_bank: z.number().int().min(0).max(2_147_483_647).optional(),
   economy_log_channel_id: z.string().nullable().optional(),
 }).strict();
 

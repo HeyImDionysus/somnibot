@@ -24,6 +24,11 @@ class PlatformEventBus {
 
   /**
    * Emit a typed platform event.
+   *
+   * V5 Audit §10.P3a — Listeners are dispatched asynchronously via
+   * setImmediate() so a slow analytics/logging handler cannot block
+   * the critical path (e.g. command response). Each listener is
+   * error-isolated so one failing handler cannot crash others.
    */
   emit<T extends PlatformEventType>(
     type: T,
@@ -38,9 +43,24 @@ class PlatformEventBus {
     };
 
     log.info(`${type} in guild ${guildId}`);
-    this.emitter.emit(type, event);
-    // Also emit to a catch-all listener
-    this.emitter.emit('*', event);
+
+    const fireAsync = (eventName: string | symbol) => {
+      const listeners = this.emitter.rawListeners(eventName) as Array<
+        (e: PlatformEvent) => void | Promise<void>
+      >;
+      for (const listener of listeners) {
+        setImmediate(async () => {
+          try {
+            await listener(event as PlatformEvent);
+          } catch (err) {
+            log.error(`Listener error on ${String(eventName)}:`, err);
+          }
+        });
+      }
+    };
+
+    fireAsync(type);
+    fireAsync('*');
   }
 
   /**

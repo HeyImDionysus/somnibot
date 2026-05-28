@@ -163,9 +163,9 @@ export async function POST(request: NextRequest) {
 
   const parsed = await parseBody(request, schemas.setup.action);
   if (!parsed.ok) return parsed.response;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const body = parsed.data as any;
-  const action = body.action as string;
+  // V5 Audit §8.P3a — removed `as any`; use Zod-inferred type
+  const body = parsed.data;
+  const { action } = body;
 
   // ── Maintenance unlock (requires authenticated owner) ───────
   if (action === 'unlock-maintenance') {
