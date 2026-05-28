@@ -35,7 +35,7 @@ async function createPayPalCatalogProduct(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'PayPal-Request-Id': `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        'PayPal-Request-Id': `product-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
       },
       body: JSON.stringify({
         name: name.slice(0, 127), // PayPal max 127 chars
@@ -79,7 +79,7 @@ async function createPayPalBillingPlan(
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
-        'PayPal-Request-Id': `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        'PayPal-Request-Id': `plan-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
       },
       body: JSON.stringify({
         product_id: paypalProductId,

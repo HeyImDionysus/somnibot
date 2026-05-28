@@ -122,43 +122,50 @@ function makeClient() {
     },
     eventBus: { emit: vi.fn() },
     shoukaku: { players: new Map() },
-    router: {
-      getContext: vi.fn(() => ({
+    // V10 Audit §6.P3a — managers now accessed via router.getContextSync().getManager()
+    router: (() => {
+      const managers = new Map<string, unknown>([
+        ['economy', {
+          loadConfig: vi.fn().mockResolvedValue({ currency_emoji: '💰', currency_name: 'coins' }),
+          claimTimedReward: vi.fn().mockResolvedValue({ success: true, message: 'You earned 500!' }),
+          getOrCreateWallet: vi.fn().mockResolvedValue({ wallet: 1000, bank: 500, bank_max: 10000 }),
+          getInventory: vi.fn().mockResolvedValue([{ item_emoji: '⚔️', item_name: 'Sword', quantity: 1, durability_remaining: null }]),
+          getShopItems: vi.fn().mockResolvedValue([{ emoji: '🗡️', name: 'Blade', price: 100, stock: null }]),
+        }],
+        ['giveawayManager', { handleEntry: vi.fn().mockResolvedValue(true) }],
+        ['musicPlayer', {
+          handleButton: vi.fn().mockResolvedValue({ message: 'Paused' }),
+          queueManager: { getQueue: vi.fn().mockResolvedValue(null) },
+        }],
+        ['trivia', { handleAnswer: vi.fn() }],
+        ['polls', { handlePollVote: vi.fn() }],
+        ['adventures', {}],
+        ['tempChannelManager', {}],
+        ['gathering', {}],
+        ['crafting', {}],
+        ['farming', {}],
+        ['fishing', {}],
+        ['market', {}],
+        ['games', {}],
+        ['lottery', {}],
+        ['pets', {}],
+        ['quests', {}],
+        ['heist', {}],
+        ['achievements', {}],
+      ]);
+      const ctx = {
         guild: { id: 'guild-1', name: 'Test', memberCount: 100 },
         guildId: 'guild-1',
         supabase: { from: vi.fn(() => chain) },
-      })),
-      all: vi.fn(() => [{ guild: { id: 'guild-1' }, guildId: 'guild-1' }]),
-    },
-    // Feature managers attached to client
-    _economyManager: {
-      loadConfig: vi.fn().mockResolvedValue({ currency_emoji: '💰', currency_name: 'coins' }),
-      claimTimedReward: vi.fn().mockResolvedValue({ success: true, message: 'You earned 500!' }),
-      getOrCreateWallet: vi.fn().mockResolvedValue({ wallet: 1000, bank: 500, bank_max: 10000 }),
-      getInventory: vi.fn().mockResolvedValue([{ item_emoji: '⚔️', item_name: 'Sword', quantity: 1, durability_remaining: null }]),
-      getShopItems: vi.fn().mockResolvedValue([{ emoji: '🗡️', name: 'Blade', price: 100, stock: null }]),
-    },
-    _giveawayManager: { handleEntry: vi.fn().mockResolvedValue(true) },
-    _musicPlayer: {
-      handleButton: vi.fn().mockResolvedValue({ message: 'Paused' }),
-      queueManager: { getQueue: vi.fn().mockResolvedValue(null) },
-    },
-    _triviaManager: { handleAnswer: vi.fn() },
-    _pollsManager: { handlePollVote: vi.fn() },
-    _adventureManager: {},
-    _tempChannelManager: {},
-    _gatheringManager: {},
-    _craftingManager: {},
-    _farmingManager: {},
-    _fishingManager: {},
-    _marketManager: {},
-    _gamesManager: {},
-    _lotteryManager: {},
-    _petsManager: {},
-    _questsManager: {},
-    _heistManager: {},
-    _achievementsManager: {},
-    _profilesManager: {},
+        _managers: managers,
+        getManager: <T>(key: string): T | undefined => managers.get(key) as T | undefined,
+      };
+      return {
+        getContext: vi.fn(() => ctx),
+        getContextSync: vi.fn(() => ctx),
+        all: vi.fn(() => [ctx]),
+      };
+    })(),
   };
 
   return { client, listeners, fire: (event: string, ...args: any[]) => listeners.get(event)?.(...args) };
@@ -245,9 +252,9 @@ describe('handler interaction routing', () => {
   });
 
   it('routes /voice command without manager replies disabled', async () => {
-    client._tempChannelManager = undefined;
+    (client.router.getContextSync('guild-1') as any)._managers.delete('tempChannelManager');
     const setup2 = makeClient();
-    setup2.client._tempChannelManager = undefined;
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('tempChannelManager');
     registerEvents(setup2.client);
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),
@@ -410,7 +417,7 @@ describe('handler interaction routing', () => {
       customId: 'giveaway_enter:123',
     });
     await fire('interactionCreate', interaction);
-    expect(client._giveawayManager.handleEntry).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('giveawayManager').handleEntry).toHaveBeenCalled();
   });
 
   it('routes btnrole: button', async () => {
@@ -446,18 +453,18 @@ describe('handler interaction routing', () => {
       customId: 'music:pause',
     });
     await fire('interactionCreate', interaction);
-    expect(client._musicPlayer.handleButton).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('musicPlayer').handleButton).toHaveBeenCalled();
   });
 
   it('routes music:queue_page: button', async () => {
-    client._musicPlayer.queueManager.getQueue = vi.fn().mockResolvedValue({ tracks: [] });
+    client.router.getContextSync('guild-1').getManager('musicPlayer').queueManager.getQueue = vi.fn().mockResolvedValue({ tracks: [] });
     const interaction = makeInteraction({
       isButton: vi.fn(() => true),
       isStringSelectMenu: vi.fn(() => false),
       customId: 'music:queue_page:2',
     });
     await fire('interactionCreate', interaction);
-    expect(client._musicPlayer.queueManager.getQueue).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('musicPlayer').queueManager.getQueue).toHaveBeenCalled();
   });
 
   it('routes adventure: button', async () => {
@@ -477,7 +484,7 @@ describe('handler interaction routing', () => {
       customId: 'trivia:answer:A',
     });
     await fire('interactionCreate', interaction);
-    expect(client._triviaManager.handleAnswer).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('trivia').handleAnswer).toHaveBeenCalled();
   });
 
   it('routes poll: button', async () => {
@@ -487,7 +494,7 @@ describe('handler interaction routing', () => {
       customId: 'poll:vote:1',
     });
     await fire('interactionCreate', interaction);
-    expect(client._pollsManager.handlePollVote).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('polls').handlePollVote).toHaveBeenCalled();
   });
 
   // Economy buttons
@@ -498,7 +505,7 @@ describe('handler interaction routing', () => {
       customId: 'econ_daily',
     });
     await fire('interactionCreate', interaction);
-    expect(client._economyManager.claimTimedReward).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('economy').claimTimedReward).toHaveBeenCalled();
   });
 
   it('routes econ_balance button', async () => {
@@ -508,7 +515,7 @@ describe('handler interaction routing', () => {
       customId: 'econ_balance',
     });
     await fire('interactionCreate', interaction);
-    expect(client._economyManager.getOrCreateWallet).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('economy').getOrCreateWallet).toHaveBeenCalled();
   });
 
   it('routes econ_inventory button with items', async () => {
@@ -518,11 +525,11 @@ describe('handler interaction routing', () => {
       customId: 'econ_inventory',
     });
     await fire('interactionCreate', interaction);
-    expect(client._economyManager.getInventory).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('economy').getInventory).toHaveBeenCalled();
   });
 
   it('routes econ_inventory button with empty inventory', async () => {
-    client._economyManager.getInventory = vi.fn().mockResolvedValue([]);
+    client.router.getContextSync('guild-1').getManager('economy').getInventory = vi.fn().mockResolvedValue([]);
     const interaction = makeInteraction({
       isButton: vi.fn(() => true),
       isStringSelectMenu: vi.fn(() => false),
@@ -539,11 +546,11 @@ describe('handler interaction routing', () => {
       customId: 'econ_shop',
     });
     await fire('interactionCreate', interaction);
-    expect(client._economyManager.getShopItems).toHaveBeenCalled();
+    expect(client.router.getContextSync('guild-1').getManager('economy').getShopItems).toHaveBeenCalled();
   });
 
   it('routes econ_shop button with empty shop', async () => {
-    client._economyManager.getShopItems = vi.fn().mockResolvedValue([]);
+    client.router.getContextSync('guild-1').getManager('economy').getShopItems = vi.fn().mockResolvedValue([]);
     const interaction = makeInteraction({
       isButton: vi.fn(() => true),
       isStringSelectMenu: vi.fn(() => false),
@@ -687,9 +694,9 @@ describe('handler interaction routing', () => {
 
   // ── Disabled feature commands ──
   it('economy command replies disabled when no manager', async () => {
-    client._economyManager = undefined;
+    (client.router.getContextSync('guild-1') as any)._managers.delete('economy');
     const setup2 = makeClient();
-    setup2.client._economyManager = undefined;
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('economy');
     registerEvents(setup2.client);
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),
@@ -701,7 +708,7 @@ describe('handler interaction routing', () => {
 
   it('gathering command replies disabled when no manager', async () => {
     const setup2 = makeClient();
-    setup2.client._gatheringManager = undefined;
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('gathering');
     registerEvents(setup2.client);
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),
@@ -713,7 +720,7 @@ describe('handler interaction routing', () => {
 
   it('music command replies disabled when no manager', async () => {
     const setup2 = makeClient();
-    setup2.client._musicPlayer = undefined;
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('musicPlayer');
     registerEvents(setup2.client);
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),
@@ -725,7 +732,7 @@ describe('handler interaction routing', () => {
 
   it('games command replies disabled when no manager', async () => {
     const setup2 = makeClient();
-    setup2.client._gamesManager = undefined;
+    (setup2.client.router.getContextSync('guild-1') as any)._managers.delete('games');
     registerEvents(setup2.client);
     const interaction = makeInteraction({
       isChatInputCommand: vi.fn(() => true),

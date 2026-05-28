@@ -179,9 +179,9 @@ export function registerEvents(client: SomniClient): void {
       },
     };
 
-    const engine = (client as unknown as Record<string, unknown>)._automationEngine as
-      | import('../features/automations/automation-engine.js').AutomationEngine
-      | undefined;
+    // V10 Audit §6.P3a — use GuildRouter context instead of casting the client
+    const guildCtx = client.router?.getContextSync(message.guild!.id);
+    const engine = guildCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
     if (engine) {
       engine.processMessageEvent(messageEvent, message).catch((err) => {
         log.error('Automation message processing error:', { error: String(err) });
@@ -203,7 +203,7 @@ export function registerEvents(client: SomniClient): void {
 
     // Economy chat income
     try {
-      const econMgr = (client as unknown as Record<string, unknown>)._economyManager as EconomyManager | undefined;
+      const econMgr = guildCtx?.getManager<EconomyManager>('economy');
       if (econMgr) await econMgr.processChatIncome(message.author.id, message.channelId);
     } catch (err) {
       log.error('Economy chat income error:', { error: String(err) });
@@ -211,7 +211,7 @@ export function registerEvents(client: SomniClient): void {
 
     // Quest progress: 'chat' activity
     try {
-      const qMgr = (client as unknown as Record<string, unknown>)._questsManager as QuestsManager | undefined;
+      const qMgr = guildCtx?.getManager<QuestsManager>('quests');
       if (qMgr) qMgr.trackProgress(message.guild!.id, message.author.id, 'chat').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
     } catch {
       // Ignore quest tracking errors
@@ -253,9 +253,8 @@ export function registerEvents(client: SomniClient): void {
       : reaction.message;
 
     if (fullMessage) {
-      const engine = (client as unknown as Record<string, unknown>)._automationEngine as
-        | import('../features/automations/automation-engine.js').AutomationEngine
-        | undefined;
+      const reactionCtx = client.router?.getContextSync(message.guild!.id);
+      const engine = reactionCtx?.getManager<import('../features/automations/automation-engine.js').AutomationEngine>('automationEngine');
       if (engine) {
         engine.processReactionEvent(reactionEvent, fullMessage).catch((err) => {
           log.error('Automation reaction processing error:', { error: String(err) });
@@ -307,7 +306,8 @@ export function registerEvents(client: SomniClient): void {
     onVoiceStateUpdate(oldState, newState);
 
     // Music auto-pause/leave
-    const musicPlayer = (client as unknown as Record<string, unknown>)._musicPlayer as MusicPlayerManager | undefined;
+    const voiceCtx = client.router?.getContextSync(newState.guild.id);
+    const musicPlayer = voiceCtx?.getManager<MusicPlayerManager>('musicPlayer');
     if (musicPlayer) {
       const affectedChannelId = oldState.channelId ?? newState.channelId;
       if (affectedChannelId) {
@@ -318,7 +318,7 @@ export function registerEvents(client: SomniClient): void {
     }
 
     // Temp channels
-    const tempMgr = (client as unknown as Record<string, unknown>)._tempChannelManager as TempChannelManager | undefined;
+    const tempMgr = voiceCtx?.getManager<TempChannelManager>('tempChannelManager');
     if (tempMgr) {
       handleVoiceStateForTempChannels(oldState, newState, tempMgr).catch((err) => {
         log.error('Temp channel voice handler error:', { error: String(err) });

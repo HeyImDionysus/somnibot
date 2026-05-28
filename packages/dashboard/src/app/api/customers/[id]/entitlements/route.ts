@@ -102,7 +102,7 @@ export async function POST(
   const { data: order, error: orderErr } = await supabase
     .from('orders')
     .insert({
-      order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
       customer_id: customerId,
       guild_id: guildId,
       product_id,

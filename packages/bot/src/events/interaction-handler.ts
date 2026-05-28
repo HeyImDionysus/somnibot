@@ -75,9 +75,16 @@ import type { MarketManager } from '../features/market/market-manager.js';
 
 const log = createLogger('InteractionHandler');
 
-/** Helper to get a typed manager from the client */
-function getManager<T>(client: SomniClient, key: string): T | undefined {
-  return (client as unknown as Record<string, unknown>)[key] as T | undefined;
+/**
+ * Helper to get a typed manager from the guild context.
+ *
+ * V10 Audit §6.P3a — Uses the GuildRouter's typed getManager() instead
+ * of casting the client to Record<string, unknown>. Falls back to the
+ * primary guild context if no guild ID is available.
+ */
+function getManager<T>(client: SomniClient, key: string, guildId?: string): T | undefined {
+  const id = guildId ?? client.guildId;
+  return client.router?.getContextSync(id)?.getManager<T>(key);
 }
 
 /**
@@ -104,7 +111,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       if (handled) return;
 
       if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
-        const mgr = getManager<GiveawayManager>(client, '_giveawayManager');
+        const mgr = getManager<GiveawayManager>(client, 'giveawayManager', interaction.guildId!);
         if (mgr && await mgr.handleEntry(interaction)) return;
       }
 
@@ -135,7 +142,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
       // Music buttons
       if (interaction.isButton() && interaction.customId.startsWith('music:')) {
-        const musicMgr = getManager<MusicPlayerManager>(client, '_musicPlayer');
+        const musicMgr = getManager<MusicPlayerManager>(client, 'musicPlayer', interaction.guildId!);
         if (musicMgr) {
           if (interaction.customId.startsWith('music:queue_page:')) {
             const page = parseInt(interaction.customId.split(':')[2] ?? '1', 10);
@@ -161,13 +168,13 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       }
 
       if (interaction.isButton() && interaction.customId.startsWith('trivia:')) {
-        const trivMgr = getManager<TriviaManager>(client, '_triviaManager');
+        const trivMgr = getManager<TriviaManager>(client, 'trivia', interaction.guildId!);
         if (trivMgr) await trivMgr.handleAnswer(interaction);
         return;
       }
 
       if (interaction.isButton() && interaction.customId.startsWith('poll:')) {
-        const pollMgr = getManager<PollsManager>(client, '_pollsManager');
+        const pollMgr = getManager<PollsManager>(client, 'polls', interaction.guildId!);
         if (pollMgr) await pollMgr.handlePollVote(interaction);
         return;
       }
@@ -286,7 +293,7 @@ async function handleSlashCommand(
 
   // Temp channel commands
   if (interaction.commandName === 'voice') {
-    const mgr = getManager<TempChannelManager>(client, '_tempChannelManager');
+    const mgr = getManager<TempChannelManager>(client, 'tempChannelManager', interaction.guildId!);
     if (mgr) { await handleTempChannelCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Temp channels are not enabled.', ephemeral: true }); }
     return;
@@ -294,7 +301,7 @@ async function handleSlashCommand(
 
   // Giveaway commands
   if (interaction.commandName === 'giveaway') {
-    const mgr = getManager<GiveawayManager>(client, '_giveawayManager');
+    const mgr = getManager<GiveawayManager>(client, 'giveawayManager', interaction.guildId!);
     if (mgr) { await handleGiveawayCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Giveaways are not enabled.', ephemeral: true }); }
     return;
@@ -303,7 +310,7 @@ async function handleSlashCommand(
   // Music commands
   const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause', 'filter']);
   if (musicCommands.has(interaction.commandName)) {
-    const mgr = getManager<MusicPlayerManager>(client, '_musicPlayer');
+    const mgr = getManager<MusicPlayerManager>(client, 'musicPlayer', interaction.guildId!);
     if (mgr) { await handleMusicCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true }); }
     return;
@@ -341,7 +348,7 @@ async function handleSlashCommand(
     'inventory', 'use', 'economy-leaderboard', 'collect-income',
   ]);
   if (economyCommands.has(interaction.commandName)) {
-    const mgr = getManager<EconomyManager>(client, '_economyManager');
+    const mgr = getManager<EconomyManager>(client, 'economy', interaction.guildId!);
     if (mgr) { await handleEconomyCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -350,7 +357,7 @@ async function handleSlashCommand(
   // Gathering commands — /hunt, /dig, /mine
   const gatheringCommands = new Set(['hunt', 'dig', 'mine']);
   if (gatheringCommands.has(interaction.commandName)) {
-    const mgr = getManager<GatheringManager>(client, '_gatheringManager');
+    const mgr = getManager<GatheringManager>(client, 'gathering', interaction.guildId!);
     if (mgr) { await handleGatheringCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The gathering system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -359,7 +366,7 @@ async function handleSlashCommand(
   // Crafting commands — /craft, /recipes
   const craftingCommands = new Set(['craft', 'recipes']);
   if (craftingCommands.has(interaction.commandName)) {
-    const mgr = getManager<CraftingManager>(client, '_craftingManager');
+    const mgr = getManager<CraftingManager>(client, 'crafting', interaction.guildId!);
     if (mgr) { await handleCraftingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The crafting system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -367,7 +374,7 @@ async function handleSlashCommand(
 
   // Farming
   if (interaction.commandName === 'farm') {
-    const mgr = getManager<FarmingManager>(client, '_farmingManager');
+    const mgr = getManager<FarmingManager>(client, 'farming', interaction.guildId!);
     if (mgr) { await handleFarmingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The farming system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -375,7 +382,7 @@ async function handleSlashCommand(
 
   // Fishing
   if (interaction.commandName === 'fish') {
-    const mgr = getManager<FishingManager>(client, '_fishingManager');
+    const mgr = getManager<FishingManager>(client, 'fishing', interaction.guildId!);
     if (mgr) { await handleFishingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The fishing system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -383,7 +390,7 @@ async function handleSlashCommand(
 
   // Adventures
   if (interaction.commandName === 'adventure') {
-    const mgr = getManager<AdventureManager>(client, '_adventureManager');
+    const mgr = getManager<AdventureManager>(client, 'adventures', interaction.guildId!);
     if (mgr) { await handleAdventureCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The adventure system is not enabled on this server.', ephemeral: true }); }
     return;
@@ -391,7 +398,7 @@ async function handleSlashCommand(
 
   // Market
   if (interaction.commandName === 'market') {
-    const mgr = getManager<MarketManager>(client, '_marketManager');
+    const mgr = getManager<MarketManager>(client, 'market', interaction.guildId!);
     if (mgr) { await handleMarketCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The market is not enabled on this server.', ephemeral: true }); }
     return;
@@ -399,7 +406,7 @@ async function handleSlashCommand(
 
   // Trivia
   if (interaction.commandName === 'trivia') {
-    const mgr = getManager<TriviaManager>(client, '_triviaManager');
+    const mgr = getManager<TriviaManager>(client, 'trivia', interaction.guildId!);
     if (mgr) { await handleTriviaCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Trivia is not enabled on this server.', ephemeral: true }); }
     return;
@@ -408,7 +415,7 @@ async function handleSlashCommand(
   // Mini-games
   const gameNames = ['coinflip', 'slots', 'rps', 'dice', 'blackjack', 'highlow', 'scratch', 'guess'];
   if (gameNames.includes(interaction.commandName)) {
-    const mgr = getManager<GamesManager>(client, '_gamesManager');
+    const mgr = getManager<GamesManager>(client, 'games', interaction.guildId!);
     if (mgr) { await handleGameCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Mini-games are not enabled on this server.', ephemeral: true }); }
     return;
@@ -416,7 +423,7 @@ async function handleSlashCommand(
 
   // Lottery
   if (interaction.commandName === 'lottery') {
-    const mgr = getManager<LotteryManager>(client, '_lotteryManager');
+    const mgr = getManager<LotteryManager>(client, 'lottery', interaction.guildId!);
     if (mgr) { await handleLotteryCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Lottery is not enabled on this server.', ephemeral: true }); }
     return;
@@ -424,13 +431,13 @@ async function handleSlashCommand(
 
   // Polls & Predictions
   if (interaction.commandName === 'poll') {
-    const mgr = getManager<PollsManager>(client, '_pollsManager');
+    const mgr = getManager<PollsManager>(client, 'polls', interaction.guildId!);
     if (mgr) { await handlePollCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Polls are not enabled on this server.', ephemeral: true }); }
     return;
   }
   if (interaction.commandName === 'predict') {
-    const mgr = getManager<PollsManager>(client, '_pollsManager');
+    const mgr = getManager<PollsManager>(client, 'polls', interaction.guildId!);
     if (mgr) { await handlePredictCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Predictions are not enabled on this server.', ephemeral: true }); }
     return;
@@ -438,7 +445,7 @@ async function handleSlashCommand(
 
   // Pets
   if (interaction.commandName === 'pet') {
-    const mgr = getManager<PetsManager>(client, '_petsManager');
+    const mgr = getManager<PetsManager>(client, 'pets', interaction.guildId!);
     if (mgr) { await handlePetCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true }); }
     return;
@@ -446,7 +453,7 @@ async function handleSlashCommand(
 
   // Quests
   if (interaction.commandName === 'quests') {
-    const mgr = getManager<QuestsManager>(client, '_questsManager');
+    const mgr = getManager<QuestsManager>(client, 'quests', interaction.guildId!);
     if (mgr) { await handleQuestCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Quests are not enabled on this server.', ephemeral: true }); }
     return;
@@ -454,7 +461,7 @@ async function handleSlashCommand(
 
   // Heist
   if (interaction.commandName === 'heist') {
-    const mgr = getManager<HeistManager>(client, '_heistManager');
+    const mgr = getManager<HeistManager>(client, 'heist', interaction.guildId!);
     if (mgr) { await handleHeistCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true }); }
     return;
@@ -462,7 +469,7 @@ async function handleSlashCommand(
 
   // Achievements & Prestige
   if (interaction.commandName === 'badges' || interaction.commandName === 'prestige') {
-    const mgr = getManager<AchievementsManager>(client, '_achievementsManager');
+    const mgr = getManager<AchievementsManager>(client, 'achievements', interaction.guildId!);
     if (mgr) { await handleAchievementCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Achievements are not enabled on this server.', ephemeral: true }); }
     return;
@@ -470,7 +477,7 @@ async function handleSlashCommand(
 
   // Profiles
   if (['profile', 'title', 'bio'].includes(interaction.commandName)) {
-    const mgr = getManager<ProfilesManager>(client, '_profilesManager');
+    const mgr = getManager<ProfilesManager>(client, 'profiles', interaction.guildId!);
     if (mgr) { await handleProfileCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Profiles are not available.', ephemeral: true }); }
     return;
@@ -489,7 +496,7 @@ async function handleEconomyButton(
   interaction: import('discord.js').ButtonInteraction,
   client: SomniClient,
 ): Promise<void> {
-  const econMgr = getManager<EconomyManager>(client, '_economyManager');
+  const econMgr = getManager<EconomyManager>(client, 'economy', interaction.guildId!);
   if (!econMgr) {
     await interaction.reply({ content: '🚫 Economy is not enabled.', ephemeral: true });
     return;

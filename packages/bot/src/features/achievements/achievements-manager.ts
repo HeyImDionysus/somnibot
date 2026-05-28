@@ -12,9 +12,18 @@ let _manager: AchievementsManager | null = null;
 export function registerAchievementsManager(mgr: AchievementsManager): void { _manager = mgr; }
 export function invalidateAchievementsCache(): void { _manager?.clearCache(); }
 
+/**
+ * V10 Audit §14.P3a — Max config-cache entries (defense-in-depth).
+ * The GuildRouter already evicts idle guilds after 30 min, so this
+ * naturally stays small. The cap prevents unbounded growth if
+ * AchievementsManager outlives its guild context.
+ */
+const CONFIG_CACHE_MAX = 500;
+const CONFIG_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+
 export class AchievementsManager {
   private supabase: SupabaseClient;
-  private configCache = new Map<string, DbGuildConfig>();
+  private configCache = new Map<string, { data: DbGuildConfig; time: number }>();
 
   constructor(supabase: SupabaseClient) {
     this.supabase = supabase;
@@ -23,10 +32,19 @@ export class AchievementsManager {
   clearCache(): void { this.configCache.clear(); }
 
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
+    const now = Date.now();
     const cached = this.configCache.get(guildId);
-    if (cached) return cached;
+    if (cached && now - cached.time < CONFIG_CACHE_TTL_MS) return cached.data;
+
     const { data } = await this.supabase.from('guild_config').select('*').eq('guild_id', guildId).single();
-    if (data) this.configCache.set(guildId, data);
+    if (data) {
+      // Evict oldest if at capacity
+      if (this.configCache.size >= CONFIG_CACHE_MAX) {
+        const oldest = this.configCache.keys().next().value;
+        if (oldest !== undefined) this.configCache.delete(oldest);
+      }
+      this.configCache.set(guildId, { data, time: now });
+    }
     return data;
   }
 

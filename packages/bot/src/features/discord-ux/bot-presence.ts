@@ -11,6 +11,7 @@
 import { ActivityType, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
+import type { SomniClient } from '../../client.js';
 
 const log = createLogger('BotPresence');
 
@@ -102,9 +103,11 @@ export class BotPresenceManager {
     });
 
     // Music status — check if a player is active
-    const musicPlayer = (this.client as unknown as Record<string, unknown>)._musicPlayer as {
+    // V10 Audit §6.P3a — use GuildRouter context instead of casting the client
+    const ctx = (this.client as SomniClient).router?.getContextSync(this.guildId);
+    const musicPlayer = ctx?.getManager<{
       queueManager?: { getQueue?: (guildId: string) => Promise<{ nowPlaying?: unknown } | null> };
-    } | undefined;
+    }>('musicPlayer');
     if (musicPlayer?.queueManager?.getQueue) {
       try {
         const queue = await musicPlayer.queueManager.getQueue(this.guildId);
