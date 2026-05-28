@@ -12,7 +12,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', mockFetch);
   process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com';
   process.env.PAYPAL_CLIENT_ID = 'test-client-id';
-  process.env.PAYPAL_CLIENT_SECRET = 'test-client-secret';
+  process.env.PAYPAL_CLIENT_SECRET = 'mock-value-for-tests';
 });
 
 afterEach(() => {
