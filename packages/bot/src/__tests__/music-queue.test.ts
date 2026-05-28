@@ -222,8 +222,8 @@ describe('MusicQueueManager', () => {
       q.entries = Array.from({ length: MAX_QUEUE_SIZE - 2 }, (_, i) => makeEntry(`S${i}`));
       await mgr.saveQueue(q);
 
-      // Try to add 5 entries — only 2 should fit
-      const entries = Array.from({ length: 5 }, (_, i) => makeEntry(`New${i}`));
+      // Try to add 5 entries from a different user — only 2 should fit
+      const entries = Array.from({ length: 5 }, (_, i) => makeEntry(`New${i}`, 'user2'));
       const { queue: result } = await mgr.addEntries('g1', entries);
       expect(result!.entries).toHaveLength(MAX_QUEUE_SIZE);
     });
@@ -233,7 +233,7 @@ describe('MusicQueueManager', () => {
       q.entries = Array.from({ length: MAX_QUEUE_SIZE }, (_, i) => makeEntry(`S${i}`));
       await mgr.saveQueue(q);
 
-      const { queue: result } = await mgr.addEntries('g1', [makeEntry('Overflow')]);
+      const { queue: result } = await mgr.addEntries('g1', [makeEntry('Overflow', 'user2')]);
       expect(result!.entries).toHaveLength(MAX_QUEUE_SIZE);
     });
 
