@@ -8,11 +8,19 @@
  */
 
 import { type Guild, EmbedBuilder } from 'discord.js';
+import type Valkey from 'iovalkey';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 const log = createLogger('Market');
+
+/**
+ * V5 Audit §4.P3a — Hard cap on price_per_unit to prevent absurd listings.
+ * 1 billion coins is well above any realistic wallet limit while staying
+ * within safe integer range for JS (Number.MAX_SAFE_INTEGER ≈ 9e15).
+ */
+const MAX_PRICE_PER_UNIT = 1_000_000_000;
 
 // ── Local Types ───────────────────────────────────────────
 
@@ -51,10 +59,10 @@ export function invalidateMarketCache(): void {
 export class MarketManager {
   private guild: Guild;
   private supabase: SupabaseClient;
-  private valkey: any;
+  private valkey: Valkey;
   private configCache: MarketConfig | null = null;
 
-  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: Valkey) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
@@ -91,6 +99,13 @@ export class MarketManager {
     const config = await this.getConfig();
     if (!config.economy_market_enabled) {
       return new EmbedBuilder().setDescription('🚫 The market is not enabled.').setColor(0xff0000);
+    }
+
+    // V5 Audit §4.P3a: Reject absurd prices
+    if (pricePerUnit > MAX_PRICE_PER_UNIT) {
+      return new EmbedBuilder()
+        .setDescription(`❌ Maximum price per unit is **${MAX_PRICE_PER_UNIT.toLocaleString()}** coins.`)
+        .setColor(0xff0000);
     }
 
     // Check active listings count

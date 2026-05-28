@@ -13,6 +13,7 @@
 
 import { createCanvas, loadImage, GlobalFonts, type SKRSContext2D } from '@napi-rs/canvas';
 import { join } from 'node:path';
+import { randomInt } from 'node:crypto';
 import type { GuildMember, Guild } from 'discord.js';
 
 // ── SomniBot Palette ──────────────────────────────────────────
@@ -172,11 +173,11 @@ function drawDefaultBackground(ctx: SKRSContext2D): void {
   roundRect(ctx, 0, 0, CARD_WIDTH, CARD_HEIGHT, 20);
   ctx.fill();
 
-  // Subtle noise/texture dots
+  // Subtle noise/texture dots — V5 Audit §1.P3a: use CSPRNG for consistency
   ctx.fillStyle = 'rgba(255, 255, 255, 0.02)';
   for (let i = 0; i < 200; i++) {
-    const x = Math.random() * CARD_WIDTH;
-    const y = Math.random() * CARD_HEIGHT;
+    const x = randomInt(CARD_WIDTH);
+    const y = randomInt(CARD_HEIGHT);
     ctx.fillRect(x, y, 1, 1);
   }
 }

@@ -35,6 +35,10 @@ RUN pnpm install --frozen-lockfile
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm turbo build --filter=@somnibot/dashboard
 
+# V5 Audit §9.P3a: Prune devDependencies before copying to runtime stage.
+# Consistent with bot Dockerfile — reduces image size and attack surface.
+RUN pnpm prune --prod
+
 # --- Stage 2: Production Runtime ---
 FROM node:22-slim AS runtime
 

@@ -104,12 +104,16 @@ export class SomniLicense {
    */
   private serverTimeAnchor: { serverEpoch: number; localMono: number } | null = null;
 
-  /** Get a monotonic-ish timestamp (ms). Falls back to Date.now in non-browser envs without performance. */
+  /**
+   * Get a monotonic timestamp (ms) via performance.now().
+   *
+   * V5 Audit §3.P3a: Always use the monotonic clock — no Date.now fallback.
+   * performance.now() is available in all browsers, Node ≥16, Deno, and Bun.
+   * If an exotic runtime lacks it, fail loudly so the operator notices rather
+   * than silently degrading to a manipulable wall-clock source.
+   */
   private mono(): number {
-    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-      return performance.now();
-    }
-    return Date.now();
+    return performance.now();
   }
 
   /** Record server time from a fetch Response's Date header. */

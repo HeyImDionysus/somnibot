@@ -12,6 +12,7 @@ import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 import { createLogger } from '@somnibot/shared';
+import { queueDriftItem } from './drift-debouncer.js';
 
 const log = createLogger('ChannelEvents');
 
@@ -73,14 +74,8 @@ export async function handleChannelCreate(
     suggestedAction: 'accept',
   };
 
-  await recordChannelDrift(client, channel.guild.id, [driftItem]);
-
-  client.eventBus.emit('drift.detected', channel.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: false,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift
+  queueDriftItem(client, channel.guild.id, driftItem);
 }
 
 /**
@@ -189,20 +184,14 @@ export async function handleChannelUpdate(
     suggestedAction: 'repair',
   };
 
-  await recordChannelDrift(client, newChannel.guild.id, [driftItem]);
-
   // Auto-repair if configured
   const config = await getSyncConfig(client, newChannel.guild.id);
   if (config.autoRepair) {
     await autoRepairChannel(client, newChannel as NonThreadGuildBasedChannel, mapping.template_key);
   }
 
-  client.eventBus.emit('drift.detected', newChannel.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: config.autoRepair,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift
+  queueDriftItem(client, newChannel.guild.id, driftItem);
 }
 
 /**
@@ -238,14 +227,8 @@ export async function handleChannelDelete(
     suggestedAction: 'repair',
   };
 
-  await recordChannelDrift(client, channel.guild.id, [driftItem]);
-
-  client.eventBus.emit('drift.detected', channel.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: false,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift
+  queueDriftItem(client, channel.guild.id, driftItem);
 
   await writeAuditLog(client.supabase, {
     guildId: channel.guild.id,
