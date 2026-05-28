@@ -13,6 +13,7 @@ import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity, DriftType } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
 import { createLogger } from '@somnibot/shared';
+import { queueDriftItem } from './drift-debouncer.js';
 
 const log = createLogger('RoleEvents');
 
@@ -47,14 +48,8 @@ export async function handleRoleCreate(
     suggestedAction: 'accept',
   };
 
-  await recordDrift(client, role.guild.id, [driftItem]);
-
-  client.eventBus.emit('drift.detected', role.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: false,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift to batch rapid events
+  queueDriftItem(client, role.guild.id, driftItem);
 }
 
 /**
@@ -81,8 +76,6 @@ export async function handleRoleUpdate(
         suggestedAction: 'repair',
       };
 
-      await recordDrift(client, newRole.guild.id, [driftItem]);
-
       // Auto-repair @everyone if configured
       const config = await getSyncConfig(client, newRole.guild.id);
       if (config.autoRepairEveryone) {
@@ -108,12 +101,8 @@ export async function handleRoleUpdate(
         }
       }
 
-      client.eventBus.emit('drift.detected', newRole.guild.id, {
-        driftCount: 1,
-        criticalCount: 1,
-        autoRepaired: config.autoRepairEveryone,
-        items: [{ type: 'EVERYONE_DRIFT', entityName: '@everyone', severity: 'critical' as DriftSeverity }],
-      });
+      // V5 Audit §14.P3a: Critical — flush immediately, no debounce
+      queueDriftItem(client, newRole.guild.id, driftItem, true);
 
       return;
     }
@@ -176,20 +165,14 @@ export async function handleRoleUpdate(
     suggestedAction: 'repair',
   };
 
-  await recordDrift(client, newRole.guild.id, [driftItem]);
-
   // Auto-repair if configured
   const config = await getSyncConfig(client, newRole.guild.id);
   if (config.autoRepair) {
     await autoRepairRole(client, newRole, mapping.template_key);
   }
 
-  client.eventBus.emit('drift.detected', newRole.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: config.autoRepair,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift
+  queueDriftItem(client, newRole.guild.id, driftItem);
 }
 
 /**
@@ -223,14 +206,8 @@ export async function handleRoleDelete(
     suggestedAction: 'repair',
   };
 
-  await recordDrift(client, role.guild.id, [driftItem]);
-
-  client.eventBus.emit('drift.detected', role.guild.id, {
-    driftCount: 1,
-    criticalCount: 0,
-    autoRepaired: false,
-    items: [{ type: driftItem.type, entityName: driftItem.entityName, severity: driftItem.severity }],
-  });
+  // V5 Audit §14.P3a: Debounce non-critical drift
+  queueDriftItem(client, role.guild.id, driftItem);
 
   await writeAuditLog(client.supabase, {
     guildId: role.guild.id,

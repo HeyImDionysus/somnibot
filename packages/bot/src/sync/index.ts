@@ -13,3 +13,4 @@ export { runSyncCycle, startSyncScheduler, type SyncConfig, type SyncResult } fr
 export { handleRoleCreate, handleRoleUpdate, handleRoleDelete } from './role-events.js';
 export { handleChannelCreate, handleChannelUpdate, handleChannelDelete } from './channel-events.js';
 export { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from './repair-actions.js';
+export { queueDriftItem } from './drift-debouncer.js';

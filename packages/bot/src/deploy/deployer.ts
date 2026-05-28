@@ -13,6 +13,8 @@ import {
   type Guild,
   type OverwriteResolvable,
   type Role,
+  type TextChannel,
+  type Message,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
@@ -176,11 +178,11 @@ export async function deployServerState(
         let purgedCount = 0;
         for (const [, channel] of textChannels) {
           try {
-            const messages = await (channel as any).messages.fetch({ limit: 100 });
-            const botMessages = messages.filter((m: any) => m.author.id === botId);
+            const messages = await (channel as TextChannel).messages.fetch({ limit: 100 });
+            const botMessages = messages.filter((m: Message) => m.author.id === botId);
             for (const [, msg] of botMessages) {
               try {
-                await (msg as any).delete();
+                await msg.delete();
                 purgedCount++;
                 await sleep(300);
               } catch { /* skip undeletable messages */ }
@@ -418,7 +420,7 @@ export async function deployServerState(
       try {
         const staffCatId = categoryKeyToDiscordId.get('cat-staff');
         if (staffCatId) {
-          await (modOnlyChannel as any).setParent(staffCatId, {
+          await (modOnlyChannel as TextChannel).setParent(staffCatId, {
             reason: 'SomniBot deployment — organize community channel',
           });
           actions.push({

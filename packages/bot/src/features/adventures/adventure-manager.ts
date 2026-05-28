@@ -24,6 +24,7 @@ import type {
 } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type Valkey from 'iovalkey';
 
 const log = createLogger('Adventures');
 
@@ -398,11 +399,11 @@ export function getAdventureManager(): AdventureManager | null {
 export class AdventureManager {
   private guild: Guild;
   private supabase: SupabaseClient;
-  private valkey: any;
+  private valkey: Valkey;
   private configCache: AdventureConfig | null = null;
   private adventureCache: Adventure[] | null = null;
 
-  constructor(guild: Guild, supabase: SupabaseClient, valkey: any) {
+  constructor(guild: Guild, supabase: SupabaseClient, valkey: Valkey) {
     this.guild = guild;
     this.supabase = supabase;
     this.valkey = valkey;
