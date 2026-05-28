@@ -12,6 +12,7 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkRateLimit } from '@/lib/api/rate-limit';
+import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 
 const updateSchema = z.object({
@@ -55,20 +56,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
   }
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
-  }
-
-  const parsed = updateSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: 'Invalid retention_days', details: parsed.error.flatten() },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(req, updateSchema);
+  if (!parsed.ok) return parsed.response;
 
   const admin = createAdminSupabase();
   const { error } = await admin

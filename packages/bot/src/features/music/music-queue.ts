@@ -52,6 +52,13 @@ export interface GuildQueue {
  */
 const MAX_QUEUE_SIZE = 5_000;
 
+/**
+ * V9 Audit §12.P2: Per-user queue limit — prevents a single user from
+ * monopolizing the entire queue. Each user may have at most this many
+ * entries queued (not counting the currently playing track).
+ */
+const MAX_PER_USER_QUEUE = 50;
+
 // ── Valkey Key Helpers ────────────────────────────────────
 
 function queueKey(guildId: string): string {
@@ -117,16 +124,31 @@ export class MusicQueueManager {
   // ── Queue Operations ──────────────────────────────────
 
   /** Add entries to the end of the queue. Returns updated queue.
-   *  V5 Audit [12.1]: Enforces MAX_QUEUE_SIZE — excess entries are silently trimmed. */
-  async addEntries(guildId: string, entries: QueueEntry[]): Promise<GuildQueue | null> {
+   *  V5 Audit [12.1]: Enforces MAX_QUEUE_SIZE — excess entries are silently trimmed.
+   *  V9 Audit §12.P2: Also enforces per-user limit (MAX_PER_USER_QUEUE). */
+  async addEntries(guildId: string, entries: QueueEntry[]): Promise<{ queue: GuildQueue | null; userLimitHit?: boolean }> {
     const queue = await this.getQueue(guildId);
-    if (!queue) return null;
+    if (!queue) return { queue: null };
+
+    // Global queue cap
     const available = MAX_QUEUE_SIZE - queue.entries.length;
-    if (available <= 0) return queue; // Queue is full
-    const toAdd = available >= entries.length ? entries : entries.slice(0, available);
-    queue.entries.push(...toAdd);
+    if (available <= 0) return { queue };
+
+    // Per-user cap — count how many the requesting user already has queued
+    let userLimitHit = false;
+    if (entries.length > 0) {
+      const userId = entries[0]!.requestedBy;
+      const userCount = queue.entries.filter((e) => e.requestedBy === userId).length;
+      const userAvailable = MAX_PER_USER_QUEUE - userCount;
+      if (userAvailable <= 0) return { queue, userLimitHit: true };
+      const cap = Math.min(available, userAvailable);
+      const toAdd = cap >= entries.length ? entries : entries.slice(0, cap);
+      userLimitHit = toAdd.length < entries.length;
+      queue.entries.push(...toAdd);
+    }
+
     await this.saveQueue(queue);
-    return queue;
+    return { queue, userLimitHit };
   }
 
   /** Remove an entry by index. Returns the removed entry or null. */

@@ -58,6 +58,8 @@ export async function handleForgetMeCommand(
       '• 🐾 Pets — all owned pets and battle history\n' +
       '• 🌾 Activities — farm plots, fish catches, adventures\n' +
       '• 🏪 Market — all listings (active ones will be cancelled)\n' +
+      '• 🔑 Licenses — all license keys revoked, sessions deactivated\n' +
+      '• 🎟️ Entitlements — active entitlements cancelled\n' +
       '• 👤 Profile — custom profile and member record\n' +
       '• 🎫 Tickets — creator info anonymized (transcripts preserved)\n\n' +
       '**This cannot be undone.** Are you sure?',
@@ -206,6 +208,8 @@ function formatTableName(table: string): string {
     economy_daily_losses: '📉 Daily Loss Records',
     member_levels: '📊 Level/XP Data',
     members: '👤 Member Record',
+    license_keys_revoked: '🔑 License Keys (revoked)',
+    entitlements_revoked: '🎟️ Entitlements (cancelled)',
     tickets_anonymized: '🎫 Tickets (anonymized)',
     poll_votes: '🗳️ Poll Votes',
     economy_pet_battles_anonymized: '⚔️ Pet Battles (anonymized)',

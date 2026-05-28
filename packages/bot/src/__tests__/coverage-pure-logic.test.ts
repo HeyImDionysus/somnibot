@@ -467,7 +467,7 @@ describe('MusicQueueManager', () => {
     const valkey = mockValkey();
     valkey.get.mockResolvedValue(JSON.stringify({ guildId: 'g1', entries: [], currentIndex: 0, loopMode: 'off', volume: 80, shuffled: false, paused: false, voiceChannelId: 'vc1', textChannelId: 'tc1' }));
     const mgr = new MusicQueueManager(valkey);
-    const q = await mgr.addEntries('g1', [sampleEntry(1), sampleEntry(2)]);
+    const { queue: q } = await mgr.addEntries('g1', [sampleEntry(1), sampleEntry(2)]);
     expect(q).toBeDefined();
     expect(q!.entries.length).toBe(2);
   });
@@ -477,7 +477,7 @@ describe('MusicQueueManager', () => {
     const fullQueue = { guildId: 'g1', entries: Array.from({ length: 5000 }, (_, i) => sampleEntry(i)), currentIndex: 0, loopMode: 'off', volume: 80, shuffled: false, paused: false, voiceChannelId: 'vc1', textChannelId: 'tc1' };
     valkey.get.mockResolvedValue(JSON.stringify(fullQueue));
     const mgr = new MusicQueueManager(valkey);
-    const q = await mgr.addEntries('g1', [sampleEntry(9999)]);
+    const { queue: q } = await mgr.addEntries('g1', [sampleEntry(9999)]);
     expect(q).toBeDefined();
     expect(q!.entries.length).toBe(5000); // No new entries
   });
@@ -485,7 +485,7 @@ describe('MusicQueueManager', () => {
   it('addEntries returns null if no queue', async () => {
     const valkey = mockValkey();
     const mgr = new MusicQueueManager(valkey);
-    const q = await mgr.addEntries('g1', [sampleEntry()]);
+    const { queue: q } = await mgr.addEntries('g1', [sampleEntry()]);
     expect(q).toBeNull();
   });
 

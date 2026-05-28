@@ -110,15 +110,25 @@ class MusicQueueManager {
     await this.valkey.del(`music:votes:${guildId}:skip`);
   }
 
-  async addEntries(guildId: string, entries: QueueEntry[]): Promise<GuildQueue | null> {
+  async addEntries(guildId: string, entries: QueueEntry[]): Promise<{ queue: GuildQueue | null; userLimitHit?: boolean }> {
     const queue = await this.getQueue(guildId);
-    if (!queue) return null;
+    if (!queue) return { queue: null };
     const available = MAX_QUEUE_SIZE - queue.entries.length;
-    if (available <= 0) return queue;
-    const toAdd = available >= entries.length ? entries : entries.slice(0, available);
-    queue.entries.push(...toAdd);
+    if (available <= 0) return { queue };
+    // Per-user cap (mirrors production logic)
+    let userLimitHit = false;
+    if (entries.length > 0) {
+      const userId = entries[0]!.requestedBy;
+      const userCount = queue.entries.filter((e) => e.requestedBy === userId).length;
+      const userAvailable = 50 - userCount;
+      if (userAvailable <= 0) return { queue, userLimitHit: true };
+      const cap = Math.min(available, userAvailable);
+      const toAdd = cap >= entries.length ? entries : entries.slice(0, cap);
+      userLimitHit = toAdd.length < entries.length;
+      queue.entries.push(...toAdd);
+    }
     await this.saveQueue(queue);
-    return queue;
+    return { queue, userLimitHit };
   }
 
   async removeEntry(guildId: string, index: number): Promise<QueueEntry | null> {
@@ -201,7 +211,7 @@ describe('MusicQueueManager', () => {
     it('adds entries to the queue', async () => {
       const q = mgr.createQueue('g1', 'vc1', 'tc1', 50);
       await mgr.saveQueue(q);
-      const result = await mgr.addEntries('g1', [makeEntry('Song A'), makeEntry('Song B')]);
+      const { queue: result } = await mgr.addEntries('g1', [makeEntry('Song A'), makeEntry('Song B')]);
       expect(result!.entries).toHaveLength(2);
       expect(result!.entries[0]!.title).toBe('Song A');
     });
@@ -212,9 +222,9 @@ describe('MusicQueueManager', () => {
       q.entries = Array.from({ length: MAX_QUEUE_SIZE - 2 }, (_, i) => makeEntry(`S${i}`));
       await mgr.saveQueue(q);
 
-      // Try to add 5 entries — only 2 should fit
-      const entries = Array.from({ length: 5 }, (_, i) => makeEntry(`New${i}`));
-      const result = await mgr.addEntries('g1', entries);
+      // Try to add 5 entries from a different user — only 2 should fit
+      const entries = Array.from({ length: 5 }, (_, i) => makeEntry(`New${i}`, 'user2'));
+      const { queue: result } = await mgr.addEntries('g1', entries);
       expect(result!.entries).toHaveLength(MAX_QUEUE_SIZE);
     });
 
@@ -223,12 +233,13 @@ describe('MusicQueueManager', () => {
       q.entries = Array.from({ length: MAX_QUEUE_SIZE }, (_, i) => makeEntry(`S${i}`));
       await mgr.saveQueue(q);
 
-      const result = await mgr.addEntries('g1', [makeEntry('Overflow')]);
+      const { queue: result } = await mgr.addEntries('g1', [makeEntry('Overflow', 'user2')]);
       expect(result!.entries).toHaveLength(MAX_QUEUE_SIZE);
     });
 
     it('returns null for non-existent queue', async () => {
-      expect(await mgr.addEntries('no-guild', [makeEntry('X')])).toBeNull();
+      const { queue: noQueue } = await mgr.addEntries('no-guild', [makeEntry('X')]);
+      expect(noQueue).toBeNull();
     });
   });
 
