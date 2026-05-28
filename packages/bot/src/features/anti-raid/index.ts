@@ -316,6 +316,26 @@ export async function processAntiRaid(
 
       if (action === 'lockdown') {
         // V6 Audit §8.6: Implement real lockdown — raise verification level
+        // V5 Audit §8.P2a: Check bot permissions before attempting lockdown.
+        // ManageGuild is required for setVerificationLevel + invite revocation.
+        const botMember = guild.members.me;
+        if (!botMember?.permissions.has('ManageGuild')) {
+          log.warn(
+            `Lockdown skipped: bot lacks ManageGuild permission in guild ${guild.id}. ` +
+            'Grant the bot "Manage Server" permission for anti-raid lockdown to work.',
+          );
+          const embed = new EmbedBuilder()
+            .setColor(0xFFAA00)
+            .setTitle('⚠️ Anti-Raid: Lockdown Failed — Missing Permission')
+            .setDescription(
+              'The bot needs **Manage Server** permission to activate lockdown mode. ' +
+              'Please grant this permission or switch anti-raid action to `kick` or `ban`.',
+            )
+            .setTimestamp();
+          await logRaidEvent(guild, config, embed);
+          return true;
+        }
+
         try {
           const valkey = getValkey();
           const prevLevelKey = `antiraid:prevlevel:${guild.id}`;

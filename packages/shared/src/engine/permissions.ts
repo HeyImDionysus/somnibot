@@ -202,12 +202,15 @@ export function buildChannelOverwrites(
  *
  * V5 Audit §11.2: Returns null on parse failure instead of 0n,
  * so callers can distinguish "no permissions" (0n) from "bad input" (null).
+ *
+ * V5 Audit §11.P3a: Widened cap from 64 bits to 128 bits. Discord currently
+ * uses ~50 bits but BigInt has no overflow, so we allow headroom for future
+ * permission flags without needing a code change.
  */
 export function safePermissionBigInt(value: string | number | bigint): bigint | null {
   try {
     const n = BigInt(value);
-    // Clamp to known permission bit space (currently 50 bits; allow up to 64)
-    if (n < 0n || n > (1n << 64n) - 1n) return null;
+    if (n < 0n || n > (1n << 128n) - 1n) return null;
     return n;
   } catch {
     return null;

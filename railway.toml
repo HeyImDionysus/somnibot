@@ -3,12 +3,18 @@
 # Defines the bot service build & deploy settings
 # ============================================================
 
+# ============================================================
+# SomniBot — Railway Configuration
+# Defines the bot service build & deploy settings.
+# The start command is defined in the Dockerfile CMD — do not
+# duplicate it here to avoid divergence (V5 Audit §9.P3a).
+# ============================================================
+
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "packages/bot/Dockerfile"
 
 [deploy]
-startCommand = "bun run packages/bot/dist/index.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
 healthcheckPath = "/health"

@@ -15,7 +15,7 @@
  * Local-mode (Electron launcher) is exempt since it's bound to localhost.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
@@ -135,7 +135,7 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
     );
   }
 
-  // Cookie format: nonce:sessionId
+  // Cookie format: nonce:sessionId or nonce:sessionId!timestamp (V5 Audit §1.P3b)
   const colonIdx = csrfCookie.indexOf(':');
   if (colonIdx === -1) {
     return NextResponse.json(
@@ -145,7 +145,10 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
   }
 
   const nonce = csrfCookie.slice(0, colonIdx);
-  const sessionId = csrfCookie.slice(colonIdx + 1);
+  // Strip optional !timestamp suffix added by V5 Audit §1.P3b rotation
+  const rest = csrfCookie.slice(colonIdx + 1);
+  const bangIdx = rest.lastIndexOf('!');
+  const sessionId = bangIdx === -1 ? rest : rest.slice(0, bangIdx);
 
   if (!verifyCsrfToken(headerToken, nonce, sessionId)) {
     return NextResponse.json(
@@ -155,6 +158,32 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
   }
 
   return null;
+}
+
+/**
+ * V5 Audit §1.P3b — Check whether the CSRF cookie should be rotated.
+ *
+ * The cookie stores `nonce:sessionId`. We add an optional `!timestamp` suffix
+ * so the middleware can tell when the token was issued. If the cookie is older
+ * than CSRF_ROTATION_MAX_AGE_MS, `shouldRotateCsrf` returns true and the
+ * middleware reissues a fresh token.
+ */
+const CSRF_ROTATION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+export function shouldRotateCsrf(request: NextRequest): boolean {
+  const csrfCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+  if (!csrfCookie) return false;
+
+  const bangIdx = csrfCookie.lastIndexOf('!');
+  if (bangIdx === -1) {
+    // Legacy cookie without timestamp — rotate to add one
+    return true;
+  }
+
+  const issuedAt = parseInt(csrfCookie.slice(bangIdx + 1), 10);
+  if (Number.isNaN(issuedAt)) return true;
+
+  return Date.now() - issuedAt > CSRF_ROTATION_MAX_AGE_MS;
 }
 
 /**

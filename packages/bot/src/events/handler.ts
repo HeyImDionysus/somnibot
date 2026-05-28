@@ -358,35 +358,65 @@ export function registerEvents(client: SomniClient): void {
   client.on('warn', (info) => { log.warn('Warning:', info); });
 
   // ── Periodic Crons ──
+  // V5 Audit §6.P3a: Store interval handles for cleanup on shutdown.
+  const cronHandles: NodeJS.Timeout[] = [];
 
   // Infraction expiry (every 15 min)
-  setInterval(async () => {
+  cronHandles.push(setInterval(async () => {
     for (const ctx of client.router.all()) {
       try { await expireInfractions(client.supabase, ctx.guildId); }
       catch (err) { log.error('Infraction expiry error', { guildId: ctx.guildId, error: String(err) }); }
     }
-  }, 15 * 60 * 1000);
+  }, 15 * 60 * 1000));
 
   // Ticket inactivity check (every 30 min)
-  setInterval(async () => {
+  cronHandles.push(setInterval(async () => {
     for (const ctx of client.router.all()) {
       try { await checkInactiveTickets(client.supabase, ctx.guild, client.eventBus); }
       catch (err) { log.error('Ticket inactivity check error', { guildId: ctx.guildId, error: String(err) }); }
     }
-  }, 30 * 60 * 1000);
+  }, 30 * 60 * 1000));
 
-  // Data retention prune (every 6 hours) — single RPC for all guilds
-  setInterval(async () => {
-    try {
-      const { data, error } = await client.supabase.rpc('prune_expired_data');
-      if (error) throw error;
-      const counts = data as Record<string, number> | null;
-      const total = counts ? Object.values(counts).reduce((s, n) => s + n, 0) : 0;
-      if (total > 0) log.info('Data pruned (batch)', counts);
-    } catch (err) {
-      log.error('Data retention prune error', { error: String(err) });
+  // Data retention prune (every 6 hours)
+  // V5 Audit §14.P3b: Iterate guilds and prune each individually so a failure
+  // in one guild doesn't block cleanup for others, and so the single RPC call
+  // doesn't lock tables across all guilds simultaneously.
+  cronHandles.push(setInterval(async () => {
+    let totalPruned = 0;
+    const guilds = client.router.all();
+    for (const ctx of guilds) {
+      try {
+        const { data, error } = await client.supabase.rpc('prune_expired_data', {
+          p_guild_id: ctx.guildId,
+        });
+        if (error) {
+          // Fall back to parameterless version (RPC may not accept guild_id yet)
+          if (error.message?.includes('p_guild_id')) {
+            const { data: d2, error: e2 } = await client.supabase.rpc('prune_expired_data');
+            if (e2) throw e2;
+            const c = d2 as Record<string, number> | null;
+            totalPruned += c ? Object.values(c).reduce((s, n) => s + n, 0) : 0;
+            break; // ran global prune, no need to iterate further
+          }
+          throw error;
+        }
+        const counts = data as Record<string, number> | null;
+        const pruned = counts ? Object.values(counts).reduce((s, n) => s + n, 0) : 0;
+        totalPruned += pruned;
+      } catch (err) {
+        log.error('Data retention prune error', { guildId: ctx.guildId, error: String(err) });
+      }
     }
-  }, 6 * 60 * 60 * 1000);
+    if (totalPruned > 0) log.info('Data pruned', { totalPruned, guilds: guilds.length });
+  }, 6 * 60 * 60 * 1000));
+
+  // V5 Audit §6.P3a: Clear all intervals on SIGTERM/SIGINT so tests exit cleanly.
+  const cleanupCrons = () => {
+    for (const handle of cronHandles) clearInterval(handle);
+    cronHandles.length = 0;
+  };
+  process.once('SIGTERM', cleanupCrons);
+  process.once('SIGINT', cleanupCrons);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

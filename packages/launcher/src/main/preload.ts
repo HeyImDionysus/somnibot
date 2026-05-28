@@ -7,6 +7,23 @@
 
 import { contextBridge, ipcRenderer } from 'electron';
 
+// V5 Audit §10.P2a: Safety-net cleanup of all IPC listeners on window close.
+// Individual on* handlers return cleanup functions for React unmount, but if a
+// component fails to call them (e.g. crash, missing useEffect cleanup), listeners
+// accumulate. This global handler ensures everything is cleared on unload.
+const IPC_CHANNELS = [
+  'status-update', 'bot-log', 'dashboard-log',
+  'updater:checking', 'updater:available', 'updater:not-available',
+  'updater:progress', 'updater:downloaded', 'updater:error',
+  'lavalink-status', 'lavalink-log', 'lavalink-download-progress',
+] as const;
+
+window.addEventListener('beforeunload', () => {
+  for (const channel of IPC_CHANNELS) {
+    ipcRenderer.removeAllListeners(channel);
+  }
+});
+
 export interface SomniBotAPI {
   // Config
   getConfig: () => Promise<Record<string, string>>;
