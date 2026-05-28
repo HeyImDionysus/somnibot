@@ -215,8 +215,21 @@ jobs:
           key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Build shared
         run: pnpm --filter @somnibot/shared build
-      - name: Run dashboard tests
-        run: pnpm --filter @somnibot/dashboard test -- --reporter=verbose
+      - name: Run dashboard tests with coverage
+        run: |
+          pnpm --filter @somnibot/dashboard test -- \
+            --coverage \
+            --coverage.thresholds.statements=70 \
+            --coverage.reporter=text \
+            --coverage.reporter=json-summary \
+            --reporter=verbose
+      - name: Upload coverage summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-dashboard
+          path: packages/dashboard/coverage/
+          retention-days: 14
 
   # ──────────────────────────────────────────────────────────────────────────
   # 6b. Shared Package Tests (V5 Audit §13.6)
