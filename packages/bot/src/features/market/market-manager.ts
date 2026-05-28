@@ -404,12 +404,18 @@ export class MarketManager {
     // Quest progress — market trade (buyer counts as completing a trade)
     getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
+    // V5 Audit §4.2: Inform user when fewer items were purchased than requested
+    const qtyNote = buyQty < quantity
+      ? `\n⚠️ Only **${buyQty}** of your requested **${quantity}** were available.`
+      : '';
+
     return new EmbedBuilder()
       .setTitle('✅ Purchase Complete!')
       .setDescription(
         `Bought **${listing.item_name}** x${buyQty}\n` +
         `💰 Cost: **${totalCost.toLocaleString()}** coins\n` +
-        `💸 Fee: **${fee.toLocaleString()}** coins (${config.economy_market_fee_pct}%)`,
+        `💸 Fee: **${fee.toLocaleString()}** coins (${config.economy_market_fee_pct}%)` +
+        qtyNote,
       )
       .setColor(0x4caf50);
   }

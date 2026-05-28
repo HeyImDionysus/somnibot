@@ -66,4 +66,25 @@ describe('isLockoutSafe', () => {
     // Role 2 has admin perms but is cosmetic — shouldn't count
     expect(isLockoutSafe([], roles, '1', 0n)).toBe(false);
   });
+
+  // V5 Audit §11.1: ownerRoleIds are now excluded from the lockout check
+  it('excludes owner-only roles from admin capability check', () => {
+    const roles: RoleConfig[] = [
+      makeRole({ id: '1', name: 'Owner Only', permissions: ADMIN_PERMS }),
+      makeRole({ id: '2', name: 'Member', tier: 'member', permissions: 0n }),
+    ];
+
+    // Role 1 has admin perms but belongs to owner — no delegate admin exists
+    expect(isLockoutSafe(['1'], roles, '2', 0n)).toBe(false);
+  });
+
+  it('allows change when a non-owner admin role exists', () => {
+    const roles: RoleConfig[] = [
+      makeRole({ id: '1', name: 'Owner Only', permissions: ADMIN_PERMS }),
+      makeRole({ id: '2', name: 'Delegate Admin', permissions: ADMIN_PERMS }),
+    ];
+
+    // Role 1 is owner-only, but role 2 is a delegate admin
+    expect(isLockoutSafe(['1'], roles, '999', 0n)).toBe(true);
+  });
 });

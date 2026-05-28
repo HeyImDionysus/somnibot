@@ -103,16 +103,24 @@ Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → ch
 Auto-run on bot start via `migration-runner.ts`. SHA-256 checksums. Stops on first error.
 
 ### Data Retention (every 6h cron)
-- Audit logs: 90 days
-- Economy transactions: 180 days
+
+Each guild has a configurable `data_retention_days` setting in `guild_config`
+(default: 180 days, minimum: 30). Guild owners can change this from
+**Settings → Data Retention** on the dashboard. The new period starts from
+the moment the setting is saved — no retroactive recovery.
+
+Defaults if the guild hasn't configured a custom value:
+- Audit logs: uses guild's `data_retention_days` (default 180)
+- Economy transactions: uses guild's `data_retention_days` (default 180)
 - License validations: 90 days
 - Portal sessions: on expiry
 - Webhook events: 30 days (processed only)
 
 **Manual cleanup** (deletes in batches of 10,000):
 ```sql
-SELECT cleanup_old_records('economy_transactions', 180);  -- 180 days retention
-SELECT cleanup_old_records('audit_log', 90);               -- 90 days retention
+-- Use the guild's configured retention, or override:
+SELECT cleanup_old_records('economy_transactions', 180);
+SELECT cleanup_old_records('audit_logs', 90);
 SELECT cleanup_old_records('license_validations', 90);
 SELECT cleanup_old_records('webhook_events', 30);
 ```

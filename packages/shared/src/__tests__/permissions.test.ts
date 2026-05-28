@@ -208,15 +208,15 @@ describe('safePermissionBigInt', () => {
     expect(safePermissionBigInt(32)).toBe(32n);
   });
 
-  it('returns 0n for negative values', () => {
-    expect(safePermissionBigInt(-1)).toBe(0n);
+  it('returns null for negative values', () => {
+    expect(safePermissionBigInt(-1)).toBeNull();
   });
 
-  it('returns 0n for malformed strings', () => {
-    expect(safePermissionBigInt('not-a-number')).toBe(0n);
+  it('returns null for malformed strings', () => {
+    expect(safePermissionBigInt('not-a-number')).toBeNull();
   });
 
-  it('returns 0n for values exceeding 64-bit range', () => {
-    expect(safePermissionBigInt((1n << 64n))).toBe(0n);
+  it('returns null for values exceeding 64-bit range', () => {
+    expect(safePermissionBigInt((1n << 64n))).toBeNull();
   });
 });

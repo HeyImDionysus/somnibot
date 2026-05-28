@@ -14,7 +14,12 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
 import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
-import type { PayPalCaptureResource, PayPalSaleResource } from '@/lib/types/paypal';
+import {
+  paypalCaptureResourceSchema,
+  paypalSaleResourceSchema,
+  type PayPalCaptureResource,
+  type PayPalSaleResource,
+} from '@/lib/types/paypal';
 
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 
@@ -316,9 +321,13 @@ async function handlePaymentCaptured(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
 ) {
+  // V5 Audit §2.1: Validate resource shape with Zod instead of type assertion
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success ? parsed.data : { id: String(resource.id ?? '') };
+
   // Find the order by PayPal order ID (from custom_id in purchase_units)
   // V5 Audit [2.1]: Support both short keys (g/p/c/d) and legacy long keys
-  const customId = (resource as unknown as PayPalCaptureResource).custom_id;
+  const customId = capture.custom_id;
   let meta: { guild_id: string; product_id: string; customer_id: string; discord_id: string } | null = null;
 
   if (customId) {
@@ -363,7 +372,7 @@ async function handlePaymentCaptured(
   }
 
   const paypalCaptureId = resource.id as string;
-  const amountValue = (resource as unknown as PayPalCaptureResource).amount?.value;
+  const amountValue = capture.amount?.value;
   const amountCents = amountValue ? Math.round(parseFloat(amountValue) * 100) : order.amount_cents;
 
   // V5 Audit §2.P2a: Verify captured amount matches the pending order's expected price.
@@ -509,7 +518,10 @@ async function handleSubscriptionActivated(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
 ) {
-  const customId = (resource as unknown as PayPalCaptureResource).custom_id;
+  // V5 Audit §2.1: Validate resource shape with Zod
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success ? parsed.data : { id: String(resource.id ?? '') };
+  const customId = capture.custom_id;
   if (!customId) return;
 
   let meta: { guild_id: string; product_id: string; plan_id: string; customer_id: string; discord_id: string };
@@ -679,7 +691,11 @@ async function handleSubscriptionPayment(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
 ) {
-  const billingAgreementId = (resource as unknown as PayPalSaleResource).billing_agreement_id;
+  // V5 Audit §2.1: Validate resource shape with Zod
+  const parsed = paypalSaleResourceSchema.safeParse(resource);
+  const sale: PayPalSaleResource = parsed.success ? parsed.data : { id: String(resource.id ?? '') };
+
+  const billingAgreementId = sale.billing_agreement_id;
   if (!billingAgreementId) return;
 
   const { data: order } = await supabase
@@ -690,7 +706,7 @@ async function handleSubscriptionPayment(
 
   if (!order) return;
 
-  const amountValue = (resource as unknown as PayPalSaleResource).amount?.total;
+  const amountValue = sale.amount?.total;
   const amountCents = amountValue ? Math.round(parseFloat(amountValue) * 100) : 0;
 
   await supabase.from('payments').insert({
@@ -723,16 +739,20 @@ async function handleCaptureRefunded(
   resource: Record<string, unknown>,
   eventType: string,
 ) {
+  // V5 Audit §2.1: Validate resource shape with Zod
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success ? parsed.data : { id: String(resource.id ?? '') };
+
   // Try to recover the original capture id
   let captureId: string | undefined;
 
-  const supp = (resource as unknown as PayPalCaptureResource).supplementary_data;
+  const supp = capture.supplementary_data;
   if (supp?.related_ids?.capture_id) {
     captureId = supp.related_ids.capture_id;
   }
 
   if (!captureId) {
-    const links = (resource as unknown as PayPalCaptureResource).links ?? [];
+    const links = capture.links ?? [];
     const up = links.find((l) => l.rel === 'up');
     if (up?.href) {
       const m = up.href.match(/\/captures\/([^/?#]+)/);

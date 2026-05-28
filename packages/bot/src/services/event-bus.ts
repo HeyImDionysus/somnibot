@@ -65,12 +65,19 @@ class PlatformEventBus {
 
   /**
    * Listen for a specific event type.
+   *
+   * V5 Audit §6.2: Warns when listener count exceeds 80 (soft limit)
+   * so we catch potential leaks before hitting the hard cap of 100.
    */
   on<T extends PlatformEventType>(
     type: T,
     handler: (event: PlatformEvent<T, PlatformEventMap[T]>) => void | Promise<void>,
   ): void {
     this.emitter.on(type, handler as (...args: unknown[]) => void);
+    const count = this.emitter.listenerCount(type);
+    if (count >= 80) {
+      log.warn(`High listener count on "${type}": ${count}/100 — possible leak`);
+    }
   }
 
   /**

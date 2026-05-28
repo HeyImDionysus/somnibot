@@ -7,6 +7,7 @@ import { Button } from '@/components/shared/button';
 import { useToast } from '@/components/shared/toast';
 import { useUnsavedWarning } from '@/hooks/use-unsaved-warning';
 import { cn } from '@/lib/utils/cn';
+import { DataRetentionSettings } from '@/components/settings/data-retention';
 import {
   Database, MessageSquare, CreditCard, Music, Server,
   CheckCircle2, XCircle, Loader2, Save, Lock, Pencil, ShieldCheck,
@@ -599,6 +600,9 @@ export default function SettingsPage() {
           </div>
         </div>
       </Card>
+
+      {/* V5 Audit §5.2: Data Retention Settings */}
+      <DataRetentionSettings />
     </div>
   );
 }

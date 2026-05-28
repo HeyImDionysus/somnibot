@@ -71,6 +71,48 @@ export async function POST(request: NextRequest) {
     const body = parsed.data;
     const admin = createAdminSupabase();
 
+    // ── V5 Audit §1.2: Prevent priority escalation ──────────────
+    // Fetch the target role's priority and is_system flag.
+    // A user must not assign a role with higher priority than their own.
+    const { data: targetRole } = await admin
+      .from('dashboard_roles')
+      .select('priority, is_system')
+      .eq('id', body.role_id)
+      .eq('guild_id', ctx.guildId)
+      .single();
+
+    if (!targetRole) {
+      return NextResponse.json({ error: 'Role not found' }, { status: 404 });
+    }
+    if (targetRole.is_system) {
+      return NextResponse.json({ error: 'Cannot assign system roles' }, { status: 403 });
+    }
+
+    // Owner bypasses priority check
+    if (!ctx.isOwner) {
+      const { data: assignerRoles } = await admin
+        .from('dashboard_user_roles')
+        .select('dashboard_roles(priority)')
+        .eq('guild_id', ctx.guildId)
+        .eq('discord_id', ctx.discordId);
+
+      const assignerMaxPriority = Math.max(
+        0,
+        ...(assignerRoles || []).map((r) => {
+          const role = r.dashboard_roles as unknown as { priority: number } | null;
+          return role?.priority ?? 0;
+        }),
+      );
+
+      if (targetRole.priority > assignerMaxPriority) {
+        return NextResponse.json(
+          { error: 'Cannot assign a role with higher priority than your own' },
+          { status: 403 },
+        );
+      }
+    }
+    // ── End priority escalation check ────────────────────────────
+
     const { data, error } = await admin
       .from('dashboard_user_roles')
       .insert({
