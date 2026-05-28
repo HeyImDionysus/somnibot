@@ -154,14 +154,63 @@ interface RateLimitEntry {
   windowStart: number;
 }
 
-const memStore = new Map<string, RateLimitEntry>();
+/**
+ * V5 Audit §7.P3a — LRU cache for in-memory rate-limit fallback.
+ *
+ * Uses Map insertion-order semantics: accessing a key deletes and re-inserts
+ * it so the least-recently-used entry is always first in iteration order.
+ * Eviction removes the LRU entry (front of Map) instead of FIFO.
+ */
+class LRURateLimitStore {
+  private map = new Map<string, RateLimitEntry>();
+  private readonly maxSize: number;
+
+  constructor(maxSize: number) {
+    this.maxSize = maxSize;
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  get(key: string): RateLimitEntry | undefined {
+    const entry = this.map.get(key);
+    if (entry) {
+      // Move to end (most recently used)
+      this.map.delete(key);
+      this.map.set(key, entry);
+    }
+    return entry;
+  }
+
+  set(key: string, entry: RateLimitEntry): void {
+    // If updating existing key, delete first to refresh position
+    if (this.map.has(key)) {
+      this.map.delete(key);
+    } else if (this.map.size >= this.maxSize) {
+      // Evict least-recently-used (first entry in Map)
+      const lruKey = this.map.keys().next().value;
+      if (lruKey !== undefined) this.map.delete(lruKey);
+    }
+    this.map.set(key, entry);
+  }
+
+  /** Iterate entries for cleanup (oldest first) */
+  entries(): IterableIterator<[string, RateLimitEntry]> {
+    return this.map.entries();
+  }
+
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+}
 
 /**
  * V7 Audit §1.P3b — Maximum entries in the in-memory rate-limit store.
  * Prevents unbounded memory growth during Valkey outage under heavy load.
- * When the cap is hit, the oldest entries are evicted (FIFO via Map iteration order).
  */
 const MEM_STORE_MAX_ENTRIES = 50_000;
+const memStore = new LRURateLimitStore(MEM_STORE_MAX_ENTRIES);
 
 const CLEANUP_INTERVAL = 5 * 60 * 1000;
 let lastCleanup = Date.now();
@@ -171,19 +220,10 @@ function cleanup(windowMs: number): void {
   if (now - lastCleanup < CLEANUP_INTERVAL) return;
   lastCleanup = now;
 
-  for (const [key, entry] of memStore) {
+  // Evict expired entries (iterate oldest-first)
+  for (const [key, entry] of memStore.entries()) {
     if (now - entry.windowStart > windowMs * 2) {
       memStore.delete(key);
-    }
-  }
-
-  // V7 Audit §1.P3b — hard cap eviction if cleanup didn't free enough
-  if (memStore.size > MEM_STORE_MAX_ENTRIES) {
-    const excess = memStore.size - MEM_STORE_MAX_ENTRIES;
-    const iter = memStore.keys();
-    for (let i = 0; i < excess; i++) {
-      const { value } = iter.next();
-      if (value) memStore.delete(value);
     }
   }
 }
@@ -199,11 +239,6 @@ function checkRateLimitMemory(
   const entry = memStore.get(key);
 
   if (!entry || now - entry.windowStart > windowMs) {
-    // V7 Audit §1.P3b — evict oldest entry if at capacity before inserting
-    if (!entry && memStore.size >= MEM_STORE_MAX_ENTRIES) {
-      const oldest = memStore.keys().next().value;
-      if (oldest) memStore.delete(oldest);
-    }
     memStore.set(key, { hits: 1, windowStart: now });
     return { limited: false, remaining: maxHits - 1, retryAfterMs: 0 };
   }

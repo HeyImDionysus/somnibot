@@ -534,6 +534,8 @@ const musicConfig = z.object({
   dj_role_id: snowflake.optional().nullable(),
   music_auto_leave_minutes: z.number().int().min(0).max(60).optional(),
   music_auto_destroy_minutes: z.number().int().min(0).max(60).optional(),
+  // V5 Audit §6.P3a — validate max queue length (bot default 500, hard cap 10 000)
+  max_queue_length: z.number().int().min(1).max(10_000).optional(),
 });
 
 // ── Product file schemas ────────────────────────────
