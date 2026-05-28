@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
@@ -174,7 +174,7 @@ export async function GET() {
 /**
  * PUT /api/settings — Save settings for a section.
  */
-export async function PUT(request: Request) {
+export async function PUT(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
   if (rateLimited) return rateLimited;
 
@@ -182,7 +182,7 @@ export async function PUT(request: Request) {
     const auth = await requireGuildOwner();
     if (!auth.ok) return auth.response;
 
-    const parsed = await parseBody(request as any, settingsUpdate);
+    const parsed = await parseBody(request, settingsUpdate);
     if (!parsed.ok) return parsed.response;
     const { section, values } = parsed.data;
 

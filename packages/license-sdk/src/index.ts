@@ -142,7 +142,9 @@ export class SomniLicense {
    */
   async validate(): Promise<ValidationResponse> {
     // Return cache if valid
-    if (this.cachedResult?.valid && Date.now() < this.cacheExpiry) {
+    // V5 Audit §3.1: Use monotonic clock for cache TTL (consistent with
+    // offline grace period) to prevent clock-manipulation bypass.
+    if (this.cachedResult?.valid && this.mono() < this.cacheExpiry) {
       return this.cachedResult;
     }
 
@@ -163,7 +165,8 @@ export class SomniLicense {
 
       if (data.valid) {
         this.cachedResult = data;
-        this.cacheExpiry = Date.now() + (this.config.cacheTtlMs ?? 60_000);
+        // V5 Audit §3.1: monotonic clock for cache TTL
+        this.cacheExpiry = this.mono() + (this.config.cacheTtlMs ?? 60_000);
         this.sessionId = data.session_id ?? null;
 
         // V7 Audit §3.P3a — anchor server time on successful validation
