@@ -13,7 +13,7 @@
 -- §3.P3a: Partial index for license validation audit queries
 -- (only rows where the foreign key is NULL = failed lookups)
 CREATE INDEX IF NOT EXISTS idx_license_validations_failed_lookups
-  ON public.license_validations (validated_at DESC)
+  ON public.license_validations (created_at DESC)
   WHERE license_key_id IS NULL;
 
 -- §14.P3b: Support efficient per-guild-id pruning.
