@@ -17,10 +17,10 @@ function buildCspHeader(nonce: string): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    // V10 Audit §1.P3a — nonce for inline styles; 'unsafe-inline' kept as
-    // fallback for browsers that don't support nonce on style-src (Safari <15.4).
-    // Browsers that DO support nonce ignore 'unsafe-inline' when a nonce is present.
-    `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'`,
+    // V5 Audit §1.1: Removed 'unsafe-inline' fallback. Safari 15.4+ (released
+    // March 2022) supports nonce on style-src, and all current browsers handle
+    // nonce correctly. Keeping unsafe-inline weakened CSP on legacy clients.
+    `style-src 'self' 'nonce-${nonce}'`,
     "img-src 'self' data: https://cdn.discordapp.com",
     "font-src 'self'",
     // connect-src: External API calls (Discord, PayPal) go through server-side

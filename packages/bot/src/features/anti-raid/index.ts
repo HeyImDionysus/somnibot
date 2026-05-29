@@ -247,9 +247,14 @@ export async function processAntiRaid(
   // Check raid mode state
   const raidActive = await isRaidModeActive(guild.id);
 
-  // V5 Audit §8.2: Auto-unban raid-banned users when raid mode expires (ban mode)
+  // V5 Audit §8.1: Auto-unban raid-banned users when raid mode expires (ban mode).
+  // Runs in background via setImmediate so it doesn't block the join handler.
   if (!raidActive && config.anti_raid_action === 'ban') {
-    await processRaidUnbans(guild, config);
+    setImmediate(() => {
+      processRaidUnbans(guild, config).catch((err) => {
+        log.error('Background raid unban failed', { error: (err as Error)?.message ?? err });
+      });
+    });
   }
 
   // V6 Audit §8.6: Restore verification level when raid mode expires

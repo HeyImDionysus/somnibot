@@ -308,6 +308,13 @@ export class EconomyManager {
    * Uses economy_add_balance to avoid TOCTOU race conditions.
    */
   async creditWallet(userId: string, amount: number): Promise<WalletData | null> {
+    // V5 Audit §4.1: Reject non-positive amounts at the JS boundary.
+    // The RPC also enforces this, but catching here gives a clearer error.
+    if (!Number.isFinite(amount) || amount <= 0) {
+      log.warn('creditWallet rejected non-positive amount', { userId, amount });
+      return null;
+    }
+
     // Ensure wallet exists before RPC call
     await this.getOrCreateWallet(userId);
 
@@ -335,6 +342,12 @@ export class EconomyManager {
    * another concurrent debit could change the balance between the read and the RPC.
    */
   async debitWallet(userId: string, amount: number): Promise<WalletData | null> {
+    // V5 Audit §4.1: Reject non-positive amounts at the JS boundary.
+    if (!Number.isFinite(amount) || amount <= 0) {
+      log.warn('debitWallet rejected non-positive amount', { userId, amount });
+      return null;
+    }
+
     // Ensure wallet exists before RPC call
     await this.getOrCreateWallet(userId);
 

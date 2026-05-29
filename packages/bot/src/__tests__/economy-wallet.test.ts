@@ -145,3 +145,45 @@ describe('Economy Wallet Operations', () => {
     expect(data!.wallet).toBe(0);
   });
 });
+
+// ── V5 Audit §4.1: JS-side amount guard tests ────────────────
+
+describe('Amount guard (creditWallet / debitWallet)', () => {
+  /**
+   * Replicate the guard from economy-manager.ts so we can test it
+   * without importing the full class (which requires Guild, Supabase, etc.).
+   */
+  function isAmountValid(amount: number): boolean {
+    return Number.isFinite(amount) && amount > 0;
+  }
+
+  it('accepts positive integers', () => {
+    expect(isAmountValid(1)).toBe(true);
+    expect(isAmountValid(100)).toBe(true);
+    expect(isAmountValid(999999)).toBe(true);
+  });
+
+  it('accepts positive floats', () => {
+    expect(isAmountValid(0.5)).toBe(true);
+    expect(isAmountValid(99.99)).toBe(true);
+  });
+
+  it('rejects zero', () => {
+    expect(isAmountValid(0)).toBe(false);
+  });
+
+  it('rejects negative amounts', () => {
+    expect(isAmountValid(-1)).toBe(false);
+    expect(isAmountValid(-1000)).toBe(false);
+    expect(isAmountValid(-0.01)).toBe(false);
+  });
+
+  it('rejects NaN', () => {
+    expect(isAmountValid(NaN)).toBe(false);
+  });
+
+  it('rejects Infinity', () => {
+    expect(isAmountValid(Infinity)).toBe(false);
+    expect(isAmountValid(-Infinity)).toBe(false);
+  });
+});
