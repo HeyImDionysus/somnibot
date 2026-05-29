@@ -203,6 +203,26 @@ describe('HealthServer', () => {
     };
   });
 
+  /** Retry HTTP GET until the server is accepting connections (up to 2s). */
+  async function httpGet(url: string): Promise<{status: number; body: string}> {
+    const maxAttempts = 20;
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        return await new Promise((resolve, reject) => {
+          const req = http.get(url, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => resolve({ status: res.statusCode!, body: data }));
+          });
+          req.on('error', reject);
+        });
+      } catch {
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    throw new Error(`Server at ${url} not reachable after ${maxAttempts} attempts`);
+  }
+
   it('startHealthServer and stopHealthServer', async () => {
     const { startHealthServer, stopHealthServer } = await import('../services/health-server.js');
     
@@ -212,25 +232,14 @@ describe('HealthServer', () => {
     
     startHealthServer(client as any);
     
-    // Give server time to start
-    await new Promise(r => setTimeout(r, 100));
-    
-    // Make a health check request
-    const result = await new Promise<{status: number; body: any}>((resolve, reject) => {
-      const req = http.get(`http://127.0.0.1:${port}/health`, (res) => {
-        let data = '';
-        res.on('data', (chunk) => data += chunk);
-        res.on('end', () => {
-          resolve({ status: res.statusCode!, body: JSON.parse(data) });
-        });
-      });
-      req.on('error', reject);
-    });
+    // Make a health check request (retries until server is ready)
+    const result = await httpGet(`http://127.0.0.1:${port}/health`);
+    const body = JSON.parse(result.body);
     
     expect(result.status).toBe(200);
-    expect(result.body.status).toBe('ok');
-    expect(result.body.checks.discord).toBe(true);
-    expect(result.body.checks.valkey).toBe(true);
+    expect(body.status).toBe('ok');
+    expect(body.checks.discord).toBe(true);
+    expect(body.checks.valkey).toBe(true);
     
     stopHealthServer();
     delete process.env.HEALTH_PORT;
@@ -245,21 +254,11 @@ describe('HealthServer', () => {
     client.ws.status = 5; // Not connected
     startHealthServer(client as any);
     
-    await new Promise(r => setTimeout(r, 100));
-    
-    const result = await new Promise<{status: number; body: any}>((resolve, reject) => {
-      const req = http.get(`http://127.0.0.1:${port}/health`, (res) => {
-        let data = '';
-        res.on('data', (chunk) => data += chunk);
-        res.on('end', () => {
-          resolve({ status: res.statusCode!, body: JSON.parse(data) });
-        });
-      });
-      req.on('error', reject);
-    });
+    const result = await httpGet(`http://127.0.0.1:${port}/health`);
+    const body = JSON.parse(result.body);
     
     expect(result.status).toBe(503);
-    expect(result.body.status).toBe('unhealthy');
+    expect(body.status).toBe('unhealthy');
     
     stopHealthServer();
     delete process.env.HEALTH_PORT;
@@ -272,15 +271,8 @@ describe('HealthServer', () => {
     process.env.HEALTH_PORT = String(port);
     
     startHealthServer(client as any);
-    await new Promise(r => setTimeout(r, 100));
     
-    const result = await new Promise<{status: number}>((resolve, reject) => {
-      const req = http.get(`http://127.0.0.1:${port}/other`, (res) => {
-        res.on('data', () => {});
-        res.on('end', () => resolve({ status: res.statusCode! }));
-      });
-      req.on('error', reject);
-    });
+    const result = await httpGet(`http://127.0.0.1:${port}/other`);
     
     expect(result.status).toBe(404);
     
