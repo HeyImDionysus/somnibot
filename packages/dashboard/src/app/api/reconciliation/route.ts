@@ -75,9 +75,8 @@ export async function POST(req: NextRequest) {
   // V5 Audit P3-5: Use centralized parseBody for consistency.
   // Body is optional — default to 'manual' trigger if empty.
   let trigger = 'manual';
-  const contentLength = req.headers.get('content-length');
-  const hasBody = contentLength !== null && contentLength !== '0';
-  if (hasBody) {
+  const bodyText = await req.clone().text().catch(() => '');
+  if (bodyText.length > 0) {
     const parsed = await parseBody(req, reconciliationTriggerSchema);
     if (!parsed.ok) return parsed.response;
     trigger = parsed.data.trigger ?? 'manual';
