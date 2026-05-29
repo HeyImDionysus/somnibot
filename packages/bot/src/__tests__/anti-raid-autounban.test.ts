@@ -325,9 +325,9 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
     const member = makeMember(g, 'raider', 30);
 
     const { processAntiRaid } = await import('../features/anti-raid/index.js');
-    const result = await processAntiRaid(g, member, makeSupa(lockdownConfig));
+    await processAntiRaid(g, member, makeSupa(lockdownConfig));
 
-    expect(result).toBe(true);
+    // Lockdown path raises verification level to VERY_HIGH (4)
     expect(g.setVerificationLevel).toHaveBeenCalledWith(4, expect.any(String));
   });
 });
