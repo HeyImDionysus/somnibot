@@ -14,6 +14,41 @@ const undoChangeSchema = z.object({
   id: z.string().uuid(),
 });
 
+/**
+ * Allowlist of tables the undo route may target.
+ *
+ * The undo_payload.table field is server-written, but a compromised DB row
+ * could point it at any table. This set constrains undo to only the tables
+ * that the admin-changes system legitimately modifies.
+ */
+const UNDOABLE_TABLES = new Set([
+  'guild_config',
+  'products',
+  'product_files',
+  'product_license_config',
+  'level_rewards',
+  'xp_multipliers',
+  'reaction_roles',
+  'automod_rules',
+  'custom_commands',
+  'ticket_panels',
+  'embed_configs',
+  'scheduled_messages',
+  'automations',
+  'economy_items',
+  'stats_channels',
+  'temp_channel_hubs',
+  'channel_templates',
+  'giveaways',
+  'polls',
+  'predictions',
+  'tutorial_configs',
+  'tutorial_steps',
+  'role_templates',
+  'alerts',
+  'fraud_rules',
+]);
+
 export async function GET(request: NextRequest) {
   try {
     const ctx = await requirePermission('dashboard.undo_changes');
@@ -77,8 +112,17 @@ export async function POST(request: NextRequest) {
     // Apply the undo payload
     const undo = change.undo_payload as Record<string, unknown> | null;
     if (undo?.table && undo?.data && undo?.match) {
+      // Reject undo if the target table is not in the allowlist.
+      const tableName = undo.table as string;
+      if (!UNDOABLE_TABLES.has(tableName)) {
+        return NextResponse.json(
+          { error: `Undo blocked: table "${tableName}" is not in the allowlist` },
+          { status: 400 },
+        );
+      }
+
       const { error: undoError } = await admin
-        .from(undo.table as string)
+        .from(tableName)
         .update(undo.data as Record<string, unknown>)
         .match(undo.match as Record<string, unknown>);
 

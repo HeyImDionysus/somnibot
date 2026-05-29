@@ -48,6 +48,8 @@ const RAID_MODE_COOLDOWN = 5 * 60_000; // Auto-deactivate after 5 minutes
 const _memoryJoinWindows = new Map<string, number[]>();
 const _memoryRaidMode = new Map<string, number>();
 
+
+
 /**
  * V7 Audit §8.P3a — Maximum guilds tracked in memory fallback Maps.
  * In a sharded bot, each shard handles ~2500 guilds max. 10,000 provides
@@ -78,6 +80,35 @@ function raidBannedKey(guildId: string): string {
 
 // In-memory fallback for raid-banned tracking
 const _memoryRaidBanned = new Map<string, Set<string>>();
+
+/**
+ * Periodically purge stale guilds from memory fallback Maps.
+ * Without this, guilds that joined once and never again hold entries forever.
+ * Runs every 5 minutes. Removes guilds whose join window data is entirely expired
+ * and whose raid mode has cooled down.
+ */
+const MEMORY_PRUNE_INTERVAL = 5 * 60_000;
+setInterval(() => {
+  const now = Date.now();
+  // Prune join windows: remove guilds with no timestamps in the last 10 minutes
+  // (any reasonable window is < 60s, so 10min is extremely conservative)
+  const staleThreshold = now - 10 * 60_000;
+  for (const [guildId, timestamps] of _memoryJoinWindows) {
+    const newest = timestamps.length > 0 ? timestamps[timestamps.length - 1] : 0;
+    if (newest < staleThreshold) _memoryJoinWindows.delete(guildId);
+  }
+  // Prune raid mode: remove guilds past cooldown
+  for (const [guildId, activated] of _memoryRaidMode) {
+    if (now - activated >= RAID_MODE_COOLDOWN) _memoryRaidMode.delete(guildId);
+  }
+  // Prune raid banned: remove guilds past cooldown + 60s (matches Valkey TTL)
+  for (const [guildId] of _memoryRaidBanned) {
+    const raidActivated = _memoryRaidMode.get(guildId);
+    if (!raidActivated || now - raidActivated >= RAID_MODE_COOLDOWN + 60_000) {
+      _memoryRaidBanned.delete(guildId);
+    }
+  }
+}, MEMORY_PRUNE_INTERVAL).unref();
 
 async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
@@ -162,10 +193,11 @@ async function recordJoinAndCount(guildId: string, windowMs: number): Promise<nu
     const now = Date.now();
     const windowStart = now - windowMs;
     const joins = _memoryJoinWindows.get(guildId) ?? [];
+    // Filter stale timestamps on every read to mirror the Valkey sorted-set
+    // TTL behavior. Without this, the per-guild array grows unbounded
+    // during prolonged Valkey downtime.
     const filtered = joins.filter((t) => t > windowStart);
     filtered.push(now);
-    // Cap in-memory array to prevent unbounded growth
-    if (filtered.length > 500) filtered.splice(0, filtered.length - 500);
     _memoryJoinWindows.set(guildId, filtered);
     capMap(_memoryJoinWindows, MAX_MEMORY_GUILDS); // V7 Audit §8.P3a
     return filtered.length;

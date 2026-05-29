@@ -1183,11 +1183,35 @@ export class EconomyManager {
       return { success: false, amount: 0, balance: wallet, message: `❌ You don't have enough of this item.` };
     }
 
+    // Snapshot wallet balance before credit so the compensating restore
+    // can verify the credit didn't actually go through.
+    const walletBefore = await this.getOrCreateWallet(userId);
+    const balanceBefore = walletBefore.wallet;
+
     // Credit wallet — V50-L2: handle null (RPC failure)
     // V53-M4: refund items back to inventory if credit fails
     const updated = await this.creditWallet(userId, totalValue);
     if (!updated) {
-      // Restore the decremented items
+      // Before restoring items, re-check the wallet. If the balance increased
+      // despite creditWallet returning null (transient network blip where the
+      // RPC actually succeeded), skip the restore to avoid giving the user
+      // both the coins AND the items back.
+      const walletAfter = await this.getOrCreateWallet(userId);
+      if (walletAfter.wallet > balanceBefore) {
+        log.warn('sellItem: creditWallet returned null but balance increased — credit likely succeeded, skipping item restore', {
+          userId, itemId, quantity, balanceBefore, balanceAfter: walletAfter.wallet,
+        });
+        // Credit went through — treat as success (user already has the coins)
+        await this.recordTransaction(userId, 'shop_sell', totalValue, walletAfter.wallet, `Sold ${quantity}x ${item.name}`);
+        return {
+          success: true,
+          amount: totalValue,
+          balance: walletAfter,
+          message: `${item.emoji} Sold **${quantity}x ${item.name}** for **${totalValue.toLocaleString()} ${cfg.currency_name}**!`,
+        };
+      }
+
+      // Balance unchanged — credit genuinely failed, safe to restore items
       await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
         p_guild_id: this.guild.id,
         p_user_id: userId,

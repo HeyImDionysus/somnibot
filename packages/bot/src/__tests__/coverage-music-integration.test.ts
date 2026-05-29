@@ -677,10 +677,20 @@ describe('MusicPlayerManager integration', () => {
     shoukaku.players.set('123456', player);
     shoukaku.connections.set('123456', { channelId: 'vc1' });
 
-    // Add voice channel with members
+    // Voice channel mock — needs filter() since Collection is mocked as Map
+    const vcMembers = new Map([
+      ['bot', { user: { bot: true } }],
+      ['user1', { user: { bot: false } }],
+    ]);
+    (vcMembers as any).filter = (fn: any) => {
+      const out = new Map([...vcMembers].filter(([, v]) => fn(v)));
+      (out as any).filter = (vcMembers as any).filter;
+      return out;
+    };
     const voiceChannel = {
       id: 'vc1',
-      members: new Map([['bot', {}], ['user1', {}]]),
+      isVoiceBased: () => true,
+      members: vcMembers,
     };
     guild.channels.cache.set('vc1', voiceChannel);
 
