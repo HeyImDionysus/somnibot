@@ -383,7 +383,7 @@ export function registerEvents(client: SomniClient): void {
   // doesn't lock tables across all guilds simultaneously.
   cronHandles.push(setInterval(async () => {
     let totalPruned = 0;
-    const guilds = client.router.all();
+    const guilds = [...client.router.all()];
     for (const ctx of guilds) {
       try {
         const { data, error } = await client.supabase.rpc('prune_expired_data', {

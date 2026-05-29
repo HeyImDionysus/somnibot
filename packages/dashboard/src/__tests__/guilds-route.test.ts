@@ -105,6 +105,10 @@ describe('GET /api/guilds', () => {
   });
 
   it('returns 500 when DB query fails', async () => {
+    // Ensure rate limit passes for this test
+    (checkRateLimit as ReturnType<typeof vi.fn>).mockResolvedValue({
+      limited: false, remaining: 30, retryAfterMs: 0,
+    });
     (requireAuth as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       userId: 'user-1',
