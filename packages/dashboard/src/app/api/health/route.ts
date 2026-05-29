@@ -3,25 +3,25 @@
  *
  * V5 Audit §14.5: Surfaces Valkey connection status
  * so uptime monitors can alert on degraded rate limiting.
+ *
+ * V5 Audit P3-3: Uses Valkey PING instead of consuming a rate-limit
+ * counter. Previous approach wasted ~2,880 INCR ops/day from Docker
+ * healthchecks alone.
  */
 import { NextResponse } from 'next/server';
-import { rateLimits } from '@/lib/api/rate-limit';
+import { checkValkeyHealth } from '@/lib/api/rate-limit';
 
 export async function GET() {
-  const probe = await rateLimits.licenseValidate('__health_check__');
-
-  // When Valkey is connected, max is 30 and remaining starts at 29.
-  // In degraded (in-memory fallback) mode, max is halved to 15.
-  const isDegraded = probe.remaining < 15;
+  const valkeyUp = await checkValkeyHealth();
 
   return NextResponse.json(
     {
-      status: isDegraded ? 'degraded' : 'healthy',
+      status: valkeyUp ? 'healthy' : 'degraded',
       services: {
-        valkey: isDegraded ? 'fallback' : 'connected',
+        valkey: valkeyUp ? 'connected' : 'fallback',
       },
       timestamp: new Date().toISOString(),
     },
-    { status: isDegraded ? 503 : 200 },
+    { status: valkeyUp ? 200 : 503 },
   );
 }

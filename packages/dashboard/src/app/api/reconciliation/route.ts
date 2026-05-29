@@ -9,10 +9,12 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { parseBody } from '@/lib/api/validation';
 
+// V5 Audit P3-5: Non-optional version for parseBody (optional body handled via fallback)
 const reconciliationTriggerSchema = z.object({
   trigger: z.enum(['manual', 'scheduled']).default('manual'),
-}).strict().optional();
+}).strict();
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -70,28 +72,15 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Validate optional body
+  // V5 Audit P3-5: Use centralized parseBody for consistency.
+  // Body is optional — default to 'manual' trigger if empty.
   let trigger = 'manual';
-  try {
-    const text = await req.text();
-    if (text.trim()) {
-      const parsed = reconciliationTriggerSchema.safeParse(JSON.parse(text));
-      if (!parsed.success) {
-        return NextResponse.json(
-          { success: false, error: 'Invalid request body', details: parsed.error.issues },
-          { status: 400 },
-        );
-      }
-      trigger = parsed.data?.trigger ?? 'manual';
-    }
-  } catch {
-    // FIX #3: Malformed JSON should return 400, not silently fall through.
-    // Empty body is fine (handled above via text.trim() check), but if
-    // text was non-empty and JSON.parse threw, the body is malformed.
-    return NextResponse.json(
-      { success: false, error: 'Malformed request body — invalid JSON' },
-      { status: 400 },
-    );
+  const contentLength = req.headers.get('content-length');
+  const hasBody = contentLength !== null && contentLength !== '0';
+  if (hasBody) {
+    const parsed = await parseBody(req, reconciliationTriggerSchema);
+    if (!parsed.ok) return parsed.response;
+    trigger = parsed.data.trigger ?? 'manual';
   }
 
   // Enqueue a reconciliation action for the bot to pick up

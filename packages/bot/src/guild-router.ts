@@ -31,6 +31,13 @@ const log = createLogger('GuildRouter');
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const EVICTION_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 
+/**
+ * V5 Audit P3-6: Maximum time allowed for guild initialization before
+ * aborting. Prevents a hung Supabase call from permanently blocking
+ * a guild's context init in the `initializing` Map.
+ */
+const INIT_TIMEOUT_MS = 30_000; // 30 seconds
+
 export class GuildRouter {
   private contexts = new Map<string, GuildContext>();
   private initializing = new Map<string, Promise<GuildContext>>();
@@ -65,14 +72,23 @@ export class GuildRouter {
     const pending = this.initializing.get(guildId);
     if (pending) return pending;
 
-    // Start initialization
-    const promise = this.initContext(guildId);
+    // Start initialization with timeout guard (V5 Audit P3-6)
+    const promise = Promise.race([
+      this.initContext(guildId),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Guild ${guildId} init timed out after ${INIT_TIMEOUT_MS}ms`)), INIT_TIMEOUT_MS),
+      ),
+    ]);
     this.initializing.set(guildId, promise);
 
     try {
       const ctx = await promise;
       this.contexts.set(guildId, ctx);
       return ctx;
+    } catch (err) {
+      // V5 Audit P3-6: Log timeout/error so the guild can retry on next event
+      log.error('Guild init failed', { guildId, error: String(err) });
+      throw err;
     } finally {
       this.initializing.delete(guildId);
     }

@@ -105,6 +105,8 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
   };
   _configCache.set(guildId, { config, time: now });
+  // V5 Audit P2-4: Cap the config cache the same way memory fallback Maps are capped
+  capMap(_configCache, MAX_MEMORY_GUILDS);
   return config;
 }
 
@@ -343,7 +345,10 @@ export async function processAntiRaid(
           // Store the current verification level so we can restore it later
           const alreadyStored = await valkey.get(prevLevelKey).catch(() => null);
           if (!alreadyStored) {
-            await valkey.set(prevLevelKey, String(guild.verificationLevel), 'PX', RAID_MODE_COOLDOWN + 60_000);
+            // V5 Audit P3-7: Use a longer TTL (1 hour) so the pre-lockdown level
+            // survives bot restarts. Previous TTL was RAID_MODE_COOLDOWN + 60s which
+            // expired before the bot could restore if it restarted late.
+            await valkey.set(prevLevelKey, String(guild.verificationLevel), 'PX', 60 * 60_000);
           }
 
           // Raise to VERY_HIGH (requires phone verification)
