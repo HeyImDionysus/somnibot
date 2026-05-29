@@ -136,26 +136,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const allowedFields = [
-    'channel_id',
-    'message_id',
-    'emoji',
-    'role_id',
-    'exclusive_group',
-    'require_role',
-    'require_level',
-    'max_per_group',
-    'remove_on_unreact',
-    'log_actions',
-    'active',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['channel_id', 'message_id', 'emoji', 'role_id', 'exclusive_group', 'require_role', 'require_level', 'max_per_group', 'remove_on_unreact', 'log_actions', 'active']);
 
   const { data, error } = await supabase
     .from('reaction_roles')

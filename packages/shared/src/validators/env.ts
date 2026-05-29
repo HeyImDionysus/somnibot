@@ -32,6 +32,8 @@ export const BotEnvSchema = z.object({
   // ─── Supabase Management API (optional, for auto-migration) ───
   SUPABASE_ACCESS_TOKEN: z.string().optional().default(''),
   SUPABASE_DB_URL: z.string().optional().default(''),
+  // V5-Audit §6.1: Pooled connection URL for multi-replica deployments (pgbouncer)
+  SUPABASE_DB_URL_POOLED: z.string().optional().default(''),
 
   // ─── Lavalink (auto-configured for Railway) ───
   LAVALINK_HOST: z.string().default('localhost'),

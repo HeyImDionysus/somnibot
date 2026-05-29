@@ -197,6 +197,15 @@ export class SomniLicense {
         return { ...this.cachedResult, status: 'offline_grace' };
       }
 
+      // V5-Audit §3.1: Distinguish expired grace from a first-time network error.
+      // If we had a cached result that's now stale, the grace period expired.
+      // Clear the stale cache and stop heartbeats to prevent zombie sessions.
+      if (this.cachedResult) {
+        this.cachedResult = null;
+        this.stopHeartbeat();
+        return { valid: false, status: 'offline_grace_expired' };
+      }
+
       return {
         valid: false,
         status: 'network_error',

@@ -7,6 +7,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -45,16 +46,7 @@ export async function PUT(req: NextRequest) {
   const body = parsed.data;
 
   // Whitelist allowed fields
-  const allowed: Record<string, unknown> = {};
-  const fields = [
-    'member_role_id', 'onboarding_enabled', 'interest_role_mapping',
-    'returning_member_skip_welcome_dm', 'returning_member_restore_entitlements',
-    'returning_member_restore_levels', 'onboarding_config',
-  ];
-
-  for (const key of fields) {
-    if (key in body) allowed[key] = (body as Record<string, unknown>)[key];
-  }
+  const allowed = typedPick(body, ['member_role_id', 'onboarding_enabled', 'interest_role_mapping', 'returning_member_skip_welcome_dm', 'returning_member_restore_entitlements', 'returning_member_restore_levels', 'onboarding_config']);
 
   const { error } = await supabase
     .from('guild_config')

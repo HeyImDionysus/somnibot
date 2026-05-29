@@ -149,25 +149,7 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  const allowedFields = [
-    'name',
-    'description',
-    'actions',
-    'allowed_roles',
-    'allowed_channels',
-    'denied_roles',
-    'denied_channels',
-    'cooldown_seconds',
-    'ephemeral',
-    'enabled',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'description', 'actions', 'allowed_roles', 'allowed_channels', 'denied_roles', 'denied_channels', 'cooldown_seconds', 'ephemeral', 'enabled']);
 
   updates.updated_at = new Date().toISOString();
 

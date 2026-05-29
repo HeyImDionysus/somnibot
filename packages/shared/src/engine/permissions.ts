@@ -47,6 +47,10 @@ export interface EffectivePermissionResult {
  * 2. Start with @everyone permissions
  * 3. OR all role permissions
  * 4. ADMINISTRATOR → all permissions
+ *
+ * V5-Audit §11.1: Validates all incoming permission bigints at the boundary
+ * via safePermissionBigInt(). Malformed or out-of-range values are clamped
+ * to 0n rather than propagating garbage through bitwise operations.
  */
 export function computeServerPermissions(
   memberRoles: RolePermissionData[],
@@ -55,11 +59,11 @@ export function computeServerPermissions(
 ): bigint {
   if (isOwner) return ALL_PERMISSIONS;
 
-  let permissions = everyonePermissions;
+  let permissions = safePermissionBigInt(everyonePermissions) ?? 0n;
 
   for (const role of memberRoles) {
     if (!role.isEveryone) {
-      permissions |= role.permissions;
+      permissions |= safePermissionBigInt(role.permissions) ?? 0n;
     }
   }
 
@@ -79,6 +83,10 @@ export function computeServerPermissions(
  * 4. Apply member-specific overrides
  * 5. If VIEW_CHANNEL denied → return 0
  */
+/**
+ * V5-Audit §11.1: All overwrite allow/deny bigints are validated at the
+ * boundary via safePermissionBigInt() before being used in bitwise ops.
+ */
 export function computeChannelPermissions(
   serverPermissions: bigint,
   overwrites: PermissionOverwrite[],
@@ -90,18 +98,20 @@ export function computeChannelPermissions(
   // Owner bypasses everything
   if (isOwner) return ALL_PERMISSIONS;
 
+  const validServerPerms = safePermissionBigInt(serverPermissions) ?? 0n;
+
   // Administrator bypasses channel overrides
-  if ((serverPermissions & DISCORD_PERMISSIONS.ADMINISTRATOR) !== 0n) {
+  if ((validServerPerms & DISCORD_PERMISSIONS.ADMINISTRATOR) !== 0n) {
     return ALL_PERMISSIONS;
   }
 
-  let permissions = serverPermissions;
+  let permissions = validServerPerms;
 
   // 1. @everyone override
   const everyoneOverwrite = overwrites.find(o => o.id === everyoneRoleId && o.type === 'role');
   if (everyoneOverwrite) {
-    permissions &= ~everyoneOverwrite.deny;
-    permissions |= everyoneOverwrite.allow;
+    permissions &= ~(safePermissionBigInt(everyoneOverwrite.deny) ?? 0n);
+    permissions |= safePermissionBigInt(everyoneOverwrite.allow) ?? 0n;
   }
 
   // 2. Role overrides (deny first, then allow — across ALL roles)
@@ -111,8 +121,8 @@ export function computeChannelPermissions(
 
   for (const overwrite of overwrites) {
     if (overwrite.type === 'role' && overwrite.id !== everyoneRoleId && roleIdSet.has(overwrite.id)) {
-      roleDeny |= overwrite.deny;
-      roleAllow |= overwrite.allow;
+      roleDeny |= safePermissionBigInt(overwrite.deny) ?? 0n;
+      roleAllow |= safePermissionBigInt(overwrite.allow) ?? 0n;
     }
   }
   permissions &= ~roleDeny;
@@ -121,8 +131,8 @@ export function computeChannelPermissions(
   // 3. Member-specific override
   const memberOverwrite = overwrites.find(o => o.id === memberId && o.type === 'member');
   if (memberOverwrite) {
-    permissions &= ~memberOverwrite.deny;
-    permissions |= memberOverwrite.allow;
+    permissions &= ~(safePermissionBigInt(memberOverwrite.deny) ?? 0n);
+    permissions |= safePermissionBigInt(memberOverwrite.allow) ?? 0n;
   }
 
   // 4. VIEW_CHANNEL check — if denied, deny everything channel-level

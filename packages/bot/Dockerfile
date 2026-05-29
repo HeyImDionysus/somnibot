@@ -7,7 +7,7 @@
 # FIX #13: Use node:22-slim (glibc) instead of node:22-alpine (musl)
 # to match the glibc-based oven/bun:1-slim runtime. Native addons
 # compiled for musl (e.g. @napi-rs/canvas) crash on glibc runtime.
-FROM node:22-slim AS builder
+FROM node:22.16-slim AS builder
 
 WORKDIR /app
 
@@ -37,7 +37,7 @@ RUN pnpm --filter @somnibot/bot build
 RUN pnpm prune --prod
 
 # --- Stage 2: Production Runtime ---
-FROM oven/bun:1-slim AS runtime
+FROM oven/bun:1.2-slim AS runtime
 
 WORKDIR /app
 

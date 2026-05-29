@@ -125,24 +125,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing giveaway id' }, { status: 400 });
   }
 
-  const allowedFields = [
-    'prize',
-    'winner_count',
-    'ends_at',
-    'required_role_id',
-    'required_level',
-    'prize_product_id',
-    'prize_license_count',
-    'status',
-    'winners',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['prize', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status', 'winners']);
 
   // If ending the giveaway
   if (body.status === 'ended' && !body.ended_at) {

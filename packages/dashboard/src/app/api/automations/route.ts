@@ -12,6 +12,8 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
+
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -124,26 +126,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing automation id' }, { status: 400 });
   }
 
-  const updates: Record<string, unknown> = {};
-  const allowedFields = [
-    'name',
-    'description',
-    'trigger_type',
-    'trigger_config',
-    'conditions',
-    'actions',
-    'enabled',
-    'target_user_ids',
-    'target_channel_ids',
-    'exclude_user_ids',
-    'exclude_channel_ids',
-  ];
-
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'description', 'trigger_type', 'trigger_config', 'conditions', 'actions', 'enabled', 'target_user_ids', 'target_channel_ids', 'exclude_user_ids', 'exclude_channel_ids']);
 
   updates.updated_at = new Date().toISOString();
 
