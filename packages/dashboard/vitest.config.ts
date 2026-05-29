@@ -7,11 +7,14 @@ export default defineConfig({
     globals: true,
     include: ['src/__tests__/**/*.test.ts'],
     exclude: ['src/__tests__/smoke/**'],
-    // V8 Audit §13.P3a: Add coverage gate for dashboard
+    // V5 Audit §13.1: Coverage gate for dashboard — matches the CI threshold.
     coverage: {
       provider: 'v8',
       include: ['src/lib/**/*.ts'],
       exclude: ['src/__tests__/**', 'src/**/*.d.ts'],
+      thresholds: {
+        statements: 70,
+      },
     },
   },
   resolve: {

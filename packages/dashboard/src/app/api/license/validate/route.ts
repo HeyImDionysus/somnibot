@@ -4,11 +4,9 @@
  * Public endpoint. Called by external apps to verify a license.
  * Architecture doc §30.8.
  *
- * Phase B enhancements:
- * - IP + key rate limiting to prevent brute-force.
- * - Invalid key attempts logged even when key not found.
- * - Failed attempt counter on the key record for abuse detection.
- * - Configurable device policy: 'evict_oldest' or 'reject'.
+ * V5 Audit §3.1: Uses composite `license_validate_lookup` RPC to collapse
+ * 4 sequential queries (key + entitlement + config + customer) into 1.
+ * The atomic `license_validate_device` RPC stays separate (needs FOR UPDATE).
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -26,11 +24,32 @@ function getClientIp(req: NextRequest): string {
     ?? 'unknown';
 }
 
+// ── Composite lookup result shape ────────────────────────────
+interface LookupResult {
+  found: boolean;
+  key_id?: string;
+  key_status?: string;
+  key_product_id?: string;
+  key_customer_id?: string;
+  key_failed_attempts?: number;
+  entitlement_id?: string;
+  entitlement_status?: string;
+  entitlement_expires_at?: string;
+  config_max_devices?: number;
+  config_device_policy?: string;
+  config_feature_flags?: string[];
+  config_tier?: string;
+  config_heartbeat_interval_seconds?: number;
+  customer_discord_username?: string;
+  customer_discord_id?: string;
+  product_guild_id?: string;
+}
+
 export async function POST(req: NextRequest) {
   const supabase = createAdminSupabase();
   const clientIp = getClientIp(req);
 
-  // ── B.5: Rate limit by IP ──
+  // ── Rate limit by IP ──
   const ipLimit = await rateLimits.licenseValidate(clientIp);
   if (ipLimit.limited) {
     return NextResponse.json(
@@ -53,10 +72,10 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Hash the key and look up
+  // 1. Hash the key
   const keyHash = sha256(license_key);
 
-  // ── B.5: Per-key rate limit ──
+  // ── Per-key rate limit ──
   const keyLimit = await rateLimits.licensePerKey(keyHash);
   if (keyLimit.limited) {
     return NextResponse.json(
@@ -68,19 +87,28 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { data: licenseKey } = await supabase
-    .from('license_keys')
-    .select('*')
-    .eq('key_hash', keyHash)
-    .single();
+  // ── V5 Audit §3.1: Composite lookup — 4 queries in 1 RPC ──
+  const { data: lookup, error: lookupError } = await supabase.rpc('license_validate_lookup', {
+    p_key_hash: keyHash,
+    p_product_id: product_id,
+  });
 
-  if (!licenseKey) {
-    // ── B.5: Log invalid key attempt with IP (even though key not found) ──
+  if (lookupError) {
+    console.error('[License] license_validate_lookup RPC error:', lookupError.message);
+    return NextResponse.json(
+      { valid: false, status: 'revoked', error: 'Internal validation error' },
+      { status: 500 },
+    );
+  }
+
+  const result = lookup as LookupResult;
+
+  if (!result.found) {
+    // Log invalid key attempt with IP
     const failedLimit = await rateLimits.licenseFailedAttempt(clientIp);
 
-    // Log the attempt to license_validations with a synthetic reference
     await supabase.from('license_validations').insert({
-      license_key_id: null, // FK is nullable — no key found, logged for audit
+      license_key_id: null,
       product_id: product_id,
       device_fingerprint: device_fingerprint ?? null,
       result: 'invalid_key',
@@ -88,7 +116,6 @@ export async function POST(req: NextRequest) {
       app_version: app_version ?? null,
     }).then(() => {}, () => {});
 
-    // If too many failed attempts from this IP, return rate limited
     if (failedLimit.limited) {
       return NextResponse.json(
         { valid: false, status: 'rate_limited', error: 'Too many failed attempts' },
@@ -100,22 +127,19 @@ export async function POST(req: NextRequest) {
   }
 
   // 2. Check key status
-  if (licenseKey.status !== 'active') {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, licenseKey.status as string, clientIp, app_version);
+  if (result.key_status !== 'active') {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, result.key_status as string, clientIp, app_version);
     return NextResponse.json({
       valid: false,
-      status: licenseKey.status,
-      error: `License is ${licenseKey.status}`,
+      status: result.key_status,
+      error: `License is ${result.key_status}`,
     });
   }
 
   // 3. Check product match
-  if (licenseKey.product_id !== product_id) {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'product_mismatch', clientIp, app_version);
-
-    // ── B.5: Increment failed attempt counter ──
-    await incrementFailedAttempts(supabase, licenseKey.id);
-
+  if (result.key_product_id !== product_id) {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'product_mismatch', clientIp, app_version);
+    await incrementFailedAttempts(supabase, result.key_id!);
     return NextResponse.json({
       valid: false,
       status: 'revoked',
@@ -124,74 +148,49 @@ export async function POST(req: NextRequest) {
   }
 
   // 4. Check entitlement
-  const { data: entitlement } = await supabase
-    .from('entitlements')
-    .select('*')
-    .eq('license_key_id', licenseKey.id)
-    .single();
-
-  if (!entitlement || !['active', 'grace_period'].includes(entitlement.status)) {
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, entitlement?.status ?? 'revoked', clientIp, app_version);
+  if (!result.entitlement_id || !['active', 'grace_period'].includes(result.entitlement_status ?? '')) {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, result.entitlement_status ?? 'revoked', clientIp, app_version);
     return NextResponse.json({
       valid: false,
-      status: entitlement?.status ?? 'revoked',
+      status: result.entitlement_status ?? 'revoked',
       error: 'Entitlement not active',
     });
   }
 
   // 5. Check expiry
-  if (entitlement.expires_at && new Date(entitlement.expires_at) < new Date()) {
+  if (result.entitlement_expires_at && new Date(result.entitlement_expires_at) < new Date()) {
     await supabase
       .from('entitlements')
       .update({ status: 'expired', updated_at: new Date().toISOString() })
-      .eq('id', entitlement.id);
+      .eq('id', result.entitlement_id);
 
-    await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'expired', clientIp, app_version);
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
     return NextResponse.json({ valid: false, status: 'expired', error: 'License has expired' });
   }
 
-  // 6. Get license config
-  const { data: licenseConfig } = await supabase
-    .from('product_license_config')
-    .select('*')
-    .eq('product_id', product_id)
-    .maybeSingle();
-
-  // 7. Get customer info
-  const { data: customer } = await supabase
-    .from('customers')
-    .select('discord_username, discord_id')
-    .eq('id', licenseKey.customer_id)
-    .single();
-
-  // 8. Multi-device tracking
+  // 6. Multi-device tracking (atomic RPC stays separate — needs FOR UPDATE)
   let sessionId: string | undefined;
 
-  // V10 Audit §3.P2a — Atomic device-limit eviction via Postgres RPC.
-  // Replaces the read-check-write sequence with a single transaction
-  // that locks the license key row, preventing concurrent validations
-  // from temporarily exceeding the device limit.
-  if (device_fingerprint && licenseConfig) {
+  if (device_fingerprint && result.config_max_devices) {
     const { data: deviceResult, error: deviceError } = await supabase
       .rpc('license_validate_device', {
-        p_license_key_id: licenseKey.id,
+        p_license_key_id: result.key_id,
         p_device_fingerprint: device_fingerprint,
         p_device_name: device_name ?? null,
         p_app_version: app_version ?? null,
         p_ip_address: clientIp,
-        p_max_devices: licenseConfig.max_devices || 3,
-        p_device_policy: licenseConfig.device_policy || 'evict_oldest',
+        p_max_devices: result.config_max_devices || 3,
+        p_device_policy: result.config_device_policy || 'evict_oldest',
       });
 
     if (deviceError) {
-      // Non-fatal: log and continue without session tracking
       console.error('[License] Device validation RPC error:', deviceError.message);
     } else if (deviceResult?.status === 'over_device_limit') {
-      await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
+      await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'over_device_limit', clientIp, app_version);
       return NextResponse.json({
         valid: false,
         status: 'over_device_limit',
-        error: `Maximum ${licenseConfig.max_devices || 3} devices reached. Deactivate an existing device first.`,
+        error: `Maximum ${result.config_max_devices || 3} devices reached. Deactivate an existing device first.`,
         active_devices: deviceResult.active_devices,
         max_devices: deviceResult.max_devices,
       });
@@ -200,46 +199,36 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Run fraud checks (non-blocking — don't delay validation response)
-  if (device_fingerprint && licenseConfig) {
-    // Get guild_id from product for fraud signal tracking
-    const { data: product } = await supabase
-      .from('products')
-      .select('guild_id')
-      .eq('id', product_id)
-      .single();
-
-    if (product?.guild_id) {
-      const guildId = product.guild_id;
-      const maxDevices = licenseConfig.max_devices || 3;
-      // Fire-and-forget — these write to fraud_signals if thresholds exceeded
-      checkDeviceAbuse(supabase, guildId, licenseKey.id, maxDevices, customer?.discord_id ?? null).catch(() => {});
-      checkIPMismatch(supabase, guildId, licenseKey.id, customer?.discord_id ?? null).catch(() => {});
-    }
+  // Fraud checks (non-blocking — fire-and-forget)
+  if (device_fingerprint && result.config_max_devices && result.product_guild_id) {
+    const guildId = result.product_guild_id;
+    const maxDevices = result.config_max_devices || 3;
+    checkDeviceAbuse(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null).catch(() => {});
+    checkIPMismatch(supabase, guildId, result.key_id!, result.customer_discord_id ?? null).catch(() => {});
   }
 
   // Log validation
-  await logValidation(supabase, licenseKey.id, product_id, device_fingerprint, 'valid', clientIp, app_version);
+  await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'valid', clientIp, app_version);
 
   // Reset failed attempt counter on successful validation
-  if (licenseKey.failed_attempts > 0) {
+  if ((result.key_failed_attempts ?? 0) > 0) {
     await supabase
       .from('license_keys')
       .update({ failed_attempts: 0 })
-      .eq('id', licenseKey.id);
+      .eq('id', result.key_id);
   }
 
   return NextResponse.json({
     valid: true,
     status: 'active',
-    entitlement_id: entitlement.id,
-    features: licenseConfig?.feature_flags ?? [],
-    tier: licenseConfig?.tier ?? null,
-    customer_discord_id: customer?.discord_id,
-    customer_name: customer?.discord_username,
-    expires_at: entitlement.expires_at,
+    entitlement_id: result.entitlement_id,
+    features: result.config_feature_flags ?? [],
+    tier: result.config_tier ?? null,
+    customer_discord_id: result.customer_discord_id,
+    customer_name: result.customer_discord_username,
+    expires_at: result.entitlement_expires_at,
     session_id: sessionId ?? null,
-    heartbeat_interval_seconds: licenseConfig?.heartbeat_interval_seconds ?? 0,
+    heartbeat_interval_seconds: result.config_heartbeat_interval_seconds ?? 0,
   });
 }
 
@@ -269,7 +258,6 @@ async function logValidation(
 /**
  * Atomically increment failed attempt counter on a license key.
  * If threshold exceeded (50 failures), auto-suspends the key in the same transaction.
- * Uses an RPC to avoid read-modify-write TOCTOU under concurrent brute-force.
  */
 async function incrementFailedAttempts(
   supabase: ReturnType<typeof createAdminSupabase>,
@@ -298,9 +286,6 @@ async function incrementFailedAttempts(
 
 
 // ── Fraud Signal Checks ────────────────────────────────────
-// Inline checks run during validation. These insert fraud_signals records
-// directly — the bot-side checkCriticalThreshold picks up the cumulative
-// count and triggers incidents / owner DMs.
 
 async function checkDeviceAbuse(
   supabase: ReturnType<typeof createAdminSupabase>,
@@ -310,8 +295,6 @@ async function checkDeviceAbuse(
   discordId: string | null,
 ): Promise<void> {
   try {
-    // V7 Audit §3.P3b — filter to active sessions only to prevent false positives
-    // on long-lived licenses with many historical (deactivated) devices.
     const { count } = await supabase
       .from('license_sessions')
       .select('*', { count: 'exact', head: true })
@@ -334,7 +317,7 @@ async function checkDeviceAbuse(
       });
     }
   } catch {
-    // Non-fatal — don't break validation
+    // Non-fatal
   }
 }
 
@@ -370,6 +353,6 @@ async function checkIPMismatch(
       });
     }
   } catch {
-    // Non-fatal — don't break validation
+    // Non-fatal
   }
 }

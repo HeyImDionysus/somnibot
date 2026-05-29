@@ -24,12 +24,14 @@ import { createLogger } from '@somnibot/shared';
 const log = createLogger('GuildRouter');
 
 /**
- * V5 Audit [14.2]: Idle timeout for guild contexts. Guilds with no events
+ * V5 Audit §14.2: Idle timeout for guild contexts. Guilds with no events
  * for this duration are eligible for eviction to bound memory usage.
  * On next event, the context is re-created via the existing lazy-init path.
+ *
+ * Configurable via env vars for per-shard tuning in multi-shard deployments.
  */
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const EVICTION_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
+const IDLE_TIMEOUT_MS = parseInt(process.env.GUILD_IDLE_TIMEOUT_MS ?? '', 10) || 30 * 60 * 1000;
+const EVICTION_CHECK_INTERVAL_MS = parseInt(process.env.GUILD_EVICTION_CHECK_INTERVAL_MS ?? '', 10) || 5 * 60 * 1000;
 
 /**
  * V5 Audit P3-6: Maximum time allowed for guild initialization before

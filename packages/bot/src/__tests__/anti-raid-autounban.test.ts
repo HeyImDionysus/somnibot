@@ -149,10 +149,15 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
     const { processAntiRaid } = await import('../features/anti-raid/index.js');
     await processAntiRaid(g, member, makeSupa());
 
+    // V5 Audit §8.1: processRaidUnbans now runs via setImmediate (non-blocking).
+    // Flush the setImmediate queue so the background work completes before assertions.
+    await new Promise((r) => setImmediate(r));
+    // Also flush any pending microtasks from the async unban calls
+    await vi.waitFor(() => expect(g.members.unban).toHaveBeenCalledTimes(3), { timeout: 1000 });
+
     // Should have called smembers to check for banned users
     expect(mockSmembers).toHaveBeenCalled();
     // Should have unbanned the 3 users
-    expect(g.members.unban).toHaveBeenCalledTimes(3);
     expect(g.members.unban).toHaveBeenCalledWith('user1', expect.stringContaining('auto-unbanning'));
     expect(g.members.unban).toHaveBeenCalledWith('user2', expect.stringContaining('auto-unbanning'));
     expect(g.members.unban).toHaveBeenCalledWith('user3', expect.stringContaining('auto-unbanning'));
@@ -221,8 +226,9 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
     const { processAntiRaid } = await import('../features/anti-raid/index.js');
     await processAntiRaid(g, member, makeSupa());
 
-    // Should still try all 3
-    expect(g.members.unban).toHaveBeenCalledTimes(3);
+    // V5 Audit §8.1: Flush setImmediate + wait for async unban calls
+    await new Promise((r) => setImmediate(r));
+    await vi.waitFor(() => expect(g.members.unban).toHaveBeenCalledTimes(3), { timeout: 1000 });
   });
 
   it('processRaidUnbans logs to channel when log channel exists', async () => {
@@ -238,8 +244,12 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
     const { processAntiRaid } = await import('../features/anti-raid/index.js');
     await processAntiRaid(g, member, makeSupa(configWithLog));
 
-    expect(g.members.unban).toHaveBeenCalledTimes(1);
+    // V5 Audit §8.1: Flush setImmediate + wait for async unban calls
+    await new Promise((r) => setImmediate(r));
+    await vi.waitFor(() => expect(g.members.unban).toHaveBeenCalledTimes(1), { timeout: 1000 });
+
     // Should have logged the auto-unban event
+    await vi.waitFor(() => expect(sendFn).toHaveBeenCalled(), { timeout: 1000 });
     expect(sendFn).toHaveBeenCalledWith(
       expect.objectContaining({
         embeds: expect.arrayContaining([
