@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { checkCsrf } from '@/lib/api/csrf';
+import { checkCsrf, shouldRotateCsrf, CSRF_COOKIE_NAME, generateCsrfToken } from '@/lib/api/csrf';
 
 /* ------------------------------------------------------------------ */
 /*  CSP Nonce — generated per request for strict script-src            */
@@ -201,6 +201,19 @@ export async function middleware(request: NextRequest) {
   if (csrfError) {
     applyCspHeaders(csrfError, nonce);
     return csrfError;
+  }
+
+  // V5 Audit §1.P3b: Periodically rotate CSRF cookie to limit token lifetime
+  if (user && shouldRotateCsrf(request)) {
+    const sessionId = user.id?.slice(-16) ?? 'unknown';
+    const csrf = generateCsrfToken(sessionId);
+    supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${Date.now()}`, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60,
+    });
   }
 
   // Apply CSP nonce to the response + pass nonce via header for layout

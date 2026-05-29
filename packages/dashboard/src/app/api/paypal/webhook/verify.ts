@@ -10,6 +10,16 @@ import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
 
 const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 
+// V5 Audit §2.P2a: Startup-time warning when WEBHOOK_REPLAY_SECRET isn't set.
+// Fires at module-load so the operator sees it in logs immediately, not on first request.
+if (!process.env.WEBHOOK_REPLAY_SECRET && process.env.NEXTAUTH_SECRET) {
+  console.warn(
+    '[PayPalWebhook] ⚠ WEBHOOK_REPLAY_SECRET is not set — deriving from NEXTAUTH_SECRET. ' +
+    'Set a dedicated WEBHOOK_REPLAY_SECRET env var for security isolation. ' +
+    'If NEXTAUTH_SECRET is rotated, replay auth will silently break.',
+  );
+}
+
 // ── Replay Secret ───────────────────────────────────
 
 let _replaySecret: string | undefined;

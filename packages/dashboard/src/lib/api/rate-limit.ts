@@ -16,6 +16,8 @@ import { createConnection, type Socket } from 'node:net';
 let valkeySocket: Socket | null = null;
 let valkeyReady = false;
 let valkeyFailed = false;
+// V5 Audit §14.P2a: Ensure degradation warning logs once, not on every request.
+let _degradedWarningLogged = false;
 let pendingCallbacks: Array<(reply: string | number | null) => void> = [];
 
 function parseRedisUrl(url: string): { host: string; port: number } {
@@ -299,10 +301,16 @@ export async function checkRateLimit(
   // warning and use a stricter in-memory budget (halved) to partially
   // compensate. For truly critical endpoints (license, portal auth), the
   // per-key and per-IP secondary checks still apply.
-  if (!valkeyReady && !valkeyFailed) {
-    console.warn('[RateLimit] CRITICAL: Valkey not ready — using in-memory fallback with reduced limits (not shared across instances)');
-  } else if (valkeyFailed) {
-    console.warn('[RateLimit] CRITICAL: Valkey connection failed — using in-memory fallback with reduced limits (not shared across instances)');
+  // V5 Audit §14.P2a: Rate-limited degradation warning — log once per state change,
+  // not on every single request (which would flood logs under load).
+  if (!valkeyReady && !_degradedWarningLogged) {
+    _degradedWarningLogged = true;
+    const reason = valkeyFailed ? 'connection failed' : 'not ready';
+    console.error(
+      `[RateLimit] ⚠ DEGRADED: Valkey ${reason} — rate limiting is per-instance only. ` +
+      'An attacker can bypass limits by distributing requests across instances. ' +
+      'Limits halved as mitigation. Restore Valkey connectivity to resolve.',
+    );
   }
   // Halve the budget when running in degraded mode to reduce blast radius
   const degradedMaxHits = Math.max(1, Math.floor(maxHits / 2));

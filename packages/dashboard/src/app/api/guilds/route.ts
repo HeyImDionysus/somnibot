@@ -2,9 +2,11 @@
  * Guilds API — List guilds owned by the authenticated user.
  *
  * V53 Phase 4 (Finding 4.3.2 — S-2)
+ * V5 Audit §7.P3a: Refactored to use requireAuth for consistency
+ *   with all other routes (was duplicating auth logic inline).
  */
 import { type NextRequest, NextResponse } from 'next/server';
-import { createServerSupabase } from '@/lib/supabase/server';
+import { requireAuth } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { cookies } from 'next/headers';
 import { checkRateLimit } from '@/lib/api/rate-limit';
@@ -21,15 +23,11 @@ export async function GET(req: NextRequest) {
       { status: 429, headers: { 'Retry-After': String(Math.ceil(rl.retryAfterMs / 1000)) } },
     );
   }
-  const supabase = await createServerSupabase();
-  const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-  if (authError || !user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+  const auth = await requireAuth();
+  if (!auth.ok) return auth.response;
 
-  const meta = user.user_metadata;
-  const discordId = (meta?.provider_id as string) || (meta?.sub as string) || null;
+  const discordId = auth.discordId;
   if (!discordId) {
     return NextResponse.json({ error: 'No Discord identity' }, { status: 401 });
   }

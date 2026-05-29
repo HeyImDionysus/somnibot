@@ -518,13 +518,22 @@ export async function handleCaptureRefunded(
 
   const { data: payment } = await supabase
     .from('payments')
-    .select('id, order_id, customer_id, guild_id')
+    .select('id, order_id, customer_id, guild_id, status')
     .eq('paypal_payment_id', captureId)
     .maybeSingle();
 
   if (!payment?.order_id) {
     console.warn(
       `[Webhook] ${eventType} for capture ${captureId} — no matching payment row, ignoring`,
+    );
+    return;
+  }
+
+  // V5 Audit §2.P3b: Skip if payment was already refunded/reversed to prevent
+  // duplicate processing noise and redundant role-revocation queue entries.
+  if (payment.status === 'refunded' || payment.status === 'reversed') {
+    console.info(
+      `[Webhook] ${eventType} for capture ${captureId} — payment already ${payment.status}, skipping`,
     );
     return;
   }

@@ -32,7 +32,8 @@ export async function GET() {
   const response = NextResponse.json({ token });
 
   // Set HttpOnly cookie with nonce + session for server-side verification
-  response.cookies.set(CSRF_COOKIE_NAME, `${nonce}:${sessionId}`, {
+  // V5 Audit §1.P3b: Append issuance timestamp for periodic rotation
+  response.cookies.set(CSRF_COOKIE_NAME, `${nonce}:${sessionId}!${Date.now()}`, {
     httpOnly: true,
     sameSite: 'strict',
     secure: process.env.NODE_ENV === 'production',

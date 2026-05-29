@@ -321,4 +321,5 @@ describe('events/handler', () => {
     await client._emit('guildMemberUpdate', oldMember, newMember);
       expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
+
 });

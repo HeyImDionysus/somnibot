@@ -216,7 +216,10 @@ describe('safePermissionBigInt', () => {
     expect(safePermissionBigInt('not-a-number')).toBeNull();
   });
 
-  it('returns null for values exceeding 64-bit range', () => {
-    expect(safePermissionBigInt((1n << 64n))).toBeNull();
+  it('allows values up to 128-bit range (V5 Audit §11.P3a)', () => {
+    // 64-bit values should now be valid (previously rejected)
+    expect(safePermissionBigInt(1n << 64n)).toBe(1n << 64n);
+    // But values exceeding 128-bit are still rejected
+    expect(safePermissionBigInt(1n << 128n)).toBeNull();
   });
 });

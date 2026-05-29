@@ -285,4 +285,49 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
     // No crash, no unbans (in-memory set is empty for this guild)
     expect(g.members.unban).not.toHaveBeenCalled();
   });
+
+  it('lockdown skips when bot lacks ManageGuild permission (V5 §8.P2a)', async () => {
+    // Trigger raid by setting join count above threshold
+    mockExec.mockResolvedValue([[null, 0], [null, 1], [null, 15], [null, 1]]);
+    mockGet.mockResolvedValue(null); // no raid lock yet
+
+    const lockdownConfig = { ...banConfig, anti_raid_action: 'lockdown' };
+    const g = makeGuild({
+      members: {
+        me: { permissions: { has: vi.fn(() => false) } }, // lacks ManageGuild
+        unban: vi.fn(async () => {}),
+        cache: new Map(),
+      },
+    });
+    const member = makeMember(g, 'raider', 30);
+
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    const result = await processAntiRaid(g, member, makeSupa(lockdownConfig));
+
+    // Should return true (handled) but NOT set verification level
+    expect(result).toBe(true);
+    expect(g.setVerificationLevel).not.toHaveBeenCalled();
+  });
+
+  it('lockdown succeeds when bot has ManageGuild permission (V5 §8.P2a)', async () => {
+    mockExec.mockResolvedValue([[null, 0], [null, 1], [null, 15], [null, 1]]);
+    mockGet.mockResolvedValue(null);
+
+    const lockdownConfig = { ...banConfig, anti_raid_action: 'lockdown' };
+    const g = makeGuild({
+      members: {
+        me: { permissions: { has: vi.fn(() => true) } }, // has ManageGuild
+        unban: vi.fn(async () => {}),
+        cache: new Map(),
+      },
+      verificationLevel: 1,
+    });
+    const member = makeMember(g, 'raider', 30);
+
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    await processAntiRaid(g, member, makeSupa(lockdownConfig));
+
+    // Lockdown path raises verification level to VERY_HIGH (4)
+    expect(g.setVerificationLevel).toHaveBeenCalledWith(4, expect.any(String));
+  });
 });
