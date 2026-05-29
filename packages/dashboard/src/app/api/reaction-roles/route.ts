@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const reactionRoleUpdate = z.object({

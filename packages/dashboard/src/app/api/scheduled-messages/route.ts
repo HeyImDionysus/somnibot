@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;

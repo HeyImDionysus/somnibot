@@ -46,7 +46,7 @@ export async function PUT(req: NextRequest) {
   const body = parsed.data;
 
   // Whitelist allowed fields
-  const allowed = typedPick(body, ['member_role_id', 'onboarding_enabled', 'interest_role_mapping', 'returning_member_skip_welcome_dm', 'returning_member_restore_entitlements', 'returning_member_restore_levels', 'onboarding_config']);
+  const allowed = typedPick(body, ['member_role_id', 'onboarding_enabled', 'interest_role_mapping', 'returning_member_skip_welcome_dm', 'returning_member_restore_entitlements', 'returning_member_restore_levels']);
 
   const { error } = await supabase
     .from('guild_config')
