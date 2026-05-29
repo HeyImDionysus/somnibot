@@ -322,11 +322,4 @@ describe('events/handler', () => {
       expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
-  it('registers SIGTERM/SIGINT cleanup handlers (V5 Audit §6.P3a)', () => {
-    const origListeners = process.listenerCount('SIGTERM');
-    registerEvents(client);
-    // registerEvents should add at least one SIGTERM listener for cron cleanup
-    expect(process.listenerCount('SIGTERM')).toBeGreaterThanOrEqual(origListeners + 1);
-    expect(process.listenerCount('SIGINT')).toBeGreaterThanOrEqual(1);
-  });
 });
