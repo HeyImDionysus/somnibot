@@ -318,6 +318,21 @@ export async function checkRateLimit(
 }
 
 /**
+ * V5 Audit P3-3: Lightweight Valkey health probe.
+ * Uses PING instead of consuming a rate-limit counter.
+ * Returns true if Valkey is connected and responds to PING.
+ */
+export async function checkValkeyHealth(): Promise<boolean> {
+  if (!ensureValkey() || !valkeyReady) return false;
+  try {
+    const reply = await sendCommand('PING');
+    return reply === 'PONG';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Pre-configured rate limits for different endpoint types.
  */
 export const rateLimits = {
@@ -348,4 +363,16 @@ export const rateLimits = {
   /** Portal data: 30 reads per minute per token hash (V6 Audit §7.1) */
   portalData: (tokenHash: string) =>
     checkRateLimit(`portal:data:${tokenHash}`, 30, 60_000),
+
+  /** V5 Audit P2-1: File downloads — 30 per 5 min per customer */
+  portalDownload: (customerId: string) =>
+    checkRateLimit(`portal:download:${customerId}`, 30, 300_000),
+
+  /** V5 Audit P3-1: PayPal webhook — 60 per minute per IP */
+  paypalWebhook: (ip: string) =>
+    checkRateLimit(`paypal:webhook:${ip}`, 60, 60_000),
+
+  /** V5 Audit P3-2: Auth callback — 10 per minute per IP */
+  authCallback: (ip: string) =>
+    checkRateLimit(`auth:callback:${ip}`, 10, 60_000),
 } as const;

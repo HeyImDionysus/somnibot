@@ -18,6 +18,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 import { isInternalReplay, verifyWebhookSignature } from './verify';
 import {
@@ -33,6 +34,13 @@ import {
 // ── Main handler ────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // V5 Audit P3-1: IP-level rate limit to prevent signature-verification abuse
+  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  const rl = await rateLimits.paypalWebhook(clientIp);
+  if (rl.limited) {
+    return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  }
+
   const rawBody = await req.text();
   const supabase = createAdminSupabase();
 

@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -53,6 +54,15 @@ export async function GET(
 
     customerId = verified.customerId;
     guildId = verified.guildId;
+
+    // V5 Audit P2-1: Rate-limit downloads per customer to prevent abuse
+    const rl = await rateLimits.portalDownload(customerId);
+    if (rl.limited) {
+      return NextResponse.json(
+        { error: 'Too many download requests. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
+        { status: 429 },
+      );
+    }
   } else {
     // Fallback: portal token via header (API clients, not browser navigation)
     const token = req.headers.get('x-portal-token');
@@ -73,6 +83,15 @@ export async function GET(
     }
     customerId = session.customer_id;
     guildId = session.guild_id;
+
+    // V5 Audit P2-1: Rate-limit downloads per customer (header auth path)
+    const rl = await rateLimits.portalDownload(customerId);
+    if (rl.limited) {
+      return NextResponse.json(
+        { error: 'Too many download requests. Try again later.', retry_after: Math.ceil(rl.retryAfterMs / 1000) },
+        { status: 429 },
+      );
+    }
   }
 
   // ── Entitlement check: customer must own the product ──

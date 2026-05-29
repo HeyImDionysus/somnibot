@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { rateLimits } from '@/lib/api/rate-limit';
 
 /**
  * Discord OAuth callback handler.
@@ -8,6 +9,13 @@ import { cookies } from 'next/headers';
  * and redirect to the dashboard.
  */
 export async function GET(request: Request) {
+  // V5 Audit P3-2: Rate-limit OAuth callbacks per IP
+  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  const rl = await rateLimits.authCallback(clientIp);
+  if (rl.limited) {
+    return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  }
+
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get('code');
   // Validate `next` to prevent open redirects.

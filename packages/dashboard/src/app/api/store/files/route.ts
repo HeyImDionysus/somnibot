@@ -16,6 +16,28 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
+/**
+ * V5 Audit P3-4: Block executable MIME types to prevent the store
+ * from being used to distribute malware. Guild owners can still
+ * upload archives (.zip, .tar.gz, .rar) which is the normal delivery
+ * format for software products.
+ */
+const BLOCKED_MIME_TYPES = new Set([
+  'application/x-msdownload',      // .exe
+  'application/x-msdos-program',   // .exe / .com
+  'application/x-dosexec',         // .exe
+  'application/x-msi',             // .msi
+  'application/x-bat',             // .bat
+  'application/x-sh',              // .sh
+  'application/x-csh',             // .csh
+  'application/vnd.microsoft.portable-executable', // PE
+]);
+
+const BLOCKED_EXTENSIONS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.msi', '.scr', '.pif', '.vbs',
+  '.wsf', '.ps1', '.reg',
+]);
+
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -64,12 +86,23 @@ export async function POST(req: NextRequest) {
     await supabase.storage.createBucket(STORAGE_BUCKET, {
       public: false,
       fileSizeLimit: MAX_FILE_SIZE,
-      allowedMimeTypes: undefined, // Allow all file types
+      allowedMimeTypes: undefined, // Bucket-level: allow all; blocked types checked at route level
     });
   }
 
   const formData = await req.formData();
   const file = formData.get('file') as File | null;
+
+  // V5 Audit P3-4: Block executable file types at route level
+  if (file) {
+    const ext = file.name.includes('.') ? `.${file.name.split('.').pop()!.toLowerCase()}` : '';
+    if (BLOCKED_MIME_TYPES.has(file.type) || BLOCKED_EXTENSIONS.has(ext)) {
+      return NextResponse.json(
+        { success: false, error: `File type not allowed: ${ext || file.type}. Executables cannot be uploaded — use an archive (.zip) instead.` },
+        { status: 400 },
+      );
+    }
+  }
 
   // Validate text fields with Zod
   const fileUploadSchema = z.object({

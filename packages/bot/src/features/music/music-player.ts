@@ -74,6 +74,25 @@ export class MusicPlayerManager {
   async init(): Promise<void> {
     await this.loadConfig();
     this.setupShoukakuEvents();
+
+    // V5 Audit P3-8: After restart, check if Shoukaku reconnected to an
+    // empty voice channel and start the auto-leave timer immediately.
+    // Without this, the bot could sit alone indefinitely after a restart.
+    const existingPlayer = this.shoukaku.players?.get(this.guild.id);
+    if (existingPlayer) {
+      const queue = await this.queueManager.getQueue(this.guild.id);
+      if (queue?.voiceChannelId) {
+        const vc = this.guild.channels.cache.get(queue.voiceChannelId);
+        if (vc?.isVoiceBased()) {
+          const humans = vc.members.filter((m) => !m.user.bot);
+          if (humans.size === 0) {
+            log.info(`Post-restart: bot alone in VC, starting auto-leave timer for ${this.guild.id}`);
+            this.startAutoLeaveTimer(this.guild.id);
+          }
+        }
+      }
+    }
+
     log.info('Player manager started');
   }
 

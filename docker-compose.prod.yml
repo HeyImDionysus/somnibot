@@ -64,6 +64,8 @@ services:
     restart: unless-stopped
     volumes:
       - ./services/lavalink/application.yml:/opt/Lavalink/application.yml
+      # V5 Audit P3-9: Persist Lavalink logs across container restarts
+      - lavalink-logs:/opt/Lavalink/logs
     environment:
       - _JAVA_OPTIONS=-Xmx512m
       - LAVALINK_PASSWORD=${LAVALINK_PASSWORD:?Set LAVALINK_PASSWORD in .env}
@@ -99,3 +101,4 @@ volumes:
   valkey-data:
   caddy-data:
   caddy-config:
+  lavalink-logs:
