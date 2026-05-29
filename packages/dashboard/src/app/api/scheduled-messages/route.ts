@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -123,25 +124,7 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing scheduled message id' }, { status: 400 });
   }
 
-  const allowedFields = [
-    'name',
-    'channel_id',
-    'message',
-    'embed_config_id',
-    'cron_expression',
-    'timezone',
-    'start_date',
-    'end_date',
-    'max_sends',
-    'active',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'channel_id', 'message', 'embed_config_id', 'cron_expression', 'timezone', 'start_date', 'end_date', 'max_sends', 'active']);
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

@@ -6,7 +6,7 @@
  */
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+import { getPayPalToken, getSubscriptionAmount, PAYPAL_API_BASE } from '@/lib/paypal';
 import {
   paypalCaptureResourceSchema,
   paypalSaleResourceSchema,
@@ -289,6 +289,13 @@ export async function handleSubscriptionActivated(
 
   const subscriptionId = resource.id as string;
 
+  // V5-Audit §2.1: Fetch the actual billing amount from PayPal instead of
+  // recording 0. Falls back to 0 if the lookup fails — the amount will be
+  // corrected when PAYMENT.SALE.COMPLETED fires.
+  const subAmount = await getSubscriptionAmount(subscriptionId);
+  const amountCents = subAmount?.amountCents ?? 0;
+  const currency = subAmount?.currency ?? 'USD';
+
   const { data: order } = await supabase
     .from('orders')
     .insert({
@@ -298,8 +305,8 @@ export async function handleSubscriptionActivated(
       product_id: meta.product_id,
       plan_id: meta.plan_id,
       paypal_subscription_id: subscriptionId,
-      amount_cents: 0,
-      currency: 'USD',
+      amount_cents: amountCents,
+      currency,
       status: 'completed',
       source: 'purchase',
     })
@@ -324,8 +331,8 @@ export async function handleSubscriptionActivated(
     order_id: order.id,
     order_number: order.order_number,
     plan_id: meta.plan_id,
-    amount_cents: 0,
-    currency: 'USD',
+    amount_cents: amountCents,
+    currency,
     granted_role_ids: product?.granted_role_ids ?? [],
     granted_channel_ids: product?.granted_channel_ids ?? [],
     entitlement_type: 'subscription',

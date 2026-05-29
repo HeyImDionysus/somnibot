@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -119,30 +120,7 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  const allowedFields = [
-    'name',
-    'title',
-    'description',
-    'color',
-    'fields',
-    'image_url',
-    'thumbnail_url',
-    'footer_text',
-    'footer_icon_url',
-    'author_name',
-    'author_url',
-    'author_icon_url',
-    'include_timestamp',
-    'use_components_v2',
-    'components_v2_data',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'title', 'description', 'color', 'fields', 'image_url', 'thumbnail_url', 'footer_text', 'footer_icon_url', 'author_name', 'author_url', 'author_icon_url', 'include_timestamp', 'use_components_v2', 'components_v2_data']);
 
   updates.updated_at = new Date().toISOString();
 

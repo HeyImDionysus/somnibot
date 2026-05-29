@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 
 const statsChannelUpdate = z.object({
   id: z.string().uuid(),
@@ -111,13 +112,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const allowedFields = ['stat_type', 'name_format', 'stat_config', 'active'];
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['stat_type', 'name_format', 'stat_config', 'active']);
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

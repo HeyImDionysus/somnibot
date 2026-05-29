@@ -6,7 +6,7 @@
  * to the updater module.
  */
 
-import { app, BrowserWindow, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +63,20 @@ function createWindow(): void {
       // contextBridge + ipcRenderer, both of which work in sandboxed mode.
       sandbox: true,
     },
+  });
+
+  // V5-Audit §10.1: Enforce Content-Security-Policy on the renderer.
+  // The launcher loads only local HTML/CSS/JS — no CDN, no inline scripts.
+  // This CSP blocks XSS even if an attacker injects content into the renderer.
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';",
+        ],
+      },
+    });
   });
 
   // Load the renderer HTML

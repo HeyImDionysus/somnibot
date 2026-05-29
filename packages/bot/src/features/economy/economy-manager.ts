@@ -318,10 +318,13 @@ export class EconomyManager {
     // Ensure wallet exists before RPC call
     await this.getOrCreateWallet(userId);
 
+    // V5-Audit §4.1: Pass amount as string so the Supabase client sends it
+    // as a JSON string → Postgres BIGINT, avoiding JS number precision loss
+    // for values beyond Number.MAX_SAFE_INTEGER.
     const { error } = await this.supabase.rpc('economy_add_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: amount,
+      p_amount: String(amount),
     });
 
     if (error) {
@@ -354,7 +357,7 @@ export class EconomyManager {
     const { error } = await this.supabase.rpc('economy_subtract_balance', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: amount,
+      p_amount: String(amount),
     });
 
     if (error) {
@@ -383,11 +386,13 @@ export class EconomyManager {
     const requestedAmount = Math.min(amount, maxDeposit);
 
     // Atomic bank deposit — debits wallet + credits bank in a single FOR UPDATE txn
-    const { data: actualAmount, error: depositErr } = await this.supabase.rpc('economy_bank_deposit', {
+    const { data: rawAmount, error: depositErr } = await this.supabase.rpc('economy_bank_deposit', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: requestedAmount,
+      p_amount: String(requestedAmount),
     });
+    // RPC may return BIGINT as string; coerce back to number for display/comparison
+    const actualAmount = Number(rawAmount);
 
     if (depositErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your wallet." };
@@ -413,12 +418,14 @@ export class EconomyManager {
     }
 
     // Atomic bank withdraw — debits bank + credits wallet in a single FOR UPDATE txn
-    const { data: actualAmount, error: withdrawErr } = await this.supabase.rpc('economy_bank_withdraw', {
+    const { data: rawAmount, error: withdrawErr } = await this.supabase.rpc('economy_bank_withdraw', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
-      p_amount: amount,
-      p_max_wallet: cfg.economy_max_wallet,
+      p_amount: String(amount),
+      p_max_wallet: String(cfg.economy_max_wallet),
     });
+    // RPC may return BIGINT as string; coerce back to number for display/comparison
+    const actualAmount = Number(rawAmount);
 
     if (withdrawErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: 'Failed to withdraw.' };

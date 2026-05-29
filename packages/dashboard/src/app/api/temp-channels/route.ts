@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const tempChannelUpdate = z.object({
@@ -131,24 +132,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const allowedFields = [
-    'hub_channel_id',
-    'category_id',
-    'naming_format',
-    'default_user_limit',
-    'default_bitrate',
-    'keep_alive_minutes',
-    'allow_text_channel',
-    'moderator_roles',
-    'active',
-  ];
-
-  const updates: Record<string, unknown> = {};
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['hub_channel_id', 'category_id', 'naming_format', 'default_user_limit', 'default_bitrate', 'keep_alive_minutes', 'allow_text_channel', 'moderator_roles', 'active']);
   updates.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase

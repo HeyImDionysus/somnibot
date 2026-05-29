@@ -1,6 +1,6 @@
 services:
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4
+    image: ghcr.io/lavalink-devs/lavalink:4.0
     container_name: somni-lavalink
     restart: unless-stopped
     ports:
@@ -19,7 +19,7 @@ services:
       - "127.0.0.1:6379:6379"
     volumes:
       - valkey-data:/data
-    command: valkey-server --save 60 1 --loglevel warning --requirepass ${VALKEY_PASSWORD:-}
+    command: valkey-server --save 60 1 --loglevel warning --requirepass ${VALKEY_PASSWORD:?Set VALKEY_PASSWORD in .env}
 
 volumes:
   valkey-data:

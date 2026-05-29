@@ -7,6 +7,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -44,17 +45,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const allowed: Record<string, unknown> = {};
-  const fields = [
-    'welcome_enabled', 'welcome_channel_id', 'welcome_message',
-    'welcome_card_enabled', 'welcome_card_background',
-    'welcome_dm_enabled', 'welcome_dm_message', 'welcome_auto_roles',
-    'goodbye_enabled', 'goodbye_channel_id', 'goodbye_message',
-  ];
-
-  for (const key of fields) {
-    if (key in body) allowed[key] = (body as Record<string, unknown>)[key];
-  }
+  const allowed = typedPick(body, ['welcome_enabled', 'welcome_channel_id', 'welcome_message', 'welcome_card_enabled', 'welcome_card_background', 'welcome_dm_enabled', 'welcome_dm_message', 'welcome_auto_roles', 'goodbye_enabled', 'goodbye_channel_id', 'goodbye_message']);
 
   const { error } = await supabase
     .from('guild_config')

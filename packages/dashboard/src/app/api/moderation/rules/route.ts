@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
+import { typedPick } from '@/lib/api/typed-pick';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 export async function GET() {
@@ -106,14 +107,7 @@ export async function PUT(req: NextRequest) {
   }
 
   // Only allow updating specific fields
-  const updates: Record<string, unknown> = {};
-  const allowedFields = ['name', 'type', 'enabled', 'config', 'action', 'mute_duration_minutes', 'exempt_roles', 'exempt_channels', 'log_to_mod_channel'];
-
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'type', 'enabled', 'config', 'action', 'mute_duration_minutes', 'exempt_roles', 'exempt_channels', 'log_to_mod_channel']);
 
   updates.updated_at = new Date().toISOString();
 

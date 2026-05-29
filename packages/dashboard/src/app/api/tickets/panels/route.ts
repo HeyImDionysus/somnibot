@@ -13,6 +13,8 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { typedPick } from '@/lib/api/typed-pick';
+
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const ticketPanelUpdate = z.object({
@@ -140,28 +142,7 @@ export async function PUT(req: NextRequest) {
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const updates: Record<string, unknown> = {};
-  const allowedFields = [
-    'name',
-    'channel_id',
-    'panel_message',
-    'input_mode',
-    'ticket_types',
-    'manager_roles',
-    'open_category_id',
-    'closed_category_id',
-    'transcript_channel_id',
-    'dm_transcript_to_creator',
-    'max_open_per_user',
-    'introduction_message',
-    'active',
-  ];
-
-  for (const field of allowedFields) {
-    if ((body as Record<string, unknown>)[field] !== undefined) {
-      updates[field] = (body as Record<string, unknown>)[field];
-    }
-  }
+  const updates = typedPick(body, ['name', 'channel_id', 'panel_message', 'input_mode', 'ticket_types', 'manager_roles', 'open_category_id', 'closed_category_id', 'transcript_channel_id', 'dm_transcript_to_creator', 'max_open_per_user', 'introduction_message', 'active']);
 
   updates.updated_at = new Date().toISOString();
 
