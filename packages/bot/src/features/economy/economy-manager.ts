@@ -386,11 +386,13 @@ export class EconomyManager {
     const requestedAmount = Math.min(amount, maxDeposit);
 
     // Atomic bank deposit — debits wallet + credits bank in a single FOR UPDATE txn
-    const { data: actualAmount, error: depositErr } = await this.supabase.rpc('economy_bank_deposit', {
+    const { data: rawAmount, error: depositErr } = await this.supabase.rpc('economy_bank_deposit', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: String(requestedAmount),
     });
+    // RPC may return BIGINT as string; coerce back to number for display/comparison
+    const actualAmount = Number(rawAmount);
 
     if (depositErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: "You don't have that much in your wallet." };
@@ -416,12 +418,14 @@ export class EconomyManager {
     }
 
     // Atomic bank withdraw — debits bank + credits wallet in a single FOR UPDATE txn
-    const { data: actualAmount, error: withdrawErr } = await this.supabase.rpc('economy_bank_withdraw', {
+    const { data: rawAmount, error: withdrawErr } = await this.supabase.rpc('economy_bank_withdraw', {
       p_guild_id: this.guild.id,
       p_user_id: userId,
       p_amount: String(amount),
       p_max_wallet: String(cfg.economy_max_wallet),
     });
+    // RPC may return BIGINT as string; coerce back to number for display/comparison
+    const actualAmount = Number(rawAmount);
 
     if (withdrawErr || !actualAmount || actualAmount <= 0) {
       return { success: false, amount: 0, balance: wallet, message: 'Failed to withdraw.' };

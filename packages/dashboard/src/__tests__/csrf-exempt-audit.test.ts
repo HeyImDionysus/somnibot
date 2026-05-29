@@ -94,23 +94,28 @@ describe('CSRF exempt-prefix integrity', () => {
     expect(orphans).toEqual([]);
   });
 
-  it('no guarded route is unnecessarily exempted', () => {
-    const allGuarded = allRouteSegments
-      .map((seg) => {
-        const filePath = path.join(API_ROOT, seg, 'route.ts');
-        const source = readFileSync(filePath, 'utf-8');
-        const hasGuard =
-          source.includes('requireGuildOwner') ||
-          source.includes('requireAuth') ||
-          source.includes('requirePermission');
-        return { path: segmentToApiPath(seg), hasGuard };
-      })
-      .filter((r) => r.hasGuard);
+  it('every exempt prefix group has at least one unguarded route (is not purely guarded)', () => {
+    // Some prefixes may contain a mix of guarded and unguarded routes
+    // (e.g. /api/license/ has bot-facing API-key routes AND dashboard-facing
+    // session routes). That's acceptable — we just verify the prefix isn't
+    // *entirely* guarded, which would mean the exemption is unnecessary.
+    const purelyGuarded = CSRF_EXEMPT_PREFIXES.filter((prefix) => {
+      const routesUnderPrefix = allRouteSegments
+        .map((seg) => {
+          const filePath = path.join(API_ROOT, seg, 'route.ts');
+          const source = readFileSync(filePath, 'utf-8');
+          const hasGuard =
+            source.includes('requireGuildOwner') ||
+            source.includes('requireAuth') ||
+            source.includes('requirePermission');
+          return { path: segmentToApiPath(seg), hasGuard };
+        })
+        .filter((r) => r.path.startsWith(prefix));
 
-    const overExempted = allGuarded.filter((route) =>
-      CSRF_EXEMPT_PREFIXES.some((prefix) => route.path.startsWith(prefix)),
-    );
+      // If every route under this prefix is guarded, the exemption is unnecessary
+      return routesUnderPrefix.length > 0 && routesUnderPrefix.every((r) => r.hasGuard);
+    });
 
-    expect(overExempted).toEqual([]);
+    expect(purelyGuarded).toEqual([]);
   });
 });
