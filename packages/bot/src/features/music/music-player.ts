@@ -155,8 +155,8 @@ export class MusicPlayerManager {
     const voiceChannel = connection?.channelId
       ? this.guild.channels.cache.get(connection.channelId)
       : null;
-    const listeners = voiceChannel && 'members' in voiceChannel
-      ? (voiceChannel.members as Map<string, unknown>).size - 1 // Subtract the bot
+    const listeners = voiceChannel?.isVoiceBased()
+      ? voiceChannel.members.filter((m) => !m.user.bot).size
       : 0;
 
     // Get track info from the queue (player.track is just a base64 string)
