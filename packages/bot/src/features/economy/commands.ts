@@ -59,14 +59,14 @@ export function buildEconomyCommands() {
     .setName('deposit')
     .setDescription('Deposit coins into your bank')
     .addIntegerOption((opt) =>
-      opt.setName('amount').setDescription('Amount to deposit (or "all")').setRequired(true).setMinValue(1),
+      opt.setName('amount').setDescription('Amount to deposit (leave empty to deposit all)').setRequired(false).setMinValue(1),
     );
 
   const withdrawCmd = new SlashCommandBuilder()
     .setName('withdraw')
     .setDescription('Withdraw coins from your bank')
     .addIntegerOption((opt) =>
-      opt.setName('amount').setDescription('Amount to withdraw').setRequired(true).setMinValue(1),
+      opt.setName('amount').setDescription('Amount to withdraw (leave empty to withdraw all)').setRequired(false).setMinValue(1),
     );
 
   const payCmd = new SlashCommandBuilder()
@@ -341,14 +341,26 @@ async function handleSearch(interaction: ChatInputCommandInteraction, mgr: Econo
 
 async function handleDeposit(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
   await interaction.deferReply();
-  const amount = interaction.options.getInteger('amount', true);
+  const explicitAmount = interaction.options.getInteger('amount');
+  // If no amount provided, deposit everything in the wallet
+  const amount = explicitAmount ?? (await mgr.getOrCreateWallet(interaction.user.id)).wallet;
+  if (amount <= 0) {
+    await interaction.editReply({ content: "You don't have anything to deposit." });
+    return;
+  }
   const result = await mgr.deposit(interaction.user.id, amount);
   await interaction.editReply({ content: result.message });
 }
 
 async function handleWithdraw(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
   await interaction.deferReply();
-  const amount = interaction.options.getInteger('amount', true);
+  const explicitAmount = interaction.options.getInteger('amount');
+  // If no amount provided, withdraw everything in the bank
+  const amount = explicitAmount ?? (await mgr.getOrCreateWallet(interaction.user.id)).bank;
+  if (amount <= 0) {
+    await interaction.editReply({ content: "You don't have anything to withdraw." });
+    return;
+  }
   const result = await mgr.withdraw(interaction.user.id, amount);
   await interaction.editReply({ content: result.message });
 }
