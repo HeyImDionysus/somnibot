@@ -99,10 +99,8 @@ async function createWindow(): Promise<void> {
     console.error('[Launcher] Failed to load renderer:', err);
   });
 
-  // Open DevTools when launched with --debug flag or DEBUG_LAUNCHER env var
-  if (process.argv.includes('--debug') || process.env.DEBUG_LAUNCHER) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  }
+  // Always open DevTools during testing so errors are visible
+  mainWindow.webContents.openDevTools({ mode: 'detach' });
 
   // Log renderer load failures
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
