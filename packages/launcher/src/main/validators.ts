@@ -168,26 +168,41 @@ export async function validateSupabase(
     });
 
     if (res.status === 401 || res.status === 403) {
-      return { ok: false, error: 'Supabase Secret Key is invalid. Get it from Supabase → Settings → API → Secret Key (sb_secret_...).' };
+      return { ok: false, error: 'Supabase Secret Key is invalid. Copy the "service_role"/"secret" key from Supabase → Settings → API → Project API keys.' };
     }
     // 200 means REST endpoint is reachable — good enough
   } catch (err) {
     return { ok: false, error: `Could not reach Supabase at ${url.trim()}. Check the URL and your internet connection.\n${String(err)}` };
   }
 
-  // Verify publishable key
+  // Verify publishable key — use the auth health endpoint which accepts anon keys
+  // regardless of PostgREST schema permissions (the anon role may get 403 from
+  // /rest/v1/ on projects with restricted permissions, which is normal).
   try {
-    const res = await fetch(`${url.trim()}/rest/v1/`, {
+    const trimmedPubKey = publishableKey.trim();
+
+    // Quick format check — Supabase keys are JWTs (eyJ...)
+    if (!trimmedPubKey.startsWith('eyJ')) {
+      return {
+        ok: false,
+        error: 'Supabase Publishable Key doesn\'t look right. It should be the "anon"/"public" key from Supabase → Settings → API. It starts with "eyJ...".',
+      };
+    }
+
+    const res = await fetch(`${url.trim()}/auth/v1/settings`, {
       headers: {
-        apikey: publishableKey.trim(),
-        Authorization: `Bearer ${publishableKey.trim()}`,
+        apikey: trimmedPubKey,
       },
       signal: AbortSignal.timeout(10_000),
     });
 
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, error: 'Supabase Publishable Key is invalid. Get it from Supabase → Settings → API → Publishable Key (sb_publishable_...).' };
+    if (res.status === 401) {
+      return {
+        ok: false,
+        error: 'Supabase Publishable Key is invalid. Copy the "anon"/"public" key from Supabase → Settings → API → Project API keys.',
+      };
     }
+    // 200 or 403 both mean the key was recognized — 403 just means restricted permissions
   } catch (err) {
     return { ok: false, error: `Could not verify Publishable Key.\n${String(err)}` };
   }
