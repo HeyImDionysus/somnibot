@@ -470,7 +470,14 @@ async function refreshLavalinkPanel() {
     lavalinkJavaStatus.innerHTML = `<span class="status-icon">✓</span> Java ${escapeHtml(java.version || 'unknown')} detected`;
   } else {
     lavalinkJavaStatus.className = 'lavalink-info error';
-    lavalinkJavaStatus.innerHTML = `<span class="status-icon">✗</span> Java not found — <a href="#" onclick="window.somnibot.openExternal('https://adoptium.net');return false;" style="color:var(--hot-pink)">install Java 17+</a>`;
+    lavalinkJavaStatus.innerHTML = `<span class="status-icon">✗</span> Java not found — <a href="#" class="java-install-link" style="color:var(--hot-pink)">install Java 17+</a>`;
+    const javaLink = lavalinkJavaStatus.querySelector('.java-install-link');
+    if (javaLink) {
+      javaLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.somnibot.openExternal('https://adoptium.net');
+      });
+    }
   }
 
   // Check JAR

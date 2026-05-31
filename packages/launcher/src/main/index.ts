@@ -327,8 +327,8 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Auto-updater
-  initUpdater();
+  // Auto-updater — must await so IPC handlers are registered before renderer calls them
+  await initUpdater();
 });
 
 // Second instance: focus the existing window

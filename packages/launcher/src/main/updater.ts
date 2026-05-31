@@ -55,6 +55,18 @@ export async function initUpdater(): Promise<void> {
     return;
   }
 
+  // Wrap the rest in try/catch so noop handlers are registered if anything fails
+  try {
+    await initUpdaterWithModule(mod);
+    return;
+  } catch {
+    registerNoopHandlers();
+    return;
+  }
+}
+
+async function initUpdaterWithModule(mod: typeof import('electron-updater')): Promise<void> {
+
   const { autoUpdater } = mod;
 
   // User must explicitly click "Install now" — no silent background downloads
