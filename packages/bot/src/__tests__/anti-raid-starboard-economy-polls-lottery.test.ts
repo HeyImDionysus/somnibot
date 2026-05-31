@@ -130,6 +130,7 @@ describe('Anti-Raid', () => {
     anti_raid_join_rate_limit: 10,
     anti_raid_join_rate_window_seconds: 60,
     anti_raid_action: 'kick',
+    anti_raid_auto_unban: true,
     anti_raid_log_channel_id: 'ch1',
     anti_raid_whitelist_roles: [],
   };
