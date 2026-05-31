@@ -94,7 +94,7 @@ function stageBot() {
   //   - Workspace deps (@somnibot/shared) bundled as real packages
   //   - Native modules (@napi-rs/canvas) included for the current platform
   //   - devDependencies excluded
-  run(`pnpm --filter @somnibot/bot deploy ${botStaging} --prod`);
+  run(`pnpm --filter @somnibot/bot deploy "${botStaging}" --prod`);
 
   // Verify the deploy produced what we expect
   assertExists(path.join(botStaging, 'dist', 'index.js'), 'Bot entry (dist/index.js)');
