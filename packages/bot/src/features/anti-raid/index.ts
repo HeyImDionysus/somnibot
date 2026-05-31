@@ -7,8 +7,8 @@
  *
  * Tracks join rate in a sliding window. When the threshold is exceeded:
  *  - "kick" mode: auto-kicks new members below account-age threshold
- *  - "ban" mode: auto-bans new members below account-age threshold
- *  - "lockdown" mode: pauses invites and enables verification level
+ *  - "ban" mode: auto-bans new members (auto-unban on cooldown is toggleable)
+ *  - "lockdown" mode: pauses invites (stored for restore) and raises verification
  *
  * Also filters joins by minimum account age regardless of raid status.
  */
@@ -32,6 +32,7 @@ interface AntiRaidConfig {
   anti_raid_join_window_seconds: number;
   anti_raid_account_age_days: number;
   anti_raid_action: 'kick' | 'ban' | 'lockdown';
+  anti_raid_auto_unban: boolean;
   anti_raid_ban_delete_seconds: number;
   anti_raid_log_channel_id: string | null;
   mod_log_channel_id: string | null;
@@ -77,6 +78,17 @@ function raidModeKey(guildId: string): string {
 function raidBannedKey(guildId: string): string {
   return `antiraid:banned:${guildId}`;
 }
+/** Store invite metadata during lockdown so invites can be recreated on restore. */
+function storedInvitesKey(guildId: string): string {
+  return `antiraid:invites:${guildId}`;
+}
+
+interface StoredInvite {
+  channelId: string;
+  maxAge: number;
+  maxUses: number;
+  temporary: boolean;
+}
 
 // In-memory fallback for raid-banned tracking
 const _memoryRaidBanned = new Map<string, Set<string>>();
@@ -120,7 +132,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
   const { data } = await supabase
     .from('guild_config')
     .select(
-      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
+      'anti_raid_enabled, anti_raid_join_threshold, anti_raid_join_window_seconds, anti_raid_account_age_days, anti_raid_action, anti_raid_auto_unban, anti_raid_ban_delete_seconds, anti_raid_log_channel_id, mod_log_channel_id',
     )
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -131,6 +143,7 @@ async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<An
     anti_raid_join_window_seconds: data?.anti_raid_join_window_seconds ?? 10,
     anti_raid_account_age_days: data?.anti_raid_account_age_days ?? 7,
     anti_raid_action: data?.anti_raid_action ?? 'kick',
+    anti_raid_auto_unban: data?.anti_raid_auto_unban ?? true,
     anti_raid_ban_delete_seconds: data?.anti_raid_ban_delete_seconds ?? 86400,
     anti_raid_log_channel_id: data?.anti_raid_log_channel_id ?? null,
     mod_log_channel_id: data?.mod_log_channel_id ?? null,
@@ -280,8 +293,9 @@ export async function processAntiRaid(
   const raidActive = await isRaidModeActive(guild.id);
 
   // V5 Audit §8.1: Auto-unban raid-banned users when raid mode expires (ban mode).
+  // Gated behind anti_raid_auto_unban toggle (defaults to true).
   // Runs in background via setImmediate so it doesn't block the join handler.
-  if (!raidActive && config.anti_raid_action === 'ban') {
+  if (!raidActive && config.anti_raid_action === 'ban' && config.anti_raid_auto_unban) {
     setImmediate(() => {
       processRaidUnbans(guild, config).catch((err) => {
         log.error('Background raid unban failed', { error: (err as Error)?.message ?? err });
@@ -289,7 +303,7 @@ export async function processAntiRaid(
     });
   }
 
-  // V6 Audit §8.6: Restore verification level when raid mode expires
+  // V6 Audit §8.6: Restore verification level + invites when raid mode expires
   if (!raidActive && config.anti_raid_action === 'lockdown') {
     try {
       const valkey = getValkey();
@@ -302,6 +316,11 @@ export async function processAntiRaid(
           log.info(`Lockdown ended: restored verification to ${level} for guild ${guild.id}`);
         }
         await valkey.del(prevLevelKey).catch(() => {});
+
+        // Restore invites that were paused (stored before deletion) during lockdown
+        await restoreLockdownInvites(guild, config).catch((err) => {
+          log.error('Failed to restore lockdown invites:', { error: String(err) });
+        });
       }
     } catch {
       // Best-effort restore
@@ -394,21 +413,45 @@ export async function processAntiRaid(
             log.info(`Lockdown: raised verification to VERY_HIGH for guild ${guild.id}`);
           }
 
-          // V5 Audit §8.P3a: Revoke all active invites during lockdown
-          // to prevent raiders from using existing invite links.
-          let revokedCount = 0;
+          // Pause invites: store metadata in Valkey, then delete. Invites are
+          // recreated with the same settings (new codes) when lockdown expires.
+          let pausedCount = 0;
           try {
             const invites = await guild.invites.fetch();
-            const deletePromises = invites.map((inv) =>
-              inv.delete('Anti-raid lockdown: revoking active invites').catch(() => null),
-            );
-            const results = await Promise.allSettled(deletePromises);
-            revokedCount = results.filter((r) => r.status === 'fulfilled').length;
-            if (revokedCount > 0) {
-              log.info(`Lockdown: revoked ${revokedCount} invite(s) for guild ${guild.id}`);
+            if (invites.size > 0) {
+              // Snapshot invite metadata so we can recreate them later
+              const stored: StoredInvite[] = [];
+              for (const inv of invites.values()) {
+                stored.push({
+                  channelId: inv.channelId ?? '',
+                  maxAge: inv.maxAge ?? 0,
+                  maxUses: inv.maxUses ?? 0,
+                  temporary: inv.temporary ?? false,
+                });
+              }
+              // Persist in Valkey (1-hour TTL — same as the prevLevel key)
+              try {
+                await valkey.set(
+                  storedInvitesKey(guild.id),
+                  JSON.stringify(stored),
+                  'PX',
+                  60 * 60_000,
+                );
+              } catch {
+                log.warn('Failed to store invite metadata — invites will be deleted without restore');
+              }
+
+              const deletePromises = invites.map((inv) =>
+                inv.delete('Anti-raid lockdown: pausing active invites').catch(() => null),
+              );
+              const results = await Promise.allSettled(deletePromises);
+              pausedCount = results.filter((r) => r.status === 'fulfilled').length;
+              if (pausedCount > 0) {
+                log.info(`Lockdown: paused ${pausedCount} invite(s) for guild ${guild.id}`);
+              }
             }
           } catch (invErr) {
-            log.warn('Failed to revoke invites during lockdown:', { error: String(invErr) });
+            log.warn('Failed to pause invites during lockdown:', { error: String(invErr) });
           }
 
           const embed = new EmbedBuilder()
@@ -416,7 +459,7 @@ export async function processAntiRaid(
             .setTitle('🔒 Anti-Raid: Lockdown Activated')
             .setDescription(
               `Server verification level raised to **Very High** (phone verification required).\n` +
-              (revokedCount > 0 ? `${revokedCount} active invite(s) revoked.\n` : '') +
+              (pausedCount > 0 ? `${pausedCount} invite(s) paused — they will be restored when lockdown ends.\n` : '') +
               `Will auto-restore when raid mode expires.`,
             )
             .setTimestamp();
@@ -432,6 +475,70 @@ export async function processAntiRaid(
   }
 
   return false;
+}
+
+/**
+ * Restore invites that were paused (stored then deleted) during lockdown.
+ * Recreates invites in the same channels with the same settings. Codes will
+ * be new — Discord doesn't allow specifying invite codes.
+ */
+async function restoreLockdownInvites(guild: Guild, config: AntiRaidConfig): Promise<void> {
+  let storedRaw: string | null = null;
+  try {
+    const valkey = getValkey();
+    const key = storedInvitesKey(guild.id);
+    storedRaw = await valkey.get(key);
+    if (storedRaw) {
+      await valkey.del(key);
+    }
+  } catch {
+    // Valkey down — can't restore
+    return;
+  }
+
+  if (!storedRaw) return;
+
+  let stored: StoredInvite[];
+  try {
+    stored = JSON.parse(storedRaw) as StoredInvite[];
+  } catch {
+    log.warn(`Failed to parse stored invite metadata for guild ${guild.id}`);
+    return;
+  }
+
+  let restored = 0;
+  for (const inv of stored) {
+    if (!inv.channelId) continue;
+    const channel = guild.channels.cache.get(inv.channelId);
+    if (!channel || !('createInvite' in channel)) continue;
+
+    try {
+      await (channel as TextChannel).createInvite({
+        maxAge: inv.maxAge,
+        maxUses: inv.maxUses,
+        temporary: inv.temporary,
+        reason: 'Anti-raid lockdown ended: restoring paused invite',
+      });
+      restored++;
+    } catch {
+      // Channel may have been deleted during lockdown
+    }
+  }
+
+  if (restored > 0) {
+    log.info(`Lockdown ended: restored ${restored}/${stored.length} invite(s) for guild ${guild.id}`);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x4caf50)
+      .setTitle('🔓 Anti-Raid: Invites Restored')
+      .setDescription(
+        `Lockdown has ended. **${restored}** invite(s) have been recreated with their original settings.\n` +
+        `Note: invite *codes* have changed — previous invite links are no longer valid.`,
+      )
+      .setTimestamp();
+
+    await logRaidEvent(guild, config, embed);
+  }
 }
 
 /**

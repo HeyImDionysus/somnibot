@@ -100,6 +100,7 @@ const banConfig: {
   anti_raid_join_window_seconds: number;
   anti_raid_account_age_days: number;
   anti_raid_action: string;
+  anti_raid_auto_unban: boolean;
   anti_raid_ban_delete_seconds: number;
   anti_raid_log_channel_id: string | null;
   mod_log_channel_id: string | null;
@@ -109,6 +110,7 @@ const banConfig: {
   anti_raid_join_window_seconds: 10,
   anti_raid_account_age_days: 7,
   anti_raid_action: 'ban',
+  anti_raid_auto_unban: true,
   anti_raid_ban_delete_seconds: 86400,
   anti_raid_log_channel_id: null,
   mod_log_channel_id: null,
@@ -339,5 +341,135 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
 
     // Lockdown path raises verification level to VERY_HIGH (4)
     expect(g.setVerificationLevel).toHaveBeenCalledWith(4, expect.any(String));
+  });
+
+  it('processAntiRaid skips auto-unban when anti_raid_auto_unban is false', async () => {
+    // Setup: raid mode inactive, previously banned users exist
+    mockSmembers.mockResolvedValue(['user1', 'user2']);
+    const g = makeGuild();
+    const member = makeMember(g, 'newUser', 30);
+
+    const noUnbanConfig = { ...banConfig, anti_raid_auto_unban: false };
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    await processAntiRaid(g, member, makeSupa(noUnbanConfig));
+
+    // Flush setImmediate queue
+    await new Promise((r) => setImmediate(r));
+    // Wait a tick — unban should NOT have been called
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(g.members.unban).not.toHaveBeenCalled();
+  });
+
+  it('lockdown stores invite metadata in Valkey before deleting', async () => {
+    mockExec.mockResolvedValue([[null, 0], [null, 1], [null, 15], [null, 1]]);
+    mockGet.mockResolvedValue(null);
+
+    const lockdownConfig = { ...banConfig, anti_raid_action: 'lockdown' };
+    // Create mock invites with metadata
+    const mockInvite1 = {
+      channelId: 'ch1',
+      maxAge: 86400,
+      maxUses: 10,
+      temporary: false,
+      delete: vi.fn(async () => {}),
+    };
+    const mockInvite2 = {
+      channelId: 'ch2',
+      maxAge: 0,
+      maxUses: 0,
+      temporary: true,
+      delete: vi.fn(async () => {}),
+    };
+    const inviteMap = new Map([['inv1', mockInvite1], ['inv2', mockInvite2]]);
+    // Make the Map iterable the way discord.js Collection works
+    (inviteMap as any).map = function (fn: any) {
+      return [...this.values()].map(fn);
+    };
+
+    const g = makeGuild({
+      members: {
+        me: { permissions: { has: vi.fn(() => true) } },
+        unban: vi.fn(async () => {}),
+        cache: new Map(),
+      },
+      verificationLevel: 1,
+      invites: { fetch: vi.fn(async () => inviteMap) },
+    });
+    const member = makeMember(g, 'raider', 30);
+
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    await processAntiRaid(g, member, makeSupa(lockdownConfig));
+
+    // Should have stored invite metadata in Valkey
+    expect(mockSet).toHaveBeenCalledWith(
+      'antiraid:invites:g1',
+      expect.any(String),
+      'PX',
+      expect.any(Number),
+    );
+
+    // Verify stored data is valid JSON with the right shape
+    const storedCall = mockSet.mock.calls.find(
+      (c: any[]) => c[0] === 'antiraid:invites:g1',
+    );
+    expect(storedCall).toBeDefined();
+    const parsed = JSON.parse(storedCall![1]);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatchObject({ channelId: 'ch1', maxAge: 86400, maxUses: 10, temporary: false });
+    expect(parsed[1]).toMatchObject({ channelId: 'ch2', maxAge: 0, maxUses: 0, temporary: true });
+
+    // Both invites should have been deleted
+    expect(mockInvite1.delete).toHaveBeenCalled();
+    expect(mockInvite2.delete).toHaveBeenCalled();
+  });
+
+  it('lockdown restore recreates invites from stored metadata', async () => {
+    // Simulate: raid mode has expired (raidModeKey returns null),
+    // action is lockdown, prevLevel is stored, invites are stored
+    mockGet.mockImplementation(async (key: string) => {
+      if (key === 'antiraid:raidmode:g1') return null; // raid expired
+      if (key === 'antiraid:prevlevel:g1') return '1'; // previous level
+      if (key === 'antiraid:invites:g1') {
+        return JSON.stringify([
+          { channelId: 'ch1', maxAge: 86400, maxUses: 10, temporary: false },
+          { channelId: 'ch2', maxAge: 0, maxUses: 0, temporary: true },
+        ]);
+      }
+      return null;
+    });
+    // Pipeline: below threshold (no new raid)
+    mockExec.mockResolvedValue([[null, 0], [null, 1], [null, 2], [null, 1]]);
+
+    const lockdownConfig = { ...banConfig, anti_raid_action: 'lockdown' };
+    const createInviteFn = vi.fn(async () => ({}));
+    const g = makeGuild({
+      channels: {
+        cache: new Map([
+          ['ch1', { createInvite: createInviteFn }],
+          ['ch2', { createInvite: createInviteFn }],
+        ]),
+      },
+      verificationLevel: 4, // currently at VERY_HIGH from lockdown
+    });
+    const member = makeMember(g, 'normalUser', 30);
+
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    await processAntiRaid(g, member, makeSupa(lockdownConfig));
+
+    // Should restore verification level
+    expect(g.setVerificationLevel).toHaveBeenCalledWith(1, expect.stringContaining('restoring'));
+
+    // Should recreate both invites
+    expect(createInviteFn).toHaveBeenCalledTimes(2);
+    expect(createInviteFn).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAge: 86400, maxUses: 10, temporary: false }),
+    );
+    expect(createInviteFn).toHaveBeenCalledWith(
+      expect.objectContaining({ maxAge: 0, maxUses: 0, temporary: true }),
+    );
+
+    // Should have cleaned up the stored invites key
+    expect(mockDel).toHaveBeenCalledWith('antiraid:invites:g1');
   });
 });

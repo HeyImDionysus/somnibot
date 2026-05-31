@@ -327,7 +327,7 @@ describe('anti-raid deep', () => {
   it('processAntiRaid with valid member', async () => {
     const mod = await import('../features/anti-raid/index.js');
     const supa = makeSupa({
-      data: { anti_raid_enabled: true, anti_raid_join_threshold: 10, anti_raid_join_window_seconds: 60, anti_raid_account_age_days: 7, anti_raid_action: 'kick', anti_raid_log_channel_id: null, mod_log_channel_id: null },
+      data: { anti_raid_enabled: true, anti_raid_join_threshold: 10, anti_raid_join_window_seconds: 60, anti_raid_account_age_days: 7, anti_raid_action: 'kick', anti_raid_auto_unban: true, anti_raid_log_channel_id: null, mod_log_channel_id: null },
       error: null,
     });
     const member: any = {

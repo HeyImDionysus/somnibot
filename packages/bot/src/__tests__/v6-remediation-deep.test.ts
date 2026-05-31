@@ -253,6 +253,7 @@ const FULL_CONFIG: Record<string, any> = {
   anti_raid_join_threshold: 10,
   anti_raid_join_window_seconds: 10,
   anti_raid_action: 'kick',
+  anti_raid_auto_unban: true,
   anti_raid_account_age_days: 7,
   anti_raid_log_channel_id: 'ch1',
   mod_log_channel_id: 'ch1',
