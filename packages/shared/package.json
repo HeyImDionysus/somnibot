@@ -24,10 +24,10 @@
     }
   },
   "scripts": {
-    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc",
+    "build": "node ../../scripts/clean.mjs dist tsconfig.tsbuildinfo && tsc",
     "dev": "tsc --watch",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist",
+    "clean": "node ../../scripts/clean.mjs dist",
     "test": "vitest run",
     "test:watch": "vitest"
   },

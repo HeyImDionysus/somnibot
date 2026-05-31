@@ -13,7 +13,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "clean": "rm -rf .next .turbo"
+    "clean": "node ../../scripts/clean.mjs .next .turbo"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.0",
