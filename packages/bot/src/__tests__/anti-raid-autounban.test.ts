@@ -411,10 +411,10 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
 
     // Verify stored data is valid JSON with the right shape
     const storedCall = mockSet.mock.calls.find(
-      (c: any[]) => c[0] === 'antiraid:invites:g1',
-    );
+      (c: unknown[]) => c[0] === 'antiraid:invites:g1',
+    ) as unknown[] | undefined;
     expect(storedCall).toBeDefined();
-    const parsed = JSON.parse(storedCall![1]);
+    const parsed = JSON.parse(storedCall![1] as string);
     expect(parsed).toHaveLength(2);
     expect(parsed[0]).toMatchObject({ channelId: 'ch1', maxAge: 86400, maxUses: 10, temporary: false });
     expect(parsed[1]).toMatchObject({ channelId: 'ch2', maxAge: 0, maxUses: 0, temporary: true });
@@ -427,7 +427,7 @@ describe('Anti-Raid auto-unban (§8.2)', () => {
   it('lockdown restore recreates invites from stored metadata', async () => {
     // Simulate: raid mode has expired (raidModeKey returns null),
     // action is lockdown, prevLevel is stored, invites are stored
-    mockGet.mockImplementation(async (key: string) => {
+    (mockGet as any).mockImplementation(async (key: string) => {
       if (key === 'antiraid:raidmode:g1') return null; // raid expired
       if (key === 'antiraid:prevlevel:g1') return '1'; // previous level
       if (key === 'antiraid:invites:g1') {
