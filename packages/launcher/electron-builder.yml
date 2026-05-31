@@ -11,6 +11,7 @@ directories:
 # automatically by electron-builder — no need to list them.
 files:
   - dist/**/*
+  - src/renderer/**/*
   - package.json
 
 # Bot and dashboard are staged into .resources/ by the build script

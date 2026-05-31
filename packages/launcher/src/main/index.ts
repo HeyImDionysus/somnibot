@@ -40,7 +40,7 @@ if (!gotLock) {
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
 
-function createWindow(): void {
+async function createWindow(): Promise<void> {
   const config = getConfig();
   const bounds = config.windowBounds ?? { width: 760, height: 680 };
 
@@ -79,8 +79,41 @@ function createWindow(): void {
     });
   });
 
-  // Load the renderer HTML
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // Load the renderer HTML.
+  // Primary: dist/renderer/ (copied during build). Fallback: src/renderer/ (source).
+  // app.getAppPath() returns the asar root in packaged builds, or the package
+  // dir in development — both work because electron-builder includes both paths.
+  const distRenderer = path.join(__dirname, '..', 'renderer', 'index.html');
+  const srcRenderer = path.join(app.getAppPath(), 'src', 'renderer', 'index.html');
+
+  // Use whichever exists — check dist first (the build copy), fall back to src
+  const { existsSync } = await import('node:fs');
+  const rendererPath = existsSync(distRenderer) ? distRenderer : srcRenderer;
+
+  // Debug: log the resolved renderer path for troubleshooting
+  console.log('[Launcher] Renderer dist path:', distRenderer, '→ exists:', existsSync(distRenderer));
+  console.log('[Launcher] Renderer src path:', srcRenderer, '→ exists:', existsSync(srcRenderer));
+  console.log('[Launcher] Using:', rendererPath);
+
+  mainWindow.loadFile(rendererPath).catch((err) => {
+    console.error('[Launcher] Failed to load renderer:', err);
+  });
+
+  // Open DevTools when launched with --debug flag or DEBUG_LAUNCHER env var
+  if (process.argv.includes('--debug') || process.env.DEBUG_LAUNCHER) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
+
+  // Log renderer load failures
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[Launcher] Renderer failed to load: ${errorCode} ${errorDescription} (${validatedURL})`);
+  });
+
+  // Log renderer console messages to main process stdout for debugging
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const tag = ['LOG', 'WARN', 'ERROR'][level] ?? 'LOG';
+    console.log(`[Renderer ${tag}] ${message} (${sourceId}:${line})`);
+  });
 
   // Show when ready to avoid white flash
   mainWindow.once('ready-to-show', () => {
@@ -282,12 +315,12 @@ function registerIpcHandlers(): void {
 /*  App lifecycle                                                      */
 /* ------------------------------------------------------------------ */
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Phase 6: Clean up stale processes from a previous crash
   cleanupStaleProcesses();
 
   registerIpcHandlers();
-  createWindow();
+  await createWindow();
 
   // macOS: re-create window when dock icon is clicked
   app.on('activate', () => {
