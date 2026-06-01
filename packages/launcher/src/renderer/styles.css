@@ -562,6 +562,8 @@ footer {
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-muted);
+  user-select: text;
+  cursor: text;
 }
 
 .log-content::-webkit-scrollbar {
