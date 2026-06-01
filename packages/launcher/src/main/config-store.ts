@@ -182,6 +182,19 @@ export function clearConfig(): void {
 /**
  * Build the full env var object for spawning bot + dashboard processes.
  */
+/**
+ * Build SUPABASE_DB_URL env entry from the project URL + database password.
+ * Returns an empty object when either value is missing or the ref can't be extracted.
+ */
+function buildDbUrlEnv(supabaseUrl: string, dbPassword: string): Record<string, string> {
+  if (!dbPassword || !supabaseUrl) return {};
+  const ref = supabaseUrl.match(/https:\/\/([a-z0-9]+)\.supabase\.co/)?.[1];
+  if (!ref) return {};
+  return {
+    SUPABASE_DB_URL: `postgresql://postgres.${ref}:${encodeURIComponent(dbPassword)}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
+  };
+}
+
 export function buildEnvVars(
   config: LauncherConfig,
   sessionToken: string,
@@ -224,14 +237,7 @@ export function buildEnvVars(
 
     // Database — direct Postgres access for migrations.
     // Construct the connection URL from the project ref + user-supplied password.
-    ...(config.supabaseDbPassword && config.supabaseUrl
-      ? (() => {
-          const ref = config.supabaseUrl.match(/https:\/\/([a-z0-9]+)\.supabase\.co/)?.[1];
-          return ref
-            ? { SUPABASE_DB_URL: `postgresql://postgres.${ref}:${encodeURIComponent(config.supabaseDbPassword)}@aws-0-us-east-1.pooler.supabase.com:6543/postgres` }
-            : {};
-        })()
-      : {}),
+    ...buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword),
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',
