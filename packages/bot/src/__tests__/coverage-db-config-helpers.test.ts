@@ -87,8 +87,30 @@ describe('db-helpers', () => {
 });
 
 describe('config', () => {
+  const ENV_BACKUP: Record<string, string | undefined> = {};
+  const CONFIG_KEYS = [
+    'DISCORD_TOKEN', 'DISCORD_APPLICATION_ID', 'DISCORD_CLIENT_SECRET',
+    'SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'LAVALINK_PASSWORD',
+  ];
+
   beforeEach(() => {
     vi.resetModules();
+    // Backup & clear env vars that affect config
+    for (const key of CONFIG_KEYS) {
+      ENV_BACKUP[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    // Restore env vars
+    for (const key of CONFIG_KEYS) {
+      if (ENV_BACKUP[key] !== undefined) {
+        process.env[key] = ENV_BACKUP[key];
+      } else {
+        delete process.env[key];
+      }
+    }
   });
 
   it('getConfig throws if loadConfig was not called', async () => {
@@ -97,12 +119,13 @@ describe('config', () => {
   });
 
   it('loadConfig succeeds with valid env vars and getConfig returns the result', async () => {
-    // Set required env vars before importing
+    // Set all required env vars (including LAVALINK_PASSWORD which has min 8)
     process.env.DISCORD_TOKEN = 'test-token-for-config';
     process.env.DISCORD_APPLICATION_ID = '123456789012345678';
     process.env.DISCORD_CLIENT_SECRET = 'test-client-secret';
     process.env.SUPABASE_URL = 'https://test-project.supabase.co';
     process.env.SUPABASE_SECRET_KEY = 'eyJ-test-secret-key';
+    process.env.LAVALINK_PASSWORD = 'test-secure-password-1234';
 
     const { loadConfig, getConfig } = await import('../config.js');
     const config = loadConfig();
@@ -117,13 +140,6 @@ describe('config', () => {
     // getConfig now works
     const config3 = getConfig();
     expect(config3).toBe(config);
-
-    // Cleanup
-    delete process.env.DISCORD_TOKEN;
-    delete process.env.DISCORD_APPLICATION_ID;
-    delete process.env.DISCORD_CLIENT_SECRET;
-    delete process.env.SUPABASE_URL;
-    delete process.env.SUPABASE_SECRET_KEY;
   });
 
   it('loadConfig exits on invalid env', async () => {
