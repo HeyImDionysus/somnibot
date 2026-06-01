@@ -857,3 +857,153 @@ describe('escalation — executeEscalation', () => {
     expect(esc.getEscalationAction(chain, 1)).toBeNull();
   });
 });
+
+// ═════════════════════════════════════════════════════════════
+// moderation/commands.ts — handleWarnCommand hierarchy checks
+// ═════════════════════════════════════════════════════════════
+describe('handleWarnCommand — role hierarchy guards', () => {
+  let handleWarnCommand: typeof import('../features/moderation/commands.js')['handleWarnCommand'];
+
+  beforeEach(async () => {
+    vi.resetModules();
+
+    // Mock infraction-service — createInfraction returns an infraction
+    vi.doMock('../features/moderation/infraction-service.js', () => ({
+      createInfraction: vi.fn(async () => ({ id: 'inf-1' })),
+      getMemberInfractions: vi.fn(async () => []),
+      getActiveWarningCount: vi.fn(async () => 0),
+      pardonInfraction: vi.fn(async () => true),
+      calculateExpiryDate: vi.fn(() => new Date().toISOString()),
+    }));
+    vi.doMock('../features/moderation/escalation.js', () => ({
+      executeEscalation: vi.fn(async () => {}),
+      getEscalationAction: vi.fn(() => null),
+    }));
+    vi.doMock('../features/moderation/mod-log.js', () => ({
+      postModLogEntry: vi.fn(async () => {}),
+    }));
+
+    const cmds = await import('../features/moderation/commands.js');
+    handleWarnCommand = cmds.handleWarnCommand;
+  });
+
+  function mockInteraction(overrides: {
+    targetId?: string;
+    targetBot?: boolean;
+    invokerId?: string;
+    guildOwnerId?: string;
+    targetRolePos?: number;
+    invokerRolePos?: number;
+    invokerFetchFails?: boolean;
+    targetFetchFails?: boolean;
+  } = {}) {
+    const {
+      targetId = 'target-1',
+      targetBot = false,
+      invokerId = 'invoker-1',
+      guildOwnerId = 'owner-1',
+      targetRolePos = 1,
+      invokerRolePos = 5,
+      invokerFetchFails = false,
+      targetFetchFails = false,
+    } = overrides;
+
+    const editReply = vi.fn(async () => {});
+    const deferReply = vi.fn(async () => {});
+
+    const targetMember = {
+      id: targetId,
+      user: { bot: targetBot },
+      roles: { highest: { position: targetRolePos } },
+    };
+    const invokerMember = {
+      id: invokerId,
+      roles: { highest: { position: invokerRolePos } },
+    };
+
+    const guild = {
+      ownerId: guildOwnerId,
+      members: {
+        fetch: vi.fn(async (id: string) => {
+          if (id === targetId) {
+            if (targetFetchFails) throw new Error('fetch failed');
+            return targetMember;
+          }
+          if (id === invokerId) {
+            if (invokerFetchFails) throw new Error('fetch failed');
+            return invokerMember;
+          }
+          throw new Error('unknown member');
+        }),
+      },
+    };
+
+    const interaction = {
+      deferReply,
+      editReply,
+      guildId: 'guild-1',
+      guild,
+      user: { id: invokerId },
+      options: {
+        getMember: vi.fn(() => ({ id: targetId })),
+        getString: vi.fn(() => 'test reason'),
+        getUser: vi.fn(() => ({ id: targetId })),
+        getInteger: vi.fn(() => null),
+      },
+    };
+
+    return { interaction, editReply, deferReply };
+  }
+
+  function mockClient() {
+    const chain = makeChain({ data: { escalation_chain: [], infraction_expiry_days: 30, mod_log_channel_id: null }, error: null });
+    return {
+      supabase: { from: vi.fn(() => chain), _chain: chain },
+      eventBus: { emit: vi.fn() },
+    };
+  }
+
+  it('blocks warning the server owner', async () => {
+    const { interaction, editReply } = mockInteraction({ targetId: 'owner-1', guildOwnerId: 'owner-1' });
+    await handleWarnCommand(interaction as any, mockClient() as any);
+    expect(editReply).toHaveBeenCalledWith('❌ Cannot warn the server owner.');
+  });
+
+  it('blocks warning a member with equal role position', async () => {
+    const { interaction, editReply } = mockInteraction({ targetRolePos: 5, invokerRolePos: 5 });
+    await handleWarnCommand(interaction as any, mockClient() as any);
+    expect(editReply).toHaveBeenCalledWith('❌ Cannot warn a member with an equal or higher role than yours.');
+  });
+
+  it('blocks warning a member with higher role position', async () => {
+    const { interaction, editReply } = mockInteraction({ targetRolePos: 10, invokerRolePos: 5 });
+    await handleWarnCommand(interaction as any, mockClient() as any);
+    expect(editReply).toHaveBeenCalledWith('❌ Cannot warn a member with an equal or higher role than yours.');
+  });
+
+  it('skips hierarchy check if invoker fetch fails (fail-open)', async () => {
+    const { interaction, editReply } = mockInteraction({
+      targetRolePos: 10,
+      invokerRolePos: 5,
+      invokerFetchFails: true,
+    });
+    const client = mockClient();
+    await handleWarnCommand(interaction as any, client as any);
+    // Should NOT have the hierarchy error — it proceeds to create the infraction
+    const calls = editReply.mock.calls.map((c: any) => c[0]);
+    expect(calls).not.toContain('❌ Cannot warn a member with an equal or higher role than yours.');
+    expect(calls).not.toContain('❌ Cannot warn the server owner.');
+  });
+
+  it('blocks warning bots', async () => {
+    const { interaction, editReply } = mockInteraction({ targetBot: true });
+    await handleWarnCommand(interaction as any, mockClient() as any);
+    expect(editReply).toHaveBeenCalledWith('❌ Cannot warn bots.');
+  });
+
+  it('blocks warning yourself', async () => {
+    const { interaction, editReply } = mockInteraction({ targetId: 'invoker-1', invokerId: 'invoker-1' });
+    await handleWarnCommand(interaction as any, mockClient() as any);
+    expect(editReply).toHaveBeenCalledWith('❌ You cannot warn yourself.');
+  });
+});
