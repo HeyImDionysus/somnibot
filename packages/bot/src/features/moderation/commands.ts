@@ -85,15 +85,15 @@ export function buildModerationCommands() {
     .addUserOption((opt) =>
       opt.setName('user').setDescription('The member to ban').setRequired(true),
     )
+    .addStringOption((opt) =>
+      opt.setName('reason').setDescription('Reason for the ban').setRequired(true),
+    )
     .addIntegerOption((opt) =>
       opt
         .setName('delete_days')
         .setDescription('Days of message history to delete (0-7)')
         .setMinValue(0)
         .setMaxValue(7),
-    )
-    .addStringOption((opt) =>
-      opt.setName('reason').setDescription('Reason for the ban').setRequired(true),
     );
 
   const pardon = new SlashCommandBuilder()

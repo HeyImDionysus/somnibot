@@ -115,7 +115,7 @@ export function checkPortAvailable(port: number): Promise<boolean> {
  */
 export function cleanupStaleProcesses(): void {
   const cfg = getConfig();
-  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null };
+  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
 
   for (const [name, pid] of Object.entries(pids)) {
     if (pid && typeof pid === 'number') {
@@ -130,7 +130,7 @@ export function cleanupStaleProcesses(): void {
   }
 
   // Clear stored PIDs
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null } });
+  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
 }
 
 /* ------------------------------------------------------------------ */
@@ -403,7 +403,7 @@ function stopHeartbeatMonitor(): void {
 
 function persistPid(name: 'bot' | 'dashboard', pid: number | null): void {
   const cfg = getConfig();
-  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null };
+  const pids = cfg.lastPids ?? { bot: null, dashboard: null, lavalink: null, valkey: null };
   pids[name] = pid;
   saveConfig({ lastPids: pids });
 }
@@ -460,7 +460,7 @@ export function stopAll(): void {
   lastHeartbeat = 0;
 
   // Clear stored PIDs
-  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null } });
+  saveConfig({ lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null } });
 
   broadcastStatus();
 }

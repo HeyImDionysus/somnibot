@@ -49,7 +49,7 @@ export interface LauncherConfig {
   lavalinkEnabled: boolean;
 
   // ── Phase 6: Stale process tracking (PIDs from last run) ──
-  lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null };
+  lastPids: { bot: number | null; dashboard: number | null; lavalink: number | null; valkey: number | null };
 }
 
 const DEFAULTS: LauncherConfig = {
@@ -63,7 +63,7 @@ const DEFAULTS: LauncherConfig = {
   supabasePublishableKey: '',
   firstRunComplete: false,
   lavalinkEnabled: false,
-  lastPids: { bot: null, dashboard: null, lavalink: null },
+  lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
 };
 
 const store = new Store<LauncherConfig>({
@@ -154,7 +154,7 @@ export function getConfig(): LauncherConfig {
     windowBounds: store.get('windowBounds'),
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
-    lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null }),
+    lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
   };
 }
 

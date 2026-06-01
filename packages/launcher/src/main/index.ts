@@ -24,6 +24,14 @@ import {
   getLavalinkError,
   isLavalinkJarPresent,
 } from './lavalink-manager.js';
+import {
+  downloadValkey,
+  startValkey,
+  stopValkey,
+  getValkeyStatus,
+  getValkeyError,
+  isValkeyBinaryPresent,
+} from './valkey-manager.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -194,6 +202,13 @@ function registerIpcHandlers(): void {
       };
     }
 
+    // Start Valkey/Redis server (required for cache, rate limiting, XP cooldowns)
+    const vkResult = await startValkey();
+    if (!vkResult.ok) {
+      // Non-fatal — bot has in-memory fallbacks, but features are degraded.
+      console.warn('[Launcher] Valkey/Redis failed to start:', vkResult.error);
+    }
+
     // Phase 6: Start managed Lavalink if enabled (non-blocking)
     if (config.lavalinkEnabled) {
       const llResult = await startLavalink();
@@ -227,6 +242,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('stop-bot', () => {
     stopAll();
     stopLavalink();
+    stopValkey();
     sessionToken = null;
   });
 
@@ -309,6 +325,27 @@ function registerIpcHandlers(): void {
       error: getLavalinkError(),
     };
   });
+
+
+  // ── Valkey/Redis management ──
+  ipcMain.handle('get-valkey-info', () => {
+    return {
+      status: getValkeyStatus(),
+      binaryPresent: isValkeyBinaryPresent(),
+      error: getValkeyError(),
+    };
+  });
+
+  ipcMain.handle('download-valkey', async () => {
+    const result = await downloadValkey((percent, downloadedMB, totalMB) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('valkey-download-progress', { percent, downloadedMB, totalMB });
+        }
+      }
+    });
+    return result;
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -347,6 +384,7 @@ app.on('before-quit', () => {
     stopAll();
   }
   stopLavalink();
+  stopValkey();
 });
 
 app.on('window-all-closed', () => {
@@ -355,6 +393,7 @@ app.on('window-all-closed', () => {
       stopAll();
     }
     stopLavalink();
+    stopValkey();
     app.quit();
   }
 });
