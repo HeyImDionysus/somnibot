@@ -92,6 +92,26 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
   }
 
   const sessionCookie = request.cookies.get(COOKIE_NAME)?.value;
+  const pathname = request.nextUrl.pathname;
+
+  // In local mode, redirect login/root to dashboard — the user is already
+  // authenticated by virtue of being on localhost with SESSION_TOKEN set.
+  // Without this, the root page calls supabase.auth.getUser() (which returns
+  // null in local mode) and redirects to /login, where the Discord OAuth
+  // button has no Supabase URL to work with.
+  if (pathname === '/' || pathname === '/login') {
+    const url = request.nextUrl.clone();
+    url.pathname = '/dashboard';
+    const response = NextResponse.redirect(url);
+    if (sessionCookie !== LOCAL_SESSION_TOKEN) {
+      response.cookies.set(COOKIE_NAME, LOCAL_SESSION_TOKEN!, {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+      });
+    }
+    return response;
+  }
 
   // Already authenticated — pass through
   if (sessionCookie === LOCAL_SESSION_TOKEN) {
