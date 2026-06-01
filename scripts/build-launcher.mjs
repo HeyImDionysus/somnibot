@@ -15,7 +15,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -67,6 +67,44 @@ function formatMB(bytes) {
 
 /* ── Dependency fixup helpers ──────────────────────────────────────── */
 
+/**
+ * Walks a node_modules directory and replaces any symlinked packages
+ * with a dereferenced (real-file) copy.  This is critical because
+ * electron-builder's extraResources copy does NOT follow symlinks.
+ */
+function dereferenceNodeModules(nmDir) {
+  if (!existsSync(nmDir)) return;
+  let fixed = 0;
+
+  for (const entry of readdirSync(nmDir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+
+    const full = path.join(nmDir, entry.name);
+
+    if (entry.name.startsWith('@') && entry.isDirectory()) {
+      // Scoped package — check sub-entries
+      for (const sub of readdirSync(full, { withFileTypes: true })) {
+        const subFull = path.join(full, sub.name);
+        if (sub.isSymbolicLink()) {
+          const real = realpathSync(subFull);
+          rmSync(subFull, { recursive: true });
+          cpSync(real, subFull, { recursive: true, dereference: true });
+          fixed++;
+        }
+      }
+    } else if (entry.isSymbolicLink()) {
+      const real = realpathSync(full);
+      rmSync(full, { recursive: true });
+      cpSync(real, full, { recursive: true, dereference: true });
+      fixed++;
+    }
+  }
+
+  if (fixed > 0) {
+    console.log(`   Dereferenced ${fixed} symlinked package(s)`);
+  }
+}
+
 /** Monorepo paths to search for source packages (in priority order). */
 const MONO_SEARCH = [
   path.join(ROOT, 'node_modules'),
@@ -75,11 +113,39 @@ const MONO_SEARCH = [
 ];
 
 /**
+ * Finds a package in the pnpm virtual store (.pnpm/).
+ * Searches node_modules/.pnpm/ for directories matching the package name.
+ * Returns the real path to the package, or null if not found.
+ */
+function findInPnpmStore(pkgName) {
+  const pnpmDir = path.join(ROOT, 'node_modules', '.pnpm');
+  if (!existsSync(pnpmDir)) return null;
+
+  // pnpm store structure: .pnpm/{name}@{version}/node_modules/{name}
+  // For scoped packages: .pnpm/@{scope}+{name}@{version}/node_modules/@{scope}/{name}
+  try {
+    for (const entry of readdirSync(pnpmDir)) {
+      // Match the package name in the directory entry.
+      // Scoped: @swc+helpers@1.0.0 → @swc/helpers
+      // Regular: ws@8.18.0 → ws
+      const storeNm = path.join(pnpmDir, entry, 'node_modules', ...pkgName.split('/'));
+      if (existsSync(storeNm)) {
+        return storeNm;
+      }
+    }
+  } catch {
+    // Permission error or similar — skip silently
+  }
+  return null;
+}
+
+/**
  * Copies a single package from the monorepo's node_modules into a target
  * node_modules dir, following pnpm symlinks (dereference: true).
  * Returns true if successfully copied, false if not found in monorepo.
  */
 function copyPkgFromMonorepo(pkgName, targetNodeModules) {
+  // 1. Search flat node_modules directories first (covers hoisted & workspace deps)
   for (const searchRoot of MONO_SEARCH) {
     const src = path.join(searchRoot, ...pkgName.split('/'));
     if (existsSync(src)) {
@@ -89,6 +155,16 @@ function copyPkgFromMonorepo(pkgName, targetNodeModules) {
       return true;
     }
   }
+
+  // 2. Fallback: search pnpm virtual store (.pnpm/)
+  const storeSrc = findInPnpmStore(pkgName);
+  if (storeSrc) {
+    const dest = path.join(targetNodeModules, ...pkgName.split('/'));
+    ensureDir(path.dirname(dest));
+    cpSync(storeSrc, dest, { recursive: true, dereference: true });
+    return true;
+  }
+
   return false;
 }
 
@@ -151,15 +227,20 @@ function fixAllMissingDeps(stagingDir, extras, label) {
   let totalCopied = 0;
   let pass = 0;
 
-  // First pass: ensure extras are present
+  // First pass: ensure extras are present.
+  // ALWAYS overwrite extras — they may have been partially traced by
+  // Next.js standalone (directory exists but files are incomplete).
   for (const pkg of extras) {
-    if (!existsSync(path.join(nm, ...pkg.split('/')))) {
-      if (copyPkgFromMonorepo(pkg, nm)) {
-        console.log(`     ✓ ${pkg} (extra)`);
-        totalCopied++;
-      } else {
-        console.warn(`     ⚠ ${pkg} not found in monorepo (skipping)`);
-      }
+    const dest = path.join(nm, ...pkg.split('/'));
+    if (existsSync(dest)) {
+      // Remove partial copy so we get the full package from monorepo
+      rmSync(dest, { recursive: true, force: true });
+    }
+    if (copyPkgFromMonorepo(pkg, nm)) {
+      console.log(`     ✓ ${pkg} (extra)`);
+      totalCopied++;
+    } else {
+      console.warn(`     ⚠ ${pkg} not found in monorepo (skipping)`);
     }
   }
 
@@ -236,6 +317,14 @@ function stageBot() {
   assertExists(path.join(botStaging, 'dist', 'index.js'), 'Bot entry (dist/index.js)');
   assertExists(path.join(botStaging, 'node_modules'), 'Bot node_modules');
 
+  // ── Dereference any remaining symlinks ─────────────────────────
+  // pnpm deploy --prod is *supposed* to produce a flat layout without
+  // symlinks, but some versions still leave symlinks pointing into the
+  // pnpm store.  electron-builder's extraResources copy does NOT follow
+  // symlinks by default, so we re-copy the entire node_modules with
+  // dereference:true to ensure everything is a real file.
+  dereferenceNodeModules(path.join(botStaging, 'node_modules'));
+
   // ── Fix transitive / peer dependencies ──────────────────────────
   // pnpm deploy --prod can miss transitive deps of scoped packages and
   // peer deps (e.g. ws is a peer of shoukaku, @supabase/* sub-packages
@@ -273,7 +362,7 @@ function stageDashboard() {
   //         .next/server/       ← server-side chunks
   //       shared/dist/          ← traced workspace dep
   //     package.json
-  cpSync(standaloneDir, dashStaging, { recursive: true });
+  cpSync(standaloneDir, dashStaging, { recursive: true, dereference: true });
 
   // Copy static assets — Next.js looks for .next/static/ relative to server.js dir
   const serverStaticDir = path.join(dashStaging, 'packages', 'dashboard', '.next', 'static');
