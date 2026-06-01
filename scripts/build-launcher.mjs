@@ -65,6 +65,29 @@ function formatMB(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/* ── Dependency fixup helper ───────────────────────────────────────── */
+
+/**
+ * Ensures specific packages exist in a staged directory's node_modules.
+ * pnpm deploy and Next.js standalone trace can miss transitive or
+ * dynamically-loaded deps.  We use npm to install only the missing ones
+ * into the flat node_modules so Node's resolver can find them at runtime.
+ */
+function fixStagedDeps(stagingDir, packages, label) {
+  const missing = packages.filter(
+    (pkg) => !existsSync(path.join(stagingDir, 'node_modules', ...pkg.split('/'))),
+  );
+  if (missing.length === 0) {
+    console.log(`   ${label}: all transitive deps present ✓`);
+    return;
+  }
+  console.log(`   ${label}: installing missing deps: ${missing.join(', ')}`);
+  run(
+    `npm install ${missing.join(' ')} --no-save --no-package-lock --ignore-scripts`,
+    { cwd: stagingDir },
+  );
+}
+
 /* ── Step 1: Build all packages via Turbo ──────────────────────────── */
 
 function buildPackages() {
@@ -99,6 +122,19 @@ function stageBot() {
   // Verify the deploy produced what we expect
   assertExists(path.join(botStaging, 'dist', 'index.js'), 'Bot entry (dist/index.js)');
   assertExists(path.join(botStaging, 'node_modules'), 'Bot node_modules');
+
+  // ── Fix transitive dependencies ──────────────────────────────────
+  // pnpm deploy can miss transitive deps of scoped packages (e.g.
+  // @supabase/supabase-js imports @supabase/functions-js at runtime,
+  // but pnpm's strict isolation doesn't always hoist them).
+  // Use npm to install any missing transitive deps into the flat layout.
+  fixStagedDeps(botStaging, [
+    '@supabase/auth-js',
+    '@supabase/functions-js',
+    '@supabase/postgrest-js',
+    '@supabase/realtime-js',
+    '@supabase/storage-js',
+  ], 'bot');
 
   console.log(`   Bot staged: ${formatMB(dirSize(botStaging))}`);
   console.log('✅ Bot staged successfully');
@@ -141,6 +177,13 @@ function stageDashboard() {
     const serverPublicDir = path.join(dashStaging, 'packages', 'dashboard', 'public');
     cpSync(publicDir, serverPublicDir, { recursive: true });
   }
+
+  // ── Fix missing traced dependencies ────────────────────────────────
+  // Next.js standalone trace misses packages loaded dynamically
+  // (e.g. styled-jsx via require-hook.js). Install them into the
+  // dashboard's node_modules within the staged standalone output.
+  const dashPkgDir = path.join(dashStaging, 'packages', 'dashboard');
+  fixStagedDeps(dashPkgDir, ['styled-jsx'], 'dashboard');
 
   // Verify
   assertExists(
