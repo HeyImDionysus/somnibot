@@ -213,7 +213,9 @@ export function buildEnvVars(
     // V7 Audit §9.8: Use the same password that was written to application.yml.
     // getLavalinkPassword() is the single source of truth — resolves from
     // LAVALINK_PASSWORD env var or a random per-launch hex, and caches the result.
-    LAVALINK_PASSWORD: config.lavalinkEnabled ? getLavalinkPassword() : '',
+    // Always pass a valid password — BotEnvSchema requires min 8 chars even
+    // when Lavalink is disabled (the bot still validates all env vars at startup).
+    LAVALINK_PASSWORD: getLavalinkPassword(),
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',
