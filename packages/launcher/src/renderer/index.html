@@ -75,8 +75,7 @@
           <li>Copy the <strong>Project URL</strong></li>
           <li>Copy the <strong>anon/public key</strong> (publishable key)</li>
           <li>Copy the <strong>service_role key</strong> (secret key)</li>
-          <li>Go to <strong>Settings → Database → Connection string → URI</strong></li>
-          <li>Copy the <strong>Database URL</strong> (needed for table migrations)</li>
+          <li>Go to <strong>Settings → Database</strong> and note your <strong>database password</strong></li>
         </ol>
         <div class="onboarding-actions">
           <button class="btn btn-secondary" id="onboarding-open-supabase">Open Supabase ↗</button>
@@ -191,9 +190,9 @@
             </div>
           </div>
           <div class="field-row password-row">
-            <label for="supabaseDbUrl">Database URL <small>(for migrations)</small></label>
-            <input type="password" id="supabaseDbUrl" placeholder="postgresql://postgres.[ref]:[password]@...pooler.supabase.com:6543/postgres" autocomplete="off" />
-            <button class="toggle-vis" data-target="supabaseDbUrl" title="Show/hide">👁</button>
+            <label for="supabaseDbPassword">Database Password <small>(for migrations)</small></label>
+            <input type="password" id="supabaseDbPassword" placeholder="The password you set when creating the Supabase project" autocomplete="off" />
+            <button class="toggle-vis" data-target="supabaseDbPassword" title="Show/hide">👁</button>
           </div>
         </div>
 
