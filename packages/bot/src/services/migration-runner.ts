@@ -44,9 +44,18 @@ function sha256(content: string): string {
  */
 function findMigrationsDir(): string {
   const candidates = [
+    // Standard monorepo layout (dev or Docker)
     join(process.cwd(), 'packages', 'supabase', 'migrations'),
+    // Relative to bot dist/ (Docker: /app/packages/bot/dist → /app/packages/supabase)
     resolve(__dirname, '..', '..', '..', 'supabase', 'migrations'),
     resolve(__dirname, '..', '..', '..', '..', 'packages', 'supabase', 'migrations'),
+    // Electron packaged app: bot is staged at resources/bot/ and migrations
+    // are copied alongside at resources/supabase/migrations/
+    join(process.cwd(), 'resources', 'supabase', 'migrations'),
+    // Electron asar-unpacked or extraResources: relative to the app root
+    ...(process.resourcesPath
+      ? [join(process.resourcesPath, 'supabase', 'migrations')]
+      : []),
   ];
 
   for (const candidate of candidates) {

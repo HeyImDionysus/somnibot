@@ -38,8 +38,10 @@ export const BotEnvSchema = z.object({
   // ─── Lavalink (auto-configured for Railway) ───
   LAVALINK_HOST: z.string().default('localhost'),
   LAVALINK_PORT: z.coerce.number().default(2333),
-  // V5 Audit §9.P3c: No default — force explicit password to avoid running with a known string.
-  LAVALINK_PASSWORD: z.string().min(8, 'LAVALINK_PASSWORD must be at least 8 characters'),
+  // V5 Audit §9.P3c: When Lavalink is enabled, a strong password should be set.
+  // Default to empty string so the bot can start without Lavalink configured —
+  // the Lavalink client will fail to connect but other features still work.
+  LAVALINK_PASSWORD: z.string().default(''),
 
   // ─── Valkey (auto-configured for Railway) ───
   VALKEY_URL: z.string().default('redis://127.0.0.1:6379'),
