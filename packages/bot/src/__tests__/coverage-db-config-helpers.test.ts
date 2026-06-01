@@ -2,7 +2,7 @@
  * Coverage tests for src/utils/db-helpers.ts and src/config.ts.
  * Targets the ~0.04% gap to reach the 70% statement threshold.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { joinField, joinProp, walletBalance, hasErrorCode } from '../utils/db-helpers.js';
 
 describe('db-helpers', () => {
