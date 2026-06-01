@@ -22,12 +22,11 @@ export const BotEnvSchema = z.object({
 
   // ─── Supabase (user-provided) ───
   SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL'),
-  // New key format (primary)
-  SUPABASE_SECRET_KEY: z.string().optional().default(''),
-  SUPABASE_PUBLISHABLE_KEY: z.string().optional().default(''),
-  // Legacy key format (accepted as fallback)
-  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(''),
-  SUPABASE_ANON_KEY: z.string().optional().default(''),
+  // Set either new or legacy name — transform resolves both.
+  SUPABASE_SECRET_KEY: z.string().min(1).optional(),
+  SUPABASE_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+  SUPABASE_ANON_KEY: z.string().min(1).optional(),
 
   // ─── Supabase Management API (optional, for auto-migration) ───
   SUPABASE_ACCESS_TOKEN: z.string().optional().default(''),
@@ -60,24 +59,22 @@ export const BotEnvSchema = z.object({
   // ─── System ───
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 })
-  .transform((env) => {
-    // Resolve secret key: prefer SUPABASE_SECRET_KEY, fall back to legacy SUPABASE_SERVICE_ROLE_KEY
-    if (!env.SUPABASE_SECRET_KEY && env.SUPABASE_SERVICE_ROLE_KEY) {
-      env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-    }
-    // Resolve publishable key: prefer SUPABASE_PUBLISHABLE_KEY, fall back to legacy SUPABASE_ANON_KEY
-    if (!env.SUPABASE_PUBLISHABLE_KEY && env.SUPABASE_ANON_KEY) {
-      env.SUPABASE_PUBLISHABLE_KEY = env.SUPABASE_ANON_KEY;
-    }
-    // Keep legacy aliases populated for any code that references them
-    if (!env.SUPABASE_SERVICE_ROLE_KEY) env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY;
-    if (!env.SUPABASE_ANON_KEY) env.SUPABASE_ANON_KEY = env.SUPABASE_PUBLISHABLE_KEY;
-    return env;
-  })
   .refine(
-    (env) => !!env.SUPABASE_SECRET_KEY,
-    { message: 'SUPABASE_SECRET_KEY is required (or set the legacy SUPABASE_SERVICE_ROLE_KEY)', path: ['SUPABASE_SECRET_KEY'] },
-  );
+    (env) => !!(env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY),
+    { message: 'Set SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY', path: ['SUPABASE_SECRET_KEY'] },
+  )
+  .transform((env) => {
+    // Resolve aliases — populate both names from whichever was provided.
+    const secret = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const pub = env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '';
+    return {
+      ...env,
+      SUPABASE_SECRET_KEY: secret,
+      SUPABASE_SERVICE_ROLE_KEY: secret,
+      SUPABASE_PUBLISHABLE_KEY: pub,
+      SUPABASE_ANON_KEY: pub,
+    };
+  });
 
 export type BotEnv = z.infer<typeof BotEnvSchema>;
 
@@ -90,9 +87,9 @@ export const DashboardEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_URL: z.string().url('NEXT_PUBLIC_SUPABASE_URL must be a valid URL'),
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().min(1, 'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is required'),
 
-  // Server-only — new format is primary, legacy accepted as fallback
-  SUPABASE_SECRET_KEY: z.string().optional().default(''),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().optional().default(''),
+  // Server-only — set either one (new name or legacy); transform resolves both.
+  SUPABASE_SECRET_KEY: z.string().min(1).optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
   DISCORD_CLIENT_SECRET: z.string().min(1, 'DISCORD_CLIENT_SECRET is required'),
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
   DISCORD_GUILD_ID: z.string().optional().default(''),
@@ -116,13 +113,15 @@ export const DashboardEnvSchema = z.object({
   // Optional
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 })
+  .refine(
+    (env) => !!(env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY),
+    { message: 'Set SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY — admin API routes need a service-role key', path: ['SUPABASE_SECRET_KEY'] },
+  )
   .transform((env) => {
-    // Resolve: prefer new key, fall back to legacy
-    if (!env.SUPABASE_SECRET_KEY && env.SUPABASE_SERVICE_ROLE_KEY) {
-      env.SUPABASE_SECRET_KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-    }
-    if (!env.SUPABASE_SERVICE_ROLE_KEY) env.SUPABASE_SERVICE_ROLE_KEY = env.SUPABASE_SECRET_KEY;
-    return env;
+    // Resolve aliases — whichever is set, populate both so downstream
+    // code can reference either name without checking.
+    const key = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '';
+    return { ...env, SUPABASE_SECRET_KEY: key, SUPABASE_SERVICE_ROLE_KEY: key };
   });
 
 export type DashboardEnv = z.infer<typeof DashboardEnvSchema>;
