@@ -181,11 +181,16 @@ export async function validateSupabase(
   try {
     const trimmedPubKey = publishableKey.trim();
 
-    // Quick format check — Supabase keys are JWTs (eyJ...)
-    if (!trimmedPubKey.startsWith('eyJ')) {
+    // Quick format check — Supabase keys are either:
+    //   - Legacy JWTs starting with "eyJ..."
+    //   - New format starting with "sb_publishable_..." or "sbp_..."
+    const looksLikeKey = trimmedPubKey.startsWith('eyJ')
+      || trimmedPubKey.startsWith('sb_publishable_')
+      || trimmedPubKey.startsWith('sbp_');
+    if (!looksLikeKey) {
       return {
         ok: false,
-        error: 'Supabase Publishable Key doesn\'t look right. It should be the "anon"/"public" key from Supabase → Settings → API. It starts with "eyJ...".',
+        error: 'Supabase Publishable Key doesn\'t look right. It should be the "anon"/"publishable" key from Supabase → Settings → API (starts with "sb_publishable_..." or "eyJ...").',
       };
     }
 
