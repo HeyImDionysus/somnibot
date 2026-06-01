@@ -54,8 +54,8 @@ function findMigrationsDir(): string {
     join(process.cwd(), 'resources', 'supabase', 'migrations'),
     // Electron asar-unpacked or extraResources: process.resourcesPath is
     // set by Electron at runtime but doesn't exist in Node.js typings.
-    ...((process as Record<string, unknown>).resourcesPath
-      ? [join(String((process as Record<string, unknown>).resourcesPath), 'supabase', 'migrations')]
+    ...((process as unknown as Record<string, unknown>).resourcesPath
+      ? [join(String((process as unknown as Record<string, unknown>).resourcesPath), 'supabase', 'migrations')]
       : []),
   ];
 
