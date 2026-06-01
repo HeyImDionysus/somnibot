@@ -52,9 +52,10 @@ function findMigrationsDir(): string {
     // Electron packaged app: bot is staged at resources/bot/ and migrations
     // are copied alongside at resources/supabase/migrations/
     join(process.cwd(), 'resources', 'supabase', 'migrations'),
-    // Electron asar-unpacked or extraResources: relative to the app root
-    ...(process.resourcesPath
-      ? [join(process.resourcesPath, 'supabase', 'migrations')]
+    // Electron asar-unpacked or extraResources: process.resourcesPath is
+    // set by Electron at runtime but doesn't exist in Node.js typings.
+    ...((process as Record<string, unknown>).resourcesPath
+      ? [join(String((process as Record<string, unknown>).resourcesPath), 'supabase', 'migrations')]
       : []),
   ];
 
