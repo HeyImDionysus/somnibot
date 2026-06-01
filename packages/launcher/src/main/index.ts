@@ -162,7 +162,7 @@ function registerIpcHandlers(): void {
       // not the actual value. Supabase operations are handled in the main process.
       supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
       supabasePublishableKey: config.supabasePublishableKey,
-      supabaseDbUrl: config.supabaseDbUrl ? '••••••••' : '',
+      supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
     };
   });
 
@@ -172,7 +172,7 @@ function registerIpcHandlers(): void {
     // back, strip it so the real secret in the config store is preserved.
     const MASK = '••••••••';
     const sanitized = { ...config };
-    for (const key of ['supabaseSecretKey', 'supabaseDbUrl', 'discordToken', 'discordClientSecret'] as const) {
+    for (const key of ['supabaseSecretKey', 'supabaseDbPassword', 'discordToken', 'discordClientSecret'] as const) {
       if (sanitized[key] === MASK) {
         delete sanitized[key];
       }
@@ -233,7 +233,7 @@ function registerIpcHandlers(): void {
       discordClientSecret: config.discordClientSecret,
       discordGuildId: config.discordGuildId,
       supabasePublishableKey: config.supabasePublishableKey,
-      supabaseDbUrl: config.supabaseDbUrl,
+      supabaseDbPassword: config.supabaseDbPassword,
     }).catch(() => {
       // Silent — sync is best-effort
     });

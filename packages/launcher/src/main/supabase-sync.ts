@@ -20,7 +20,7 @@ export interface SyncableCredentials {
   discordClientSecret: string;
   discordGuildId: string;
   supabasePublishableKey: string;
-  supabaseDbUrl: string;
+  supabaseDbPassword: string;
 }
 
 /** Map from SyncableCredentials key → instance_settings row key. */
@@ -30,7 +30,7 @@ const SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
   discordClientSecret: 'discord_client_secret',
   discordGuildId: 'discord_guild_id',
   supabasePublishableKey: 'supabase_publishable_key',
-  supabaseDbUrl: 'supabase_db_url',
+  supabaseDbPassword: 'supabase_db_password',
 };
 
 const SECTION = 'launcher';
@@ -135,7 +135,7 @@ export async function pullFromSupabase(
       discordClientSecret: '',
       discordGuildId: '',
       supabasePublishableKey: '',
-      supabaseDbUrl: '',
+      supabaseDbPassword: '',
     };
 
     for (const row of rows) {

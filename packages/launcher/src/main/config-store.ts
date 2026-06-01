@@ -39,7 +39,7 @@ export interface LauncherConfig {
   supabaseSecretKey: string;
   supabasePublishableKey: string;
   /** Direct Postgres connection URL — required for running DB migrations. */
-  supabaseDbUrl: string;
+  supabaseDbPassword: string;
 
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
@@ -63,7 +63,7 @@ const DEFAULTS: LauncherConfig = {
   supabaseUrl: '',
   supabaseSecretKey: '',
   supabasePublishableKey: '',
-  supabaseDbUrl: '',
+  supabaseDbPassword: '',
   firstRunComplete: false,
   lavalinkEnabled: false,
   lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
@@ -85,7 +85,7 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'discordToken',
   'discordClientSecret',
   'supabaseSecretKey',
-  'supabaseDbUrl',
+  'supabaseDbPassword',
 ]);
 
 /**
@@ -155,7 +155,7 @@ export function getConfig(): LauncherConfig {
     supabaseUrl: store.get('supabaseUrl', ''),
     supabaseSecretKey: getSensitive('supabaseSecretKey'),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
-    supabaseDbUrl: getSensitive('supabaseDbUrl'),
+    supabaseDbPassword: getSensitive('supabaseDbPassword'),
     windowBounds: store.get('windowBounds'),
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
@@ -182,6 +182,19 @@ export function clearConfig(): void {
 /**
  * Build the full env var object for spawning bot + dashboard processes.
  */
+/**
+ * Build SUPABASE_DB_URL env entry from the project URL + database password.
+ * Returns an empty object when either value is missing or the ref can't be extracted.
+ */
+function buildDbUrlEnv(supabaseUrl: string, dbPassword: string): Record<string, string> {
+  if (!dbPassword || !supabaseUrl) return {};
+  const ref = supabaseUrl.match(/https:\/\/([a-z0-9]+)\.supabase\.co/)?.[1];
+  if (!ref) return {};
+  return {
+    SUPABASE_DB_URL: `postgresql://postgres.${ref}:${encodeURIComponent(dbPassword)}@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
+  };
+}
+
 export function buildEnvVars(
   config: LauncherConfig,
   sessionToken: string,
@@ -222,8 +235,9 @@ export function buildEnvVars(
     // when Lavalink is disabled (the bot still validates all env vars at startup).
     LAVALINK_PASSWORD: getLavalinkPassword(),
 
-    // Database — direct Postgres access for migrations
-    ...(config.supabaseDbUrl ? { SUPABASE_DB_URL: config.supabaseDbUrl } : {}),
+    // Database — direct Postgres access for migrations.
+    // Construct the connection URL from the project ref + user-supplied password.
+    ...buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword),
 
     // Valkey defaults
     VALKEY_URL: 'redis://127.0.0.1:6379',
