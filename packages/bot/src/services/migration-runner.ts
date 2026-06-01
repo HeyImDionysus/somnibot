@@ -106,17 +106,15 @@ async function executeSql(
     return { success: false, error: `Management API error (${res.status}): ${errText}` };
   }
 
-  // Strategy 2: Direct DATABASE_URL via postgres package
+  // Strategy 2: Direct connection via postgres package + SUPABASE_DB_URL
   const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
   if (dbUrl) {
     try {
-      const { default: postgres } = await import('postgres' as string).catch(() => ({ default: null }));
-      if (postgres) {
-        const sqlClient = postgres(dbUrl);
-        await sqlClient.unsafe(sql);
-        await sqlClient.end();
-        return { success: true };
-      }
+      const { default: postgres } = await import('postgres');
+      const sqlClient = postgres(dbUrl);
+      await sqlClient.unsafe(sql);
+      await sqlClient.end();
+      return { success: true };
     } catch (err) {
       return { success: false, error: `Direct DB error: ${err}` };
     }
