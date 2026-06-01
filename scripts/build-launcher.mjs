@@ -198,13 +198,18 @@ function getRequiredDeps(pkgJsonPath) {
     const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
     const deps = Object.keys(pkg.dependencies ?? {});
     const peers = Object.keys(pkg.peerDependencies ?? {});
+    const optional = Object.keys(pkg.optionalDependencies ?? {});
     const optionalPeers = new Set(
       Object.entries(pkg.peerDependenciesMeta ?? {})
         .filter(([, meta]) => meta.optional)
         .map(([name]) => name),
     );
     const requiredPeers = peers.filter((p) => !optionalPeers.has(p));
-    return [...new Set([...deps, ...requiredPeers])];
+    // Include optionalDependencies so platform-specific native bindings
+    // (e.g. @napi-rs/canvas-win32-x64-msvc) are detected and copied.
+    // Packages that don't exist in the monorepo for the current platform
+    // will be silently skipped by copyPkgFromMonorepo.
+    return [...new Set([...deps, ...requiredPeers, ...optional])];
   } catch {
     return [];
   }
