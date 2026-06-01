@@ -10,6 +10,7 @@
  * here since each is short (~20-50 lines) and doesn't benefit from extraction.
  */
 
+import { Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
 import type { EscalationStep } from '@somnibot/shared';
@@ -92,7 +93,7 @@ export function registerEvents(client: SomniClient): void {
   });
 
   // ── Ready ──
-  client.once('ready', async (readyClient) => {
+  client.once(Events.ClientReady, async (readyClient) => {
     log.info('Logged in', { tag: readyClient.user.tag, gateway: `${readyClient.ws.ping}ms`, guilds: readyClient.guilds.cache.size });
   });
 

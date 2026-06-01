@@ -266,10 +266,25 @@ export async function startValkey(): Promise<{
   if (process.platform === 'win32') {
     serverBin = getServerBinaryPath();
     if (!fs.existsSync(serverBin)) {
-      const msg = 'Redis server not found. Download it first via Settings.';
-      setStatus('error', msg);
-      broadcastValkeyStatus();
-      return { ok: false, error: msg };
+      // Auto-download Redis on first run (Windows only)
+      console.log('[Valkey] Redis binary not found — downloading automatically...');
+      const dlResult = await downloadValkey((percent, dlMB, totMB) => {
+        if (percent % 25 === 0) {
+          console.log(`[Valkey] Downloading Redis... ${percent}% (${dlMB}/${totMB} MB)`);
+        }
+      });
+      if (!dlResult.ok) {
+        setStatus('error', dlResult.error ?? 'Failed to download Redis');
+        broadcastValkeyStatus();
+        return { ok: false, error: dlResult.error };
+      }
+      // Verify binary exists after download
+      if (!fs.existsSync(serverBin)) {
+        const msg = 'Redis binary missing after download — extraction may have failed';
+        setStatus('error', msg);
+        broadcastValkeyStatus();
+        return { ok: false, error: msg };
+      }
     }
   } else {
     // macOS/Linux — detect system binary

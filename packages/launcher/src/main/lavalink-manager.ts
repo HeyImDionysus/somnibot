@@ -252,10 +252,10 @@ export async function startLavalink(): Promise<{
     return { ok: false, error: javaCheck.error };
   }
 
-  // Ensure config exists
-  if (!fs.existsSync(getConfigPath())) {
-    await writeDefaultConfig();
-  }
+  // Always rewrite application.yml so the password matches getLavalinkPassword().
+  // On re-launch, getLavalinkPassword() generates a new random password, but the
+  // old application.yml still has the previous launch's password → 401 auth failure.
+  await writeDefaultConfig();
 
   setStatus('starting');
   broadcastLavalinkStatus();
