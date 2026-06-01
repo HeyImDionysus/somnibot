@@ -153,6 +153,18 @@ export async function handleWarnCommand(
     return;
   }
 
+  // Role hierarchy check — unlike mute/kick/ban, warn has no Discord API action
+  // to enforce this, so we must check manually.
+  if (member.id === guild.ownerId) {
+    await interaction.editReply('❌ Cannot warn the server owner.');
+    return;
+  }
+  const invoker = await guild.members.fetch(interaction.user.id).catch(() => null);
+  if (invoker && member.roles.highest.position >= invoker.roles.highest.position) {
+    await interaction.editReply('❌ Cannot warn a member with an equal or higher role than yours.');
+    return;
+  }
+
   // Load mod config for escalation and expiry
   const { data: config } = await client.supabase
     .from('guild_config')
