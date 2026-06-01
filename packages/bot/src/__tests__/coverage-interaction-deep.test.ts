@@ -17,6 +17,7 @@ vi.mock('discord.js', () => ({
     addFields() { return this; } setAuthor() { return this; }
   },
   ChannelType: { GuildText: 0 },
+  Events: { ClientReady: 'ready', InteractionCreate: 'interactionCreate', MessageCreate: 'messageCreate' },
   PermissionFlagsBits: { ViewChannel: 1n, SendMessages: 2n, ManageChannels: 4n, ManageRoles: 8n, Administrator: 8n },
   Collection: class extends Map {},
 }));
