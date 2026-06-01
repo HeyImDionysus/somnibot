@@ -1,3 +1,18 @@
+// Provide WebSocket for Node.js < 22 (Electron's bundled Node 20).
+// ws is a transitive dependency from discord.js — we polyfill globalThis.WebSocket
+// so @supabase/realtime-js can find it without requiring the transport option on
+// every createClient() call. This must be the first import to run before any
+// Supabase client is created.
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+if (typeof globalThis.WebSocket === 'undefined') {
+  try {
+    globalThis.WebSocket = _require('ws');
+  } catch {
+    // ws not available — Supabase realtime will error later if needed
+  }
+}
+
 import { loadConfig } from './config.js';
 import { loadConfigFromDatabase, syncConfigToDatabase } from './services/config-loader.js';
 import { SomniClient } from './client.js';
