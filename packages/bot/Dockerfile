@@ -1,12 +1,11 @@
 # ============================================================
 # SomniBot — Bot Dockerfile (multi-stage)
-# Builds the TypeScript bot with pnpm, runs it with Bun
+# Builds the TypeScript bot with pnpm, runs it with Node
 # ============================================================
 
 # --- Stage 1: Install & Build ---
-# FIX #13: Use node:22-slim (glibc) instead of node:22-alpine (musl)
-# to match the glibc-based oven/bun:1-slim runtime. Native addons
-# compiled for musl (e.g. @napi-rs/canvas) crash on glibc runtime.
+# Uses node:22-slim (glibc) — must match the runtime stage base
+# so native addons (e.g. @napi-rs/canvas) are ABI-compatible.
 FROM node:22.16-slim AS builder
 
 WORKDIR /app
@@ -37,7 +36,11 @@ RUN pnpm --filter @somnibot/bot build
 RUN pnpm prune --prod
 
 # --- Stage 2: Production Runtime ---
-FROM oven/bun:1.2-slim AS runtime
+# Uses the same Node base as the builder so pnpm's node_modules layout
+# (symlinks into .pnpm store) resolves correctly and native addons
+# compiled against glibc work without cross-runtime surprises.
+# The bot has no bun-specific API usage — it's pure Node/TypeScript.
+FROM node:22.16-slim AS runtime
 
 WORKDIR /app
 
@@ -79,4 +82,4 @@ ENV HEALTH_PORT=3001
 EXPOSE 3001
 
 # Entry point
-CMD ["bun", "run", "packages/bot/dist/index.js"]
+CMD ["node", "packages/bot/dist/index.js"]
