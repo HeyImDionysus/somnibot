@@ -19,6 +19,7 @@ const fields = {
   supabaseUrl: $('supabaseUrl'),
   supabaseSecretKey: $('supabaseSecretKey'),
   supabasePublishableKey: $('supabasePublishableKey'),
+  supabaseDbUrl: $('supabaseDbUrl'),
 };
 
 const btnStart = $('btn-start');
@@ -599,6 +600,7 @@ function fieldLabel(key) {
     supabaseUrl: 'Supabase URL',
     supabaseSecretKey: 'Secret Key',
     supabasePublishableKey: 'Publishable Key',
+    supabaseDbUrl: 'Database URL',
   };
   return labels[key] || key;
 }
