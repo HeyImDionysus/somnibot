@@ -195,7 +195,7 @@ async function writeDefaultConfig(): Promise<void> {
   const yml = [
     'server:',
     '  port: 2333',
-    '  address: 0.0.0.0',
+    '  address: 127.0.0.1',
     'lavalink:',
     '  server:',
     `    password: "${getLavalinkPassword()}"`,
@@ -262,10 +262,21 @@ export async function startLavalink(): Promise<{
 
   return new Promise((resolve) => {
     const cwd = getLavalinkDir();
+    // Only forward essential system env vars to the Java process.
+    // Mirrors the safeParentEnv() approach used for bot/dashboard —
+    // avoids leaking Discord tokens, Supabase keys, etc. to Lavalink.
+    const safeEnv: Record<string, string> = {};
+    for (const key of [
+      'PATH', 'JAVA_HOME', 'LANG', 'TZ', 'HOME', 'USERPROFILE',
+      'TMPDIR', 'TEMP', 'TMP', 'SystemRoot', 'APPDATA', 'LOCALAPPDATA',
+      'PROGRAMFILES', 'COMSPEC', 'XDG_RUNTIME_DIR',
+    ]) {
+      if (process.env[key]) safeEnv[key] = process.env[key]!;
+    }
     const proc = spawn('java', ['-jar', jarPath], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: safeEnv,
     });
 
     lavalinkProcess = proc;
