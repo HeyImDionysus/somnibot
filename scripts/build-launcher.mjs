@@ -15,7 +15,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,38 +65,139 @@ function formatMB(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/* ── Dependency fixup helper ───────────────────────────────────────── */
+/* ── Dependency fixup helpers ──────────────────────────────────────── */
+
+/** Monorepo paths to search for source packages (in priority order). */
+const MONO_SEARCH = [
+  path.join(ROOT, 'node_modules'),
+  path.join(ROOT, 'packages', 'bot', 'node_modules'),
+  path.join(ROOT, 'packages', 'dashboard', 'node_modules'),
+];
 
 /**
- * Ensures specific packages exist in a staged directory's node_modules.
- * pnpm deploy and Next.js standalone trace can miss transitive or
- * dynamically-loaded deps.  We use npm to install only the missing ones
- * into the flat node_modules so Node's resolver can find them at runtime.
+ * Copies a single package from the monorepo's node_modules into a target
+ * node_modules dir, following pnpm symlinks (dereference: true).
+ * Returns true if successfully copied, false if not found in monorepo.
  */
-function fixStagedDeps(stagingDir, packages, label) {
-  const missing = packages.filter(
-    (pkg) => !existsSync(path.join(stagingDir, 'node_modules', ...pkg.split('/'))),
-  );
-  if (missing.length === 0) {
-    console.log(`   ${label}: all transitive deps present ✓`);
-    return;
-  }
-  console.log(`   ${label}: copying missing deps: ${missing.join(', ')}`);
-  for (const pkg of missing) {
-    // Resolve the real path from the monorepo node_modules (follows pnpm symlinks)
-    const candidates = [
-      path.join(ROOT, 'node_modules', ...pkg.split('/')),
-      path.join(ROOT, 'packages', 'bot', 'node_modules', ...pkg.split('/')),
-      path.join(ROOT, 'packages', 'dashboard', 'node_modules', ...pkg.split('/')),
-    ];
-    const src = candidates.find((c) => existsSync(c));
-    if (!src) {
-      throw new Error(`Cannot find ${pkg} in any node_modules to copy`);
+function copyPkgFromMonorepo(pkgName, targetNodeModules) {
+  for (const searchRoot of MONO_SEARCH) {
+    const src = path.join(searchRoot, ...pkgName.split('/'));
+    if (existsSync(src)) {
+      const dest = path.join(targetNodeModules, ...pkgName.split('/'));
+      ensureDir(path.dirname(dest));
+      cpSync(src, dest, { recursive: true, dereference: true });
+      return true;
     }
-    const dest = path.join(stagingDir, 'node_modules', ...pkg.split('/'));
-    ensureDir(path.dirname(dest));
-    cpSync(src, dest, { recursive: true, dereference: true });
-    console.log(`     ✓ ${pkg}`);
+  }
+  return false;
+}
+
+/**
+ * Lists all package names in a node_modules directory (including scoped).
+ */
+function listInstalledPackages(nodeModulesDir) {
+  if (!existsSync(nodeModulesDir)) return [];
+  const pkgs = [];
+  for (const entry of readdirSync(nodeModulesDir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue;
+    if (entry.name.startsWith('@')) {
+      // Scoped package — read sub-entries
+      const scopeDir = path.join(nodeModulesDir, entry.name);
+      for (const sub of readdirSync(scopeDir, { withFileTypes: true })) {
+        if (sub.isDirectory()) pkgs.push(`${entry.name}/${sub.name}`);
+      }
+    } else if (entry.isDirectory() || entry.isSymbolicLink()) {
+      pkgs.push(entry.name);
+    }
+  }
+  return pkgs;
+}
+
+/**
+ * Reads a package.json and returns its production dependency names
+ * (dependencies + peerDependencies, excluding optional peers).
+ */
+function getRequiredDeps(pkgJsonPath) {
+  try {
+    const pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
+    const deps = Object.keys(pkg.dependencies ?? {});
+    const peers = Object.keys(pkg.peerDependencies ?? {});
+    const optionalPeers = new Set(
+      Object.entries(pkg.peerDependenciesMeta ?? {})
+        .filter(([, meta]) => meta.optional)
+        .map(([name]) => name),
+    );
+    const requiredPeers = peers.filter((p) => !optionalPeers.has(p));
+    return [...new Set([...deps, ...requiredPeers])];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Scans ALL packages in a staged node_modules, collects their declared
+ * dependencies + non-optional peerDependencies, and copies any that are
+ * missing from the monorepo's node_modules.
+ *
+ * Also installs any explicitly listed "extras" (for packages that are
+ * loaded dynamically and don't appear in any package.json deps list).
+ *
+ * Repeats until no new packages are added (transitive closure).
+ */
+function fixAllMissingDeps(stagingDir, extras, label) {
+  const nm = path.join(stagingDir, 'node_modules');
+  if (!existsSync(nm)) return;
+
+  let totalCopied = 0;
+  let pass = 0;
+
+  // First pass: ensure extras are present
+  for (const pkg of extras) {
+    if (!existsSync(path.join(nm, ...pkg.split('/')))) {
+      if (copyPkgFromMonorepo(pkg, nm)) {
+        console.log(`     ✓ ${pkg} (extra)`);
+        totalCopied++;
+      } else {
+        console.warn(`     ⚠ ${pkg} not found in monorepo (skipping)`);
+      }
+    }
+  }
+
+  // Iterative scan: resolve transitive closure
+  while (true) {
+    pass++;
+    const installed = listInstalledPackages(nm);
+    const needed = new Set();
+
+    for (const pkg of installed) {
+      const pkgJson = path.join(nm, ...pkg.split('/'), 'package.json');
+      for (const dep of getRequiredDeps(pkgJson)) {
+        if (!existsSync(path.join(nm, ...dep.split('/')))) {
+          needed.add(dep);
+        }
+      }
+    }
+
+    if (needed.size === 0) break;
+
+    let copiedThisPass = 0;
+    for (const dep of needed) {
+      if (copyPkgFromMonorepo(dep, nm)) {
+        console.log(`     ✓ ${dep}`);
+        copiedThisPass++;
+        totalCopied++;
+      }
+      // If not found in monorepo, it may be an optional/platform dep — skip silently
+    }
+
+    // Safety: if we couldn't copy anything new, stop to avoid infinite loop
+    if (copiedThisPass === 0) break;
+  }
+
+  if (totalCopied === 0) {
+    console.log(`   ${label}: all dependencies present ✓`);
+  } else {
+    console.log(`   ${label}: copied ${totalCopied} missing deps (${pass} pass${pass > 1 ? 'es' : ''})`);
   }
 }
 
@@ -135,18 +236,13 @@ function stageBot() {
   assertExists(path.join(botStaging, 'dist', 'index.js'), 'Bot entry (dist/index.js)');
   assertExists(path.join(botStaging, 'node_modules'), 'Bot node_modules');
 
-  // ── Fix transitive dependencies ──────────────────────────────────
-  // pnpm deploy can miss transitive deps of scoped packages (e.g.
-  // @supabase/supabase-js imports @supabase/functions-js at runtime,
-  // but pnpm's strict isolation doesn't always hoist them).
-  // Use npm to install any missing transitive deps into the flat layout.
-  fixStagedDeps(botStaging, [
-    '@supabase/auth-js',
-    '@supabase/functions-js',
-    '@supabase/postgrest-js',
-    '@supabase/realtime-js',
-    '@supabase/storage-js',
-  ], 'bot');
+  // ── Fix transitive / peer dependencies ──────────────────────────
+  // pnpm deploy --prod can miss transitive deps of scoped packages and
+  // peer deps (e.g. ws is a peer of shoukaku, @supabase/* sub-packages
+  // are transitive deps of @supabase/supabase-js).
+  // Scan all installed packages' declared deps and copy any missing ones
+  // from the monorepo.
+  fixAllMissingDeps(botStaging, [], 'bot');
 
   console.log(`   Bot staged: ${formatMB(dirSize(botStaging))}`);
   console.log('✅ Bot staged successfully');
@@ -192,10 +288,15 @@ function stageDashboard() {
 
   // ── Fix missing traced dependencies ────────────────────────────────
   // Next.js standalone trace misses packages loaded dynamically
-  // (e.g. styled-jsx via require-hook.js). Install them into the
-  // dashboard's node_modules within the staged standalone output.
+  // (e.g. styled-jsx via require-hook.js, @swc/helpers via SWC runtime).
+  // Scan all installed packages and copy any missing deps from the monorepo.
+  // "extras" are packages that aren't declared in any dep list but are
+  // loaded dynamically at runtime.
   const dashPkgDir = path.join(dashStaging, 'packages', 'dashboard');
-  fixStagedDeps(dashPkgDir, ['styled-jsx'], 'dashboard');
+  fixAllMissingDeps(dashPkgDir, ['styled-jsx', '@swc/helpers'], 'dashboard');
+
+  // Also fix root-level node_modules (standalone has two: root + per-package)
+  fixAllMissingDeps(dashStaging, [], 'dashboard-root');
 
   // Verify
   assertExists(
