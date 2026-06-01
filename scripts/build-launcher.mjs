@@ -81,11 +81,23 @@ function fixStagedDeps(stagingDir, packages, label) {
     console.log(`   ${label}: all transitive deps present ✓`);
     return;
   }
-  console.log(`   ${label}: installing missing deps: ${missing.join(', ')}`);
-  run(
-    `npm install ${missing.join(' ')} --no-save --no-package-lock --ignore-scripts`,
-    { cwd: stagingDir },
-  );
+  console.log(`   ${label}: copying missing deps: ${missing.join(', ')}`);
+  for (const pkg of missing) {
+    // Resolve the real path from the monorepo node_modules (follows pnpm symlinks)
+    const candidates = [
+      path.join(ROOT, 'node_modules', ...pkg.split('/')),
+      path.join(ROOT, 'packages', 'bot', 'node_modules', ...pkg.split('/')),
+      path.join(ROOT, 'packages', 'dashboard', 'node_modules', ...pkg.split('/')),
+    ];
+    const src = candidates.find((c) => existsSync(c));
+    if (!src) {
+      throw new Error(`Cannot find ${pkg} in any node_modules to copy`);
+    }
+    const dest = path.join(stagingDir, 'node_modules', ...pkg.split('/'));
+    ensureDir(path.dirname(dest));
+    cpSync(src, dest, { recursive: true, dereference: true });
+    console.log(`     ✓ ${pkg}`);
+  }
 }
 
 /* ── Step 1: Build all packages via Turbo ──────────────────────────── */
