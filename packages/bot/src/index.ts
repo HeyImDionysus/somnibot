@@ -24,7 +24,7 @@ import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer, stopHealthServer } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
-import { EmbedBuilder } from 'discord.js';
+import { EmbedBuilder, Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Boot');
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   startHealthServer(client);
 
   // 6. Post-ready initialization
-  client.once('ready', async () => {
+  client.once(Events.ClientReady, async () => {
     log.info('Discord ready — initializing systems...');
 
     // ── Auto-detect guild ID if not set ──
