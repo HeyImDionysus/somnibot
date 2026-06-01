@@ -15,6 +15,7 @@
 
 import Store from 'electron-store';
 import { safeStorage } from 'electron';
+import { randomBytes } from 'crypto';
 import { getLavalinkPassword } from './lavalink-manager.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
@@ -219,6 +220,13 @@ export function buildEnvVars(
 
     // Dashboard local-mode auth
     SESSION_TOKEN: sessionToken,
+
+    // Security — CSRF protection + session signing.
+    // Generated once per launcher session. Local-mode is CSRF-exempt,
+    // but these are still required so the dashboard env schema validates
+    // and so cloud-deploy settings pages work if configured.
+    CSRF_SECRET: randomBytes(32).toString('hex'),
+    NEXTAUTH_SECRET: randomBytes(32).toString('hex'),
 
     // Dashboard binding
     PORT: '3456',

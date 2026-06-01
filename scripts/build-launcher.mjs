@@ -338,6 +338,20 @@ function stageBot() {
   // from the monorepo.
   fixAllMissingDeps(botStaging, [], 'bot');
 
+  // ── Copy Supabase migrations alongside bot ─────────────────────
+  // The migration-runner looks for migrations via process.resourcesPath.
+  // Stage them at .resources/supabase/migrations/ so electron-builder
+  // picks them up as extraResources.
+  const migrationsSource = path.join(ROOT, 'packages', 'supabase', 'migrations');
+  const migrationsStaging = path.join(STAGING, 'supabase', 'migrations');
+  if (existsSync(migrationsSource)) {
+    mkdirSync(migrationsStaging, { recursive: true });
+    cpSync(migrationsSource, migrationsStaging, { recursive: true });
+    console.log(`   Migrations staged: ${readdirSync(migrationsStaging).length} files`);
+  } else {
+    console.warn('⚠ packages/supabase/migrations not found — skipping migration staging');
+  }
+
   console.log(`   Bot staged: ${formatMB(dirSize(botStaging))}`);
   console.log('✅ Bot staged successfully');
 }

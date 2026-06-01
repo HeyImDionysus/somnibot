@@ -25,6 +25,10 @@ extraResources:
     to: dashboard
     filter:
       - "**/*"
+  - from: .resources/supabase
+    to: supabase
+    filter:
+      - "**/*"
 
 win:
   target:

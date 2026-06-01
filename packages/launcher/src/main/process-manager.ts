@@ -210,6 +210,13 @@ export function getStatus(): StatusUpdate {
 /*  Bot process                                                        */
 /* ------------------------------------------------------------------ */
 
+function getMigrationsDir(): string {
+  if (app.isPackaged) {
+    return path.join(getResourcePath(), 'supabase', 'migrations');
+  }
+  return path.join(getResourcePath(), 'packages', 'supabase', 'migrations');
+}
+
 function startBotProcess(envVars: Record<string, string>): void {
   const entryPath = getBotEntryPath();
   botStatus = 'starting';
@@ -218,7 +225,7 @@ function startBotProcess(envVars: Record<string, string>): void {
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   // Avoids leaking parent-process env (cloud provider secrets, etc.) to children.
   botProcess = fork(entryPath, [], {
-    env: { ...safeParentEnv(), ...envVars },
+    env: { ...safeParentEnv(), ...envVars, MIGRATIONS_DIR: getMigrationsDir() },
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });

@@ -41,12 +41,20 @@ function sha256(content: string): string {
 
 /**
  * Find the migrations directory relative to CWD or known paths.
+ * When launched from the Electron launcher, MIGRATIONS_DIR is set explicitly.
  */
 function findMigrationsDir(): string {
   const candidates = [
+    // Explicit path from launcher or deploy config — always check first
+    ...(process.env.MIGRATIONS_DIR ? [process.env.MIGRATIONS_DIR] : []),
+    // Standard monorepo layout (dev or Docker)
     join(process.cwd(), 'packages', 'supabase', 'migrations'),
+    // Relative to bot dist/ (Docker: /app/packages/bot/dist → /app/packages/supabase)
     resolve(__dirname, '..', '..', '..', 'supabase', 'migrations'),
     resolve(__dirname, '..', '..', '..', '..', 'packages', 'supabase', 'migrations'),
+    // Electron packaged app: bot is staged at resources/bot/ and migrations
+    // are copied alongside at resources/supabase/migrations/
+    join(process.cwd(), 'resources', 'supabase', 'migrations'),
   ];
 
   for (const candidate of candidates) {

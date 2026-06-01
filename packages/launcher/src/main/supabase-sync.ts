@@ -23,9 +23,15 @@ export interface SyncableCredentials {
   supabaseDbPassword: string;
 }
 
-/** Map from SyncableCredentials key → instance_settings row key. */
+/** Map from SyncableCredentials key → instance_settings row key.
+ *
+ * These keys must match what the bot's config-loader reads from
+ * instance_settings (SETTINGS_TO_ENV in config-loader.ts). The bot
+ * expects `discord_bot_token` (not `discord_token`), so we use that
+ * here to ensure the launcher → DB → bot flow works on fresh starts.
+ */
 const SETTINGS_MAP: Record<keyof SyncableCredentials, string> = {
-  discordToken: 'discord_token',
+  discordToken: 'discord_bot_token',
   discordApplicationId: 'discord_application_id',
   discordClientSecret: 'discord_client_secret',
   discordGuildId: 'discord_guild_id',
