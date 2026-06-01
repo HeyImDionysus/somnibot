@@ -77,6 +77,34 @@ async function main(): Promise<void> {
   const config = loadConfig();
   log.info('Environment loaded', { env: config.NODE_ENV, guild: config.DISCORD_GUILD_ID || '(auto-detect)' });
 
+  // 1.5. Verify Supabase is reachable before proceeding
+  // Without Supabase, every feature (commands, config, heartbeat, deploy) fails
+  // individually with cryptic errors. Fail fast with a clear message instead.
+  try {
+    const healthRes = await fetch(`${config.SUPABASE_URL}/rest/v1/`, {
+      method: 'HEAD',
+      headers: {
+        apikey: config.SUPABASE_SECRET_KEY,
+        Authorization: `Bearer ${config.SUPABASE_SECRET_KEY}`,
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!healthRes.ok) {
+      log.error(
+        `Supabase returned ${healthRes.status} — check SUPABASE_URL and SUPABASE_SECRET_KEY`,
+      );
+      process.exit(1);
+    }
+    log.info('Supabase reachable');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`Cannot reach Supabase at ${config.SUPABASE_URL}: ${msg}`);
+    log.error(
+      'The bot requires a working Supabase connection. Verify your SUPABASE_URL and network, then restart.',
+    );
+    process.exit(1);
+  }
+
   // 2. Connect Valkey
   try {
     await connectValkey();

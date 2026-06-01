@@ -43,6 +43,11 @@ const SAFE_PARENT_ENV_KEYS = [
   'SHELL',
   'XDG_RUNTIME_DIR',
   'XDG_CONFIG_HOME',
+  // Platform-specific library paths — required for native modules
+  // (@napi-rs/canvas, sharp, etc.) that load shared libraries at runtime.
+  'LD_LIBRARY_PATH',           // Linux
+  'DYLD_LIBRARY_PATH',         // macOS
+  'DYLD_FALLBACK_LIBRARY_PATH', // macOS fallback
 ] as const;
 
 function safeParentEnv(): Record<string, string> {
