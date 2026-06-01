@@ -73,5 +73,10 @@ USER somni
 
 ENV NODE_ENV=production
 
+# Health server binds to HEALTH_PORT, PORT (Railway), or 3001.
+# In Docker standalone, default to 3001 so the port is predictable.
+ENV HEALTH_PORT=3001
+EXPOSE 3001
+
 # Entry point
 CMD ["bun", "run", "packages/bot/dist/index.js"]

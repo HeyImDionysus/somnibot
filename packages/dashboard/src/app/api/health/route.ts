@@ -14,6 +14,11 @@ import { checkValkeyHealth } from '@/lib/api/rate-limit';
 export async function GET() {
   const valkeyUp = await checkValkeyHealth();
 
+  // Always return 200 — the dashboard is functional without Valkey (falls back
+  // to in-memory rate limiting). Returning 503 when Valkey is down causes
+  // Railway/Vercel to restart the container, which doesn't fix Valkey and just
+  // creates a restart loop. The 'degraded' status field lets monitors alert
+  // without triggering platform-level restarts.
   return NextResponse.json(
     {
       status: valkeyUp ? 'healthy' : 'degraded',
@@ -22,6 +27,6 @@ export async function GET() {
       },
       timestamp: new Date().toISOString(),
     },
-    { status: valkeyUp ? 200 : 503 },
+    { status: 200 },
   );
 }
