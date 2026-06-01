@@ -95,4 +95,43 @@ describe('config', () => {
     const { getConfig } = await import('../config.js');
     expect(() => getConfig()).toThrow('Config not loaded');
   });
+
+  it('loadConfig succeeds with valid env vars and getConfig returns the result', async () => {
+    // Set required env vars before importing
+    process.env.DISCORD_TOKEN = 'test-token-for-config';
+    process.env.DISCORD_APPLICATION_ID = '123456789012345678';
+    process.env.DISCORD_CLIENT_SECRET = 'test-client-secret';
+    process.env.SUPABASE_URL = 'https://test-project.supabase.co';
+    process.env.SUPABASE_SECRET_KEY = 'eyJ-test-secret-key';
+
+    const { loadConfig, getConfig } = await import('../config.js');
+    const config = loadConfig();
+    expect(config).toBeDefined();
+    expect(config.DISCORD_TOKEN).toBe('test-token-for-config');
+    expect(config.SUPABASE_URL).toBe('https://test-project.supabase.co');
+
+    // Calling again returns cached result
+    const config2 = loadConfig();
+    expect(config2).toBe(config);
+
+    // getConfig now works
+    const config3 = getConfig();
+    expect(config3).toBe(config);
+
+    // Cleanup
+    delete process.env.DISCORD_TOKEN;
+    delete process.env.DISCORD_APPLICATION_ID;
+    delete process.env.DISCORD_CLIENT_SECRET;
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SECRET_KEY;
+  });
+
+  it('loadConfig exits on invalid env', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    // Don't set any env vars — validation should fail
+    const { loadConfig } = await import('../config.js');
+    loadConfig();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    exitSpy.mockRestore();
+  });
 });
