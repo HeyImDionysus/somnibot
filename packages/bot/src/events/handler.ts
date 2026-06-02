@@ -378,6 +378,39 @@ export function registerEvents(client: SomniClient): void {
     }
   }, 30 * 60 * 1000));
 
+  // Temp role grant expiry sweep (every 15 min)
+  // Audit Finding #3: temp_role_grants rows have expires_at but were never swept.
+  cronHandles.push(setInterval(async () => {
+    try {
+      const { data: expired } = await client.supabase
+        .from('temp_role_grants')
+        .select('id, guild_id, user_id, role_id')
+        .lt('expires_at', new Date().toISOString())
+        .limit(200);
+
+      if (!expired || expired.length === 0) return;
+
+      for (const grant of expired) {
+        try {
+          const guild = client.guilds.cache.get(grant.guild_id);
+          if (guild) {
+            const member = await guild.members.fetch(grant.user_id).catch(() => null);
+            if (member && member.roles.cache.has(grant.role_id)) {
+              await member.roles.remove(grant.role_id, 'SomniBot — temporary role expired');
+            }
+          }
+          await client.supabase.from('temp_role_grants').delete().eq('id', grant.id);
+        } catch (err) {
+          log.error('Temp role expiry failed for grant', { grantId: grant.id, error: String(err) });
+        }
+      }
+
+      log.info(`Temp role sweep: expired ${expired.length} grant(s)`);
+    } catch (err) {
+      log.error('Temp role expiry sweep error', { error: String(err) });
+    }
+  }, 15 * 60 * 1000));
+
   // Data retention prune (every 6 hours)
   // V5 Audit §14.P3b: Iterate guilds and prune each individually so a failure
   // in one guild doesn't block cleanup for others, and so the single RPC call

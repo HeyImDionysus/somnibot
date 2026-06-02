@@ -221,8 +221,9 @@ export async function writeGuildSnapshot(
         })),
       }));
     }
-  } catch {
-    // Guild may not have onboarding configured — that's fine
+  } catch (err) {
+    // Guild may not have onboarding configured — that's expected and fine
+    log.debug('Onboarding fetch skipped (not configured or no access)', { error: String(err) });
   }
 
   // ── Members (for MemberPicker and useDiscordNames in dashboard) ──

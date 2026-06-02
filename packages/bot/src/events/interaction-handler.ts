@@ -260,8 +260,9 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
         await interaction.reply({ content: '❌ An error occurred.', ephemeral: true });
       }
-    } catch {
-      // Ignore reply failures
+    } catch (replyErr) {
+      // Error handler's own reply failed — nothing more we can do
+      log.debug('Error reply itself failed', { error: String(replyErr) });
     }
   }
 }

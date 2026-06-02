@@ -315,7 +315,9 @@ export async function processAntiRaid(
           await guild.setVerificationLevel(level, 'Anti-raid lockdown ended: restoring verification level');
           log.info(`Lockdown ended: restored verification to ${level} for guild ${guild.id}`);
         }
-        await valkey.del(prevLevelKey).catch(() => {});
+        await valkey.del(prevLevelKey).catch((err) => {
+          log.debug('Failed to delete anti-raid prev level key', { key: prevLevelKey, error: String(err) });
+        });
 
         // Restore invites that were paused (stored before deletion) during lockdown
         await restoreLockdownInvites(guild, config).catch((err) => {

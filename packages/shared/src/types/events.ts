@@ -237,6 +237,57 @@ export interface EntitlementRevokedData {
 }
 
 
+// ── Automation & Webhook Audit Events ──────────────────────
+// Required by AuditService EVENT_TO_AUDIT mappings (Finding #4).
+
+export interface AutomationExecutedData {
+  automationId: string;
+  automationName: string;
+  trigger: string;
+  actionsExecuted: number;
+  actionsFailed: number;
+  success: boolean;
+  duration: number;
+  executionId?: string;
+}
+
+export interface AutomationCreatedData {
+  automationId: string;
+  automationName: string;
+  trigger: string;
+  createdBy: string;
+  enabled: boolean;
+  actionCount: number;
+}
+
+export interface AutomationUpdatedData {
+  automationId: string;
+  automationName: string;
+  updatedBy: string;
+  before?: Record<string, unknown>;
+  after?: Record<string, unknown>;
+}
+
+export interface AutomationDeletedData {
+  automationId: string;
+  automationName: string;
+  deletedBy: string;
+}
+
+export interface WebhookReceivedData {
+  eventId: string;
+  eventType: string;
+  provider: string;
+  result: string;
+}
+
+export interface WebhookReplayedData {
+  eventId: string;
+  eventType: string;
+  replayedBy: string;
+  replayCount: number;
+}
+
 // ── Owner Notification Event Types ─────────────────────────
 // These events power the OwnerNotificationService (DMs to guild owner).
 
@@ -317,6 +368,12 @@ export interface PlatformEventMap {
   'fraud.detected': FraudDetectedData;
   'incident.created': IncidentCreatedData;
   'payment.failed': PaymentFailedData;
+  'automation.executed': AutomationExecutedData;
+  'automation.created': AutomationCreatedData;
+  'automation.updated': AutomationUpdatedData;
+  'automation.deleted': AutomationDeletedData;
+  'webhook.received': WebhookReceivedData;
+  'webhook.replayed': WebhookReplayedData;
 }
 
 export type PlatformEventType = keyof PlatformEventMap;

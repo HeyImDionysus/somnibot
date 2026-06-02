@@ -131,6 +131,25 @@ export async function POST(req: NextRequest) {
         .eq('event_id', eventId);
     }
 
+    // Emit webhook.received audit event via bot action queue (Finding #4)
+    const guildId = process.env.DISCORD_GUILD_ID;
+    if (guildId && eventId) {
+      await supabase.from('bot_action_queue').insert({
+        guild_id: guildId,
+        action: 'emit_audit_event',
+        payload: {
+          event_type: 'webhook.received',
+          event_data: {
+            eventId,
+            eventType: event.event_type,
+            provider: 'paypal',
+            result: 'success',
+          },
+        },
+        status: 'pending',
+      }).then(null, () => { /* non-blocking */ });
+    }
+
     return NextResponse.json({ status: 'ok' }, { status: 200 });
   } catch (err) {
     console.error(`[Webhook] Error processing ${event.event_type}:`, err);

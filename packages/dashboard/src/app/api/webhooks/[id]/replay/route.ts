@@ -130,6 +130,25 @@ export async function POST(
     }
     // Note: the webhook handler itself updates result on success
 
+    // Emit webhook.replayed audit event via bot action queue (Finding #4)
+    const envGuildId = process.env.DISCORD_GUILD_ID;
+    if (envGuildId) {
+      await supabase.from('bot_action_queue').insert({
+        guild_id: envGuildId,
+        action: 'emit_audit_event',
+        payload: {
+          event_type: 'webhook.replayed',
+          event_data: {
+            eventId: id,
+            eventType: event.event_type ?? 'unknown',
+            replayedBy: auth.ctx.discordId,
+            replayCount: (event.replay_count ?? 0) + 1,
+          },
+        },
+        status: 'pending',
+      }).then(null, () => { /* non-blocking */ });
+    }
+
     return NextResponse.json({ success, replayed: true });
   } catch (err) {
     await supabase
