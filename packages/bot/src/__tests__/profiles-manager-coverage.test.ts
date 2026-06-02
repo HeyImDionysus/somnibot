@@ -107,7 +107,7 @@ describe('ProfilesManager', () => {
     });
 
     it('register and invalidate', () => {
-      registerProfilesManager(mgr);
+      registerProfilesManager(mgr, 'test-guild-id');
       invalidateProfilesCache();
     });
   });

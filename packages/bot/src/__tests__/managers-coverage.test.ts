@@ -203,13 +203,13 @@ describe('AdventureManager', () => {
 
   it('register + get pattern works', () => {
     const mgr = new AdventureManager(makeGuild(), makeSupabase(), makeValkey());
-    registerAdventureManager(mgr);
+    registerAdventureManager(mgr, 'test-guild-id');
     expect(getAdventureManager()).toBe(mgr);
   });
 
   it('invalidateCache does not throw', () => {
     const mgr = new AdventureManager(makeGuild(), makeSupabase(), makeValkey());
-    registerAdventureManager(mgr);
+    registerAdventureManager(mgr, 'test-guild-id');
     invalidateAdventureCache();
     expect(mgr).toBeDefined();
   });
@@ -223,7 +223,7 @@ describe('GamesManager', () => {
 
   it('register + invalidate works', () => {
     const mgr = new GamesManager(makeSupabase());
-    registerGamesManager(mgr);
+    registerGamesManager(mgr, 'test-guild-id');
     invalidateGamesCache();
     expect(mgr).toBeDefined();
   });
@@ -237,13 +237,13 @@ describe('HeistManager', () => {
 
   it('register + get pattern works', () => {
     const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
-    registerHeistManager(mgr);
+    registerHeistManager(mgr, 'test-guild-id');
     expect(getHeistManager()).toBe(mgr);
   });
 
   it('invalidateCache does not throw', () => {
     const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
-    registerHeistManager(mgr);
+    registerHeistManager(mgr, 'test-guild-id');
     invalidateHeistCache();
     expect(mgr).toBeDefined();
   });

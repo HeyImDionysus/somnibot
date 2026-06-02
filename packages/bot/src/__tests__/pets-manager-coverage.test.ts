@@ -129,7 +129,7 @@ describe('PetsManager', () => {
     });
 
     it('register and invalidate', () => {
-      registerPetsManager(mgr);
+      registerPetsManager(mgr, 'test-guild-id');
       invalidatePetsCache();
     });
   });

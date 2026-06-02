@@ -97,7 +97,7 @@ describe('LotteryManager', () => {
     });
 
     it('register and invalidate', () => {
-      registerLotteryManager(mgr);
+      registerLotteryManager(mgr, 'test-guild-id');
       invalidateLotteryCache();
     });
   });

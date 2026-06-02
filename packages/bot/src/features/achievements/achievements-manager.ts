@@ -19,7 +19,7 @@ export function invalidateAchievementsCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();
   } else {
-    for (const mgr of _managers.values()) mgr.clearCache();
+    for (const mgr of _managers.values()) mgr?.clearCache();
   }
 }
 

@@ -34,7 +34,7 @@ export function invalidateHeistCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();
   } else {
-    for (const mgr of _managers.values()) mgr.clearCache();
+    for (const mgr of _managers.values()) mgr?.clearCache();
   }
 }
 export function getHeistManager(guildId?: string): HeistManager | null {

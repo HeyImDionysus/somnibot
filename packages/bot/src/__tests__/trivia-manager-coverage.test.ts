@@ -126,7 +126,7 @@ describe('registerTriviaManager & invalidateTriviaCache', () => {
     const supabase = makeSupabase();
     const valkey = makeValkey();
     const mgr = new TriviaManager(supabase as any, valkey as any);
-    registerTriviaManager(mgr);
+    registerTriviaManager(mgr, 'test-guild-id');
     invalidateTriviaCache(); // Should clear cache without error
   });
 });

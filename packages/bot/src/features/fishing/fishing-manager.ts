@@ -119,7 +119,7 @@ export function invalidateFishingCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateCache();
   } else {
-    for (const mgr of _managers.values()) mgr.invalidateCache();
+    for (const mgr of _managers.values()) mgr?.invalidateCache();
   }
 }
 

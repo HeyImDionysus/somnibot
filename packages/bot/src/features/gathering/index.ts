@@ -20,6 +20,6 @@ export function invalidateGatheringCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateConfig();
   } else {
-    for (const mgr of _managers.values()) mgr.invalidateConfig();
+    for (const mgr of _managers.values()) mgr?.invalidateConfig();
   }
 }

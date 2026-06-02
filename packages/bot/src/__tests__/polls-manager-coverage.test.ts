@@ -117,7 +117,7 @@ describe('registerPollsManager & invalidatePollsCache', () => {
   it('registers and invalidates', () => {
     const supabase = makeSupabase();
     const mgr = new PollsManager(supabase as any);
-    registerPollsManager(mgr);
+    registerPollsManager(mgr, 'test-guild-id');
     invalidatePollsCache();
     // Should not throw
   });

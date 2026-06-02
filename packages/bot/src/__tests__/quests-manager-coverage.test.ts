@@ -86,7 +86,7 @@ describe('QuestsManager', () => {
     it('clearCache works', () => { mgr.clearCache(); });
 
     it('register and invalidate', () => {
-      registerQuestsManager(mgr);
+      registerQuestsManager(mgr, 'test-guild-id');
       invalidateQuestsCache();
       expect(getQuestsManager()).toBe(mgr);
     });
