@@ -188,17 +188,17 @@ export async function PUT(request: NextRequest) {
 
     const admin = createAdminSupabase();
 
-    for (const [key, value] of Object.entries(values)) {
-      // Skip masked values (user didn't change them)
-      if (value.includes('••••')) continue;
-      if (!value.trim()) continue;
+    // V10 Audit §6: Batch all upserts into a single operation to avoid
+    // sequential timing that leaks info about which keys were skipped.
+    const now = new Date().toISOString();
+    const upsertRows = Object.entries(values)
+      .filter(([, value]) => !value.includes('••••') && value.trim() !== '')
+      .map(([key, value]) => ({ key, value, section, updated_at: now }));
 
+    if (upsertRows.length > 0) {
       await admin
         .from('instance_settings')
-        .upsert(
-          { key, value, section, updated_at: new Date().toISOString() },
-          { onConflict: 'key' },
-        );
+        .upsert(upsertRows, { onConflict: 'key' });
     }
 
     await notifyBot('settings', { section });

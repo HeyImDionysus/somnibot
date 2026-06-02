@@ -33,9 +33,26 @@ export function getValkey(): Valkey {
 
 /**
  * Initialize Valkey connection.
+ *
+ * V10 Audit §13: Catches NOAUTH errors from password mismatches and logs
+ * a clear message pointing to VALKEY_URL configuration.
  */
 export async function connectValkey(): Promise<void> {
   const client = getValkey();
-  await client.connect();
-  log.info('Ready');
+  try {
+    await client.connect();
+    log.info('Ready');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('NOAUTH') || msg.includes('Authentication required')) {
+      log.error(
+        'Valkey authentication failed (NOAUTH). ' +
+        'Check that VALKEY_URL includes the correct password ' +
+        '(e.g., redis://:yourpassword@localhost:6379). ' +
+        'If Valkey is configured with --requirepass in docker-compose.yml, ' +
+        'the password in VALKEY_URL must match.',
+      );
+    }
+    throw err;
+  }
 }

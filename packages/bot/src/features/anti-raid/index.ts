@@ -98,9 +98,14 @@ const _memoryRaidBanned = new Map<string, Set<string>>();
  * Without this, guilds that joined once and never again hold entries forever.
  * Runs every 5 minutes. Removes guilds whose join window data is entirely expired
  * and whose raid mode has cooled down.
+ *
+ * V10 Audit §1: Lifecycle-managed via start/stop so the interval can be
+ * cleaned up during guild context destruction and in tests.
  */
 const MEMORY_PRUNE_INTERVAL = 5 * 60_000;
-setInterval(() => {
+let _pruneInterval: ReturnType<typeof setInterval> | null = null;
+
+function pruneStaleMemoryEntries(): void {
   const now = Date.now();
   // Prune join windows: remove guilds with no timestamps in the last 10 minutes
   // (any reasonable window is < 60s, so 10min is extremely conservative)
@@ -120,7 +125,22 @@ setInterval(() => {
       _memoryRaidBanned.delete(guildId);
     }
   }
-}, MEMORY_PRUNE_INTERVAL).unref();
+}
+
+/** Start the periodic memory pruner. Idempotent — safe to call multiple times. */
+export function startAntiRaidPruner(): void {
+  if (_pruneInterval) return;
+  _pruneInterval = setInterval(pruneStaleMemoryEntries, MEMORY_PRUNE_INTERVAL);
+  _pruneInterval.unref();
+}
+
+/** Stop the periodic memory pruner. Idempotent. */
+export function stopAntiRaidPruner(): void {
+  if (_pruneInterval) {
+    clearInterval(_pruneInterval);
+    _pruneInterval = null;
+  }
+}
 
 async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();

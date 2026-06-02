@@ -224,42 +224,16 @@ export async function processMessageXp(
     return { granted: false, newXp: 0, oldLevel: 0, newLevel: 0, leveledUp: false };
   }
 
-  // Fallback: RPC returned null (should not happen if migration is applied)
+  // V10 Audit §3: Fail-fast if RPC returns null. The previous non-atomic
+  // fallback (read → compute → upsert) could race message XP vs voice XP
+  // and silently lose XP. If the RPC is missing, migrations must be applied.
   if (!result) {
-    log.warn('increment_member_xp returned null — applying non-atomic fallback');
-    const { data: existing } = await supabase
-      .from('member_levels')
-      .select('xp, level, total_messages')
-      .eq('guild_id', guildId)
-      .eq('member_id', userId)
-      .maybeSingle();
-
-    const oldXp = existing?.xp ?? 0;
-    const oldLevel = existing?.level ?? 0;
-    const oldMessages = existing?.total_messages ?? 0;
-    const newXp = oldXp + xpAmount;
-    const newLevel = calculateLevel(newXp);
-
-    await supabase.from('member_levels').upsert(
-      {
-        guild_id: guildId,
-        member_id: userId,
-        xp: newXp,
-        level: newLevel,
-        total_messages: oldMessages + 1,
-        last_xp_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'guild_id,member_id' },
+    log.error(
+      'increment_member_xp RPC returned null — migration not applied. ' +
+      'Run migrations to add the increment_member_xp function. ' +
+      'Refusing non-atomic fallback to prevent XP race conditions.',
     );
-
-    return {
-      granted: true,
-      newXp,
-      oldLevel,
-      newLevel,
-      leveledUp: newLevel > oldLevel,
-    };
+    return { granted: false, newXp: 0, oldLevel: 0, newLevel: 0, leveledUp: false };
   }
 
   const newXp = result.new_xp;
@@ -314,42 +288,13 @@ export async function grantVoiceXp(
     return { granted: false };
   }
 
-  // Fallback: RPC returned null (should not happen if migration is applied)
+  // V10 Audit §3: Same fail-fast guard as message XP above.
   if (!result) {
-    log.warn('increment_member_xp returned null (voice) — applying non-atomic fallback');
-    const { data: existing } = await supabase
-      .from('member_levels')
-      .select('xp, level, voice_minutes')
-      .eq('guild_id', guildId)
-      .eq('member_id', userId)
-      .maybeSingle();
-
-    const oldXp = existing?.xp ?? 0;
-    const oldLevel = existing?.level ?? 0;
-    const oldVoiceMinutes = existing?.voice_minutes ?? 0;
-    const newXp = oldXp + xpAmount;
-    const newLevel = calculateLevel(newXp);
-
-    await supabase.from('member_levels').upsert(
-      {
-        guild_id: guildId,
-        member_id: userId,
-        xp: newXp,
-        level: newLevel,
-        voice_minutes: oldVoiceMinutes + config.voice_xp_interval_minutes,
-        last_xp_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'guild_id,member_id' },
+    log.error(
+      'increment_member_xp RPC returned null (voice) — migration not applied. ' +
+      'Run migrations to add the increment_member_xp function.',
     );
-
-    return {
-      granted: true,
-      newXp,
-      oldLevel,
-      newLevel,
-      leveledUp: newLevel > oldLevel,
-    };
+    return { granted: false };
   }
 
   const newXp = result.new_xp;

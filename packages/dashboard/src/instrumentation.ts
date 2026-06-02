@@ -11,6 +11,24 @@
 export async function register() {
   // Only validate on the server (not during edge middleware or client build)
   if (process.env.NEXT_RUNTIME === 'nodejs') {
+    // V10 Audit §12: Read SESSION_TOKEN from a temp file instead of env.
+    // The launcher writes the token to a file with 0600 perms and passes
+    // the path via SESSION_TOKEN_FILE. This avoids exposing the token in
+    // /proc/<pid>/environ on Linux.
+    if (process.env.SESSION_TOKEN_FILE && !process.env.SESSION_TOKEN) {
+      try {
+        const { readFileSync, unlinkSync } = await import('node:fs');
+        const token = readFileSync(process.env.SESSION_TOKEN_FILE, 'utf-8').trim();
+        if (token) {
+          process.env.SESSION_TOKEN = token;
+        }
+        // Delete the file after reading — single-use
+        try { unlinkSync(process.env.SESSION_TOKEN_FILE); } catch { /* may already be gone */ }
+      } catch {
+        console.warn('⚠ SESSION_TOKEN_FILE set but could not be read.');
+      }
+    }
+
     const { DashboardEnvSchema } = await import('@somnibot/shared');
 
     const result = DashboardEnvSchema.safeParse(process.env);

@@ -212,17 +212,17 @@ describe('processMessageXp', () => {
     expect(result.newXp).toBe(125);
   });
 
-  it('falls back to upsert when RPC returns null', async () => {
+  it('returns granted:false when RPC returns null (fail-fast, no fallback)', async () => {
+    // V10 Audit §3: Non-atomic fallback was removed to prevent XP race conditions.
+    // When the RPC is missing (null return), the function now fails fast.
     const supabase = makeSupabase({
       guild_config: { data: { levels_enabled: true, xp_channel_list: [], no_xp_role_id: null }, error: null },
       xp_multipliers: { data: [], error: null },
-      member_levels: { data: { xp: 50, level: 0, total_messages: 10 }, error: null },
     });
     supabase.rpc.mockResolvedValue({ data: null, error: null });
     const valkey = makeValkey();
     const result = await processMessageXp(makeMessage() as any, supabase as any, valkey as any, 'g1');
-    expect(result.granted).toBe(true);
-    expect(result.newXp).toBe(75); // 50 + 25
+    expect(result.granted).toBe(false);
   });
 
   it('returns false on RPC error', async () => {
@@ -328,16 +328,15 @@ describe('grantVoiceXp', () => {
     expect(result.newXp).toBe(60);
   });
 
-  it('falls back when RPC returns null', async () => {
+  it('returns granted:false when RPC returns null (fail-fast, no fallback)', async () => {
+    // V10 Audit §3: Non-atomic fallback was removed to prevent XP race conditions.
     const supabase = makeSupabase({
       guild_config: { data: { levels_enabled: true, voice_xp_enabled: true, no_xp_role_id: null }, error: null },
       xp_multipliers: { data: [], error: null },
-      member_levels: { data: { xp: 100, level: 1, voice_minutes: 30 }, error: null },
     });
     supabase.rpc.mockResolvedValue({ data: null, error: null });
     const result = await grantVoiceXp(supabase as any, makeValkey() as any, 'g1', 'u1', [], 10);
-    expect(result.granted).toBe(true);
-    expect(result.newXp).toBe(110);
+    expect(result.granted).toBe(false);
   });
 
   it('returns false on RPC error', async () => {

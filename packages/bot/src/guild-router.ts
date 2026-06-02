@@ -75,12 +75,18 @@ export class GuildRouter {
     if (pending) return pending;
 
     // Start initialization with timeout guard (V5 Audit P3-6)
+    // V10 Audit §4: The `.catch` eviction on the stored promise is defense-in-depth.
+    // If any code path awaits the promise directly from the Map (bypassing the
+    // try/finally below), the rejected promise still self-cleans from the Map.
     const promise = Promise.race([
       this.initContext(guildId),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`Guild ${guildId} init timed out after ${INIT_TIMEOUT_MS}ms`)), INIT_TIMEOUT_MS),
       ),
-    ]);
+    ]).catch((err) => {
+      this.initializing.delete(guildId);
+      throw err;
+    });
     this.initializing.set(guildId, promise);
 
     try {
