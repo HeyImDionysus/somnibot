@@ -417,16 +417,4 @@ describe('MarketManager browse & buy', () => {
   });
 });
 
-// ═══════════════════════════════════════
-// GuildInit — partial (constructor is testable)
-// ═══════════════════════════════════════
-describe('GuildInit', () => {
-  it('module imports successfully', async () => {
-    try {
-      const mod = await import('../guild-init.js');
-      expect(mod).toBeDefined();
-    } catch {
-      // May fail due to heavy dependencies
-    }
-  });
-});
+

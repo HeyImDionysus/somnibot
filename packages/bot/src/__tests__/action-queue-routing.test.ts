@@ -224,7 +224,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // no crash, action marked as failed
   });
 
@@ -297,7 +297,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // config_reload calls various cache invalidation - no crash = success
   });
 
@@ -335,7 +335,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // writeGuildSnapshot is mocked - no crash = success
   });
 
@@ -348,7 +348,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // unknown action should be marked as failed
   });
 
@@ -403,7 +403,7 @@ describe('action-queue deep routing', () => {
       return { data: null, error: null };
     });
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // Should attempt to write DLQ entry for stale-1 and re-process stale-2
   });
 
@@ -417,7 +417,7 @@ describe('action-queue deep routing', () => {
       return { data: null, error: null };
     });
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // Should log error and continue
   });
 
@@ -450,7 +450,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // runSyncCycle is mocked
   });
 
@@ -463,7 +463,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // marketplace reconcile runs
   });
 
@@ -476,7 +476,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // fulfillPurchase is mocked
   });
 
@@ -489,7 +489,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // test welcome message sending
   });
 
@@ -509,7 +509,7 @@ describe('action-queue deep routing', () => {
     const guild = makeGuild();
     const supa = makeSupa([]);
     await startActionQueueListener(guild, supa);
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // should just subscribe to realtime without processing
   });
 
@@ -544,7 +544,7 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
     // Non-transient errors (Unknown action) should NOT schedule retry —
     // they should go straight to 'failed' status
-    expect(true).toBe(true); // exercises the !isTransient branch
+    expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
   });
 
   it('processes multiple pending actions in order', async () => {

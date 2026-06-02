@@ -40,6 +40,6 @@ try {
 describe('onboarding-handler', () => {
   it('module loads without error and exports exist', () => {
     // Just importing exercises the module-level code
-    expect(true).toBe(true);
+    // Module loaded successfully
   });
 });

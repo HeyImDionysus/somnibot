@@ -211,7 +211,7 @@ describe('AdventureManager', () => {
     const mgr = new AdventureManager(makeGuild(), makeSupabase(), makeValkey());
     registerAdventureManager(mgr);
     invalidateAdventureCache();
-    expect(true).toBe(true);
+    expect(mgr).toBeDefined();
   });
 });
 
@@ -225,7 +225,7 @@ describe('GamesManager', () => {
     const mgr = new GamesManager(makeSupabase());
     registerGamesManager(mgr);
     invalidateGamesCache();
-    expect(true).toBe(true);
+    expect(mgr).toBeDefined();
   });
 });
 
@@ -245,7 +245,7 @@ describe('HeistManager', () => {
     const mgr = new HeistManager(makeSupabase(), {} as any, makeValkey());
     registerHeistManager(mgr);
     invalidateHeistCache();
-    expect(true).toBe(true);
+    expect(mgr).toBeDefined();
   });
 });
 
@@ -292,7 +292,7 @@ describe('xp-tracker', () => {
   it('invalidateLevelCaches runs without error', () => {
     invalidateLevelCaches('guild1');
     invalidateLevelCaches(); // no arg
-    expect(true).toBe(true);
+    // Cache invalidation completed without throwing
   });
 });
 

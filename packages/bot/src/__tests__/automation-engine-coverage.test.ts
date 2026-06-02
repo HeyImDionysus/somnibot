@@ -1,0 +1,535 @@
+/**
+ * AutomationEngine — Coverage tests
+ *
+ * Tests the core engine: start, handleEvent, processAutomation,
+ * scope checks, buildEventContext for all event types, chain depth guard,
+ * processMessageEvent, processReactionEvent.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('discord.js', () => ({
+  EmbedBuilder: class {
+    data: Record<string, unknown> = {};
+    setColor(c: number) { this.data.color = c; return this; }
+    setTitle(t: string) { this.data.title = t; return this; }
+    setDescription(d: string) { this.data.description = d; return this; }
+  },
+}));
+
+vi.mock('@somnibot/shared', () => ({
+  createLogger: () => ({
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+  }),
+  AUTOMATION_LIMITS: {
+    MAX_CHAIN_DEPTH: 5,
+  },
+}));
+
+// We need to mock the sub-modules that AutomationEngine imports
+const mockLoad = vi.fn().mockResolvedValue(undefined);
+const mockSubscribe = vi.fn();
+const mockGetForTrigger = vi.fn().mockReturnValue([]);
+vi.mock('../features/automations/automation-loader.js', () => ({
+  AutomationLoader: class {
+    load = mockLoad;
+    subscribe = mockSubscribe;
+    getForTrigger = mockGetForTrigger;
+  },
+}));
+
+const mockEvaluateConditions = vi.fn().mockResolvedValue(true);
+vi.mock('../features/automations/condition-evaluator.js', () => ({
+  evaluateConditions: (...args: unknown[]) => mockEvaluateConditions(...args),
+}));
+
+const mockExecuteActions = vi.fn().mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+vi.mock('../features/automations/action-executor.js', () => ({
+  executeActions: (...args: unknown[]) => mockExecuteActions(...args),
+}));
+
+const mockAllowFire = vi.fn().mockResolvedValue(true);
+const mockAllowCustom = vi.fn().mockResolvedValue(true);
+vi.mock('../features/automations/rate-limiter.js', () => ({
+  AutomationRateLimiter: class {
+    allowFire = mockAllowFire;
+    allowCustom = mockAllowCustom;
+  },
+}));
+
+const mockLogExecution = vi.fn().mockResolvedValue(undefined);
+vi.mock('../features/automations/execution-logger.js', () => ({
+  ExecutionLogger: class {
+    log = mockLogExecution;
+  },
+}));
+
+import { AutomationEngine } from '../features/automations/automation-engine.js';
+
+// ── Helpers ───────────────────────────────────────────────
+
+function makeGuild() {
+  const cache = new Map<string, unknown>();
+  cache.set('u1', { id: 'u1', displayName: 'TestUser' });
+  const channels = new Map<string, unknown>();
+  channels.set('ch1', { id: 'ch1', name: 'general' });
+  return {
+    id: 'g1',
+    memberCount: 42,
+    members: { cache },
+    channels: { cache: channels },
+  };
+}
+
+function makeAutomation(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'auto1',
+    name: 'Test Automation',
+    conditions: [],
+    actions: [{ type: 'send_message', config: { channelId: 'ch1', content: 'hello' } }],
+    scopeTargetUserIds: [] as string[],
+    scopeExcludeUserIds: [] as string[],
+    scopeTargetChannelIds: [] as string[],
+    scopeExcludeChannelIds: [] as string[],
+    rateLimitPerUser: 0,
+    rateLimitWindowSeconds: 0,
+    ...overrides,
+  };
+}
+
+function makeValkey() {
+  return {
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue('OK'),
+    del: vi.fn().mockResolvedValue(1),
+    incr: vi.fn().mockResolvedValue(1),
+    expire: vi.fn().mockResolvedValue(1),
+  };
+}
+
+function makeSupabase() {
+  return { from: vi.fn().mockReturnValue({ select: vi.fn().mockReturnThis() }) };
+}
+
+function makeEventBus() {
+  const listeners: Array<(event: unknown) => void> = [];
+  return {
+    onAny: vi.fn((cb: (event: unknown) => void) => { listeners.push(cb); }),
+    on: vi.fn(),
+    emit: vi.fn(),
+    _listeners: listeners,
+    fire: (event: unknown) => {
+      for (const fn of listeners) fn(event);
+    },
+  };
+}
+
+describe('AutomationEngine', () => {
+  let engine: AutomationEngine;
+  let guild: ReturnType<typeof makeGuild>;
+  let eventBus: ReturnType<typeof makeEventBus>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    guild = makeGuild();
+    eventBus = makeEventBus();
+    engine = new AutomationEngine(
+      guild as any,
+      makeSupabase() as any,
+      makeValkey() as any,
+      eventBus as any,
+    );
+  });
+
+  describe('start', () => {
+    it('loads automations and subscribes', async () => {
+      await engine.start();
+      expect(mockLoad).toHaveBeenCalled();
+      expect(mockSubscribe).toHaveBeenCalled();
+      expect(eventBus.onAny).toHaveBeenCalled();
+    });
+
+    it('registers event handler that ignores other guilds', async () => {
+      await engine.start();
+      mockGetForTrigger.mockReturnValue([]);
+      // Fire event from different guild
+      eventBus.fire({ type: 'member.joined', guildId: 'other', data: {} });
+      // processAutomation should not be called
+      expect(mockGetForTrigger).not.toHaveBeenCalled();
+    });
+
+    it('handles events for matching guild', async () => {
+      await engine.start();
+      mockGetForTrigger.mockReturnValue([]);
+      eventBus.fire({ type: 'member.joined', guildId: 'g1', data: {} });
+      expect(mockGetForTrigger).toHaveBeenCalledWith('member.joined');
+    });
+  });
+
+  describe('setAlertService', () => {
+    it('sets alert service', () => {
+      const alertService = { recordSuccess: vi.fn(), recordFailure: vi.fn() };
+      engine.setAlertService(alertService as any);
+      // No error thrown
+    });
+  });
+
+  describe('handleEvent / processAutomation', () => {
+    it('drops event exceeding chain depth', async () => {
+      await engine.start();
+      eventBus.fire({ type: 'member.joined', guildId: 'g1', data: {}, _chainDepth: 10 });
+      expect(mockGetForTrigger).not.toHaveBeenCalled();
+    });
+
+    it('processes automation when trigger matches', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      // Wait for async processAutomation
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).toHaveBeenCalled();
+      expect(mockLogExecution).toHaveBeenCalled();
+    });
+
+    it('skips automation when scope excludes user', async () => {
+      const auto = makeAutomation({ scopeExcludeUserIds: ['u1'] });
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('skips automation when scope targets different user', async () => {
+      const auto = makeAutomation({ scopeTargetUserIds: ['u2'] });
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('skips automation when scope excludes channel', async () => {
+      const auto = makeAutomation({ scopeExcludeChannelIds: ['ch1'] });
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'message.sent',
+        guildId: 'g1',
+        data: { discordId: 'u1', channelId: 'ch1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('skips automation when scope targets different channel', async () => {
+      const auto = makeAutomation({ scopeTargetChannelIds: ['ch2'] });
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'message.sent',
+        guildId: 'g1',
+        data: { discordId: 'u1', channelId: 'ch1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('skips when rate limited', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockAllowFire.mockResolvedValue(false);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('skips when custom rate limited', async () => {
+      const auto = makeAutomation({ rateLimitPerUser: 3, rateLimitWindowSeconds: 60 });
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockAllowFire.mockResolvedValue(true);
+      mockAllowCustom.mockResolvedValue(false);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('logs conditions-failed when conditions not met', async () => {
+      const auto = makeAutomation({ conditions: [{ type: 'has_role', config: {} }] });
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockEvaluateConditions.mockResolvedValue(false);
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockLogExecution).toHaveBeenCalled();
+      const logged = mockLogExecution.mock.calls[0][0];
+      expect(logged.conditionsPassed).toBe(false);
+    });
+
+    it('reports failures to alert service', async () => {
+      const alertService = {
+        recordSuccess: vi.fn().mockResolvedValue(undefined),
+        recordFailure: vi.fn().mockResolvedValue(undefined),
+      };
+      engine.setAlertService(alertService as any);
+
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockEvaluateConditions.mockResolvedValue(true);
+      mockExecuteActions.mockResolvedValue({ executed: 1, failed: 1, errors: ['oops'] });
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      // processAutomation runs async — wait enough time
+      await vi.waitFor(() => {
+        expect(alertService.recordFailure).toHaveBeenCalledWith('auto1', 'Test Automation', 'oops');
+      }, { timeout: 2000 });
+    });
+
+    it('reports success to alert service', async () => {
+      const alertService = {
+        recordSuccess: vi.fn().mockResolvedValue(undefined),
+        recordFailure: vi.fn().mockResolvedValue(undefined),
+      };
+      engine.setAlertService(alertService as any);
+
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockEvaluateConditions.mockResolvedValue(true);
+      mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+      await engine.start();
+
+      eventBus.fire({
+        type: 'member.joined',
+        guildId: 'g1',
+        data: { discordId: 'u1' },
+      });
+
+      await vi.waitFor(() => {
+        expect(alertService.recordSuccess).toHaveBeenCalledWith('auto1');
+      }, { timeout: 2000 });
+    });
+  });
+
+  describe('buildEventContext variables', () => {
+    async function fireAndCapture(eventType: string, data: Record<string, unknown>) {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      mockEvaluateConditions.mockResolvedValue(true);
+      mockExecuteActions.mockResolvedValue({ executed: 1, failed: 0, errors: [] });
+      await engine.start();
+
+      eventBus.fire({ type: eventType, guildId: 'g1', data });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Capture the ActionContext passed to executeActions
+      return mockExecuteActions.mock.calls[0]?.[1] as { variables: Record<string, string> } | undefined;
+    }
+
+    it('resolves member.joined variables', async () => {
+      const ctx = await fireAndCapture('member.joined', { discordId: 'u1', isReturning: true });
+      expect(ctx?.variables.memberCount).toBe('42');
+      expect(ctx?.variables.returning).toBe('true');
+    });
+
+    it('resolves member.left variables', async () => {
+      const ctx = await fireAndCapture('member.left', { discordId: 'u1' });
+      expect(ctx?.variables.memberCount).toBe('42');
+    });
+
+    it('resolves member.verified variables', async () => {
+      const ctx = await fireAndCapture('member.verified', { discordId: 'u1', memberNumber: 42 });
+      expect(ctx?.variables.memberNumber).toBe('42');
+    });
+
+    it('resolves message.sent variables', async () => {
+      const ctx = await fireAndCapture('message.sent', { discordId: 'u1', channelId: 'ch1', content: 'hello world' });
+      expect(ctx?.variables.content).toBe('hello world');
+      expect(ctx?.variables.message).toBe('hello world');
+    });
+
+    it('resolves role.gained variables', async () => {
+      const ctx = await fireAndCapture('role.gained', { discordId: 'u1', roleId: 'r1', roleName: 'Admin', source: 'manual' });
+      expect(ctx?.variables['role']).toBe('<@&r1>');
+      expect(ctx?.variables['role.name']).toBe('Admin');
+      expect(ctx?.variables['source']).toBe('manual');
+    });
+
+    it('resolves role.lost variables', async () => {
+      const ctx = await fireAndCapture('role.lost', { discordId: 'u1', roleId: 'r1', roleName: 'Admin' });
+      expect(ctx?.variables['role']).toBe('<@&r1>');
+    });
+
+    it('resolves level.up variables', async () => {
+      const ctx = await fireAndCapture('level.up', { discordId: 'u1', previousLevel: 5, newLevel: 6 });
+      expect(ctx?.variables.oldLevel).toBe('5');
+      expect(ctx?.variables.newLevel).toBe('6');
+    });
+
+    it('resolves purchase.completed variables', async () => {
+      const ctx = await fireAndCapture('purchase.completed', { discordId: 'u1', productName: 'VIP', orderNumber: 'ORD-1', amount: 9.99 });
+      expect(ctx?.variables.product).toBe('VIP');
+      expect(ctx?.variables.order).toBe('ORD-1');
+      expect(ctx?.variables.amount).toBe('9.99');
+    });
+
+    it('resolves subscription.activated variables', async () => {
+      const ctx = await fireAndCapture('subscription.activated', { discordId: 'u1', planId: 'premium' });
+      expect(ctx?.variables.plan).toBe('premium');
+    });
+
+    it('resolves subscription.lapsed variables', async () => {
+      const ctx = await fireAndCapture('subscription.lapsed', { discordId: 'u1', planId: 'premium' });
+      expect(ctx?.variables.plan).toBe('premium');
+    });
+
+    it('resolves ticket.opened variables', async () => {
+      const ctx = await fireAndCapture('ticket.opened', { discordId: 'u1', ticketNumber: 42 });
+      expect(ctx?.variables.ticket).toBe('#42');
+    });
+
+    it('resolves ticket.closed variables', async () => {
+      const ctx = await fireAndCapture('ticket.closed', { discordId: 'u1', ticketNumber: 42 });
+      expect(ctx?.variables.ticket).toBe('#42');
+    });
+
+    it('resolves giveaway.ended variables', async () => {
+      const ctx = await fireAndCapture('giveaway.ended', { discordId: 'u1', title: 'Epic Giveaway', winnerIds: ['u1', 'u2'] });
+      expect(ctx?.variables.giveaway).toBe('Epic Giveaway');
+      expect(ctx?.variables.winners).toContain('<@u1>');
+    });
+
+    it('resolves button.clicked variables', async () => {
+      const ctx = await fireAndCapture('button.clicked', { discordId: 'u1', buttonId: 'btn_verify' });
+      expect(ctx?.variables.buttonId).toBe('btn_verify');
+    });
+
+    it('resolves reaction.added variables', async () => {
+      const ctx = await fireAndCapture('reaction.added', { discordId: 'u1', emoji: '👍' });
+      expect(ctx?.variables.emoji).toBe('👍');
+    });
+
+    it('resolves voice.joined variables', async () => {
+      const ctx = await fireAndCapture('voice.joined', { discordId: 'u1', channelId: 'ch1', channelName: 'General' });
+      expect(ctx?.variables.channel).toBe('General');
+    });
+
+    it('resolves voice.left variables', async () => {
+      const ctx = await fireAndCapture('voice.left', { discordId: 'u1', channelId: 'ch1' });
+      expect(ctx?.variables.channel).toContain('ch1');
+    });
+
+    it('resolves infraction.created variables', async () => {
+      const ctx = await fireAndCapture('infraction.created', { discordId: 'u1', type: 'warn', reason: 'spam', totalInfractions: 3 });
+      expect(ctx?.variables.type).toBe('warn');
+      expect(ctx?.variables.reason).toBe('spam');
+      expect(ctx?.variables.count).toBe('3');
+    });
+
+    it('resolves unknown discordId gracefully', async () => {
+      const ctx = await fireAndCapture('member.joined', { discordId: 'unknown_user' });
+      expect(ctx?.variables['user']).toBe('unknown_user');
+    });
+  });
+
+  describe('processMessageEvent', () => {
+    it('processes message event with message object', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      const message = { id: 'msg1', content: 'hello', channel: { id: 'ch1' } };
+      await engine.processMessageEvent(
+        { type: 'message.sent', guildId: 'g1', data: { discordId: 'u1', channelId: 'ch1', content: 'hello' } } as any,
+        message as any,
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).toHaveBeenCalled();
+    });
+
+    it('skips when no message.sent automations', async () => {
+      mockGetForTrigger.mockReturnValue([]);
+      await engine.start();
+      await engine.processMessageEvent(
+        { type: 'message.sent', guildId: 'g1', data: {} } as any,
+        {} as any,
+      );
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('processReactionEvent', () => {
+    it('processes reaction event', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+
+      const message = { id: 'msg1', content: '', channel: { id: 'ch1' } };
+      await engine.processReactionEvent(
+        { type: 'reaction.added', guildId: 'g1', data: { discordId: 'u1', emoji: '👍' } } as any,
+        message as any,
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      expect(mockExecuteActions).toHaveBeenCalled();
+    });
+
+    it('skips when no reaction.added automations', async () => {
+      mockGetForTrigger.mockReturnValue([]);
+      await engine.start();
+      await engine.processReactionEvent(
+        { type: 'reaction.added', guildId: 'g1', data: {} } as any,
+        {} as any,
+      );
+      expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+  });
+});

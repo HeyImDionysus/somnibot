@@ -207,7 +207,7 @@ describe('action-queue', () => {
       await vi.runAllTimersAsync().catch(() => {});
 
       vi.useRealTimers();
-        expect(true).toBe(true); // exercises code path
+        expect(supa.from).toHaveBeenCalled();
     });
 
     it('subscribes to realtime INSERT events', async () => {
