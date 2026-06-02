@@ -12,7 +12,7 @@ vi.mock('discord.js', () => ({
 
 import { takeSnapshot } from '../sync/snapshot.js';
 
-class MockCollection extends Map<any, any> {
+class MockCollection extends Map {
   map(fn: (v: any, k: string) => any): any[] {
     const result: any[] = [];
     for (const [k, v] of this) result.push(fn(v, k));

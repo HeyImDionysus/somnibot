@@ -523,10 +523,8 @@ describe('rules cache', () => {
     });
     const msg = makeMessage('badword');
     await processMessage(client, msg, modConfig);
-    // Should not have queried supabase for rules (used cache)
-    const fromCalls = client.supabase.from.mock.calls;
-    const rulesQueries = fromCalls.filter((c: any[]) => c[0] === 'automod_rules');
-    expect(rulesQueries).toHaveLength(0);
+    // Should not have queried supabase (used cache)
+    expect(client.supabase.from).not.toHaveBeenCalled();
   });
 
   it('handles unknown rule type gracefully', async () => {
