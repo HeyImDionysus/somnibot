@@ -406,6 +406,6 @@ describe('startSyncScheduler', () => {
 
     // After stop, advancing time should not trigger runs
     // (If timer was cleared, no more callbacks)
-    expect(true).toBe(true); // Mainly testing it doesn't throw
+    expect(scheduler).toBeDefined();
   });
 });
