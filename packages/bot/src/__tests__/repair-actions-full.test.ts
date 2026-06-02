@@ -109,7 +109,7 @@ describe('repairDriftItem — EVERYONE_DRIFT', () => {
       entityDiscordId: 'everyone',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
 
     expect(result.success).toBe(true);
     expect(guild.roles.everyone.setPermissions).toHaveBeenCalledWith(0n, expect.any(String));
@@ -128,7 +128,7 @@ describe('repairDriftItem — EXTRA_RESOURCE (role)', () => {
       entityDiscordId: 'extra1',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
 
     expect(result.success).toBe(true);
     expect(guild.roles.cache.get('extra1').delete).toHaveBeenCalledWith(expect.any(String));
@@ -144,7 +144,7 @@ describe('repairDriftItem — EXTRA_RESOURCE (role)', () => {
       entityDiscordId: 'managed1',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(true);
     expect(guild.roles.cache.get('managed1').delete).not.toHaveBeenCalled();
   });
@@ -161,7 +161,7 @@ describe('repairDriftItem — EXTRA_RESOURCE (channel)', () => {
       entityDiscordId: 'ch1',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
 
     expect(result.success).toBe(true);
     expect(guild.channels.cache.get('ch1').delete).toHaveBeenCalled();
@@ -179,7 +179,7 @@ describe('repairDriftItem — EXTRA_RESOURCE without Discord ID', () => {
       entityDiscordId: undefined,
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('No Discord ID');
   });
@@ -211,7 +211,7 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
       entityDiscordId: 'old-role-id',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(true);
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
@@ -228,7 +228,7 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
       entityDiscordId: 'gone',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('No ID mapping');
   });
@@ -244,7 +244,7 @@ describe('repairDriftItem — unknown type', () => {
       entityName: 'Test',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('Unknown drift type');
   });
@@ -260,7 +260,7 @@ describe('acceptDriftItem', () => {
       entityName: '@everyone',
     };
 
-    const result = await acceptDriftItem(guild, supabase, drift);
+    const result = await acceptDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('cannot be accepted');
   });
@@ -284,7 +284,7 @@ describe('acceptDriftItem', () => {
       entityDiscordId: 'extra1',
     };
 
-    const result = await acceptDriftItem(guild, supabase, drift);
+    const result = await acceptDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(true);
     expect(supabase.from).toHaveBeenCalledWith('discord_id_map');
   });
@@ -302,7 +302,7 @@ describe('repairDriftItem — error handling', () => {
       entityDiscordId: 'everyone',
     };
 
-    const result = await repairDriftItem(guild, supabase, drift);
+    const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
     expect(result.error).toContain('Discord API down');
   });

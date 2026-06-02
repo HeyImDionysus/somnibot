@@ -50,7 +50,7 @@ function makeSupabase(overrides: Record<string, any> = {}) {
     const data = overrides[table] ?? null;
     const count = overrides[`${table}_count`] ?? 0;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: null, count });
-    chain[Symbol.toStringTag] = 'Promise';
+    (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
 
@@ -176,7 +176,7 @@ describe('ProfilesManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null, count: 0 });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 

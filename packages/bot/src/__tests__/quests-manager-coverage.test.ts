@@ -42,7 +42,7 @@ function makeSupabase(overrides: Record<string, any> = {}) {
     }
     const data = overrides[table] ?? null;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: null, count: 0 });
-    chain[Symbol.toStringTag] = 'Promise';
+    (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
   return {

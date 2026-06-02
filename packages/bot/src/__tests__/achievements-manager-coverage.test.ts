@@ -41,7 +41,7 @@ function chainable(resolveValue: unknown = null) {
     chain[m] = vi.fn().mockReturnValue(chain);
   }
   chain.then = (resolve: (v: any) => void) => resolve({ data: resolveValue, error: null, count: 0 });
-  chain[Symbol.toStringTag] = 'Promise';
+  (chain as any)[Symbol.toStringTag] = 'Promise';
   return chain;
 }
 
@@ -56,7 +56,7 @@ function makeSupabase(overrides: Record<string, any> = {}) {
       }
       // Default resolve
       chain.then = (resolve: (v: any) => void) => resolve({ data: overrides[_table] ?? null, error: null, count: overrides[`${_table}_count`] ?? 0 });
-      chain[Symbol.toStringTag] = 'Promise';
+      (chain as any)[Symbol.toStringTag] = 'Promise';
       return chain;
     }),
     rpc: vi.fn().mockResolvedValue(rpcResult),
@@ -213,7 +213,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -249,7 +249,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -288,7 +288,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -334,7 +334,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -366,7 +366,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -403,7 +403,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -442,7 +442,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -480,7 +480,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -521,7 +521,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -563,7 +563,7 @@ describe('AchievementsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        chain[Symbol.toStringTag] = 'Promise';
+        (chain as any)[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 

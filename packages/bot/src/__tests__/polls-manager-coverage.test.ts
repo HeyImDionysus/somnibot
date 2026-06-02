@@ -438,7 +438,7 @@ describe('PollsManager', () => {
         return chainBuilder();
       });
       const interaction = makeInteraction();
-      await mgr.createPrediction(interaction as any, 'Will it rain?', ['Yes', 'No'], 60);
+      await mgr.createPrediction(interaction as any, 'Will it rain?', ['Yes', 'No']);
       expect(interaction.reply).toHaveBeenCalled();
     });
 
@@ -450,7 +450,7 @@ describe('PollsManager', () => {
         return chainBuilder();
       });
       const interaction = makeInteraction();
-      await mgr.createPrediction(interaction as any, 'Test?', ['Yes', 'No'], 60);
+      await mgr.createPrediction(interaction as any, 'Test?', ['Yes', 'No']);
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('not enabled') }),
       );

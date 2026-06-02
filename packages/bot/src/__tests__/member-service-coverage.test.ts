@@ -47,7 +47,7 @@ function makeSupabase(responses: Record<string, any> = {}) {
   };
 }
 
-class MockCollection extends Map {
+class MockCollection extends Map<any, any> {
   filter(fn: (v: any) => boolean): MockCollection {
     const result = new MockCollection();
     for (const [key, value] of this.entries()) {

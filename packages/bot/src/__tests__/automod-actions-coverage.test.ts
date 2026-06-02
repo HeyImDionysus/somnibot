@@ -84,7 +84,7 @@ function makeRule(overrides: Record<string, unknown> = {}) {
 }
 
 const defaultModConfig = {
-  escalationChain: [] as { threshold: number; action: string; durationMinutes?: number }[],
+  escalationChain: [] as any[],
   infractionExpiryDays: 30,
   modLogChannelId: 'mod-ch',
 };
@@ -98,7 +98,7 @@ describe('executeAutoModAction', () => {
     const client = makeClient();
     const msg = makeMessage();
     (msg as any).member = null;
-    await executeAutoModAction(client as any, msg as any, makeRule() as any, 'bad word', defaultModConfig);
+    await executeAutoModAction(client as any, msg as any, makeRule() as any, 'bad word', defaultModConfig as any);
     expect(msg.delete).not.toHaveBeenCalled();
   });
 
@@ -109,7 +109,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'delete' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(msg.delete).toHaveBeenCalled();
       expect(mockPostModLogEntry).toHaveBeenCalled();
       expect(mockWriteAuditLog).toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe('executeAutoModAction', () => {
       const msg = makeMessage();
       msg.deletable = false;
       const rule = makeRule({ action: 'delete' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(msg.delete).not.toHaveBeenCalled();
     });
 
@@ -128,7 +128,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'delete', log_to_mod_channel: false });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(mockPostModLogEntry).not.toHaveBeenCalled();
     });
 
@@ -137,7 +137,7 @@ describe('executeAutoModAction', () => {
       const msg = makeMessage();
       msg.delete.mockRejectedValue(new Error('Discord error'));
       const rule = makeRule({ action: 'delete' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       // Should not throw
       expect(mockWriteAuditLog).toHaveBeenCalled();
     });
@@ -150,7 +150,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'warn' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig as any);
       expect(mockCreateInfraction).toHaveBeenCalled();
       expect(client.eventBus.emit).toHaveBeenCalledWith(
         'infraction.created',
@@ -163,7 +163,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'warn' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig as any);
       // For 'warn', the initial delete is skipped (rule.action === 'warn')
       expect(msg.delete).not.toHaveBeenCalled();
     });
@@ -172,7 +172,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'warn' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig as any);
       expect(mockExecuteEscalation).toHaveBeenCalled();
     });
 
@@ -183,12 +183,12 @@ describe('executeAutoModAction', () => {
       const modConfig = {
         ...defaultModConfig,
         escalationChain: [
-          { threshold: 3, action: 'mute', durationMinutes: 60 },
-          { threshold: 5, action: 'ban' },
+          { threshold: 3, action: 'mute' as const, durationMinutes: 60, dmMember: true },
+          { threshold: 5, action: 'ban' as const, dmMember: true },
         ],
       };
       mockGetActiveWarningCount.mockResolvedValue(2);
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', modConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', modConfig as any);
       expect(mockPostModLogEntry).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ nextEscalation: expect.stringContaining('Mute') }),
@@ -201,10 +201,10 @@ describe('executeAutoModAction', () => {
       const rule = makeRule({ action: 'warn' });
       const modConfig = {
         ...defaultModConfig,
-        escalationChain: [{ threshold: 1, action: 'kick' }],
+        escalationChain: [{ threshold: 1, action: 'kick' as const, dmMember: true }],
       };
       mockGetActiveWarningCount.mockResolvedValue(10);
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', modConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', modConfig as any);
       expect(mockPostModLogEntry).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ nextEscalation: null }),
@@ -215,7 +215,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'warn' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad word', defaultModConfig as any);
       expect(mockWriteAuditLog).toHaveBeenCalledWith(
         client.supabase,
         expect.objectContaining({
@@ -234,7 +234,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember();
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'mute', mute_duration_minutes: 10 });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(member.timeout).toHaveBeenCalledWith(600_000, expect.stringContaining('Auto-Mod'));
       expect(mockCreateInfraction).toHaveBeenCalledWith(
         expect.anything(),
@@ -247,7 +247,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember();
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'mute', mute_duration_minutes: null });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(member.timeout).toHaveBeenCalledWith(300_000, expect.any(String));
     });
 
@@ -255,7 +255,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'mute' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(client.eventBus.emit).toHaveBeenCalledWith(
         'member.muted',
         'g1',
@@ -268,7 +268,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember({ timeout: vi.fn().mockRejectedValue(new Error('no perms')) });
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'mute' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(mockWriteAuditLog).toHaveBeenCalled(); // doesn't throw
     });
 
@@ -276,7 +276,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'mute' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'spam', defaultModConfig as any);
       expect(msg.delete).toHaveBeenCalled();
     });
   });
@@ -289,7 +289,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember();
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'kick' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(member.send).toHaveBeenCalledWith(expect.stringContaining('kicked'));
       expect(member.kick).toHaveBeenCalled();
       expect(mockCreateInfraction).toHaveBeenCalledWith(
@@ -302,7 +302,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'kick' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(client.eventBus.emit).toHaveBeenCalledWith(
         'member.kicked',
         'g1',
@@ -315,7 +315,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember({ send: vi.fn().mockRejectedValue(new Error('DMs off')) });
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'kick' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(member.kick).toHaveBeenCalled(); // still kicks
     });
 
@@ -324,7 +324,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember({ kick: vi.fn().mockRejectedValue(new Error('no perms')) });
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'kick' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(mockWriteAuditLog).toHaveBeenCalled(); // doesn't throw
     });
   });
@@ -337,7 +337,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember();
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'ban' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(member.send).toHaveBeenCalledWith(expect.stringContaining('banned'));
       expect(member.ban).toHaveBeenCalledWith(expect.objectContaining({ reason: expect.any(String) }));
       expect(mockCreateInfraction).toHaveBeenCalledWith(
@@ -350,7 +350,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'ban' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(client.eventBus.emit).toHaveBeenCalledWith(
         'member.banned',
         'g1',
@@ -363,7 +363,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember({ send: vi.fn().mockRejectedValue(new Error('blocked')) });
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'ban' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(member.ban).toHaveBeenCalled();
     });
 
@@ -372,7 +372,7 @@ describe('executeAutoModAction', () => {
       const member = makeMember({ ban: vi.fn().mockRejectedValue(new Error('no perms')) });
       const msg = makeMessage(member);
       const rule = makeRule({ action: 'ban' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(mockWriteAuditLog).toHaveBeenCalled();
     });
 
@@ -380,7 +380,7 @@ describe('executeAutoModAction', () => {
       const client = makeClient();
       const msg = makeMessage();
       const rule = makeRule({ action: 'ban' });
-      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig);
+      await executeAutoModAction(client as any, msg as any, rule as any, 'bad', defaultModConfig as any);
       expect(msg.delete).toHaveBeenCalled();
     });
   });
