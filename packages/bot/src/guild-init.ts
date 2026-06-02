@@ -126,8 +126,8 @@ export async function initGuildFeatures(
 
   guildLog.info('Initializing features');
 
-  // V10 Audit §1: Start the anti-raid memory pruner (idempotent — safe per guild)
-  startAntiRaidPruner();
+  // V10 Audit L-3: Anti-raid pruner is process-wide (idempotent singleton),
+  // moved to bot-level startup in index.ts to avoid redundant per-guild calls.
 
   // ── Bot role check ──
   const roleCheck = await checkBotRolePosition(guild);
@@ -317,7 +317,7 @@ export async function initGuildFeatures(
   try {
     if (guildCfg?.economy_enabled) {
       const economyManager = new EconomyManager(guild, supabase, valkey);
-      registerEconomyManager(economyManager);
+      registerEconomyManager(economyManager, guildId);
       ctx.setManager('economy', economyManager);
       const econCmds = buildEconomyCommands();
       for (const cmd of Object.values(econCmds)) allCommands.push(cmd.toJSON());
@@ -328,88 +328,88 @@ export async function initGuildFeatures(
       // Sub-features (gathering, crafting, farming, fishing, adventures, market, trivia, games, lottery, polls, pets, quests, achievements, heist)
       if (guildCfg.economy_gathering_enabled) {
         const mgr = new GatheringManager(guild, supabase, valkey);
-        registerGatheringManager(mgr); ctx.setManager('gathering', mgr);
+        registerGatheringManager(mgr, guildId); ctx.setManager('gathering', mgr);
         const cmds = buildGatheringCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_crafting_enabled) {
         const mgr = new CraftingManager(guild, supabase, valkey);
-        registerCraftingManager(mgr); ctx.setManager('crafting', mgr);
+        registerCraftingManager(mgr, guildId); ctx.setManager('crafting', mgr);
         const cmds = buildCraftingCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_farming_enabled) {
         const mgr = new FarmingManager(guild, supabase, valkey);
-        registerFarmingManager(mgr); ctx.setManager('farming', mgr);
+        registerFarmingManager(mgr, guildId); ctx.setManager('farming', mgr);
         const cmds = buildFarmingCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_fishing_enabled) {
         const mgr = new FishingManager(guild, supabase, valkey);
-        registerFishingManager(mgr); ctx.setManager('fishing', mgr);
+        registerFishingManager(mgr, guildId); ctx.setManager('fishing', mgr);
         const cmds = buildFishingCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_adventures_enabled) {
         const mgr = new AdventureManager(guild, supabase, valkey);
-        registerAdventureManager(mgr); ctx.setManager('adventures', mgr);
+        registerAdventureManager(mgr, guildId); ctx.setManager('adventures', mgr);
         const cmds = buildAdventureCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_market_enabled) {
         const mgr = new MarketManager(guild, supabase, valkey);
-        registerMarketManager(mgr); ctx.setManager('market', mgr);
+        registerMarketManager(mgr, guildId); ctx.setManager('market', mgr);
         const cmds = buildMarketCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_trivia_enabled) {
         const mgr = new TriviaManager(supabase, valkey);
-        registerTriviaManager(mgr); ctx.setManager('trivia', mgr);
+        registerTriviaManager(mgr, guildId); ctx.setManager('trivia', mgr);
         const cmds = buildTriviaCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_games_enabled) {
         const mgr = new GamesManager(supabase);
-        registerGamesManager(mgr); ctx.setManager('games', mgr);
+        registerGamesManager(mgr, guildId); ctx.setManager('games', mgr);
         const cmds = buildGameCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_lottery_enabled) {
         const mgr = new LotteryManager(supabase, client);
-        registerLotteryManager(mgr); ctx.setManager('lottery', mgr);
+        registerLotteryManager(mgr, guildId); ctx.setManager('lottery', mgr);
         mgr.scheduleLotteryDraws(guildId);
         const cmds = buildLotteryCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.polls_enabled || guildCfg.predictions_enabled) {
         const mgr = new PollsManager(supabase);
-        registerPollsManager(mgr); ctx.setManager('polls', mgr);
+        registerPollsManager(mgr, guildId); ctx.setManager('polls', mgr);
         const cmds = buildPollCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_pets_enabled) {
         const mgr = new PetsManager(supabase, client, valkey);
-        registerPetsManager(mgr); ctx.setManager('pets', mgr);
+        registerPetsManager(mgr, guildId); ctx.setManager('pets', mgr);
         mgr.schedulePetDecay(guildId);
         const cmds = buildPetCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_quests_enabled) {
         const mgr = new QuestsManager(supabase);
-        registerQuestsManager(mgr); ctx.setManager('quests', mgr);
+        registerQuestsManager(mgr, guildId); ctx.setManager('quests', mgr);
         mgr.scheduleWeeklyReset(guildId);
         const cmds = buildQuestCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_achievements_enabled || guildCfg.economy_prestige_enabled) {
         const mgr = new AchievementsManager(supabase);
-        registerAchievementsManager(mgr); ctx.setManager('achievements', mgr);
+        registerAchievementsManager(mgr, guildId); ctx.setManager('achievements', mgr);
         const cmds = buildAchievementCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_heist_enabled) {
         const mgr = new HeistManager(supabase, client);
-        registerHeistManager(mgr); ctx.setManager('heist', mgr);
+        registerHeistManager(mgr, guildId); ctx.setManager('heist', mgr);
         await mgr.resumePendingHeists(guildId);
         const cmds = buildHeistCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
@@ -418,7 +418,7 @@ export async function initGuildFeatures(
 
     // Profiles (always available)
     const profilesManager = new ProfilesManager(supabase);
-    registerProfilesManager(profilesManager); ctx.setManager('profiles', profilesManager);
+    registerProfilesManager(profilesManager, guildId); ctx.setManager('profiles', profilesManager);
     const profCmds = buildProfileCommands();
     for (const cmd of Object.values(profCmds)) allCommands.push(cmd.toJSON());
   } catch (err) {
@@ -487,8 +487,9 @@ export async function initGuildFeatures(
     services.configWatcher.start();
     ctx.setManager('configWatcher', services.configWatcher);
 
-    services.presenceManager = new BotPresenceManager(client, guildId, supabase);
-    services.presenceManager.start();
+    // V10 Audit L-4: BotPresenceManager sets client-wide presence but was
+    // created per-guild (each guild's timer would overwrite the last).
+    // Moved to bot-level init in index.ts. See presenceManager on client.
 
     services.crossFeatureBridge = new CrossFeatureBridge(guild, supabase, eventBus, valkey);
     services.crossFeatureBridge.start();
@@ -557,6 +558,8 @@ export function destroyGuildServices(ctx: GuildContext): void {
   if (services.syncHandle) services.syncHandle.stop();
 
   // Services with stop()
+  // V10 Audit M-5: Added notificationService and giveawayFulfillment
+  // (both now have stop() methods that remove their event bus listeners).
   const stoppable = [
     services.tempChannelManager,
     services.statsManager,
@@ -570,6 +573,8 @@ export function destroyGuildServices(ctx: GuildContext): void {
     services.crossFeatureBridge,
     services.autoModSync,
     services.guildOnboardingSync,
+    services.notificationService,
+    services.giveawayFulfillment,
   ];
   for (const svc of stoppable) {
     if (svc && typeof (svc as unknown as Record<string, unknown>).stop === 'function') {

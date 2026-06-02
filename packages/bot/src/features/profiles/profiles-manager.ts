@@ -7,9 +7,20 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Profiles');
 
-let _manager: ProfilesManager | null = null;
-export function registerProfilesManager(mgr: ProfilesManager): void { _manager = mgr; }
-export function invalidateProfilesCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, ProfilesManager>();
+
+export function registerProfilesManager(mgr: ProfilesManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateProfilesCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr.clearCache();
+  }
+}
 
 export class ProfilesManager {
   private supabase: SupabaseClient;

@@ -19,6 +19,8 @@ export class GiveawayFulfillmentService {
   private supabase: SupabaseClient;
   private eventBus: PlatformEventBus;
   private entitlementService: EntitlementService;
+  // V10 Audit M-5: Store listener reference so stop() can remove it.
+  private onGiveawayEnded: ((event: { data: { giveawayId: string; title: string; winnerIds: string[]; prizeProductId: string | null } }) => void) | null = null;
 
   constructor(guild: Guild, supabase: SupabaseClient, eventBus: PlatformEventBus) {
     this.guild = guild;
@@ -31,12 +33,24 @@ export class GiveawayFulfillmentService {
    * Start listening for giveaway.ended events.
    */
   start(): void {
-    this.eventBus.on('giveaway.ended', (event) => {
+    this.onGiveawayEnded = (event) => {
       this.handleGiveawayEnded(event.data).catch((err) => {
         log.error('Error handling giveaway end:', { error: String(err) });
       });
-    });
+    };
+    this.eventBus.on('giveaway.ended', this.onGiveawayEnded as never);
     log.info('Service started — listening for giveaway.ended');
+  }
+
+  /**
+   * V10 Audit M-5: Remove event listener to prevent leaks on guild destroy.
+   */
+  stop(): void {
+    if (this.onGiveawayEnded) {
+      this.eventBus.off('giveaway.ended', this.onGiveawayEnded as never);
+      this.onGiveawayEnded = null;
+    }
+    log.info('Service stopped');
   }
 
   private async handleGiveawayEnded(data: {

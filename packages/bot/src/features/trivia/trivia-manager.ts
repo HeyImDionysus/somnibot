@@ -21,9 +21,20 @@ const log = createLogger('Trivia');
 
 // ── Module-level state ────────────────────────────────────
 
-let _manager: TriviaManager | null = null;
-export function registerTriviaManager(mgr: TriviaManager): void { _manager = mgr; }
-export function invalidateTriviaCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, TriviaManager>();
+
+export function registerTriviaManager(mgr: TriviaManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateTriviaCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr.clearCache();
+  }
+}
 
 // ── Built-in question pool ────────────────────────────────
 
@@ -263,7 +274,7 @@ export class TriviaManager {
         });
         if (triviaPayErr) log.error(`Failed to pay ${userId}:`, triviaPayErr.message);
         winners.push({ userId, paid: !triviaPayErr });
-        getQuestsManager()?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+        getQuestsManager(guildId)?.trackProgress(guildId, userId, 'trivia').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
       } else {
         losers.push(userId);
         await this.setStreak(guildId, userId, 0);

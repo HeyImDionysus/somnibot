@@ -13,6 +13,7 @@ import { EmbedBuilder, type Client } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import type { PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('OwnerNotify');
 
@@ -21,10 +22,15 @@ interface NotificationConfig {
   adminChannelId: string | null;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyHandler = (event: PlatformEvent<any>) => void;
+
 export class OwnerNotificationService {
   private config: NotificationConfig | null = null;
   private cooldowns = new Map<string, number>(); // eventType → lastSentTimestamp
   private cooldownMs = 60_000; // 1 minute between same event type
+  // V10 Audit M-5: Store listener references so stop() can remove them.
+  private boundListeners: Array<{ type: string; handler: AnyHandler }> = [];
 
   constructor(
     private client: Client,
@@ -52,10 +58,11 @@ export class OwnerNotificationService {
       adminChannelId: guildConfig?.mod_log_channel_id ?? null,
     };
 
-    // Subscribe to critical events
+    // Subscribe to critical events — store references for stop() cleanup.
+
     // fraud.detected — emitted by fraud-detection service when signals are created
-    this.eventBus.on('fraud.detected', (event) => {
-      const data = event.data;
+    this.listen('fraud.detected', (event) => {
+      const data = event.data as Record<string, unknown>;
       this.notify('fraud.detected', {
         title: '🚨 Fraud Detected',
         description: `A potentially fraudulent transaction was flagged.`,
@@ -70,15 +77,16 @@ export class OwnerNotificationService {
     });
 
     // incident.created — emitted when a critical incident is auto-created
-    this.eventBus.on('incident.created', (event) => {
-      const data = event.data;
-      if (data.severity === 'critical' || data.severity === 'high') {
+    this.listen('incident.created', (event) => {
+      const data = event.data as Record<string, unknown>;
+      const severity = String(data.severity ?? '');
+      if (severity === 'critical' || severity === 'high') {
         this.notify('incident.created', {
           title: '🔴 Critical Incident',
           description: String(data.title ?? 'An incident has been created'),
           color: 0xFF0000,
           fields: [
-            { name: 'Severity', value: data.severity.toUpperCase(), inline: true },
+            { name: 'Severity', value: severity.toUpperCase(), inline: true },
             { name: 'Category', value: String(data.category ?? 'unknown'), inline: true },
           ],
         });
@@ -86,16 +94,16 @@ export class OwnerNotificationService {
     });
 
     // moderation.action — emitted by moderation/commands.ts on warn, mute, kick, ban
-    this.eventBus.on('moderation.action', (event) => {
-      const data = event.data;
+    this.listen('moderation.action', (event) => {
+      const data = event.data as Record<string, unknown>;
       if (data.action === 'ban') {
         this.notify('moderation.ban', {
           title: '🔨 Member Banned',
           description: `A member has been banned from the server.`,
           color: 0xFF4444,
           fields: [
-            { name: 'Member', value: `<@${data.discordId}>`, inline: true },
-            { name: 'By', value: data.moderatorId === 'system' ? 'Auto-Mod' : `<@${data.moderatorId}>`, inline: true },
+            { name: 'Member', value: `<@${String(data.discordId)}>`, inline: true },
+            { name: 'By', value: data.moderatorId === 'system' ? 'Auto-Mod' : `<@${String(data.moderatorId)}>`, inline: true },
             { name: 'Reason', value: String(data.reason ?? 'No reason'), inline: false },
           ],
         });
@@ -103,21 +111,40 @@ export class OwnerNotificationService {
     });
 
     // payment.failed — emitted by commerce-fulfillment on subscription_suspended
-    this.eventBus.on('payment.failed', (event) => {
-      const data = event.data;
+    this.listen('payment.failed', (event) => {
+      const data = event.data as Record<string, unknown>;
       this.notify('payment.failed', {
         title: '💳 Payment Failed',
         description: `A payment could not be processed.`,
         color: 0xFFAA00,
         fields: [
-          { name: 'Customer', value: data.discordId ? `<@${data.discordId}>` : 'Unknown', inline: true },
-          { name: 'Amount', value: data.amount ? `$${(data.amount / 100).toFixed(2)}` : 'Unknown', inline: true },
+          { name: 'Customer', value: data.discordId ? `<@${String(data.discordId)}>` : 'Unknown', inline: true },
+          { name: 'Amount', value: data.amount ? `$${(Number(data.amount) / 100).toFixed(2)}` : 'Unknown', inline: true },
           { name: 'Error', value: String(data.error ?? 'Unknown error'), inline: false },
         ],
       });
     });
 
     log.info('Owner notification service started');
+  }
+
+  /**
+   * V10 Audit M-5: Remove all event listeners registered by this service.
+   */
+  stop(): void {
+    for (const { type, handler } of this.boundListeners) {
+      this.eventBus.off(type as never, handler as never);
+    }
+    this.boundListeners = [];
+    log.info('Owner notification service stopped');
+  }
+
+  /**
+   * Register a listener on the event bus and store the reference for cleanup.
+   */
+  private listen(type: string, handler: AnyHandler): void {
+    this.eventBus.on(type as never, handler as never);
+    this.boundListeners.push({ type, handler });
   }
 
   private async notify(

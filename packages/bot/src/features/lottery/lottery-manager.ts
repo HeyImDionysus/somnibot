@@ -16,9 +16,20 @@ const log = createLogger('Lottery');
 
 // ── Module-level state ────────────────────────────────────
 
-let _manager: LotteryManager | null = null;
-export function registerLotteryManager(mgr: LotteryManager): void { _manager = mgr; }
-export function invalidateLotteryCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, LotteryManager>();
+
+export function registerLotteryManager(mgr: LotteryManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateLotteryCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr.clearCache();
+  }
+}
 
 const SCHEDULE_MS: Record<string, number> = {
   '6h': 6 * 60 * 60 * 1000,
@@ -267,7 +278,7 @@ export class LotteryManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(guildId)?.trackProgress(guildId, userId, 'lottery', count).catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

@@ -23,10 +23,24 @@ const log = createLogger('Heist');
 
 // ── Module-level state ────────────────────────────────────
 
-let _manager: HeistManager | null = null;
-export function registerHeistManager(mgr: HeistManager): void { _manager = mgr; }
-export function invalidateHeistCache(): void { _manager?.clearCache(); }
-export function getHeistManager(): HeistManager | null { return _manager; }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, HeistManager>();
+
+export function registerHeistManager(mgr: HeistManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateHeistCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr.clearCache();
+  }
+}
+export function getHeistManager(guildId?: string): HeistManager | null {
+  if (guildId) return _managers.get(guildId) ?? null;
+  return _managers.values().next().value ?? null;
+}
 
 // ── Constants ─────────────────────────────────────────────
 
@@ -378,7 +392,7 @@ export class HeistManager {
 
     const displayChance = Math.min(95, (config.economy_heist_success_base_pct ?? 40) + (actualCount - 1) * 7 + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0));
 
-    getQuestsManager()?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(guildId)?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()

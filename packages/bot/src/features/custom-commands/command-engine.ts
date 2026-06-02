@@ -34,8 +34,16 @@ interface CustomCommandAction {
   roleId?: string;
 }
 
-/** In-memory registry of loaded custom commands */
-const commandRegistry = new Map<string, DbCustomCommand>();
+/**
+ * Guild-scoped registry of loaded custom commands.
+ * Outer key: guildId, inner key: command name.
+ *
+ * V10 Audit C-2: Previously a flat Map<name, cmd>. loadCustomCommands()
+ * called .clear() before repopulating — when guild B initialized it wiped
+ * guild A's entire command registry, silently breaking all custom commands
+ * for every guild except the most-recently-initialized one.
+ */
+const commandRegistry = new Map<string, Map<string, DbCustomCommand>>();
 
 /**
  * Load all custom commands from Supabase into the in-memory registry
@@ -59,17 +67,20 @@ export async function loadCustomCommands(
     .eq('enabled', true)
     .limit(1000);
 
-  commandRegistry.clear();
+  // Build a fresh per-guild sub-map (replaces only this guild's commands)
+  const guildMap = new Map<string, DbCustomCommand>();
 
   if (!data || data.length === 0) {
+    commandRegistry.set(guild.id, guildMap);
     log.info('No custom commands found');
     return [];
   }
 
-  // Populate in-memory registry for the interaction handler
+  // Populate per-guild registry for the interaction handler
   for (const cmd of data as DbCustomCommand[]) {
-    commandRegistry.set(cmd.name, cmd);
+    guildMap.set(cmd.name, cmd);
   }
+  commandRegistry.set(guild.id, guildMap);
 
   // Return command JSON bodies for the bulk PUT (merged into allCommands)
   const commandBodies = (data as DbCustomCommand[]).map((cmd) => ({
@@ -106,7 +117,7 @@ export async function handleCustomCommand(
   valkey: Valkey,
   guild: Guild,
 ): Promise<boolean> {
-  const cmd = commandRegistry.get(interaction.commandName);
+  const cmd = commandRegistry.get(guild.id)?.get(interaction.commandName);
   if (!cmd) return false;
 
   // Check permissions: allowed roles
@@ -270,15 +281,24 @@ export async function handleCustomCommand(
 }
 
 /**
- * Check if a command name is registered as a custom command.
+ * Check if a command name is registered as a custom command for any guild.
  */
-export function isCustomCommand(name: string): boolean {
-  return commandRegistry.has(name);
+export function isCustomCommand(name: string, guildId?: string): boolean {
+  if (guildId) return commandRegistry.get(guildId)?.has(name) ?? false;
+  // Fallback: check all guilds (for cases where guildId isn't available)
+  for (const guildMap of commandRegistry.values()) {
+    if (guildMap.has(name)) return true;
+  }
+  return false;
 }
 
 /**
- * Clear the command registry (for reloading).
+ * Clear the command registry for a specific guild (for reloading).
  */
-export function clearCommandRegistry(): void {
-  commandRegistry.clear();
+export function clearCommandRegistry(guildId?: string): void {
+  if (guildId) {
+    commandRegistry.delete(guildId);
+  } else {
+    commandRegistry.clear();
+  }
 }

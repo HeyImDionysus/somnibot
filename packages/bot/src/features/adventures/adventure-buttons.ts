@@ -8,7 +8,7 @@ import { getAdventureManager } from './adventure-manager.js';
 export async function handleAdventureButton(
   interaction: ButtonInteraction,
 ): Promise<void> {
-  const manager = getAdventureManager();
+  const manager = getAdventureManager(interaction.guildId ?? undefined);
   if (!manager) {
     await interaction.reply({ content: '❌ Adventures module is not loaded.', ephemeral: true });
     return;

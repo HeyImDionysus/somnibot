@@ -606,7 +606,7 @@ export class EconomyManager {
 
     await this.recordTransaction(userId, 'work', amount, updated.wallet, `Worked: ${job}`);
     await this.logEconomyEvent(userId, 'work', amount);
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'work').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'work').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
     return {
       success: true,
@@ -645,7 +645,7 @@ export class EconomyManager {
 
       await this.recordTransaction(userId, 'crime', amount, updated.wallet, `Crime success: ${story}`);
       await this.logEconomyEvent(userId, 'crime (success)', amount);
-      getQuestsManager()?.trackProgress(this.guild.id, userId, 'crime').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
+      getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'crime').catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
       return {
         success: true,
@@ -1125,7 +1125,7 @@ export class EconomyManager {
 
     await this.recordTransaction(userId, 'shop_buy', -totalCost, wallet.wallet, `Bought ${quantity}x ${item.name}`);
     await this.logEconomyEvent(userId, `bought ${quantity}x ${item.name}`, -totalCost);
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'shop_buy', quantity).catch((e: unknown) => { log.warn('Quest trackProgress failed', { detail: (e as Error)?.message ?? e }); });
 
     return {
       success: true,

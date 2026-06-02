@@ -20,9 +20,20 @@ const log = createLogger('Games');
 
 // ── Module-level state ────────────────────────────────────
 
-let _manager: GamesManager | null = null;
-export function registerGamesManager(mgr: GamesManager): void { _manager = mgr; }
-export function invalidateGamesCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, GamesManager>();
+
+export function registerGamesManager(mgr: GamesManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateGamesCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr.clearCache();
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -129,7 +140,7 @@ export class GamesManager {
       if (error) { log.error('economy_subtract_balance failed:', error.message); return false; }
     }
     // Track quest progress for any gamble action (win or loss)
-    getQuestsManager()?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(guildId)?.trackProgress(guildId, userId, 'gamble').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
     return true;
   }
 
