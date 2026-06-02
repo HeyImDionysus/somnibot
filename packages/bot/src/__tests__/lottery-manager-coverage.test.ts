@@ -48,7 +48,7 @@ function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<st
     }
     const data = tableData[table] ?? null;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
-    (chain as any)[Symbol.toStringTag] = 'Promise';
+    chain[Symbol.toStringTag] = 'Promise';
     return chain;
   });
   return {

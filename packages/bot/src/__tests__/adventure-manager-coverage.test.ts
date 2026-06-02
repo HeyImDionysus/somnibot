@@ -59,7 +59,7 @@ function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<st
     }
     const data = tableData[table] ?? null;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: null, count: tableData[table + '_count'] ?? 0 });
-    (chain as any)[Symbol.toStringTag] = 'Promise';
+    chain[Symbol.toStringTag] = 'Promise';
     return chain;
   });
   return {
@@ -219,7 +219,7 @@ describe('AdventureManager', () => {
           const data = table === 'guild_config' ? { economy_adventures_enabled: true, economy_adventure_daily_limit: 3, economy_adventure_ticket_cost: 100, economy_adventure_max_scenes: 10 } : null;
           chain.then = (r: (v: any) => void) => r({ data, error: null, count: 0 });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
@@ -268,7 +268,7 @@ describe('AdventureManager', () => {
             error: null, count: 0,
           });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
@@ -323,7 +323,7 @@ describe('AdventureManager', () => {
             error: null, count: 0,
           });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
@@ -378,7 +378,7 @@ describe('AdventureManager', () => {
         } else {
           chain.then = (r: (v: any) => void) => r({ data: null, error: null });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
@@ -417,7 +417,7 @@ describe('AdventureManager', () => {
         } else {
           chain.then = (r: (v: any) => void) => r({ data: null, error: null });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);
@@ -459,7 +459,7 @@ describe('AdventureManager', () => {
         } else {
           chain.then = (r: (v: any) => void) => r({ data: null, error: null });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
       mgr = new AdventureManager(makeGuild() as any, supabase as any, makeValkey() as any);

@@ -57,7 +57,7 @@ function makeSupabase(overrides: Record<string, any> = {}) {
     }
     const data = overrides[table] ?? null;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: overrides[`${table}_error`] ?? null });
-    (chain as any)[Symbol.toStringTag] = 'Promise';
+    chain[Symbol.toStringTag] = 'Promise';
     return chain;
   });
 
@@ -274,7 +274,7 @@ describe('PetsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
@@ -409,7 +409,7 @@ describe('PetsManager', () => {
         } else {
           chain.then = (resolve: (v: any) => void) => resolve({ data: null, error: null });
         }
-        (chain as any)[Symbol.toStringTag] = 'Promise';
+        chain[Symbol.toStringTag] = 'Promise';
         return chain;
       });
 
