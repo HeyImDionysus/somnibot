@@ -390,17 +390,7 @@ export function registerEvents(client: SomniClient): void {
         const { data, error } = await client.supabase.rpc('prune_expired_data', {
           p_guild_id: ctx.guildId,
         });
-        if (error) {
-          // Fall back to parameterless version (RPC may not accept guild_id yet)
-          if (error.message?.includes('p_guild_id')) {
-            const { data: d2, error: e2 } = await client.supabase.rpc('prune_expired_data');
-            if (e2) throw e2;
-            const c = d2 as Record<string, number> | null;
-            totalPruned += c ? Object.values(c).reduce((s, n) => s + n, 0) : 0;
-            break; // ran global prune, no need to iterate further
-          }
-          throw error;
-        }
+        if (error) throw error;
         const counts = data as Record<string, number> | null;
         const pruned = counts ? Object.values(counts).reduce((s, n) => s + n, 0) : 0;
         totalPruned += pruned;

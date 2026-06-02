@@ -22,6 +22,7 @@ import type {
   NewlineSpamConfig,
   EscalationStep,
 } from '@somnibot/shared';
+import { runInNewContext } from 'node:vm';
 import { executeAutoModAction } from './automod-actions.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -261,20 +262,26 @@ function checkWordFilter(
 
           const regex = new RegExp(word, config.caseSensitive ? '' : 'i');
 
-          // Run the match with a timeout guard: if regex.test takes >50ms,
-          // treat it as a timeout and skip this pattern.
-          const start = Date.now();
-          const matched = regex.test(content);
-          if (Date.now() - start > 50) {
-            log.warn(`Regex pattern "${word}" took >50ms — skipping for safety`);
-            break;
-          }
+          // V6 Audit H-5: Run regex in a sandboxed VM context with a hard
+          // 50ms timeout. The previous approach checked elapsed time AFTER
+          // regex.test() completed, which didn't protect against catastrophic
+          // backtracking blocking the event loop. This matches the approach
+          // used in automations/condition-evaluator.ts.
+          const input = content.slice(0, 2000);
+          const matched = runInNewContext(
+            'regex.test(input)',
+            { regex, input },
+            { timeout: 50 },
+          );
 
           if (matched) {
             return `Matched regex filter: "${word}"`;
           }
-        } catch {
-          // Invalid regex — skip
+        } catch (err) {
+          // Timeout, invalid regex, or other error — skip
+          if (err instanceof Error && err.message?.includes('timed out')) {
+            log.warn(`Regex pattern "${word}" timed out after 50ms — skipping for safety`);
+          }
         }
         break;
       }
