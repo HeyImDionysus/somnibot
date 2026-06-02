@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Stub env before importing
 process.env.CSRF_SECRET = 'test-csrf-secret-32chars-minimum';
 
-import { generateCsrfToken, verifyCsrfToken, checkCsrf } from '@/lib/api/csrf';
+import { generateCsrfToken, verifyCsrfToken, checkCsrf, shouldRotateCsrf, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { NextRequest } from 'next/server';
 
 function makeMutatingRequest(
@@ -163,6 +163,132 @@ describe('CSRF Protection', () => {
       });
       const result = checkCsrf(req);
       expect(result).toBeNull();
+    });
+  });
+
+  describe('checkCsrf — grace-period on rotation (V10 §5)', () => {
+    // When the CSRF cookie rotates, the client's in-memory X-CSRF-Token header
+    // still holds the old token. The prev cookie keeps the old nonce valid for
+    // 60s so in-flight requests don't 403.
+
+    it('accepts old token via prev cookie within 60s grace window', () => {
+      const sessionId = 'grace-session';
+      const old = generateCsrfToken(sessionId);
+      const fresh = generateCsrfToken(sessionId);
+
+      // Simulate: current cookie has new nonce, prev cookie has old nonce + recent timestamp
+      const now = String(Date.now());
+      const req = makeMutatingRequest('/api/config', {
+        method: 'PUT',
+        headers: { 'x-csrf-token': old.token },
+        cookies: {
+          'somnibot-csrf-token': `${fresh.nonce}:${sessionId}!${now}`,
+          [CSRF_PREV_COOKIE_NAME]: `${old.nonce}:${sessionId}!${now}`,
+        },
+      });
+
+      expect(checkCsrf(req)).toBeNull();
+    });
+
+    it('rejects old token after grace window expires', () => {
+      const sessionId = 'grace-session';
+      const old = generateCsrfToken(sessionId);
+      const fresh = generateCsrfToken(sessionId);
+
+      // 120s ago — beyond the 60s grace window
+      const expired = String(Date.now() - 120_000);
+      const req = makeMutatingRequest('/api/config', {
+        method: 'PUT',
+        headers: { 'x-csrf-token': old.token },
+        cookies: {
+          'somnibot-csrf-token': `${fresh.nonce}:${sessionId}!${Date.now()}`,
+          [CSRF_PREV_COOKIE_NAME]: `${old.nonce}:${sessionId}!${expired}`,
+        },
+      });
+
+      const result = checkCsrf(req);
+      expect(result).not.toBeNull();
+      expect(result!.status).toBe(403);
+    });
+
+    it('rejects when prev cookie has no colon separator', () => {
+      const fresh = generateCsrfToken('session-123');
+      const req = makeMutatingRequest('/api/config', {
+        method: 'POST',
+        headers: { 'x-csrf-token': 'wrong-token' },
+        cookies: {
+          'somnibot-csrf-token': `${fresh.nonce}:session-123!${Date.now()}`,
+          [CSRF_PREV_COOKIE_NAME]: 'malformed-no-colon',
+        },
+      });
+
+      expect(checkCsrf(req)).not.toBeNull();
+    });
+
+    it('rejects when prev cookie has non-numeric timestamp', () => {
+      const sessionId = 'session-123';
+      const old = generateCsrfToken(sessionId);
+      const fresh = generateCsrfToken(sessionId);
+
+      const req = makeMutatingRequest('/api/config', {
+        method: 'POST',
+        headers: { 'x-csrf-token': old.token },
+        cookies: {
+          'somnibot-csrf-token': `${fresh.nonce}:${sessionId}!${Date.now()}`,
+          [CSRF_PREV_COOKIE_NAME]: `${old.nonce}:${sessionId}!NaN`,
+        },
+      });
+
+      expect(checkCsrf(req)).not.toBeNull();
+    });
+
+    it('does not fall back to prev cookie when current token is valid', () => {
+      const sessionId = 'session-123';
+      const current = generateCsrfToken(sessionId);
+
+      // Current token is valid — prev cookie should be irrelevant
+      const req = makeMutatingRequest('/api/config', {
+        method: 'DELETE',
+        headers: { 'x-csrf-token': current.token },
+        cookies: {
+          'somnibot-csrf-token': `${current.nonce}:${sessionId}!${Date.now()}`,
+          [CSRF_PREV_COOKIE_NAME]: 'stale:garbage!0',
+        },
+      });
+
+      expect(checkCsrf(req)).toBeNull();
+    });
+  });
+
+  describe('shouldRotateCsrf', () => {
+    it('returns false when no CSRF cookie exists', () => {
+      const req = new NextRequest('http://localhost/api/config');
+      expect(shouldRotateCsrf(req)).toBe(false);
+    });
+
+    it('returns true for legacy cookie without timestamp', () => {
+      const req = new NextRequest('http://localhost/api/config');
+      req.cookies.set('somnibot-csrf-token', 'abc123:session-id');
+      expect(shouldRotateCsrf(req)).toBe(true);
+    });
+
+    it('returns false for recently-issued cookie', () => {
+      const req = new NextRequest('http://localhost/api/config');
+      req.cookies.set('somnibot-csrf-token', `abc123:session-id!${Date.now()}`);
+      expect(shouldRotateCsrf(req)).toBe(false);
+    });
+
+    it('returns true when cookie is older than 30 minutes', () => {
+      const req = new NextRequest('http://localhost/api/config');
+      const thirtyOneMinAgo = Date.now() - 31 * 60 * 1000;
+      req.cookies.set('somnibot-csrf-token', `abc123:session-id!${thirtyOneMinAgo}`);
+      expect(shouldRotateCsrf(req)).toBe(true);
+    });
+
+    it('returns true when timestamp is unparseable', () => {
+      const req = new NextRequest('http://localhost/api/config');
+      req.cookies.set('somnibot-csrf-token', 'abc123:session-id!garbage');
+      expect(shouldRotateCsrf(req)).toBe(true);
     });
   });
 });
