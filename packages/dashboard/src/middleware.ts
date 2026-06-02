@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { checkCsrf, shouldRotateCsrf, CSRF_COOKIE_NAME, generateCsrfToken } from '@/lib/api/csrf';
+import { checkCsrf, shouldRotateCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, generateCsrfToken } from '@/lib/api/csrf';
 
 /* ------------------------------------------------------------------ */
 /*  CSP Nonce — generated per request for strict script-src            */
@@ -224,8 +224,23 @@ export async function middleware(request: NextRequest) {
   }
 
   // V5 Audit §1.P3b: Periodically rotate CSRF cookie to limit token lifetime
+  // V10 Audit §5: Preserve the old nonce in a separate cookie so in-flight
+  // requests using the previous token are accepted during the grace period.
   if (user && shouldRotateCsrf(request)) {
     const sessionId = user.id?.slice(-16) ?? 'unknown';
+
+    // Save current cookie as previous before overwriting
+    const currentCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+    if (currentCookie) {
+      supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${currentCookie}`, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 120, // 2 minutes — longer than the 60s grace window
+      });
+    }
+
     const csrf = generateCsrfToken(sessionId);
     supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${Date.now()}`, {
       httpOnly: true,

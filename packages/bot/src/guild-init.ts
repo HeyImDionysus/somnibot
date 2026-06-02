@@ -54,6 +54,7 @@ import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
 import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
+import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
@@ -124,6 +125,9 @@ export async function initGuildFeatures(
   const allCommands: RESTPostAPIApplicationCommandsJSONBody[] = [];
 
   guildLog.info('Initializing features');
+
+  // V10 Audit §1: Start the anti-raid memory pruner (idempotent — safe per guild)
+  startAntiRaidPruner();
 
   // ── Bot role check ──
   const roleCheck = await checkBotRolePosition(guild);

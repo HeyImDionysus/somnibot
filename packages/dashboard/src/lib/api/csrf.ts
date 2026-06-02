@@ -19,7 +19,15 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
+/**
+ * V10 Audit §5: Previous CSRF nonce cookie for grace-period acceptance.
+ * When the token rotates, the client's in-memory header still holds the old
+ * token for 1-2 seconds. This cookie allows the old token to remain valid
+ * for up to CSRF_GRACE_PERIOD_MS after rotation.
+ */
+const CSRF_PREV_COOKIE_NAME = 'somnibot-csrf-prev';
 const CSRF_HEADER_NAME = 'x-csrf-token';
+const CSRF_GRACE_PERIOD_MS = 60_000; // 60 seconds
 
 /**
  * V7 Audit §1.P3a — Centralized CSRF exempt route prefixes.
@@ -151,6 +159,27 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
   const sessionId = bangIdx === -1 ? rest : rest.slice(0, bangIdx);
 
   if (!verifyCsrfToken(headerToken, nonce, sessionId)) {
+    // V10 Audit §5: Try previous token during rotation grace period.
+    // When the middleware rotates the CSRF cookie, the client's in-memory
+    // X-CSRF-Token header still holds the old token. Accept the old nonce
+    // for CSRF_GRACE_PERIOD_MS after rotation.
+    const prevCookie = request.cookies.get(CSRF_PREV_COOKIE_NAME)?.value;
+    if (prevCookie) {
+      const prevColonIdx = prevCookie.indexOf(':');
+      const prevBangIdx = prevCookie.lastIndexOf('!');
+      if (prevColonIdx !== -1 && prevBangIdx > prevColonIdx) {
+        const prevNonce = prevCookie.slice(0, prevColonIdx);
+        const prevRest = prevCookie.slice(prevColonIdx + 1, prevBangIdx);
+        const prevTimestamp = parseInt(prevCookie.slice(prevBangIdx + 1), 10);
+
+        if (!Number.isNaN(prevTimestamp) && Date.now() - prevTimestamp < CSRF_GRACE_PERIOD_MS) {
+          if (verifyCsrfToken(headerToken, prevNonce, prevRest)) {
+            return null; // Previous token still valid within grace period
+          }
+        }
+      }
+    }
+
     return NextResponse.json(
       { error: 'Invalid CSRF token' },
       { status: 403 },
@@ -189,4 +218,4 @@ export function shouldRotateCsrf(request: NextRequest): boolean {
 /**
  * Cookie name and header name exports for the /api/csrf route.
  */
-export { CSRF_COOKIE_NAME, CSRF_HEADER_NAME };
+export { CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, CSRF_HEADER_NAME };

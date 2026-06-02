@@ -12,6 +12,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import os from 'node:os';
@@ -323,9 +324,26 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   dashboardStatus = 'starting';
   broadcastStatus();
 
+  // V10 Audit §12: Write SESSION_TOKEN to a temp file with restrictive
+  // permissions instead of passing it solely via env. The dashboard reads
+  // the file path from SESSION_TOKEN_FILE in instrumentation.ts and deletes
+  // the file after reading. The env var is still set as a fallback.
+  const dashEnv = { ...safeParentEnv(), ...envVars };
+  if (envVars.SESSION_TOKEN) {
+    try {
+      const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');
+      fs.mkdirSync(tokenDir, { recursive: true, mode: 0o700 });
+      const tokenFile = path.join(tokenDir, `session-${Date.now()}.tok`);
+      fs.writeFileSync(tokenFile, envVars.SESSION_TOKEN, { mode: 0o600 });
+      dashEnv.SESSION_TOKEN_FILE = tokenFile;
+    } catch {
+      // Fall back to env-only if temp file fails (e.g., Windows FS quirks)
+    }
+  }
+
   // V7 Audit §10.P3a — Only pass explicit env vars + essential system vars.
   dashboardProcess = fork(entryPath, [], {
-    env: { ...safeParentEnv(), ...envVars },
+    env: dashEnv,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });

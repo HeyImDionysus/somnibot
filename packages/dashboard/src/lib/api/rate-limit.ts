@@ -333,6 +333,20 @@ export async function checkValkeyHealth(): Promise<boolean> {
 }
 
 /**
+ * V10 Audit §7: Read a raw Valkey key value. Used by the health endpoint
+ * to check bot heartbeat without exposing the internal sendCommand.
+ */
+export async function readValkeyKey(key: string): Promise<string | null> {
+  if (!ensureValkey() || !valkeyReady) return null;
+  try {
+    const reply = await sendCommand('GET', key);
+    return typeof reply === 'string' ? reply : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Pre-configured rate limits for different endpoint types.
  */
 export const rateLimits = {

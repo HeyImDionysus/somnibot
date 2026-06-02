@@ -7,7 +7,7 @@
 -- CORE
 -- ============================================================
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   discord_id TEXT UNIQUE NOT NULL,
   discord_username TEXT NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE users (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE guild (
+CREATE TABLE IF NOT EXISTS guild (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   icon_url TEXT,
@@ -32,7 +32,7 @@ CREATE TABLE guild (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE guild_config (
+CREATE TABLE IF NOT EXISTS guild_config (
   guild_id TEXT PRIMARY KEY REFERENCES guild(id),
   -- Onboarding
   member_role_id TEXT,
@@ -109,7 +109,7 @@ CREATE TABLE guild_config (
 -- TEMPLATES & SERVER STRUCTURE
 -- ============================================================
 
-CREATE TABLE role_templates (
+CREATE TABLE IF NOT EXISTS role_templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -123,7 +123,7 @@ CREATE TABLE role_templates (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE channel_templates (
+CREATE TABLE IF NOT EXISTS channel_templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -136,7 +136,7 @@ CREATE TABLE channel_templates (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE server_templates (
+CREATE TABLE IF NOT EXISTS server_templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -148,7 +148,7 @@ CREATE TABLE server_templates (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE guild_desired_state (
+CREATE TABLE IF NOT EXISTS guild_desired_state (
   guild_id TEXT PRIMARY KEY REFERENCES guild(id),
   server_template_id UUID REFERENCES server_templates(id),
   roles JSONB NOT NULL DEFAULT '[]',
@@ -161,7 +161,7 @@ CREATE TABLE guild_desired_state (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE discord_id_map (
+CREATE TABLE IF NOT EXISTS discord_id_map (
   guild_id TEXT REFERENCES guild(id),
   entity_type TEXT NOT NULL CHECK (entity_type IN ('role', 'channel', 'category')),
   template_key TEXT NOT NULL,
@@ -173,7 +173,7 @@ CREATE TABLE discord_id_map (
 -- REACTION ROLES
 -- ============================================================
 
-CREATE TABLE reaction_roles (
+CREATE TABLE IF NOT EXISTS reaction_roles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   channel_id TEXT NOT NULL,
@@ -195,7 +195,7 @@ CREATE TABLE reaction_roles (
 -- MODERATION
 -- ============================================================
 
-CREATE TABLE automod_rules (
+CREATE TABLE IF NOT EXISTS automod_rules (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -211,7 +211,7 @@ CREATE TABLE automod_rules (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE infractions (
+CREATE TABLE IF NOT EXISTS infractions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   member_id TEXT NOT NULL,
@@ -232,7 +232,7 @@ CREATE TABLE infractions (
 -- TICKETING
 -- ============================================================
 
-CREATE TABLE ticket_panels (
+CREATE TABLE IF NOT EXISTS ticket_panels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -253,7 +253,7 @@ CREATE TABLE ticket_panels (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE tickets (
+CREATE TABLE IF NOT EXISTS tickets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   panel_id UUID REFERENCES ticket_panels(id),
@@ -278,7 +278,7 @@ CREATE SEQUENCE ticket_number_seq START 1;
 -- AUTOMATIONS
 -- ============================================================
 
-CREATE TABLE automations (
+CREATE TABLE IF NOT EXISTS automations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -299,7 +299,7 @@ CREATE TABLE automations (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE automation_executions (
+CREATE TABLE IF NOT EXISTS automation_executions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   automation_id UUID REFERENCES automations(id) ON DELETE CASCADE,
   guild_id TEXT REFERENCES guild(id),
@@ -317,7 +317,7 @@ CREATE TABLE automation_executions (
 -- CUSTOM COMMANDS
 -- ============================================================
 
-CREATE TABLE custom_commands (
+CREATE TABLE IF NOT EXISTS custom_commands (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -340,7 +340,7 @@ CREATE TABLE custom_commands (
 -- EMBED BUILDER
 -- ============================================================
 
-CREATE TABLE embed_configs (
+CREATE TABLE IF NOT EXISTS embed_configs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -366,7 +366,7 @@ CREATE TABLE embed_configs (
 -- LEVELS & XP
 -- ============================================================
 
-CREATE TABLE member_levels (
+CREATE TABLE IF NOT EXISTS member_levels (
   guild_id TEXT REFERENCES guild(id),
   member_id TEXT NOT NULL,
   xp INTEGER NOT NULL DEFAULT 0,
@@ -379,7 +379,7 @@ CREATE TABLE member_levels (
   PRIMARY KEY (guild_id, member_id)
 );
 
-CREATE TABLE level_rewards (
+CREATE TABLE IF NOT EXISTS level_rewards (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   level INTEGER NOT NULL,
@@ -390,7 +390,7 @@ CREATE TABLE level_rewards (
   UNIQUE(guild_id, level, role_id)
 );
 
-CREATE TABLE xp_multipliers (
+CREATE TABLE IF NOT EXISTS xp_multipliers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   role_id TEXT NOT NULL,
@@ -400,7 +400,7 @@ CREATE TABLE xp_multipliers (
 );
 
 -- Per-user rank card customization (v4)
-CREATE TABLE member_rank_settings (
+CREATE TABLE IF NOT EXISTS member_rank_settings (
   guild_id TEXT REFERENCES guild(id),
   member_id TEXT NOT NULL,
   background_url TEXT,
@@ -418,7 +418,7 @@ CREATE TABLE member_rank_settings (
 -- TEMPORARY VOICE CHANNELS
 -- ============================================================
 
-CREATE TABLE temp_channel_hubs (
+CREATE TABLE IF NOT EXISTS temp_channel_hubs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   hub_channel_id TEXT NOT NULL,
@@ -434,7 +434,7 @@ CREATE TABLE temp_channel_hubs (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE active_temp_channels (
+CREATE TABLE IF NOT EXISTS active_temp_channels (
   channel_id TEXT PRIMARY KEY,
   text_channel_id TEXT,
   guild_id TEXT REFERENCES guild(id),
@@ -447,7 +447,7 @@ CREATE TABLE active_temp_channels (
 -- STATISTICS CHANNELS
 -- ============================================================
 
-CREATE TABLE stats_channels (
+CREATE TABLE IF NOT EXISTS stats_channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   channel_id TEXT,
@@ -465,7 +465,7 @@ CREATE TABLE stats_channels (
 -- SCHEDULED MESSAGES
 -- ============================================================
 
-CREATE TABLE scheduled_messages (
+CREATE TABLE IF NOT EXISTS scheduled_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -488,7 +488,7 @@ CREATE TABLE scheduled_messages (
 -- COMMERCE
 -- ============================================================
 
-CREATE TABLE products (
+CREATE TABLE IF NOT EXISTS products (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -507,7 +507,7 @@ CREATE TABLE products (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE product_files (
+CREATE TABLE IF NOT EXISTS product_files (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id UUID REFERENCES products(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
@@ -521,7 +521,7 @@ CREATE TABLE product_files (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE plans (
+CREATE TABLE IF NOT EXISTS plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id UUID REFERENCES products(id) ON DELETE CASCADE,
   guild_id TEXT REFERENCES guild(id),
@@ -537,7 +537,7 @@ CREATE TABLE plans (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE customers (
+CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES users(id),
   guild_id TEXT REFERENCES guild(id),
@@ -553,7 +553,7 @@ CREATE TABLE customers (
   UNIQUE(discord_id, guild_id)
 );
 
-CREATE TABLE promotions (
+CREATE TABLE IF NOT EXISTS promotions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   name TEXT NOT NULL,
@@ -573,7 +573,7 @@ CREATE TABLE promotions (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_number TEXT UNIQUE NOT NULL,
   customer_id UUID REFERENCES customers(id),
@@ -592,7 +592,7 @@ CREATE TABLE orders (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE license_keys (
+CREATE TABLE IF NOT EXISTS license_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id UUID REFERENCES orders(id),
   customer_id UUID REFERENCES customers(id),
@@ -611,7 +611,7 @@ CREATE TABLE license_keys (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE entitlements (
+CREATE TABLE IF NOT EXISTS entitlements (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id UUID REFERENCES customers(id),
   guild_id TEXT REFERENCES guild(id),
@@ -636,7 +636,7 @@ CREATE TABLE entitlements (
 -- GIVEAWAYS (after products table for FK)
 -- ============================================================
 
-CREATE TABLE giveaways (
+CREATE TABLE IF NOT EXISTS giveaways (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   channel_id TEXT NOT NULL,
@@ -661,7 +661,7 @@ CREATE TABLE giveaways (
 -- UNIVERSAL LICENSING (v4)
 -- ============================================================
 
-CREATE TABLE product_license_config (
+CREATE TABLE IF NOT EXISTS product_license_config (
   product_id UUID PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
   license_mode TEXT NOT NULL DEFAULT 'portal_only' CHECK (license_mode IN ('portal_only', 'portal_watermark', 'embedded', 'access_pass')),
   max_devices INTEGER DEFAULT 3,
@@ -675,7 +675,7 @@ CREATE TABLE product_license_config (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE license_sessions (
+CREATE TABLE IF NOT EXISTS license_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   license_key_id UUID REFERENCES license_keys(id) ON DELETE CASCADE,
   device_fingerprint TEXT NOT NULL,
@@ -690,7 +690,7 @@ CREATE TABLE license_sessions (
   UNIQUE(license_key_id, device_fingerprint)
 );
 
-CREATE TABLE license_validations (
+CREATE TABLE IF NOT EXISTS license_validations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   license_key_id UUID REFERENCES license_keys(id) ON DELETE CASCADE,
   product_id UUID REFERENCES products(id),
@@ -705,7 +705,7 @@ CREATE TABLE license_validations (
 -- PAYMENTS
 -- ============================================================
 
-CREATE TABLE payments (
+CREATE TABLE IF NOT EXISTS payments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id UUID REFERENCES orders(id),
   customer_id UUID REFERENCES customers(id),
@@ -722,7 +722,7 @@ CREATE TABLE payments (
 -- AUDIT & OPERATIONS
 -- ============================================================
 
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   guild_id TEXT REFERENCES guild(id),
   timestamp TIMESTAMPTZ DEFAULT now(),
@@ -738,7 +738,7 @@ CREATE TABLE audit_logs (
   error_message TEXT
 );
 
-CREATE TABLE webhook_events (
+CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
   processed_at TIMESTAMPTZ DEFAULT now(),

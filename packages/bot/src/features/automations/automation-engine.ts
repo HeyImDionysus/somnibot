@@ -36,9 +36,17 @@ export class AutomationEngine {
   private rateLimiter: AutomationRateLimiter;
   private executionLogger: ExecutionLogger;
   private alertService: AlertService | null;
-  /** Current chain depth — incremented during automation execution so any
-   *  events emitted as side-effects (e.g., role.gained from give_role) inherit it. */
-  private _currentChainDepth = 0;
+  /**
+   * V10 Audit §2: Per-execution chain depth tracking.
+   *
+   * Maps a unique execution ID to the chain depth of that execution.
+   * When a side-effect event arrives without `_chainDepth` (e.g., role.gained
+   * from a give_role action round-tripping through Discord), the highest active
+   * depth is inherited. This prevents concurrent automations from corrupting
+   * a single shared field, while still guarding against infinite loops.
+   */
+  private _activeDepths = new Map<string, number>();
+  private _execCounter = 0;
 
   constructor(
     private guild: Guild,
@@ -68,12 +76,18 @@ export class AutomationEngine {
     this.loader.subscribe();
 
     // Listen to ALL platform events and check for matching automations.
-    // If an event arrives without _chainDepth but we're currently executing
-    // an automation (side-effect event), inherit the current depth + 1.
+    // V10 Audit §2: If an event arrives without _chainDepth but there are
+    // active automation executions, inherit the highest active depth.
+    // This handles side-effect events (e.g., role.gained from give_role)
+    // that round-trip through Discord and lose async context.
     this.eventBus.onAny(async (event: PlatformEvent) => {
       if (event.guildId !== this.guild.id) return;
-      if (event._chainDepth === undefined && this._currentChainDepth > 0) {
-        event._chainDepth = this._currentChainDepth;
+      if (event._chainDepth === undefined && this._activeDepths.size > 0) {
+        let maxDepth = 0;
+        for (const d of this._activeDepths.values()) {
+          if (d > maxDepth) maxDepth = d;
+        }
+        if (maxDepth > 0) event._chainDepth = maxDepth;
       }
       await this.handleEvent(event);
     });
@@ -182,9 +196,11 @@ export class AutomationEngine {
       return;
     }
 
-    // 4. Execute actions — track chain depth so side-effect events inherit it
+    // 4. Execute actions — V10 Audit §2: track chain depth per-execution
+    //    so concurrent automations don't corrupt each other's depth.
     const depth = (event._chainDepth ?? 0) + 1;
-    this._currentChainDepth = depth;
+    const execId = `${automation.id}:${++this._execCounter}`;
+    this._activeDepths.set(execId, depth);
 
     const actionCtx: ActionContext = {
       guild: this.guild,
@@ -206,8 +222,7 @@ export class AutomationEngine {
         actionCtx,
       );
     } finally {
-      // Reset chain depth after execution completes
-      this._currentChainDepth = Math.max(0, this._currentChainDepth - 1);
+      this._activeDepths.delete(execId);
     }
     const { executed, failed, errors } = actionResult;
 
