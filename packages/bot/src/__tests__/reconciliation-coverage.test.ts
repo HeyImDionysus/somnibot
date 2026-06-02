@@ -26,7 +26,7 @@ function makeSupabase(tableData: Record<string, any> = {}) {
     }
     const data = tableData[table] ?? null;
     chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
-    chain[Symbol.toStringTag] = 'Promise';
+    (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
   return { from: fromMock };

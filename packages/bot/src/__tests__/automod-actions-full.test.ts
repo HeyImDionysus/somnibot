@@ -11,21 +11,21 @@ vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
-vi.mock('./infraction-service.js', () => ({
+vi.mock('../features/moderation/infraction-service.js', () => ({
   createInfraction: vi.fn(async () => ({ id: 'inf1' })),
   getActiveWarningCount: vi.fn(async () => 2),
   calculateExpiryDate: vi.fn(() => '2026-12-31T00:00:00Z'),
 }));
 
-vi.mock('./escalation.js', () => ({
+vi.mock('../features/moderation/escalation.js', () => ({
   executeEscalation: vi.fn(async () => {}),
 }));
 
-vi.mock('./mod-log.js', () => ({
+vi.mock('../features/moderation/mod-log.js', () => ({
   postModLogEntry: vi.fn(async () => {}),
 }));
 
-vi.mock('../../services/audit.js', () => ({
+vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
 

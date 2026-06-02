@@ -54,7 +54,7 @@ import {
 } from '../features/music/music-embeds.js';
 import type { QueueEntry, GuildQueue, LoopMode } from '../features/music/music-queue.js';
 
-function makeEntry(overrides: Partial<QueueEntry & { artworkUrl?: string }> = {}): QueueEntry & { artworkUrl?: string } {
+function makeEntry(overrides: Partial<QueueEntry> = {}): QueueEntry {
   return {
     track: 'base64encodedtrack',
     title: 'Test Song',
@@ -62,7 +62,8 @@ function makeEntry(overrides: Partial<QueueEntry & { artworkUrl?: string }> = {}
     duration: 240000, // 4 minutes
     author: 'Test Artist',
     requestedBy: 'u1',
-    thumbnail: 'https://img.youtube.com/test.jpg',
+    artworkUrl: 'https://img.youtube.com/test.jpg',
+    addedAt: Date.now(),
     isStream: false,
     ...overrides,
   };
@@ -77,6 +78,7 @@ function makeQueue(overrides: Partial<GuildQueue> = {}): GuildQueue {
     currentIndex: 0,
     loopMode: 'off' as LoopMode,
     volume: 50,
+    shuffled: false,
     paused: false,
     ...overrides,
   };
@@ -177,7 +179,7 @@ describe('music-embeds', () => {
   describe('buildQueueEmbed', () => {
     it('builds embed for a queue with one track', () => {
       const queue = makeQueue();
-      const embed = buildQueueEmbed(queue, 0, 1);
+      const embed = buildQueueEmbed(queue, 0);
       expect(embed).toBeDefined();
     });
 
@@ -186,7 +188,7 @@ describe('music-embeds', () => {
         makeEntry({ title: `Song ${i + 1}`, duration: (i + 1) * 60000 })
       );
       const queue = makeQueue({ entries });
-      const embed = buildQueueEmbed(queue, 0, 1);
+      const embed = buildQueueEmbed(queue, 0);
       expect(embed).toBeDefined();
     });
 
@@ -195,7 +197,7 @@ describe('music-embeds', () => {
         makeEntry({ title: `Song ${i + 1}` })
       );
       const queue = makeQueue({ entries });
-      const embed = buildQueueEmbed(queue, 1, 3);
+      const embed = buildQueueEmbed(queue, 1);
       expect(embed).toBeDefined();
     });
   });
@@ -216,7 +218,7 @@ describe('music-embeds', () => {
 
   describe('buildPlaylistAddedEmbed', () => {
     it('builds embed for added playlist', () => {
-      const embed = buildPlaylistAddedEmbed('My Playlist', 10, 60000);
+      const embed = buildPlaylistAddedEmbed(10, 'My Playlist');
       expect(embed).toBeDefined();
     });
   });

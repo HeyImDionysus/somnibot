@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const mockCheckBotRolePosition = vi.fn(async () => ({
+const mockCheckBotRolePosition = vi.fn(async (): Promise<any> => ({
   isTopPosition: true,
   botRolePosition: 10,
   totalRoles: 5,
@@ -15,7 +15,7 @@ const mockCheckBotRolePosition = vi.fn(async () => ({
   canManageAllRoles: true,
 }));
 
-const mockCheckBotPermissions = vi.fn(() => ({
+const mockCheckBotPermissions = vi.fn((): any => ({
   hasRequired: true,
   missing: [],
 }));
@@ -29,8 +29,8 @@ vi.mock('discord.js', () => ({
 }));
 
 vi.mock('../guards/bot-role-guard.js', () => ({
-  checkBotRolePosition: (...args: any[]) => mockCheckBotRolePosition(...args),
-  checkBotPermissions: (...args: any[]) => mockCheckBotPermissions(...args),
+  checkBotRolePosition: (...args: unknown[]) => mockCheckBotRolePosition(...(args as Parameters<typeof mockCheckBotRolePosition>)),
+  checkBotPermissions: (...args: unknown[]) => mockCheckBotPermissions(...(args as Parameters<typeof mockCheckBotPermissions>)),
 }));
 
 import { deployServerState, type DeployOptions } from '../deploy/deployer.js';
@@ -118,7 +118,7 @@ describe('deployServerState — pre-flight', () => {
       isTopPosition: false, botRolePosition: 3, totalRoles: 5,
       rolesAboveBot: [{ id: 'r1', name: 'Admin', position: 5 }],
       canManageAllRoles: false,
-    });
+    } as any);
 
     const guild = makeGuild();
     const supabase = { from: vi.fn(() => supaChain()) } as any;
@@ -134,7 +134,7 @@ describe('deployServerState — pre-flight', () => {
     mockCheckBotPermissions.mockReturnValueOnce({
       hasRequired: false,
       missing: ['ManageRoles', 'ManageChannels'],
-    });
+    } as any);
 
     const guild = makeGuild();
     const supabase = { from: vi.fn(() => supaChain()) } as any;
