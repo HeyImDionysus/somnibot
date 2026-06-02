@@ -84,6 +84,7 @@ const log = createLogger('GuildInit');
 interface GuildServices {
   snapshotTimer?: ReturnType<typeof setInterval>;
   voiceXpTimer?: ReturnType<typeof setInterval>;
+  actionQueueStaleTimer?: ReturnType<typeof setInterval>;
   syncHandle?: { stop: () => void };
   reconTimer?: ReturnType<typeof setInterval>;
   automationEngine?: AutomationEngine;
@@ -190,7 +191,8 @@ export async function initGuildFeatures(
   // ── Snapshots + Action Queue ──
   services.snapshotTimer = startPeriodicSnapshots(guild, supabase, 60_000);
   guildLog.info('Guild snapshots started (60s)');
-  await startActionQueueListener(guild, supabase);
+  const aqHandle = await startActionQueueListener(guild, supabase);
+  services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   guildLog.info('Action queue listener started');
 
   // ── Sync engine ──
@@ -546,6 +548,7 @@ export function destroyGuildServices(ctx: GuildContext): void {
   // Timers
   if (services.snapshotTimer) clearInterval(services.snapshotTimer);
   if (services.voiceXpTimer) clearInterval(services.voiceXpTimer);
+  if (services.actionQueueStaleTimer) clearInterval(services.actionQueueStaleTimer);
   if (services.reconTimer) clearInterval(services.reconTimer);
   if (services.syncHandle) services.syncHandle.stop();
 

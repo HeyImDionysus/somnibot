@@ -276,6 +276,14 @@ export interface PaymentFailedData {
   error?: string;
 }
 
+export interface SyncReportData {
+  report: string;
+  repairedCount: number;
+  needsAttentionCount: number;
+  totalDrift: number;
+  timestamp: string;
+}
+
 export interface PlatformEventMap {
   'member.joined': MemberJoinedData;
   'member.left': MemberLeftData;
@@ -313,6 +321,7 @@ export interface PlatformEventMap {
   'deploy.failed': DeployFailedData;
   'drift.detected': DriftDetectedData;
   'sync.completed': SyncCompletedData;
+  'sync.report': SyncReportData;
   'moderation.action': ModerationActionData;
   'fraud.detected': FraudDetectedData;
   'incident.created': IncidentCreatedData;

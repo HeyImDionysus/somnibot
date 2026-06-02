@@ -947,10 +947,14 @@ async function recoverStaleActions(
   }
 }
 
+export interface ActionQueueHandle {
+  staleRecoveryTimer: ReturnType<typeof setInterval>;
+}
+
 export async function startActionQueueListener(
   guild: Guild,
   supabase: SupabaseClient,
-): Promise<void> {
+): Promise<ActionQueueHandle> {
   log.info('Starting action queue listener');
 
   // V48-C3: before processing pending rows, recover anything stuck in
@@ -977,11 +981,12 @@ export async function startActionQueueListener(
 
   // Periodic stale-row sweep (runs in addition to the startup pass so
   // long-running deployments don't accumulate stuck rows).
-  setInterval(() => {
+  const staleRecoveryTimer = setInterval(() => {
     recoverStaleActions(guild, supabase).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
     });
-  }, STALE_RECOVERY_INTERVAL_MS).unref?.();
+  }, STALE_RECOVERY_INTERVAL_MS);
+  staleRecoveryTimer.unref?.();
 
   // Subscribe to new inserts
   supabase
@@ -1006,4 +1011,6 @@ export async function startActionQueueListener(
     });
 
   log.info('Action queue listener active');
+
+  return { staleRecoveryTimer };
 }

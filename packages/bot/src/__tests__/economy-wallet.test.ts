@@ -41,7 +41,7 @@ function mockSupabase() {
       return {};
     },
     rpc: async (fn: string, params: Record<string, unknown>) => {
-      if (fn === 'economy_credit_wallet') {
+      if (fn === 'economy_add_balance') {
         const key = `${params.p_guild_id}:${params.p_user_id}`;
         const existing = wallets.get(key) ?? {
           user_id: params.p_user_id as string,
@@ -56,7 +56,7 @@ function mockSupabase() {
         wallets.set(key, existing);
         return { data: { wallet: existing.wallet }, error: null };
       }
-      if (fn === 'economy_debit_wallet') {
+      if (fn === 'economy_subtract_balance') {
         const key = `${params.p_guild_id}:${params.p_user_id}`;
         const existing = wallets.get(key);
         if (!existing) return { data: null, error: { message: 'Wallet not found' } };
@@ -80,7 +80,7 @@ describe('Economy Wallet Operations', () => {
   });
 
   it('credits a new wallet starting from zero', async () => {
-    const { data, error } = await supabase.rpc('economy_credit_wallet', {
+    const { data, error } = await supabase.rpc('economy_add_balance', {
       p_guild_id: 'guild1',
       p_user_id: 'user1',
       p_amount: 100,
@@ -90,21 +90,21 @@ describe('Economy Wallet Operations', () => {
   });
 
   it('stacks credits on existing balance', async () => {
-    await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
-    const { data } = await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 75 });
+    await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
+    const { data } = await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 75 });
     expect(data!.wallet).toBe(125);
   });
 
   it('refuses debit on insufficient funds', async () => {
-    await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
-    const { error } = await supabase.rpc('economy_debit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
+    await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
+    const { error } = await supabase.rpc('economy_subtract_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
     expect(error).not.toBeNull();
     expect(error!.message).toMatch(/insufficient/i);
   });
 
   it('refuses operations on suspended wallet', async () => {
     supabase.wallets.set('g1:u1', { user_id: 'u1', wallet: 500, bank: 0, suspended: true });
-    const { error } = await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
+    const { error } = await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
     expect(error).not.toBeNull();
     expect(error!.message).toMatch(/suspended/i);
   });
@@ -127,20 +127,20 @@ describe('Economy Wallet Operations', () => {
   });
 
   it('debit returns wallet not found for missing user', async () => {
-    const { error } = await supabase.rpc('economy_debit_wallet', { p_guild_id: 'g1', p_user_id: 'nonexistent', p_amount: 10 });
+    const { error } = await supabase.rpc('economy_subtract_balance', { p_guild_id: 'g1', p_user_id: 'nonexistent', p_amount: 10 });
     expect(error).not.toBeNull();
     expect(error!.message).toMatch(/not found/i);
   });
 
   it('handles zero-amount credit', async () => {
-    await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
-    const { data } = await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 0 });
+    await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 });
+    const { data } = await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 0 });
     expect(data!.wallet).toBe(100);
   });
 
   it('exact debit leaves wallet at zero', async () => {
-    await supabase.rpc('economy_credit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
-    const { data, error } = await supabase.rpc('economy_debit_wallet', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
+    await supabase.rpc('economy_add_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
+    const { data, error } = await supabase.rpc('economy_subtract_balance', { p_guild_id: 'g1', p_user_id: 'u1', p_amount: 50 });
     expect(error).toBeNull();
     expect(data!.wallet).toBe(0);
   });

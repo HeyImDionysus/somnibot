@@ -81,14 +81,16 @@ export class CrossFeatureBridge {
       await this.cleanupMemberEconomy(userId, 'left');
     });
 
-    // ── 2. Level Up → Unlock Economy Features (V53 Phase 4 — Finding 4.2) ──
+    // ── 2. Level Up → Unlock Economy Features + Milestone Bonus ────────────
     // Role grants still handled by level-announcer.ts (V47-L1).
-    // Bridge handles feature unlocks (fishing, farming, etc.) based on level_unlock_configs.
+    // Bridge handles feature unlocks (fishing, farming, etc.) based on level_unlock_configs,
+    // plus milestone economy bonuses at every 10th level.
     this.on('level.up', async (event) => {
       const userId = event.data.discordId;
       const newLevel = event.data.newLevel;
       if (!userId || !newLevel) return;
 
+      // 2a. Feature unlocks
       try {
         // Check for feature unlocks at this level
         const { data: unlocks } = await this.supabase
@@ -124,17 +126,36 @@ export class CrossFeatureBridge {
       } catch (err) {
         log.error(`Level-up unlock check failed for ${userId}:`, err);
       }
+
+      // 2b. Milestone economy bonus (multiples of 10)
+      if (newLevel % 10 === 0) {
+        try {
+          const bonus = (newLevel / 10) * 100;
+          const { error } = await this.supabase.rpc('economy_add_balance', {
+            p_guild_id: this.guild.id,
+            p_user_id: userId,
+            p_amount: bonus,
+          });
+
+          if (!error) {
+            log.info(`Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
+          }
+        } catch (err) {
+          log.error('Milestone bonus failed:', { error: String(err) });
+        }
+      }
     });
 
-    // ── 3. Purchase Complete → XP bonus + Celebration ──────
+    // ── 3. Purchase Complete → XP bonus + Role grants ──────
 
     this.on('purchase.completed', async (event) => {
       const userId = event.data.discordId;
       const productName = event.data.productName ?? 'a product';
       const orderId = event.data.orderId;
+      const productId = event.data.productId;
       if (!userId) return;
 
-      // Grant XP bonus for purchase (atomic — handles upsert, increment, and level recalc)
+      // 3a. Grant XP bonus for purchase (atomic — handles upsert, increment, and level recalc)
       const XP_BONUS = 500;
       const { error: xpError } = await this.supabase.rpc('increment_member_xp', {
         p_guild_id: this.guild.id,
@@ -147,15 +168,20 @@ export class CrossFeatureBridge {
       } else {
         log.info(`Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
       }
+
+      // 3b. Grant Discord role if this product is a role-grant item
+      if (productId) {
+        await this.grantPurchaseRole(userId, productId);
+      }
     });
 
-    // ── 4. Ticket Closed → Resolution metrics ──────────────
+    // ── 4. Ticket Closed → Resolution metrics + Satisfaction Survey ─────
 
     this.on('ticket.closed', async (event) => {
       const ticketId = event.data.ticketId;
       if (!ticketId) return;
 
-      // Calculate resolution time
+      // 4a. Resolution metrics
       const { data: ticket } = await this.supabase
         .from('tickets')
         .select('created_at, closed_at, creator_id')
@@ -188,6 +214,12 @@ export class CrossFeatureBridge {
         ).catch(() => { /* fire-and-forget stats */ });
         await this.valkey.ltrim(`stats:tickets:${this.guild.id}:resolution_times`, 0, 99).catch(() => { /* fire-and-forget stats */ });
       }
+
+      // 4b. Satisfaction survey DM
+      const creatorId = event.data.userDiscordId;
+      if (creatorId) {
+        await this.sendSatisfactionSurvey(ticketId, creatorId);
+      }
     });
 
     // ── 5. Infraction → Escalation + Giveaway cleanup ──────
@@ -210,120 +242,6 @@ export class CrossFeatureBridge {
     // here that was queuing action-queue entries with an incompatible payload
     // shape (missing required FulfillmentPayload fields), risking double
     // fulfillment and error spam.
-
-    // ── 7. Achievement Earned → Economy Bonus (V53 Phase 4 — Finding 4.2) ──
-    this.on('level.up', async (event) => {
-      const userId = event.data.discordId;
-      const newLevel = event.data.newLevel;
-      if (!userId || !newLevel) return;
-
-      // Check if this level is an achievement milestone (multiples of 10)
-      if (newLevel % 10 !== 0) return;
-
-      try {
-        // Grant milestone bonus: 100 coins per 10 levels
-        const bonus = (newLevel / 10) * 100;
-        const { error } = await this.supabase.rpc('economy_credit_wallet', {
-          p_guild_id: this.guild.id,
-          p_user_id: userId,
-          p_amount: bonus,
-          p_reason: `Level ${newLevel} milestone bonus`,
-        });
-
-        if (!error) {
-          log.info(`Granted ${bonus} coins to ${userId} for level ${newLevel} milestone`);
-        }
-      } catch (err) {
-        log.error('Milestone bonus failed:', { error: String(err) });
-      }
-    });
-
-    // ── 8. Ticket Closed → Satisfaction Survey DM (V53 Phase 4 — Finding 4.2) ──
-    this.on('ticket.closed', async (event) => {
-      const ticketId = event.data.ticketId;
-      const creatorId = event.data.userDiscordId;
-      if (!ticketId || !creatorId) return;
-
-      try {
-        // Check if satisfaction surveys are enabled
-        const { data: config } = await this.supabase
-          .from('guild_config')
-          .select('ticket_satisfaction_survey')
-          .eq('guild_id', this.guild.id)
-          .single();
-
-        if (!config?.ticket_satisfaction_survey) return;
-
-        // DM the ticket creator with a satisfaction survey
-        const member = await this.guild.members.fetch(creatorId).catch(() => null);
-        if (!member) return;
-
-        const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import('discord.js');
-        const embed = new EmbedBuilder()
-          .setTitle('📋 How was your support experience?')
-          .setDescription(`Your ticket #${ticketId.slice(0, 8)} has been resolved. We\'d love your feedback!`)
-          .setColor(0x5865F2)
-          .setTimestamp();
-
-        const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
-          new ButtonBuilder().setCustomId(`survey:${ticketId}:great`).setLabel('😊 Great').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`survey:${ticketId}:okay`).setLabel('😐 Okay').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId(`survey:${ticketId}:poor`).setLabel('😞 Poor').setStyle(ButtonStyle.Danger),
-        );
-
-        await member.send({ embeds: [embed], components: [row] }).catch(() => {
-          // User may have DMs disabled — that's fine
-        });
-      } catch (err) {
-        log.error('Satisfaction survey failed:', { error: String(err) });
-      }
-    });
-
-    // ── 9. Economy Purchase of Role Item → Grant Discord Role (V53 Phase 4 — Finding 4.2) ──
-    this.on('purchase.completed', async (event) => {
-      const userId = event.data.discordId;
-      const productId = event.data.productId;
-      if (!userId || !productId) return;
-
-      try {
-        // Check if this product is a role-grant item
-        const { data: product } = await this.supabase
-          .from('economy_items')
-          .select('metadata')
-          .eq('id', productId)
-          .maybeSingle();
-
-        if (!product) return;
-        const metadata = product.metadata as Record<string, unknown> | null;
-        const roleId = metadata?.grant_role_id as string | undefined;
-        if (!roleId) return;
-
-        const member = await this.guild.members.fetch(userId).catch(() => null);
-        if (!member) return;
-
-        const roleDurationHours = metadata?.role_duration_hours as number | undefined;
-        const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
-
-        await member.roles.add(roleId, 'SomniBot economy purchase — role item');
-        log.info(`Granted role ${roleId} to ${userId} via economy purchase`);
-
-        // If temporary role, schedule removal
-        if (durationMs) {
-          const expiresAt = new Date(Date.now() + durationMs).toISOString();
-          await this.supabase.from('temp_role_grants').insert({
-            guild_id: this.guild.id,
-            user_id: userId,
-            role_id: roleId,
-            expires_at: expiresAt,
-            source: 'economy_purchase',
-            source_id: productId,
-          });
-          log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
-        }
-      } catch (err) {
-        log.error('Role grant from purchase failed:', { error: String(err) });
-      }
-    });
 
     log.info(`${this.listeners.length} cross-feature event bridges active`);
   }
@@ -358,6 +276,83 @@ export class CrossFeatureBridge {
     };
     this.eventBus.on(event as never, wrapped as never);
     this.listeners.push(() => this.eventBus.off(event as never, wrapped as never));
+  }
+
+  private async sendSatisfactionSurvey(ticketId: string, creatorId: string): Promise<void> {
+    try {
+      // Check if satisfaction surveys are enabled
+      const { data: config } = await this.supabase
+        .from('guild_config')
+        .select('ticket_satisfaction_survey')
+        .eq('guild_id', this.guild.id)
+        .single();
+
+      if (!config?.ticket_satisfaction_survey) return;
+
+      // DM the ticket creator with a satisfaction survey
+      const member = await this.guild.members.fetch(creatorId).catch(() => null);
+      if (!member) return;
+
+      const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = await import('discord.js');
+      const embed = new EmbedBuilder()
+        .setTitle('📋 How was your support experience?')
+        .setDescription(`Your ticket #${ticketId.slice(0, 8)} has been resolved. We'd love your feedback!`)
+        .setColor(0x5865F2)
+        .setTimestamp();
+
+      const row = new ActionRowBuilder<InstanceType<typeof ButtonBuilder>>().addComponents(
+        new ButtonBuilder().setCustomId(`survey:${ticketId}:great`).setLabel('😊 Great').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`survey:${ticketId}:okay`).setLabel('😐 Okay').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`survey:${ticketId}:poor`).setLabel('😞 Poor').setStyle(ButtonStyle.Danger),
+      );
+
+      await member.send({ embeds: [embed], components: [row] }).catch(() => {
+        // User may have DMs disabled — that's fine
+      });
+    } catch (err) {
+      log.error('Satisfaction survey failed:', { error: String(err) });
+    }
+  }
+
+  private async grantPurchaseRole(userId: string, productId: string): Promise<void> {
+    try {
+      // Check if this product is a role-grant item
+      const { data: product } = await this.supabase
+        .from('economy_items')
+        .select('metadata')
+        .eq('id', productId)
+        .maybeSingle();
+
+      if (!product) return;
+      const metadata = product.metadata as Record<string, unknown> | null;
+      const roleId = metadata?.grant_role_id as string | undefined;
+      if (!roleId) return;
+
+      const member = await this.guild.members.fetch(userId).catch(() => null);
+      if (!member) return;
+
+      const roleDurationHours = metadata?.role_duration_hours as number | undefined;
+      const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
+
+      await member.roles.add(roleId, 'SomniBot economy purchase — role item');
+      log.info(`Granted role ${roleId} to ${userId} via economy purchase`);
+
+      // If temporary role, schedule removal
+      if (durationMs) {
+        const expiresAt = new Date(Date.now() + durationMs).toISOString();
+        await this.supabase.from('temp_role_grants').insert({
+          guild_id: this.guild.id,
+          user_id: userId,
+          role_id: roleId,
+          expires_at: expiresAt,
+          source: 'economy_purchase',
+          source_id: productId,
+        });
+        log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
+      }
+    } catch (err) {
+      log.error('Role grant from purchase failed:', { error: String(err) });
+    }
   }
 
   private async removeGiveawayEntries(userId: string, reason: string): Promise<void> {

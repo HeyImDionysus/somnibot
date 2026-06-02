@@ -293,9 +293,10 @@ async function repairDriftItem(
 
         await supabase.from('discord_id_map').upsert({
           guild_id: guild.id,
+          entity_type: 'role',
           template_key: `role:${roleKey}`,
           discord_id: created.id,
-        }, { onConflict: 'guild_id,template_key' });
+        }, { onConflict: 'guild_id,entity_type,template_key' });
 
         return { success: true, action: `Recreated role "${roleDef.name}" (${created.id})` };
       }
@@ -326,9 +327,10 @@ async function repairDriftItem(
 
         await supabase.from('discord_id_map').upsert({
           guild_id: guild.id,
+          entity_type: item.entityType,
           template_key: `${item.entityType}:${chanKey}`,
           discord_id: created.id,
-        }, { onConflict: 'guild_id,template_key' });
+        }, { onConflict: 'guild_id,entity_type,template_key' });
 
         return { success: true, action: `Recreated ${item.entityType} "${chanDef.name}" (${created.id})` };
       }
@@ -422,13 +424,13 @@ async function postSyncReport(
     }
   }
 
-  eventBus.emit('sync.report' as never, guild.id, {
+  eventBus.emit('sync.report', guild.id, {
     report: reportLines.join('\n'),
     repairedCount,
     needsAttentionCount: needsAttention.length,
     totalDrift: driftItems.length,
     timestamp,
-  } as never);
+  });
 
   // Also store report in DB for dashboard access
   await supabase.from('sync_reports').insert({
