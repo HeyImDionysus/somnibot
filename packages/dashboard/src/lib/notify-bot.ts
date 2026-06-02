@@ -32,11 +32,15 @@ export type ConfigSection =
 /**
  * Notify the bot that a config section has changed.
  * Non-blocking — failures are logged but don't break the API response.
+ *
+ * @param auditEvent  Optional event data for the bot to emit on the PlatformEventBus
+ *                    so AuditService can log CRUD operations (Finding #4).
  */
 export async function notifyBot(
   section: ConfigSection,
   changes?: Record<string, unknown>,
   changedBy: string = 'dashboard',
+  auditEvent?: { type: string; data: Record<string, unknown> },
 ): Promise<void> {
   try {
     const supabase = createAdminSupabase();
@@ -47,6 +51,7 @@ export async function notifyBot(
         section,
         changes: changes ?? {},
         changed_by: changedBy,
+        ...(auditEvent ? { audit_event: auditEvent } : {}),
       },
       status: 'pending',
       created_at: new Date().toISOString(),

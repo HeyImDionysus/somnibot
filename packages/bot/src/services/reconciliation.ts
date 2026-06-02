@@ -159,18 +159,30 @@ export async function runReconciliation(
       .limit(1000);
 
     if (staleSessions) {
+      // Pre-fetch all product license configs to avoid N+1 queries (Finding #5)
+      const productIds = [
+        ...new Set(
+          staleSessions
+            .map((s) => (s.license_keys as unknown as { product_id: string })?.product_id)
+            .filter(Boolean),
+        ),
+      ];
+      const configMap = new Map<string, number>();
+      if (productIds.length > 0) {
+        const { data: configs } = await supabase
+          .from('product_license_config')
+          .select('product_id, offline_grace_period_seconds')
+          .in('product_id', productIds);
+        for (const c of configs ?? []) {
+          configMap.set(c.product_id, c.offline_grace_period_seconds);
+        }
+      }
+
       for (const session of staleSessions) {
         const productId = (session.license_keys as unknown as { product_id: string })?.product_id;
         if (!productId) continue;
 
-        // Get offline grace period for this product
-        const { data: config } = await supabase
-          .from('product_license_config')
-          .select('offline_grace_period_seconds')
-          .eq('product_id', productId)
-          .maybeSingle();
-
-        const gracePeriodSeconds = config?.offline_grace_period_seconds ?? 86400;
+        const gracePeriodSeconds = configMap.get(productId) ?? 86400;
         const lastSeen = new Date(session.last_seen_at).getTime();
         const nowMs = Date.now();
 

@@ -244,6 +244,17 @@ export class AutomationEngine {
     } else {
       log.info(`"${automation.name}" executed ${executed} action(s) in ${result.durationMs}ms`);
     }
+
+    // Emit audit event so AuditService can log automation executions
+    this.eventBus.emit('automation.executed', this.guild.id, {
+      automationId: automation.id,
+      automationName: automation.name,
+      trigger: event.type,
+      actionsExecuted: executed,
+      actionsFailed: failed,
+      success: failed === 0,
+      duration: result.durationMs,
+    });
   }
 
   /**

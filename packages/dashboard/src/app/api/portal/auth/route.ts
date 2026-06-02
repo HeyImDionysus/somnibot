@@ -182,8 +182,6 @@ export async function POST(request: NextRequest) {
         data: { token, expires_at: expires.toISOString(), customer_id: customer.id },
       });
     }
-
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: msg }, { status: 500 });

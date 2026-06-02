@@ -457,6 +457,21 @@ async function handleConfigReload(
     changedBy: changedBy ?? 'dashboard',
   });
 
+  // If the dashboard attached an audit event, emit it on the event bus
+  // so AuditService can log automation/webhook CRUD operations (Finding #4).
+  const auditEvent = payload.audit_event as { type: string; data: Record<string, unknown> } | undefined;
+  if (auditEvent?.type && auditEvent.data) {
+    try {
+      eventBus.emit(
+        auditEvent.type as import('@somnibot/shared').PlatformEventType,
+        guild.id,
+        auditEvent.data as never,
+      );
+    } catch (err) {
+      log.warn('Failed to emit audit event from config_reload:', { type: auditEvent.type, error: String(err) });
+    }
+  }
+
   return { success: true, data: { section, reloaded: true } };
 }
 
@@ -711,6 +726,99 @@ async function handleMarketItemReconcile(
   return { success: true, data: { userId, itemId, quantity } };
 }
 
+/**
+ * Emit a platform event from the dashboard via the action queue.
+ * Used for audit logging of dashboard-side operations (webhook CRUD, etc.)
+ * where the PlatformEventBus is only available bot-side. (Finding #4)
+ */
+async function handleEmitAuditEvent(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const eventType = payload.event_type as string;
+  const eventData = payload.event_data as Record<string, unknown>;
+  if (!eventType || !eventData) {
+    return { success: false, error: 'Missing event_type or event_data' };
+  }
+
+  eventBus.emit(
+    eventType as import('@somnibot/shared').PlatformEventType,
+    guild.id,
+    eventData as never,
+  );
+
+  return { success: true, data: { eventType } };
+}
+
+/**
+ * Bulk add a single role to a member (queued by dashboard bulk operations).
+ */
+async function handleBulkRoleAdd(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const memberId = payload.member_id as string;
+  const roleId = payload.role_id as string;
+  if (!memberId) return { success: false, error: 'Missing member_id' };
+  if (!roleId) return { success: false, error: 'Missing role_id' };
+
+  const member = await guild.members.fetch(memberId).catch(() => null);
+  if (!member) return { success: false, error: `Member ${memberId} not found in guild` };
+
+  if (member.roles.cache.has(roleId)) {
+    return { success: true, data: { memberId, roleId, skipped: true } };
+  }
+
+  await member.roles.add(roleId, 'SomniBot dashboard — bulk role assign');
+  return { success: true, data: { memberId, roleId } };
+}
+
+/**
+ * Bulk remove a single role from a member (queued by dashboard bulk operations).
+ */
+async function handleBulkRoleRemove(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const memberId = payload.member_id as string;
+  const roleId = payload.role_id as string;
+  if (!memberId) return { success: false, error: 'Missing member_id' };
+  if (!roleId) return { success: false, error: 'Missing role_id' };
+
+  const member = await guild.members.fetch(memberId).catch(() => null);
+  if (!member) return { success: false, error: `Member ${memberId} not found in guild` };
+
+  if (!member.roles.cache.has(roleId)) {
+    return { success: true, data: { memberId, roleId, skipped: true } };
+  }
+
+  await member.roles.remove(roleId, 'SomniBot dashboard — bulk role remove');
+  return { success: true, data: { memberId, roleId } };
+}
+
+/**
+ * Send a DM to a single member (queued by dashboard bulk operations).
+ */
+async function handleBulkSendDm(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const memberId = payload.member_id as string;
+  const message = payload.message as string;
+  if (!memberId) return { success: false, error: 'Missing member_id' };
+  if (!message) return { success: false, error: 'Missing message' };
+
+  const member = await guild.members.fetch(memberId).catch(() => null);
+  if (!member) return { success: false, error: `Member ${memberId} not found in guild` };
+
+  await member.send(message);
+  return { success: true, data: { memberId } };
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -734,6 +842,10 @@ const ACTION_HANDLERS: Record<
   run_reconciliation: handleRunReconciliation,
   revoke_roles: handleRevokeRoles,
   market_item_reconcile: handleMarketItemReconcile,
+  bulk_role_add: handleBulkRoleAdd,
+  bulk_role_remove: handleBulkRoleRemove,
+  bulk_send_dm: handleBulkSendDm,
+  emit_audit_event: handleEmitAuditEvent,
 };
 
 async function processAction(

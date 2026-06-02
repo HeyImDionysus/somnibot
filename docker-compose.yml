@@ -25,6 +25,8 @@ services:
     # When VALKEY_PASSWORD is set, pass --requirepass; otherwise run without auth.
     # The bot/dashboard VALKEY_URL must include the password if set:
     #   VALKEY_URL=redis://:yourpassword@127.0.0.1:6379
+    # NOTE: Set VALKEY_PASSWORD in .env even in dev so auth-related bugs
+    # surface locally rather than only in production (Finding #14).
     command: >-
       valkey-server
       --save 60 1

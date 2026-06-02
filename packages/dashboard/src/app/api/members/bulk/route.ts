@@ -32,14 +32,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'role_id required' }, { status: 400 });
       }
 
-      // Queue through action queue for Discord API rate limit safety
-      const { error } = await admin.from('action_queue').insert(
+      // Queue through bot_action_queue for Discord API rate limit safety
+      const { error } = await admin.from('bot_action_queue').insert(
         member_ids.map((memberId) => ({
           guild_id: guildId,
-          action_type: action === 'assign_role' ? 'role_add' : 'role_remove',
+          action: action === 'assign_role' ? 'bulk_role_add' : 'bulk_role_remove',
           payload: { member_id: memberId, role_id: roleId },
           status: 'pending',
-          created_at: new Date().toISOString(),
         })),
       );
 
@@ -120,13 +119,12 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const { error } = await admin.from('action_queue').insert(
+      const { error } = await admin.from('bot_action_queue').insert(
         member_ids.map((memberId) => ({
           guild_id: guildId,
-          action_type: 'send_dm',
+          action: 'bulk_send_dm',
           payload: { member_id: memberId, message },
           status: 'pending',
-          created_at: new Date().toISOString(),
         })),
       );
 

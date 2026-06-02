@@ -104,7 +104,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
-  await notifyBot('automations');
+  await notifyBot('automations', undefined, 'dashboard', {
+    type: 'automation.created',
+    data: {
+      automationId: data.id,
+      automationName: data.name,
+      trigger: data.trigger_type,
+      createdBy: auth.ctx.discordId,
+      enabled: data.enabled,
+      actionCount: (data.actions as unknown[])?.length ?? 0,
+    },
+  });
 
   return NextResponse.json({ success: true, data });
 }
@@ -142,7 +152,15 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
-  await notifyBot('automations');
+  await notifyBot('automations', undefined, 'dashboard', {
+    type: 'automation.updated',
+    data: {
+      automationId: data.id,
+      automationName: data.name,
+      updatedBy: auth.ctx.discordId,
+      after: updates,
+    },
+  });
 
   return NextResponse.json({ success: true, data });
 }
@@ -163,6 +181,14 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing automation id' }, { status: 400 });
   }
 
+  // Fetch name before deleting so the audit event has context
+  const { data: existing } = await supabase
+    .from('automations')
+    .select('name')
+    .eq('id', id)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
   const { error } = await supabase
     .from('automations')
     .delete()
@@ -173,7 +199,14 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 
-  await notifyBot('automations');
+  await notifyBot('automations', undefined, 'dashboard', {
+    type: 'automation.deleted',
+    data: {
+      automationId: id,
+      automationName: existing?.name ?? 'unknown',
+      deletedBy: auth.ctx.discordId,
+    },
+  });
 
   return NextResponse.json({ success: true });
 }
