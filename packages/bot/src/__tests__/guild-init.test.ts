@@ -101,6 +101,6 @@ describe('guild-init', () => {
       getManager: vi.fn(() => services),
     };
     destroyGuildServices(ctx as any);
-      expect(true).toBe(true); // exercises code path
+      expect(ctx.getManager).toHaveBeenCalledWith('_services');
   });
 });

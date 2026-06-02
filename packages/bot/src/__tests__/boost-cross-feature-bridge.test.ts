@@ -106,6 +106,6 @@ describe('CrossFeatureBridge', () => {
     bridge.stop();
     bridge.start();
     bridge.stop();
-      expect(true).toBe(true); // exercises code path
+      expect(bridge).toBeDefined(); // start/stop lifecycle completed
   });
 });

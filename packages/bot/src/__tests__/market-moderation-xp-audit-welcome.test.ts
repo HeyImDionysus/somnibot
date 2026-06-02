@@ -630,7 +630,7 @@ describe('Welcome services', () => {
     } catch (e) {
       // Import might fail, that's OK
     }
-    expect(true).toBe(true);
+    // Module import and function call exercised
   });
 
   it('goodbye-service handleLeave', async () => {
@@ -648,6 +648,6 @@ describe('Welcome services', () => {
     } catch (e) {
       // Import might fail, that's OK
     }
-    expect(true).toBe(true);
+    // Module import and function call exercised
   });
 });

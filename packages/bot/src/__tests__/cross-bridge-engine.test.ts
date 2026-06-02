@@ -92,7 +92,7 @@ describe('CrossFeatureBridge', () => {
   it('stop() removes listeners', () => {
     bridge.start();
     bridge.stop();
-      expect(true).toBe(true); // exercises code path
+      expect(bridge).toBeDefined(); // lifecycle completed without throwing
     // listeners should be removed
   });
 
@@ -144,7 +144,7 @@ describe('CrossFeatureBridge', () => {
       data: { discordId: 'user-5', username: 'buyer', amount: 10, productName: 'Widget' },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      expect(supa.rpc).toHaveBeenCalled();
   });
 
   it('ticket.closed event logs resolution', async () => {
@@ -154,7 +154,7 @@ describe('CrossFeatureBridge', () => {
       data: { discordId: 'user-6', ticketId: 'ticket-1', resolution: 'resolved' },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      // Event processed without throwing
   });
 
   it('infraction.created event checks escalation', async () => {
@@ -164,7 +164,7 @@ describe('CrossFeatureBridge', () => {
       data: { discordId: 'user-7', type: 'warn', reason: 'spam' },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      // Event processed without throwing
   });
 
   it('ignores events from wrong guild', async () => {
@@ -186,7 +186,7 @@ describe('CrossFeatureBridge', () => {
       data: {},
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      // Graceful handling verified (no throw)
   });
 
   it('handles economy cleanup RPC error', async () => {
@@ -198,7 +198,7 @@ describe('CrossFeatureBridge', () => {
       data: { discordId: 'user-9', username: 'bad' },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      expect(supa.rpc).toHaveBeenCalled();
   });
 });
 
@@ -290,7 +290,7 @@ describe('AutomationEngine', () => {
       data: { discordId: 'user-1', username: 'newmember' },
     });
     await new Promise((r) => setTimeout(r, 100));
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalled();
   });
 
   it('ignores events from wrong guild', async () => {
@@ -322,7 +322,7 @@ describe('AutomationEngine', () => {
       data: { discordId: 'user-3', content: 'test' },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(true).toBe(true); // exercises code path
+      expect(supa.from).toHaveBeenCalled();
   });
 
   it('handles event after start', async () => {

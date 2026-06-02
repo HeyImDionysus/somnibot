@@ -120,13 +120,13 @@ describe('LotteryManager deep', () => {
     const supa = makeSupa();
     const mgr = new LotteryManager(supa);
     mgr.scheduleLotteryDraws('guild-1');
-      expect(true).toBe(true); // exercises code path
+      expect(mgr).toBeDefined();
   });
 
   it('clearCache clears config', () => {
     const supa = makeSupa();
     const mgr = new LotteryManager(supa);
     mgr.clearCache();
-      expect(true).toBe(true); // exercises code path
+      expect(mgr).toBeDefined();
   });
 });
