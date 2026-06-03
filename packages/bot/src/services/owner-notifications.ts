@@ -133,7 +133,7 @@ export class OwnerNotificationService {
    */
   stop(): void {
     for (const { type, handler } of this.boundListeners) {
-      this.eventBus.off(type as never, handler as never);
+      this.eventBus.off(type, handler);
     }
     this.boundListeners = [];
     log.info('Owner notification service stopped');
@@ -143,7 +143,7 @@ export class OwnerNotificationService {
    * Register a listener on the event bus and store the reference for cleanup.
    */
   private listen(type: string, handler: AnyHandler): void {
-    this.eventBus.on(type as never, handler as never);
+    this.eventBus.on(type, handler);
     this.boundListeners.push({ type, handler });
   }
 

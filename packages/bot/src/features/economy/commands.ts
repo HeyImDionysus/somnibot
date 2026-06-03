@@ -543,13 +543,13 @@ async function handleEconLeaderboard(interaction: ChatInputCommandInteraction, m
 
 async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
   // Check role-based income
-  const client = interaction.client as unknown as SomniClient;
+  const client = interaction.client as SomniClient;
   const cfg = await mgr.loadConfig();
 
-  const { data: roleIncomes } = await (client as unknown as Record<string, unknown>).supabase
+  const { data: roleIncomes } = await client.supabase
     ? await (async () => {
         // Access supabase from the client
-        const supabase = (interaction.client as unknown as { supabase: import('@supabase/supabase-js').SupabaseClient }).supabase;
+        const supabase = client.supabase;
         return supabase
           .from('economy_role_income')
           .select('role_id, amount, interval_minutes')

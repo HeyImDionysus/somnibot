@@ -274,8 +274,8 @@ export class CrossFeatureBridge {
         log.error(`Error handling ${event}:`, err);
       });
     };
-    this.eventBus.on(event as never, wrapped as never);
-    this.listeners.push(() => this.eventBus.off(event as never, wrapped as never));
+    this.eventBus.on(event, wrapped);
+    this.listeners.push(() => this.eventBus.off(event, wrapped));
   }
 
   private async sendSatisfactionSurvey(ticketId: string, creatorId: string): Promise<void> {

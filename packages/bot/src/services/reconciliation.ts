@@ -70,7 +70,8 @@ export async function runReconciliation(
         const roleIds = ent.granted_role_ids ?? [];
         if (!roleIds.length) continue;
 
-        const discordId = (ent.customers as unknown as { discord_id: string } | null)?.discord_id;
+        const custJoin = Array.isArray(ent.customers) ? ent.customers[0] : ent.customers;
+        const discordId = (custJoin as { discord_id: string } | null)?.discord_id;
         if (!discordId) continue;
 
         try {
@@ -163,7 +164,10 @@ export async function runReconciliation(
       const productIds = [
         ...new Set(
           staleSessions
-            .map((s) => (s.license_keys as unknown as { product_id: string })?.product_id)
+            .map((s) => {
+              const lk = Array.isArray(s.license_keys) ? s.license_keys[0] : s.license_keys;
+              return (lk as { product_id: string })?.product_id;
+            })
             .filter(Boolean),
         ),
       ];
@@ -179,7 +183,8 @@ export async function runReconciliation(
       }
 
       for (const session of staleSessions) {
-        const productId = (session.license_keys as unknown as { product_id: string })?.product_id;
+        const lkJoin = Array.isArray(session.license_keys) ? session.license_keys[0] : session.license_keys;
+        const productId = (lkJoin as { product_id: string })?.product_id;
         if (!productId) continue;
 
         const gracePeriodSeconds = configMap.get(productId) ?? 86400;

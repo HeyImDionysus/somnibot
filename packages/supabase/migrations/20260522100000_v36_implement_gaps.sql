@@ -3,7 +3,6 @@
 
 -- ── New guild_config columns ─────────────────────────────
 ALTER TABLE guild_config
-  ADD COLUMN IF NOT EXISTS economy_heist_enabled           boolean NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS economy_pet_decay_interval_hours integer NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS economy_pet_low_stat_threshold   integer NOT NULL DEFAULT 20,
   ADD COLUMN IF NOT EXISTS economy_pet_notify_owner         boolean NOT NULL DEFAULT true,

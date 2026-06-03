@@ -11,7 +11,7 @@ export function buildCraftingCommands(): Record<string, SlashCommandBuilder> {
       .setDescription('Craft an item using materials from your inventory')
       .addStringOption((opt) =>
         opt.setName('item').setDescription('Name of the recipe to craft').setRequired(true),
-      ) as unknown as SlashCommandBuilder,
+      ) as SlashCommandBuilder,
 
     recipes: new SlashCommandBuilder()
       .setName('recipes')

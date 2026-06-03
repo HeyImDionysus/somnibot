@@ -324,7 +324,7 @@ async function handleQueue(
 
   const page = interaction.options.getInteger('page') ?? 1;
   const { embeds, components } = buildQueueEmbed(queue, page);
-  await interaction.reply({ embeds, components: components as never[] });
+  await interaction.reply({ embeds, components });
 }
 
 async function handleNowPlaying(
@@ -353,7 +353,7 @@ async function handleNowPlaying(
   const position = musicPlayer.getPlayerPosition(guildId);
   const activeFilters = musicPlayer.getActiveFilters(guildId);
   const { embeds, components } = buildNowPlayingEmbed(current, position, queue, activeFilters);
-  await interaction.reply({ embeds, components: components as never[] });
+  await interaction.reply({ embeds, components: components });
 }
 
 async function handleVolume(

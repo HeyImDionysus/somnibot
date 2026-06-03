@@ -156,7 +156,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
             if (queue) {
               const { buildQueueEmbed } = await import('../features/music/music-embeds.js');
               const { embeds, components } = buildQueueEmbed(queue, page);
-              await interaction.update({ embeds, components: components as never[] });
+              await interaction.update({ embeds, components });
             } else {
               await interaction.reply({ content: '📭 No active queue.', ephemeral: true });
             }
@@ -588,7 +588,7 @@ async function handleEconomyButton(
       return;
     }
     case 'econ_timers': {
-      const timersClient = interaction.client as unknown as SomniClient;
+      const timersClient = interaction.client as SomniClient;
       const userId = interaction.user.id;
       // V10 Audit: guildId from outer scope (interaction.guildId) is correct.
       const valkey = timersClient.valkey;

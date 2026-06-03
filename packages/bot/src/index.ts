@@ -205,9 +205,9 @@ async function main(): Promise<void> {
     // Store command registry for /help (from primary guild context)
     const primaryCtx = client.router.getContextSync(client.guildId);
     if (primaryCtx) {
-      const commands = primaryCtx.getManager('_commands');
+      const commands = primaryCtx.getManager<import('discord.js').RESTPostAPIApplicationCommandsJSONBody[]>('_commands');
       if (commands) {
-        (client as unknown as Record<string, unknown>)._registeredCommands = commands;
+        client._registeredCommands = commands;
       }
     }
 

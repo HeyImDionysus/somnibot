@@ -1,6 +1,6 @@
 -- ============================================================
--- Audit Fix: economy_credit_wallet RPC + ticket_satisfaction_survey column
--- Addresses Finding #1 (CRITICAL) and Finding #2 (HIGH)
+-- Audit Fix: economy_credit_wallet RPC
+-- Addresses Finding #1 (CRITICAL)
 -- ============================================================
 
 -- ── 1. economy_credit_wallet RPC (Finding #1) ──────────────
@@ -35,8 +35,4 @@ REVOKE ALL ON FUNCTION public.economy_credit_wallet(text, text, bigint, text) FR
 GRANT EXECUTE ON FUNCTION public.economy_credit_wallet(text, text, bigint, text) TO service_role;
 
 -- ── 2. ticket_satisfaction_survey column (Finding #2) ──────
--- cross-feature-bridge.ts:251 reads this column to decide whether to
--- DM a satisfaction survey on ticket close. Column was never created.
-
-ALTER TABLE guild_config
-  ADD COLUMN IF NOT EXISTS ticket_satisfaction_survey boolean NOT NULL DEFAULT false;
+-- Removed: duplicate of 20260625000000_v6_audit_findings.sql which already adds this column.

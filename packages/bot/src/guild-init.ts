@@ -457,8 +457,8 @@ export async function initGuildFeatures(
     ctx.setManager('alertService', services.alertService);
 
     // Wire alert service into automation engine
-    if (services.automationEngine && typeof (services.automationEngine as unknown as Record<string, unknown>).setAlertService === 'function') {
-      (services.automationEngine as unknown as { setAlertService: (svc: AlertService) => void }).setAlertService(services.alertService);
+    if (services.automationEngine) {
+      services.automationEngine.setAlertService(services.alertService);
     }
 
     guildLog.info('Audit, diagnostics, heartbeat, and alerts initialized');
@@ -577,17 +577,17 @@ export function destroyGuildServices(ctx: GuildContext): void {
     services.giveawayFulfillment,
   ];
   for (const svc of stoppable) {
-    if (svc && typeof (svc as unknown as Record<string, unknown>).stop === 'function') {
-      (svc as { stop: () => void }).stop();
+    if (svc && 'stop' in svc && typeof svc.stop === 'function') {
+      svc.stop();
     }
   }
 
   // Music
-  if (services.musicPlayer && typeof (services.musicPlayer as unknown as Record<string, unknown>).shutdown === 'function') {
-    (services.musicPlayer as { shutdown: () => void }).shutdown();
+  if (services.musicPlayer) {
+    services.musicPlayer.shutdown();
   }
   if (services.musicStatusReporter) {
-    (services.musicStatusReporter as { stop: () => void }).stop();
+    services.musicStatusReporter.stop();
   }
 
   // Economy managers with timers
@@ -598,14 +598,14 @@ export function destroyGuildServices(ctx: GuildContext): void {
   const quests = ctx.getManager<QuestsManager>('quests');
   if (quests && typeof quests.stopResetTimer === 'function') quests.stopResetTimer();
   const games = ctx.getManager<GamesManager>('games');
-  if (games && typeof (games as unknown as Record<string, unknown>).stopDailyResetTimer === 'function') {
-    (games as { stopDailyResetTimer: () => void }).stopDailyResetTimer();
+  if (games) {
+    games.stopDailyResetTimer();
   }
   const heist = ctx.getManager<HeistManager>('heist');
   if (heist && typeof heist.cleanup === 'function') heist.cleanup();
   const trivia = ctx.getManager<TriviaManager>('trivia');
-  if (trivia && typeof (trivia as unknown as Record<string, unknown>).stopAll === 'function') {
-    (trivia as { stopAll: () => void }).stopAll();
+  if (trivia) {
+    trivia.stopAll();
   }
 
   guildLog.info('Guild services destroyed');

@@ -38,7 +38,7 @@ export class GiveawayFulfillmentService {
         log.error('Error handling giveaway end:', { error: String(err) });
       });
     };
-    this.eventBus.on('giveaway.ended', this.onGiveawayEnded as never);
+    this.eventBus.on('giveaway.ended', this.onGiveawayEnded);
     log.info('Service started — listening for giveaway.ended');
   }
 
@@ -47,7 +47,7 @@ export class GiveawayFulfillmentService {
    */
   stop(): void {
     if (this.onGiveawayEnded) {
-      this.eventBus.off('giveaway.ended', this.onGiveawayEnded as never);
+      this.eventBus.off('giveaway.ended', this.onGiveawayEnded);
       this.onGiveawayEnded = null;
     }
     log.info('Service stopped');

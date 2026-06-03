@@ -12,6 +12,7 @@
 import { Guild, GuildOnboardingPromptType } from 'discord.js';
 import { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import type { PlatformEvent, ConfigChangedData } from '@somnibot/shared';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('OnboardingSync');
@@ -45,13 +46,13 @@ export class GuildOnboardingSync {
 
   start(): void {
     // Listen for onboarding config changes
-    this.eventBus.on('config.changed' as never, ((data: { section?: string }) => {
-      if (data.section === 'onboarding' || data.section === 'welcome') {
+    this.eventBus.on('config.changed', (event: PlatformEvent<'config.changed', ConfigChangedData>) => {
+      if (event.data.section === 'onboarding' || event.data.section === 'welcome') {
         this.syncOnboarding().catch((err) =>
           log.error('Sync failed:', { error: String(err) }),
         );
       }
-    }) as never);
+    });
 
     log.info('Guild onboarding sync started');
   }

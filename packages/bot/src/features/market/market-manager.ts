@@ -143,7 +143,9 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    const invEntry = inv[0] as unknown as { item_id: string; quantity: number; economy_items: { id: string; name: string } };
+    const raw = inv[0];
+    const joinedItems = Array.isArray(raw.economy_items) ? raw.economy_items[0] : raw.economy_items;
+    const invEntry = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { id: string; name: string } };
     if (invEntry.quantity < quantity) {
       return new EmbedBuilder()
         .setDescription(`❌ You only have **${invEntry.quantity}x** ${itemName} (trying to list ${quantity}).`)

@@ -221,7 +221,9 @@ export class FishingManager {
     if (!data || data.length === 0) return null;
     // Supabase !inner join returns a single object at runtime, but generated types
     // may infer an array. Cast through unknown to satisfy both.
-    const inv = data[0] as unknown as { item_id: string; quantity: number; economy_items: { name: string } };
+    const raw = data[0];
+    const joinedItems = Array.isArray(raw.economy_items) ? raw.economy_items[0] : raw.economy_items;
+    const inv = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { name: string } };
 
     // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
     // /fish call already consumed the last bait, the RPC returns false
