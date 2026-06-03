@@ -109,6 +109,19 @@ export async function runReconciliation(
       .limit(1000);
 
     if (gracePeriodEntitlements) {
+      // V11 Audit M-1: Batch customer lookup instead of N+1 per-entitlement.
+      const graceCustomerIds = [...new Set(gracePeriodEntitlements.map((e) => e.customer_id).filter(Boolean))];
+      const customerMap = new Map<string, string>();
+      if (graceCustomerIds.length > 0) {
+        const { data: customers } = await supabase
+          .from('customers')
+          .select('id, discord_id')
+          .in('id', graceCustomerIds);
+        for (const c of customers ?? []) {
+          if (c.discord_id) customerMap.set(c.id, c.discord_id);
+        }
+      }
+
       for (const ent of gracePeriodEntitlements) {
         // Expire the entitlement
         await supabase
@@ -125,15 +138,11 @@ export async function runReconciliation(
         const roleIds = ent.granted_role_ids ?? [];
         if (!roleIds.length) continue;
 
-        const { data: customer } = await supabase
-          .from('customers')
-          .select('discord_id')
-          .eq('id', ent.customer_id)
-          .single();
+        const discordId = customerMap.get(ent.customer_id);
 
-        if (customer?.discord_id) {
+        if (discordId) {
           try {
-            const member = await guild.members.fetch(customer.discord_id);
+            const member = await guild.members.fetch(discordId);
             for (const roleId of roleIds) {
               if (member.roles.cache.has(roleId)) {
                 await member.roles.remove(roleId, 'Reconciliation: grace period expired');

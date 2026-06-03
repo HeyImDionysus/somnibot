@@ -16,6 +16,11 @@ const log = createLogger('EventBus');
  */
 class PlatformEventBus {
   private emitter = new EventEmitter();
+  // V11 Audit M-5: Backpressure — track in-flight async handlers and
+  // drop events when the queue exceeds MAX_IN_FLIGHT to prevent OOM
+  // under sustained event bursts (e.g. raid join floods).
+  private inFlight = 0;
+  private static readonly MAX_IN_FLIGHT = 500;
 
   constructor() {
     // Allow many listeners — automations, logging, sync, etc.
@@ -44,16 +49,25 @@ class PlatformEventBus {
 
     log.info(`${type} in guild ${guildId}`);
 
+    // V11 Audit M-5: Drop events when too many handlers are in flight.
+    if (this.inFlight >= PlatformEventBus.MAX_IN_FLIGHT) {
+      log.warn(`Backpressure: dropping ${type} — ${this.inFlight} handlers in flight`);
+      return;
+    }
+
     const fireAsync = (eventName: string | symbol) => {
       const listeners = this.emitter.rawListeners(eventName) as Array<
         (e: PlatformEvent) => void | Promise<void>
       >;
       for (const listener of listeners) {
+        this.inFlight++;
         setImmediate(async () => {
           try {
             await listener(event as PlatformEvent);
           } catch (err) {
             log.error(`Listener error on ${String(eventName)}:`, err);
+          } finally {
+            this.inFlight--;
           }
         });
       }

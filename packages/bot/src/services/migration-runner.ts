@@ -44,9 +44,25 @@ function sha256(content: string): string {
  * When launched from the Electron launcher, MIGRATIONS_DIR is set explicitly.
  */
 function findMigrationsDir(): string {
+  // V11 Audit M-7: Validate MIGRATIONS_DIR to prevent path traversal.
+  // resolve() normalises the path and we verify it doesn't escape /app
+  // or the CWD tree by checking the resolved prefix.
+  const envDir = process.env.MIGRATIONS_DIR;
+  const sanitizedEnvDir = envDir ? (() => {
+    const resolved = resolve(envDir);
+    const cwd = process.cwd();
+    // Only accept paths under CWD, /app (Docker), or absolute paths
+    // that don't traverse upward past known roots.
+    if (resolved.startsWith(cwd) || resolved.startsWith('/app') || resolved.startsWith(join(process.cwd(), 'resources'))) {
+      return resolved;
+    }
+    log.warn(`MIGRATIONS_DIR "${envDir}" resolves outside allowed roots, ignoring`);
+    return null;
+  })() : null;
+
   const candidates = [
     // Explicit path from launcher or deploy config — always check first
-    ...(process.env.MIGRATIONS_DIR ? [process.env.MIGRATIONS_DIR] : []),
+    ...(sanitizedEnvDir ? [sanitizedEnvDir] : []),
     // Standard monorepo layout (dev or Docker)
     join(process.cwd(), 'packages', 'supabase', 'migrations'),
     // Relative to bot dist/ (Docker: /app/packages/bot/dist → /app/packages/supabase)

@@ -200,11 +200,15 @@ export async function POST(req: NextRequest) {
   }
 
   // Fraud checks (non-blocking — fire-and-forget)
+  // V11 Audit M-8: Also check critical fraud signal threshold after device/IP checks
+  // so accumulated signals auto-create incidents.
   if (device_fingerprint && result.config_max_devices && result.product_guild_id) {
     const guildId = result.product_guild_id;
     const maxDevices = result.config_max_devices || 3;
-    checkDeviceAbuse(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null).catch(() => {});
-    checkIPMismatch(supabase, guildId, result.key_id!, result.customer_discord_id ?? null).catch(() => {});
+    Promise.allSettled([
+      checkDeviceAbuse(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null),
+      checkIPMismatch(supabase, guildId, result.key_id!, result.customer_discord_id ?? null),
+    ]).then(() => checkCriticalFraudThreshold(supabase, guildId)).catch(() => {});
   }
 
   // Log validation
@@ -354,5 +358,73 @@ async function checkIPMismatch(
     }
   } catch {
     // Non-fatal
+  }
+}
+
+/**
+ * V11 Audit M-8: Auto-create an incident when ≥ 3 critical fraud signals
+ * accumulate within the last hour for a guild.
+ *
+ * Mirror of the bot's `checkCriticalThreshold` — runs in the dashboard
+ * context (no event bus) after license validation fraud checks.
+ */
+async function checkCriticalFraudThreshold(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+): Promise<void> {
+  try {
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    const { count } = await supabase
+      .from('fraud_signals')
+      .select('*', { count: 'exact', head: true })
+      .eq('guild_id', guildId)
+      .eq('status', 'open')
+      .eq('severity', 'critical')
+      .gte('created_at', since);
+
+    if (!count || count < 3) return;
+
+    // Check if we already created an incident for this burst
+    const { data: existing } = await supabase
+      .from('incidents')
+      .select('id')
+      .eq('guild_id', guildId)
+      .eq('source', 'fraud_auto')
+      .not('status', 'eq', 'resolved')
+      .gte('created_at', since)
+      .limit(1);
+
+    if (existing && existing.length > 0) return;
+
+    const { data: seqVal } = await supabase.rpc('nextval_incident');
+    const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
+
+    const { data: incident } = await supabase
+      .from('incidents')
+      .insert({
+        guild_id: guildId,
+        incident_number: nextNumber,
+        title: `Fraud alert: ${count} critical signals in the last hour`,
+        description: 'Auto-created incident due to elevated critical fraud signals during license validation.',
+        severity: 'critical',
+        status: 'open',
+        source: 'fraud_auto',
+        created_by: 'system:fraud',
+      })
+      .select()
+      .single();
+
+    if (incident) {
+      await supabase.from('incident_events').insert({
+        incident_id: incident.id,
+        event_type: 'auto_created',
+        actor_id: 'system:fraud',
+        message: `${count} critical fraud signals detected in the last hour. Automatic incident created.`,
+        metadata: { signal_count: count },
+      });
+    }
+  } catch {
+    // Non-fatal — don't let incident creation break license validation
   }
 }

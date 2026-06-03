@@ -50,10 +50,24 @@ export interface XpResult {
 // Per-guild caches — keyed by guildId to support multi-guild
 interface CacheEntry<T> { data: T; time: number; }
 const CONFIG_TTL = 60_000;
+// V11 Audit L-8: Max entries per cache map to prevent unbounded growth
+// if the bot joins/leaves many guilds over its lifetime.
+const MAX_CACHE_ENTRIES = 200;
 
 const _levelConfigCache = new Map<string, CacheEntry<LevelConfig>>();
 const _multiplierCache = new Map<string, CacheEntry<XpMultiplier[]>>();
 const _rewardCache = new Map<string, CacheEntry<LevelReward[]>>();
+
+/**
+ * V11 Audit L-8: Evict the oldest entry when the cache exceeds MAX_CACHE_ENTRIES.
+ * Maps iterate in insertion order, so the first key is the oldest.
+ */
+function evictOldest<T>(map: Map<string, CacheEntry<T>>): void {
+  if (map.size > MAX_CACHE_ENTRIES) {
+    const firstKey = map.keys().next().value;
+    if (firstKey !== undefined) map.delete(firstKey);
+  }
+}
 
 export async function loadLevelConfig(
   supabase: SupabaseClient,
@@ -89,6 +103,7 @@ export async function loadLevelConfig(
     no_xp_role_id: data?.no_xp_role_id ?? null,
   };
   _levelConfigCache.set(guildId, { data: config, time: now });
+  evictOldest(_levelConfigCache);
   return config;
 }
 
@@ -110,6 +125,7 @@ async function loadMultipliers(
 
   const multipliers = (data ?? []) as XpMultiplier[];
   _multiplierCache.set(guildId, { data: multipliers, time: now });
+  evictOldest(_multiplierCache);
   return multipliers;
 }
 
@@ -132,6 +148,7 @@ export async function loadRewards(
 
   const rewards = (data ?? []) as LevelReward[];
   _rewardCache.set(guildId, { data: rewards, time: now });
+  evictOldest(_rewardCache);
   return rewards;
 }
 

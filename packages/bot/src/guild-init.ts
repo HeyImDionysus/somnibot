@@ -193,8 +193,9 @@ export async function initGuildFeatures(
   }
 
   // ── Snapshots + Action Queue ──
-  services.snapshotTimer = startPeriodicSnapshots(guild, supabase, 60_000);
-  guildLog.info('Guild snapshots started (60s)');
+  // V11 Audit C-3: Interval increased to 5 min (matches new default).
+  services.snapshotTimer = startPeriodicSnapshots(guild, supabase, 300_000);
+  guildLog.info('Guild snapshots started (5 min)');
   const aqHandle = await startActionQueueListener(guild, supabase);
   services.actionQueueStaleTimer = aqHandle.staleRecoveryTimer;
   guildLog.info('Action queue listener started');
@@ -558,9 +559,11 @@ export function destroyGuildServices(ctx: GuildContext): void {
   if (services.syncHandle) services.syncHandle.stop();
 
   // Services with stop()
-  // V10 Audit M-5: Added notificationService and giveawayFulfillment
-  // (both now have stop() methods that remove their event bus listeners).
+  // V10 Audit M-5: Added notificationService and giveawayFulfillment.
+  // V11 Audit H-3: Added automationEngine and forumTicketService —
+  // both were started but not tracked for shutdown, leaking timers/listeners.
   const stoppable = [
+    services.automationEngine,
     services.tempChannelManager,
     services.statsManager,
     services.scheduledRunner,
@@ -575,6 +578,7 @@ export function destroyGuildServices(ctx: GuildContext): void {
     services.guildOnboardingSync,
     services.notificationService,
     services.giveawayFulfillment,
+    services.forumTicketService,
   ];
   for (const svc of stoppable) {
     if (svc && 'stop' in svc && typeof svc.stop === 'function') {

@@ -182,7 +182,8 @@ describe('action-queue', () => {
       await startActionQueueListener(guild, supa as any);
 
       // Should subscribe to realtime channel
-      expect(supa.channel).toHaveBeenCalledWith('bot-action-queue');
+      // V11 Audit H-5: Channel name now includes a timestamp for unique reconnections
+      expect(supa.channel).toHaveBeenCalledWith(expect.stringContaining('bot-action-queue-'));
     });
 
     it('recovers stale actions before processing pending', async () => {
