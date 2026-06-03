@@ -280,7 +280,11 @@ export async function handleMuteCommand(
   try {
     await member.timeout(duration * 60 * 1000, `${reason} — by ${interaction.user.tag}`);
   } catch (err) {
-    await interaction.editReply(`❌ Failed to timeout member: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    // V11 Audit R6-1: Was leaking Discord.js error details (e.g. API codes,
+    // internal messages) to the invoking moderator. Log the real error
+    // server-side and show a generic message.
+    log.error('Timeout failed', { target: member.id, error: String(err) });
+    await interaction.editReply('❌ Failed to timeout member — check bot permissions and role hierarchy.');
     return;
   }
 
@@ -382,7 +386,10 @@ export async function handleKickCommand(
   try {
     await member.kick(`${reason} — by ${interaction.user.tag}`);
   } catch (err) {
-    await interaction.editReply(`❌ Kick failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    // V11 Audit R6-2: Was leaking Discord.js error details to the invoking
+    // moderator. Log server-side, show generic message.
+    log.error('Kick failed', { target: member.id, error: String(err) });
+    await interaction.editReply('❌ Kick failed — check bot permissions and role hierarchy.');
     return;
   }
 
@@ -471,7 +478,10 @@ export async function handleBanCommand(
       reason: `${reason} — by ${interaction.user.tag}`,
     });
   } catch (err) {
-    await interaction.editReply(`❌ Ban failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    // V11 Audit R6-3: Was leaking Discord.js error details to the invoking
+    // moderator. Log server-side, show generic message.
+    log.error('Ban failed', { target: member.id, error: String(err) });
+    await interaction.editReply('❌ Ban failed — check bot permissions and role hierarchy.');
     return;
   }
 
