@@ -22,6 +22,7 @@ import type {
   NewlineSpamConfig,
   EscalationStep,
 } from '@somnibot/shared';
+import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { executeAutoModAction } from './automod-actions.js';
 import { createLogger } from '@somnibot/shared';
@@ -343,6 +344,12 @@ function checkLinkFilter(
 // Cache for resolved invite codes → guild IDs (avoids repeat API calls)
 const _inviteGuildCache = new Map<string, { guildId: string | null; expiresAt: number }>();
 const INVITE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+/**
+ * V11 Audit H-1 + M-1: Cap the invite cache to prevent unbounded growth.
+ * Evicts oldest entries when the cap is reached, and prunes expired entries
+ * lazily on each check to avoid retaining stale one-off invite lookups.
+ */
+const MAX_INVITE_CACHE_SIZE = 5_000;
 
 async function checkInviteFilter(
   client: SomniClient,
@@ -350,6 +357,13 @@ async function checkInviteFilter(
   config: InviteFilterConfig,
   guildId?: string,
 ): Promise<string | null> {
+  // V11 Audit M-1: Lazily prune expired entries on each filter call to avoid
+  // retaining stale invite codes that are never checked again.
+  const now = Date.now();
+  for (const [code, entry] of _inviteGuildCache) {
+    if (entry.expiresAt <= now) _inviteGuildCache.delete(code);
+  }
+
   const inviteRegex = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord\.com\/invite|discordapp\.com\/invite)\/(\S+)/gi;
   const matches = [...content.matchAll(inviteRegex)];
 
@@ -367,7 +381,7 @@ async function checkInviteFilter(
 
     // Check cache first
     const cached = _inviteGuildCache.get(code);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (cached && cached.expiresAt > now) {
       if (cached.guildId === guildId) continue; // own server — allow
       return 'Discord invite link detected (external server)';
     }
@@ -376,6 +390,12 @@ async function checkInviteFilter(
     try {
       const invite = await client.fetchInvite(code);
       const inviteGuildId = invite.guild?.id ?? null;
+
+      // V11 Audit H-1: Evict oldest entry when cache exceeds cap.
+      if (_inviteGuildCache.size >= MAX_INVITE_CACHE_SIZE) {
+        const oldest = _inviteGuildCache.keys().next().value;
+        if (oldest) _inviteGuildCache.delete(oldest);
+      }
 
       // Cache the result
       _inviteGuildCache.set(code, {
@@ -386,6 +406,12 @@ async function checkInviteFilter(
       if (inviteGuildId === guildId) continue; // own server — allow
       return 'Discord invite link detected (external server)';
     } catch {
+      // V11 Audit H-1: Evict oldest entry when cache exceeds cap.
+      if (_inviteGuildCache.size >= MAX_INVITE_CACHE_SIZE) {
+        const oldest = _inviteGuildCache.keys().next().value;
+        if (oldest) _inviteGuildCache.delete(oldest);
+      }
+
       // Invalid or expired invite — flag it
       _inviteGuildCache.set(code, {
         guildId: null,
@@ -525,14 +551,11 @@ function checkNewlineSpam(
 // ═══════════════════════════════════════════════════════════
 
 /**
- * Simple hash for dedup tracking.
+ * V11 Audit L-1: SHA-256 based hash for dedup tracking.
+ * Replaces the DJB-style 32-bit hash that had high collision risk.
+ * 12 hex chars ≈ 48 bits of entropy — effectively collision-free
+ * for duplicate-message detection across any realistic message volume.
  */
 function simpleHash(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(36);
+  return createHash('sha256').update(str).digest('hex').slice(0, 12);
 }

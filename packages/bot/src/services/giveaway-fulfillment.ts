@@ -10,7 +10,7 @@ import { EmbedBuilder } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
-import { SOMNI_PALETTE , createLogger } from '@somnibot/shared';
+import { SOMNI_PALETTE, createLogger, type PlatformEvent } from '@somnibot/shared';
 
 const log = createLogger('GiveawayFulfillment');
 
@@ -20,7 +20,8 @@ export class GiveawayFulfillmentService {
   private eventBus: PlatformEventBus;
   private entitlementService: EntitlementService;
   // V10 Audit M-5: Store listener reference so stop() can remove it.
-  private onGiveawayEnded: ((event: { data: { giveawayId: string; title: string; winnerIds: string[]; prizeProductId: string | null } }) => void) | null = null;
+  // V11 Audit H-3: Typed as PlatformEvent so we can filter by guildId.
+  private onGiveawayEnded: ((event: PlatformEvent<'giveaway.ended', { giveawayId: string; title: string; winnerIds: string[]; prizeProductId: string | null }>) => void) | null = null;
 
   constructor(guild: Guild, supabase: SupabaseClient, eventBus: PlatformEventBus) {
     this.guild = guild;
@@ -34,6 +35,10 @@ export class GiveawayFulfillmentService {
    */
   start(): void {
     this.onGiveawayEnded = (event) => {
+      // V11 Audit H-3: Only process events for this guild to prevent
+      // cross-guild data corruption in multi-guild deployments.
+      if (event.guildId !== this.guild.id) return;
+
       this.handleGiveawayEnded(event.data).catch((err) => {
         log.error('Error handling giveaway end:', { error: String(err) });
       });

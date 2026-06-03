@@ -35,6 +35,12 @@ RUN pnpm install --frozen-lockfile
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm turbo build --filter=@somnibot/dashboard
 
+# V11 Audit L-5: Verify standalone output exists before pruning/copying.
+# If next.config.ts output:'standalone' is missing or the build fails silently,
+# this gives a clear error message instead of a cryptic COPY failure later.
+RUN test -d /app/packages/dashboard/.next/standalone \
+    || (echo "ERROR: standalone output not found — check next.config.ts output:'standalone'" && exit 1)
+
 # V5 Audit §9.P3a: Prune devDependencies before copying to runtime stage.
 # Consistent with bot Dockerfile — reduces image size and attack surface.
 RUN pnpm prune --prod

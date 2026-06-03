@@ -25,6 +25,11 @@ export function registerPollsManager(mgr: PollsManager, guildId: string): void {
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterPollsManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidatePollsCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();

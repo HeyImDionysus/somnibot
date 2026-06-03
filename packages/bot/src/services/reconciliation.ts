@@ -14,6 +14,12 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Reconciliation');
 
+/**
+ * V11 Audit H-2: Page size for cursor-based pagination.
+ * Replaces the old `.limit(1000)` hard cap that silently skipped data.
+ */
+const PAGE_SIZE = 1_000;
+
 interface ReconciliationFindings {
   entitlements_checked: number;
   roles_missing: number;
@@ -57,163 +63,204 @@ export async function runReconciliation(
   try {
     // ── 1. Check active entitlements → Discord roles ──
     // V5 audit 5.1/14.1 — JOIN instead of N+1 per-entitlement customer lookup
-    const { data: activeEntitlements } = await supabase
-      .from('entitlements')
-      .select('id, customer_id, granted_role_ids, product_id, customers(discord_id)')
-      .eq('guild_id', guild.id)
-      .eq('status', 'active')
-      .limit(1000);
-
-    if (activeEntitlements) {
-      for (const ent of activeEntitlements) {
-        findings.entitlements_checked++;
-        const roleIds = ent.granted_role_ids ?? [];
-        if (!roleIds.length) continue;
-
-        const custJoin = Array.isArray(ent.customers) ? ent.customers[0] : ent.customers;
-        const discordId = (custJoin as { discord_id: string } | null)?.discord_id;
-        if (!discordId) continue;
-
-        try {
-          const member = await guild.members.fetch(discordId);
-
-          for (const roleId of roleIds) {
-            if (!member.roles.cache.has(roleId)) {
-              // Role is missing — re-grant
-              findings.roles_missing++;
-              const role = guild.roles.cache.get(roleId);
-              if (role) {
-                await member.roles.add(roleId, 'Reconciliation: re-granting missing role');
-                findings.roles_regranted++;
-              }
-            }
-          }
-        } catch (err) {
-          // Member not in guild — that's okay, roles will be granted when they rejoin
-          const msg = err instanceof Error ? err.message : String(err);
-          if (!msg.includes('Unknown Member') && !msg.includes('not found')) {
-            findings.errors.push(`Entitlement ${ent.id}: ${msg}`);
-          }
-        }
-      }
-    }
-
-    // ── 2. Expire grace periods that have ended ──
-    const now = new Date().toISOString();
-    const { data: gracePeriodEntitlements } = await supabase
-      .from('entitlements')
-      .select('id, customer_id, granted_role_ids')
-      .eq('guild_id', guild.id)
-      .eq('status', 'grace_period')
-      .lt('grace_period_ends_at', now)
-      .limit(1000);
-
-    if (gracePeriodEntitlements) {
-      // V11 Audit M-1: Batch customer lookup instead of N+1 per-entitlement.
-      const graceCustomerIds = [...new Set(gracePeriodEntitlements.map((e) => e.customer_id).filter(Boolean))];
-      const customerMap = new Map<string, string>();
-      if (graceCustomerIds.length > 0) {
-        const { data: customers } = await supabase
-          .from('customers')
-          .select('id, discord_id')
-          .in('id', graceCustomerIds);
-        for (const c of customers ?? []) {
-          if (c.discord_id) customerMap.set(c.id, c.discord_id);
-        }
-      }
-
-      for (const ent of gracePeriodEntitlements) {
-        // Expire the entitlement
-        await supabase
+    // V11 Audit H-2: Cursor-based pagination to avoid silently skipping rows.
+    {
+      let offset = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const { data: page } = await supabase
           .from('entitlements')
-          .update({
-            status: 'expired',
-            updated_at: now,
-          })
-          .eq('id', ent.id);
+          .select('id, customer_id, granted_role_ids, product_id, customers(discord_id)')
+          .eq('guild_id', guild.id)
+          .eq('status', 'active')
+          .range(offset, offset + PAGE_SIZE - 1);
 
-        findings.grace_periods_expired++;
+        const rows = page ?? [];
+        hasMore = rows.length === PAGE_SIZE;
+        offset += PAGE_SIZE;
 
-        // Revoke roles
-        const roleIds = ent.granted_role_ids ?? [];
-        if (!roleIds.length) continue;
+        for (const ent of rows) {
+          findings.entitlements_checked++;
+          const roleIds = ent.granted_role_ids ?? [];
+          if (!roleIds.length) continue;
 
-        const discordId = customerMap.get(ent.customer_id);
+          const custJoin = Array.isArray(ent.customers) ? ent.customers[0] : ent.customers;
+          const discordId = (custJoin as { discord_id: string } | null)?.discord_id;
+          if (!discordId) continue;
 
-        if (discordId) {
           try {
             const member = await guild.members.fetch(discordId);
+
             for (const roleId of roleIds) {
-              if (member.roles.cache.has(roleId)) {
-                await member.roles.remove(roleId, 'Reconciliation: grace period expired');
+              if (!member.roles.cache.has(roleId)) {
+                // Role is missing — re-grant
+                findings.roles_missing++;
+                const role = guild.roles.cache.get(roleId);
+                if (role) {
+                  await member.roles.add(roleId, 'Reconciliation: re-granting missing role');
+                  findings.roles_regranted++;
+                }
               }
             }
-          } catch {
-            // Member not in guild
+          } catch (err) {
+            // Member not in guild — that's okay, roles will be granted when they rejoin
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!msg.includes('Unknown Member') && !msg.includes('not found')) {
+              findings.errors.push(`Entitlement ${ent.id}: ${msg}`);
+            }
+          }
+        }
+      } // end while
+    } // end block
+
+    // ── 2. Expire grace periods that have ended ──
+    // V11 Audit H-2: Cursor-based pagination.
+    const now = new Date().toISOString();
+    {
+      let offset = 0;
+      let hasMore = true;
+      const allGracePeriod: Array<{ id: string; customer_id: string; granted_role_ids: string[] | null }> = [];
+
+      while (hasMore) {
+        const { data: gracePage } = await supabase
+          .from('entitlements')
+          .select('id, customer_id, granted_role_ids')
+          .eq('guild_id', guild.id)
+          .eq('status', 'grace_period')
+          .lt('grace_period_ends_at', now)
+          .range(offset, offset + PAGE_SIZE - 1);
+
+        const rows = gracePage ?? [];
+        for (const r of rows) allGracePeriod.push(r);
+        hasMore = rows.length === PAGE_SIZE;
+        offset += PAGE_SIZE;
+      }
+
+      if (allGracePeriod.length > 0) {
+        // V11 Audit M-1: Batch customer lookup instead of N+1 per-entitlement.
+        const graceCustomerIds = [...new Set(allGracePeriod.map((e) => e.customer_id).filter(Boolean))];
+        const customerMap = new Map<string, string>();
+        if (graceCustomerIds.length > 0) {
+          const { data: customers } = await supabase
+            .from('customers')
+            .select('id, discord_id')
+            .in('id', graceCustomerIds);
+          for (const c of customers ?? []) {
+            if (c.discord_id) customerMap.set(c.id, c.discord_id);
+          }
+        }
+
+        for (const ent of allGracePeriod) {
+          // Expire the entitlement
+          await supabase
+            .from('entitlements')
+            .update({
+              status: 'expired',
+              updated_at: now,
+            })
+            .eq('id', ent.id);
+
+          findings.grace_periods_expired++;
+
+          // Revoke roles
+          const roleIds = ent.granted_role_ids ?? [];
+          if (!roleIds.length) continue;
+
+          const discordId = customerMap.get(ent.customer_id);
+
+          if (discordId) {
+            try {
+              const member = await guild.members.fetch(discordId);
+              for (const roleId of roleIds) {
+                if (member.roles.cache.has(roleId)) {
+                  await member.roles.remove(roleId, 'Reconciliation: grace period expired');
+                }
+              }
+            } catch {
+              // Member not in guild
+            }
           }
         }
       }
-    }
+    } // end block
 
     // ── 3. Timeout stale license sessions ──
-    // Get all active sessions with their license config
-    const { data: staleSessions } = await supabase
-      .from('license_sessions')
-      .select(`
-        id,
-        last_seen_at,
-        license_key_id,
-        license_keys!inner(product_id)
-      `)
-      .eq('active', true)
-      .limit(1000);
+    // V11 Audit H-2: Cursor-based pagination.
+    {
+      let offset = 0;
+      let hasMore = true;
+      const allStaleSessions: Array<{
+        id: string;
+        last_seen_at: string;
+        license_key_id: string;
+        license_keys: { product_id: string } | { product_id: string }[];
+      }> = [];
 
-    if (staleSessions) {
-      // Pre-fetch all product license configs to avoid N+1 queries (Finding #5)
-      const productIds = [
-        ...new Set(
-          staleSessions
-            .map((s) => {
-              const lk = Array.isArray(s.license_keys) ? s.license_keys[0] : s.license_keys;
-              return (lk as { product_id: string })?.product_id;
-            })
-            .filter(Boolean),
-        ),
-      ];
-      const configMap = new Map<string, number>();
-      if (productIds.length > 0) {
-        const { data: configs } = await supabase
-          .from('product_license_config')
-          .select('product_id, offline_grace_period_seconds')
-          .in('product_id', productIds);
-        for (const c of configs ?? []) {
-          configMap.set(c.product_id, c.offline_grace_period_seconds);
-        }
+      while (hasMore) {
+        const { data: sessionPage } = await supabase
+          .from('license_sessions')
+          .select(`
+            id,
+            last_seen_at,
+            license_key_id,
+            license_keys!inner(product_id)
+          `)
+          .eq('active', true)
+          .range(offset, offset + PAGE_SIZE - 1);
+
+        const rows = (sessionPage ?? []) as typeof allStaleSessions;
+        for (const r of rows) allStaleSessions.push(r);
+        hasMore = rows.length === PAGE_SIZE;
+        offset += PAGE_SIZE;
       }
 
-      for (const session of staleSessions) {
-        const lkJoin = Array.isArray(session.license_keys) ? session.license_keys[0] : session.license_keys;
-        const productId = (lkJoin as { product_id: string })?.product_id;
-        if (!productId) continue;
+      if (allStaleSessions.length > 0) {
+        // Pre-fetch all product license configs to avoid N+1 queries (Finding #5)
+        const productIds = [
+          ...new Set(
+            allStaleSessions
+              .map((s) => {
+                const lk = Array.isArray(s.license_keys) ? s.license_keys[0] : s.license_keys;
+                return (lk as { product_id: string })?.product_id;
+              })
+              .filter(Boolean),
+          ),
+        ];
+        const configMap = new Map<string, number>();
+        if (productIds.length > 0) {
+          const { data: configs } = await supabase
+            .from('product_license_config')
+            .select('product_id, offline_grace_period_seconds')
+            .in('product_id', productIds);
+          for (const c of configs ?? []) {
+            configMap.set(c.product_id, c.offline_grace_period_seconds);
+          }
+        }
 
-        const gracePeriodSeconds = configMap.get(productId) ?? 86400;
-        const lastSeen = new Date(session.last_seen_at).getTime();
-        const nowMs = Date.now();
+        for (const session of allStaleSessions) {
+          const lkJoin = Array.isArray(session.license_keys) ? session.license_keys[0] : session.license_keys;
+          const productId = (lkJoin as { product_id: string })?.product_id;
+          if (!productId) continue;
 
-        if (nowMs - lastSeen > gracePeriodSeconds * 1000) {
-          await supabase
-            .from('license_sessions')
-            .update({
-              active: false,
-              deactivated_at: new Date().toISOString(),
-              deactivation_reason: 'heartbeat_timeout',
-            })
-            .eq('id', session.id);
+          const gracePeriodSeconds = configMap.get(productId) ?? 86400;
+          const lastSeen = new Date(session.last_seen_at).getTime();
+          const nowMs = Date.now();
 
-          findings.sessions_timed_out++;
+          if (nowMs - lastSeen > gracePeriodSeconds * 1000) {
+            await supabase
+              .from('license_sessions')
+              .update({
+                active: false,
+                deactivated_at: new Date().toISOString(),
+                deactivation_reason: 'heartbeat_timeout',
+              })
+              .eq('id', session.id);
+
+            findings.sessions_timed_out++;
+          }
         }
       }
-    }
+    } // end block
 
     // ── Mark run as completed ──
     if (runId) {

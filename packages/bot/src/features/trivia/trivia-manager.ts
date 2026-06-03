@@ -28,6 +28,11 @@ export function registerTriviaManager(mgr: TriviaManager, guildId: string): void
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterTriviaManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateTriviaCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();

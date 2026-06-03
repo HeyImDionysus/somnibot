@@ -389,6 +389,11 @@ export function registerAdventureManager(mgr: AdventureManager, guildId: string)
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterAdventureManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateAdventureCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateCache();

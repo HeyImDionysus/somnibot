@@ -54,28 +54,28 @@ import { CrossFeatureBridge } from './services/cross-feature-bridge.js';
 import { scheduleReconciliation } from './services/reconciliation.js';
 import { AutoModSync } from './features/discord-native/automod-sync.js';
 import { GuildOnboardingSync } from './features/discord-native/guild-onboarding-sync.js';
-import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
+import { startAntiRaidPruner, stopAntiRaidPruner, clearAntiRaidGuildState } from './features/anti-raid/index.js';
 import { ForumTicketService } from './features/discord-native/forum-tickets.js';
 import { buildSetupCommand } from './features/setup-wizard/index.js';
 import { startSyncScheduler, type SyncConfig } from './sync/sync-engine.js';
 import { checkBotRolePosition } from './guards/bot-role-guard.js';
 import { ticketCommand } from './features/tickets/ticket-commands.js';
-import { EconomyManager, buildEconomyCommands, registerEconomyManager, buildTimersCommand } from './features/economy/index.js';
-import { GatheringManager, buildGatheringCommands, registerGatheringManager } from './features/gathering/index.js';
-import { CraftingManager, buildCraftingCommands, registerCraftingManager } from './features/crafting/index.js';
-import { FarmingManager, buildFarmingCommands, registerFarmingManager } from './features/farming/index.js';
-import { FishingManager, buildFishingCommands, registerFishingManager } from './features/fishing/index.js';
-import { AdventureManager, buildAdventureCommands, registerAdventureManager } from './features/adventures/index.js';
-import { MarketManager, buildMarketCommands, registerMarketManager } from './features/market/index.js';
-import { TriviaManager, buildTriviaCommands, registerTriviaManager } from './features/trivia/index.js';
-import { GamesManager, buildGameCommands, registerGamesManager } from './features/games/index.js';
-import { LotteryManager, buildLotteryCommands, registerLotteryManager } from './features/lottery/index.js';
-import { PollsManager, buildPollCommands, registerPollsManager } from './features/polls/index.js';
-import { PetsManager, buildPetCommands, registerPetsManager } from './features/pets/index.js';
-import { QuestsManager, buildQuestCommands, registerQuestsManager } from './features/quests/index.js';
-import { AchievementsManager, buildAchievementCommands, registerAchievementsManager } from './features/achievements/index.js';
-import { ProfilesManager, buildProfileCommands, registerProfilesManager } from './features/profiles/index.js';
-import { HeistManager, buildHeistCommands, registerHeistManager } from './features/heist/index.js';
+import { EconomyManager, buildEconomyCommands, registerEconomyManager, unregisterEconomyManager, buildTimersCommand } from './features/economy/index.js';
+import { GatheringManager, buildGatheringCommands, registerGatheringManager, unregisterGatheringManager } from './features/gathering/index.js';
+import { CraftingManager, buildCraftingCommands, registerCraftingManager, unregisterCraftingManager } from './features/crafting/index.js';
+import { FarmingManager, buildFarmingCommands, registerFarmingManager, unregisterFarmingManager } from './features/farming/index.js';
+import { FishingManager, buildFishingCommands, registerFishingManager, unregisterFishingManager } from './features/fishing/index.js';
+import { AdventureManager, buildAdventureCommands, registerAdventureManager, unregisterAdventureManager } from './features/adventures/index.js';
+import { MarketManager, buildMarketCommands, registerMarketManager, unregisterMarketManager } from './features/market/index.js';
+import { TriviaManager, buildTriviaCommands, registerTriviaManager, unregisterTriviaManager } from './features/trivia/index.js';
+import { GamesManager, buildGameCommands, registerGamesManager, unregisterGamesManager } from './features/games/index.js';
+import { LotteryManager, buildLotteryCommands, registerLotteryManager, unregisterLotteryManager } from './features/lottery/index.js';
+import { PollsManager, buildPollCommands, registerPollsManager, unregisterPollsManager } from './features/polls/index.js';
+import { PetsManager, buildPetCommands, registerPetsManager, unregisterPetsManager } from './features/pets/index.js';
+import { QuestsManager, buildQuestCommands, registerQuestsManager, unregisterQuestsManager } from './features/quests/index.js';
+import { AchievementsManager, buildAchievementCommands, registerAchievementsManager, unregisterAchievementsManager } from './features/achievements/index.js';
+import { ProfilesManager, buildProfileCommands, registerProfilesManager, unregisterProfilesManager } from './features/profiles/index.js';
+import { HeistManager, buildHeistCommands, registerHeistManager, unregisterHeistManager } from './features/heist/index.js';
 
 const log = createLogger('GuildInit');
 
@@ -611,6 +611,28 @@ export function destroyGuildServices(ctx: GuildContext): void {
   if (trivia && typeof trivia.stopAll === 'function') {
     trivia.stopAll();
   }
+
+  // V11 Audit M-2: Remove per-guild manager references from module-level Maps
+  // to prevent unbounded memory growth over the bot's lifetime.
+  unregisterEconomyManager(ctx.guildId);
+  unregisterGatheringManager(ctx.guildId);
+  unregisterCraftingManager(ctx.guildId);
+  unregisterFarmingManager(ctx.guildId);
+  unregisterFishingManager(ctx.guildId);
+  unregisterAdventureManager(ctx.guildId);
+  unregisterMarketManager(ctx.guildId);
+  unregisterTriviaManager(ctx.guildId);
+  unregisterGamesManager(ctx.guildId);
+  unregisterLotteryManager(ctx.guildId);
+  unregisterPollsManager(ctx.guildId);
+  unregisterPetsManager(ctx.guildId);
+  unregisterQuestsManager(ctx.guildId);
+  unregisterAchievementsManager(ctx.guildId);
+  unregisterProfilesManager(ctx.guildId);
+  unregisterHeistManager(ctx.guildId);
+
+  // V11 Audit M-3: Clear anti-raid in-memory state for this guild.
+  clearAntiRaidGuildState(ctx.guildId);
 
   guildLog.info('Guild services destroyed');
 }

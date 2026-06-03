@@ -53,6 +53,11 @@ export function registerMarketManager(mgr: MarketManager, guildId: string): void
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterMarketManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateMarketCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateCache();

@@ -16,7 +16,7 @@
  */
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 
@@ -69,15 +69,23 @@ export function useRealtimeSubscription<T extends Record<string, unknown>>(
     enabled = true,
   } = options;
 
-  const [data, setData] = useState<T[]>(initialData);
+  // V11 Audit M-7: Stabilize initialData reference to avoid unnecessary
+  // re-renders when the parent passes a new array with identical contents.
+  const stableInitialData = useMemo(
+    () => initialData,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(initialData)],
+  );
+
+  const [data, setData] = useState<T[]>(stableInitialData);
   const [isConnected, setIsConnected] = useState(false);
   const [updateCount, setUpdateCount] = useState(0);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
-  // Update data when initialData changes
+  // Update data when initialData changes (stable reference)
   useEffect(() => {
-    setData(initialData);
-  }, [initialData]);
+    setData(stableInitialData);
+  }, [stableInitialData]);
 
   const reset = useCallback((newData: T[]) => {
     setData(newData);

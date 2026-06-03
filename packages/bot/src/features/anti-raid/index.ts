@@ -142,6 +142,18 @@ export function stopAntiRaidPruner(): void {
   }
 }
 
+/**
+ * V11 Audit M-3: Clear all in-memory state for a specific guild.
+ * Called from destroyGuildServices() when a guild context is evicted
+ * to prevent unbounded growth of memory Maps over the bot's lifetime.
+ */
+export function clearAntiRaidGuildState(guildId: string): void {
+  _configCache.delete(guildId);
+  _memoryJoinWindows.delete(guildId);
+  _memoryRaidMode.delete(guildId);
+  _memoryRaidBanned.delete(guildId);
+}
+
 async function loadConfig(supabase: SupabaseClient, guildId: string): Promise<AntiRaidConfig> {
   const now = Date.now();
   const cached = _configCache.get(guildId);

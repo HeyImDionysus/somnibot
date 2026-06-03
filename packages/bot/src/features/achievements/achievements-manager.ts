@@ -15,6 +15,11 @@ export function registerAchievementsManager(mgr: AchievementsManager, guildId: s
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterAchievementsManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateAchievementsCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();
@@ -71,9 +76,10 @@ export class AchievementsManager {
       .from('economy_user_achievements').select('achievement_id').eq('guild_id', guildId).eq('user_id', userId)
       .limit(1000);
 
-    const unlockedIds = new Set((userAch ?? []).map((a: any) => a.achievement_id));
+    // V11 Audit L-6: Replace `any` casts with typed row references.
+    const unlockedIds = new Set((userAch ?? []).map((a) => a.achievement_id));
 
-    const lines = (allDefs ?? []).map((d: any) => {
+    const lines = (allDefs ?? []).map((d) => {
       const unlocked = unlockedIds.has(d.id);
       if (d.hidden && !unlocked) return `❓ *Hidden achievement*`;
       return `${unlocked ? '✅' : '⬜'} ${d.badge_emoji} **${d.name}** — ${d.description}`;

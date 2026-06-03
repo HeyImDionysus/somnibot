@@ -14,6 +14,11 @@ export function registerFarmingManager(mgr: FarmingManager, guildId: string): vo
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterFarmingManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateFarmingCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateConfig();

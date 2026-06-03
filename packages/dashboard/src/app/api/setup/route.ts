@@ -35,8 +35,8 @@ function createSetupSupabase(url?: string, key?: string) {
 /**
  * Check whether setup has been completed (setup_completed_at exists).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getSetupLock(supabase: any) {
+// V11 Audit L-7: Replace `any` with typed SupabaseClient.
+async function getSetupLock(supabase: ReturnType<typeof createClient>) {
   const { data: completedRow } = await supabase
     .from('instance_settings')
     .select('value')
