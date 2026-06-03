@@ -598,13 +598,13 @@ export function destroyGuildServices(ctx: GuildContext): void {
   const quests = ctx.getManager<QuestsManager>('quests');
   if (quests && typeof quests.stopResetTimer === 'function') quests.stopResetTimer();
   const games = ctx.getManager<GamesManager>('games');
-  if (games) {
+  if (games && typeof games.stopDailyResetTimer === 'function') {
     games.stopDailyResetTimer();
   }
   const heist = ctx.getManager<HeistManager>('heist');
   if (heist && typeof heist.cleanup === 'function') heist.cleanup();
   const trivia = ctx.getManager<TriviaManager>('trivia');
-  if (trivia) {
+  if (trivia && typeof trivia.stopAll === 'function') {
     trivia.stopAll();
   }
 
