@@ -20,7 +20,7 @@ function makeSupabase(tableData: Record<string, any> = {}) {
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
     const chain: Record<string, any> = {};
-    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
+    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'order', 'limit', 'range', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
