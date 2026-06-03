@@ -79,6 +79,9 @@ export async function checkPurchaseVelocity(
 
 // ── Device Abuse Check ─────────────────────────────────────
 // Triggers if a license key is activated on too many unique devices.
+// NOTE: License validation runs in the dashboard API, which has its own
+// inline copy of this check (packages/dashboard/src/app/api/license/validate/route.ts).
+// This export is kept for bot-side use if license events are ever processed here.
 
 export async function checkDeviceAbuse(
   ctx: FraudContext,
@@ -109,6 +112,7 @@ export async function checkDeviceAbuse(
 
 // ── IP Mismatch Check ──────────────────────────────────────
 // Triggers if license activations come from many different IPs rapidly.
+// NOTE: See checkDeviceAbuse note above — dashboard has its own inline copy.
 
 export async function checkIPMismatch(
   ctx: FraudContext,
