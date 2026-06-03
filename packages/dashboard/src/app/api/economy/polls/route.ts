@@ -32,6 +32,6 @@ export async function GET(request: NextRequest) {
       predictions: predsRes.data ?? [],
     });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 401 });
+    return authErrorResponse(e);
   }
 }
