@@ -277,7 +277,12 @@ export async function POST(request: NextRequest) {
         credentialsSaved: true,
       });
     } catch (err) {
-      return NextResponse.json({ valid: false, error: String(err) });
+      // V11 Audit R5-1: Was returning String(err) — leaks internal network/fetch
+      // error details to the client. Generic message covers both Discord
+      // verification and credential-persistence failures since the catch
+      // scope includes Supabase upserts and auth-provider configuration.
+      console.error('[setup/verify-discord] Error:', err);
+      return NextResponse.json({ valid: false, error: 'Discord verification failed — please try again or check the server logs for details' });
     }
   }
 
