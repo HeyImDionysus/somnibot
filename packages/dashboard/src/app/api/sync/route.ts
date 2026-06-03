@@ -9,6 +9,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const syncConfigAction = z.object({
   action: z.literal('update_config'),
@@ -96,7 +97,7 @@ export async function POST(request: NextRequest) {
         sync_auto_repair_everyone: body.autoRepairEveryone,
        }, { onConflict: 'guild_id' });
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'sync');
 
     // Notify bot so it hot-reloads sync config immediately
     await notifyBot('settings');

@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -35,7 +36,7 @@ export async function GET(request: NextRequest) {
     if (correlationId) query = query.eq('correlation_id', correlationId);
 
     const { data, count, error } = await query;
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'workflows/events');
 
     return NextResponse.json({
       success: true,

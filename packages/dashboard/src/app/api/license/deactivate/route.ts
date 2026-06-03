@@ -8,6 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createHash } from 'crypto';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { dbError } from '@/lib/api/response';
 
 function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
     .eq('license_key_id', licenseKey.id);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license/deactivate');
   }
 
   return NextResponse.json({ success: true });

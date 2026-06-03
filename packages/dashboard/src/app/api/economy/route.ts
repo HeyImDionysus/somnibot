@@ -11,6 +11,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
+import { dbError, apiServerError} from '@/lib/api/response';
 
 const ECONOMY_COLUMNS = [
   'economy_enabled',
@@ -141,8 +142,7 @@ export async function GET() {
     });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
-    const message = err instanceof Error ? err.message : 'Failed to load economy config';
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return apiServerError(err, 'economy');
   }
 }
 
@@ -169,7 +169,7 @@ export async function PATCH(request: NextRequest) {
       .eq('guild_id', ctx.guildId);
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'economy');
     }
 
     // Notify bot to reload economy config
@@ -178,7 +178,6 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
-    const message = err instanceof Error ? err.message : 'Failed to update economy config';
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return apiServerError(err, 'economy');
   }
 }

@@ -10,6 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 export async function GET(
@@ -45,7 +46,7 @@ export async function GET(
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'customers/entitlements');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -115,7 +116,7 @@ export async function POST(
     .single();
 
   if (orderErr || !order) {
-    return NextResponse.json({ success: false, error: orderErr?.message ?? 'Failed to create order' }, { status: 500 });
+    return dbError(orderErr ?? { message: 'Failed to create order' }, 'customers/entitlements');
   }
 
   const { data, error } = await supabase
@@ -137,7 +138,7 @@ export async function POST(
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'customers/entitlements');
   }
 
   return NextResponse.json({ success: true, data });
@@ -185,7 +186,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'customers/entitlements');
   }
 
   return NextResponse.json({ success: true, data });

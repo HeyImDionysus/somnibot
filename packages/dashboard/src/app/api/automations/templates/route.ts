@@ -9,6 +9,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 // ── Templates (inlined to avoid cross-package build dependency) ──
@@ -194,7 +195,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'automations/templates');
   }
 
   return NextResponse.json({ success: true, data });

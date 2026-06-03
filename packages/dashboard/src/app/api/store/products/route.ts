@@ -14,6 +14,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 // ── PayPal Helpers ─────────────────────────────────────
 
 /**
@@ -140,7 +141,7 @@ export async function GET() {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -212,7 +213,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products');
   }
 
   // 3. Auto-create PayPal Billing Plans for subscription products
@@ -302,7 +303,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products');
   }
 
   // Notify bot so it hot-reloads product changes
@@ -335,7 +336,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products');
   }
 
   // Notify bot so deactivated product is no longer purchasable

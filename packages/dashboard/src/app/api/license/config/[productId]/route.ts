@@ -9,6 +9,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(
   _req: NextRequest,
@@ -28,7 +29,7 @@ export async function GET(
     .maybeSingle();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license/config');
   }
 
   // Return defaults if no config exists
@@ -101,7 +102,7 @@ export async function PUT(
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license/config');
   }
 
   return NextResponse.json({ success: true, data });

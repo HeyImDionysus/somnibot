@@ -10,6 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 export async function POST(request: NextRequest) {
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
   );
 
   if (error)
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return dbError(error, 'deploy');
 
   // Audit: log the deploy request
   await admin.from('audit_logs').insert({

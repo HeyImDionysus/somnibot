@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { CSRF_COOKIE_NAME } from '@/lib/api/csrf';
+import { dbError } from '@/lib/api/response';
 
 const rbacUserAssign = z.object({
   discord_id: z.string().regex(/^\d{17,20}$/, 'Must be a Discord snowflake ID'),
@@ -28,7 +29,7 @@ export async function GET() {
       .order('assigned_at', { ascending: false })
       .limit(500);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'rbac/users');
 
     // Group by discord_id
     const usersMap = new Map<string, { discord_id: string; roles: unknown[] }>();
@@ -125,7 +126,7 @@ export async function POST(request: NextRequest) {
       .select('*, dashboard_roles(name)')
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'rbac/users');
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
     // Clearing the cookie forces a re-fetch of /api/csrf, which re-derives
@@ -157,7 +158,7 @@ export async function DELETE(request: NextRequest) {
       .eq('id', assignmentId)
       .eq('guild_id', ctx.guildId);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'rbac/users');
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
     const resp = NextResponse.json({ success: true });

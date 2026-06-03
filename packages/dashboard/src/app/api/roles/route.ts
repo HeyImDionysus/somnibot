@@ -14,6 +14,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest) {
     .select('id')
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return dbError(error, 'roles');
 
   return NextResponse.json({
     success: true,
@@ -168,7 +169,7 @@ export async function PATCH(request: NextRequest) {
     .select('id')
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return dbError(error, 'roles');
 
   return NextResponse.json({
     success: true,
@@ -208,7 +209,7 @@ export async function DELETE(request: NextRequest) {
     .select('id')
     .single();
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return dbError(error, 'roles');
 
   return NextResponse.json({
     success: true,

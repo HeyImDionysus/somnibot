@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const sessionIdSchema = z.string().uuid('Session ID must be a valid UUID');
 
@@ -54,7 +55,7 @@ export async function DELETE(
     .eq('id', sessionId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license/sessions');
   }
 
   return NextResponse.json({ success: true });

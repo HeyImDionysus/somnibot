@@ -64,7 +64,7 @@ export async function GET(req: NextRequest) {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/files');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });

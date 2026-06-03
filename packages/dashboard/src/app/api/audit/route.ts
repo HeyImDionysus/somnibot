@@ -11,6 +11,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_EXPORT_ROWS = 10_000;
@@ -79,7 +80,7 @@ export async function GET(req: NextRequest) {
   const { data, error, count } = await query;
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'audit');
   }
 
   if (isExport && format === 'csv') {

@@ -10,6 +10,7 @@ import { createHash } from 'crypto';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(
   _req: NextRequest,
@@ -130,7 +131,7 @@ export async function PUT(
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license-keys');
   }
 
   return NextResponse.json({ success: true, data });

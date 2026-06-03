@@ -12,6 +12,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 export async function GET(req: NextRequest) {
@@ -37,7 +38,7 @@ export async function GET(req: NextRequest) {
   const { data, error } = await query;
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/plans');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -93,7 +94,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/plans');
   }
 
   return NextResponse.json({ success: true, data });
@@ -128,7 +129,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/plans');
   }
 
   return NextResponse.json({ success: true, data });
@@ -157,7 +158,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/plans');
   }
 
   return NextResponse.json({ success: true });

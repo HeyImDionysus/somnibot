@@ -10,6 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(
   _req: NextRequest,
@@ -32,7 +33,7 @@ export async function GET(
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products/files');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -97,7 +98,7 @@ export async function POST(
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products/files');
   }
 
   return NextResponse.json({ success: true, data });
@@ -142,7 +143,7 @@ export async function DELETE(
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/products/files');
   }
 
   return NextResponse.json({ success: true });

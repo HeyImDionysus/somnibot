@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const alertActionSchema = z.object({
   id: z.string().uuid(),
@@ -63,7 +64,7 @@ export async function GET(req: NextRequest) {
   const { data, error } = await query;
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'alerts');
   }
 
   // Separate active and resolved for convenience
@@ -106,7 +107,7 @@ export async function PATCH(req: NextRequest) {
       .eq('guild_id', guildId);
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'alerts');
     }
     return NextResponse.json({ success: true });
   }
@@ -123,7 +124,7 @@ export async function PATCH(req: NextRequest) {
       .eq('guild_id', guildId);
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'alerts');
     }
     return NextResponse.json({ success: true });
   }

@@ -11,6 +11,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError, apiServerError} from '@/lib/api/response';
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -41,7 +42,7 @@ export async function GET(request: NextRequest) {
     const { data, count, error } = await query;
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'economy/transactions');
     }
 
     return NextResponse.json({
@@ -56,7 +57,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
-    const message = err instanceof Error ? err.message : 'Failed to load transactions';
-    return NextResponse.json({ success: false, error: message }, { status: 500 });
+    return apiServerError(err, 'economy/transactions');
   }
 }

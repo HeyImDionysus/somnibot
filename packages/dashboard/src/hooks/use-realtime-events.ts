@@ -91,6 +91,12 @@ export function useAutoRefresh(
   enabled: boolean = true,
 ) {
   const channelRef = useRef<RealtimeChannel | null>(null);
+  // V11 Re-Audit N-2: Store refetchFn in a ref so the Realtime callback always
+  // invokes the current closure without including it in the useEffect dep array.
+  // This mirrors the handlersRef pattern used in useRealtimeEvents (M-9) and
+  // prevents subscribe/unsubscribe churn when callers pass un-memoized callbacks.
+  const refetchRef = useRef(refetchFn);
+  refetchRef.current = refetchFn;
 
   useEffect(() => {
     if (!enabled) return;
@@ -109,7 +115,7 @@ export function useAutoRefresh(
           filter: filter ?? undefined,
         },
         () => {
-          refetchFn();
+          refetchRef.current();
         },
       )
       .subscribe();
@@ -120,5 +126,5 @@ export function useAutoRefresh(
       channel.unsubscribe();
       channelRef.current = null;
     };
-  }, [table, filter, enabled, refetchFn]);
+  }, [table, filter, enabled]);
 }

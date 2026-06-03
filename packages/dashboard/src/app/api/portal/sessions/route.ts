@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const sessionDeleteSchema = z.object({
   customer_id: z.string().min(1, 'customer_id is required'),
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'portal/sessions');
   }
 
   return NextResponse.json({
@@ -82,7 +83,7 @@ export async function DELETE(req: NextRequest) {
       .eq('revoked', false);
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'portal/sessions');
     }
     return NextResponse.json({ success: true, message: 'All sessions revoked' });
   }
@@ -96,7 +97,7 @@ export async function DELETE(req: NextRequest) {
     .eq('customer_id', customer_id);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'portal/sessions');
   }
 
   return NextResponse.json({ success: true, message: 'Session revoked' });

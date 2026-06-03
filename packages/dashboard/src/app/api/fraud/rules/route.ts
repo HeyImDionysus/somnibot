@@ -10,6 +10,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const fraudRuleCreate = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -41,7 +42,7 @@ export async function GET() {
       .order('created_at', { ascending: false })
       .limit(500);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/rules');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/rules');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -108,7 +109,7 @@ export async function PATCH(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/rules');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -133,7 +134,7 @@ export async function DELETE(request: NextRequest) {
       .eq('id', ruleId)
       .eq('guild_id', ctx.guildId);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/rules');
     return NextResponse.json({ success: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

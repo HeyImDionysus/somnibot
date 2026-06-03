@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
+import { dbError } from '@/lib/api/response';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 const tempChannelUpdate = z.object({
@@ -43,7 +44,7 @@ export async function GET() {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'temp-channels');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -111,7 +112,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'temp-channels');
   }
 
   await notifyBot('temp-channels');
@@ -144,7 +145,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'temp-channels');
   }
 
   await notifyBot('temp-channels');
@@ -175,7 +176,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'temp-channels');
   }
 
   await notifyBot('temp-channels');

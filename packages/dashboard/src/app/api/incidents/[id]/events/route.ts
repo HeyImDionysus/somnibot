@@ -8,6 +8,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const incidentEventCreate = z.object({
   event_type: z.string().max(64).default('note'),
@@ -43,7 +44,7 @@ export async function GET(
       .order('created_at', { ascending: true })
       .limit(500);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'incidents/events');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -90,7 +91,7 @@ export async function POST(
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'incidents/events');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

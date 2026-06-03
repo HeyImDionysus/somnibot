@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -129,7 +130,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'levels');
   }
 
   await notifyBot('levels');
@@ -173,7 +174,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'levels');
     }
 
     await notifyBot('levels');
@@ -201,7 +202,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'levels');
     }
 
     await notifyBot('levels');
@@ -241,7 +242,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'levels');
   }
 
   await notifyBot('levels');

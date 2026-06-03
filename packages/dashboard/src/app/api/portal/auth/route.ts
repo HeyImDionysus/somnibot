@@ -17,6 +17,7 @@ import { randomBytes, createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
+import { dbError } from '@/lib/api/response';
 
 const portalAuthSchema = z.object({
   action: z.literal('login'),
@@ -175,7 +176,7 @@ export async function POST(request: NextRequest) {
           user_agent: request.headers.get('user-agent') || null,
         });
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (error) return dbError(error, 'portal/auth');
 
       return NextResponse.json({
         success: true,
