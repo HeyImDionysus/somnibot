@@ -277,7 +277,11 @@ export async function POST(request: NextRequest) {
         credentialsSaved: true,
       });
     } catch (err) {
-      return NextResponse.json({ valid: false, error: String(err) });
+      // V11 Audit R5-1: Was returning String(err) — leaks internal network/fetch
+      // error details to the client. The verify-supabase action already returns a
+      // generic message; align verify-discord with the same pattern.
+      console.error('[setup/verify-discord] Error:', err);
+      return NextResponse.json({ valid: false, error: 'Could not reach Discord API — check your internet connection and bot token' });
     }
   }
 

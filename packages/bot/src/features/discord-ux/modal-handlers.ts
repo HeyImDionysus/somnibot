@@ -268,8 +268,12 @@ async function handleTicketFromMessageModal(
     .single();
 
   if (error) {
+    // V11 Audit R5-2: Was surfacing raw Supabase error.message (may contain
+    // table/constraint names) to the Discord user. Log the real error
+    // server-side and show a generic message.
+    console.error('[ModalHandler] Ticket DB insert failed:', error.message);
     await ticketChannel.delete().catch(() => { /* channel may already be deleted */ });
-    await interaction.editReply({ content: `❌ Failed to create ticket: ${error.message}` });
+    await interaction.editReply({ content: '❌ Failed to create ticket. Please try again or contact an admin.' });
     return;
   }
 
