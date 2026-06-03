@@ -367,15 +367,22 @@ export class CrossFeatureBridge {
 
       if (!giveaways || giveaways.length === 0) return;
 
-      // V5 audit 14.2 — batch RPC calls with Promise.allSettled instead of serial N+1
-      const results = await Promise.allSettled(
-        giveaways.map((g) =>
-          this.supabase.rpc('giveaway_remove_entry', {
-            p_giveaway_id: g.id,
-            p_user_id: userId,
-          }),
-        ),
-      );
+      // V11 Audit M-2: Batch RPC calls in groups of 15 to avoid saturating
+      // the Supabase connection pool. Previous code fired all concurrently.
+      const BATCH_SIZE = 15;
+      const results: PromiseSettledResult<Awaited<ReturnType<typeof this.supabase.rpc>>>[] = [];
+      for (let i = 0; i < giveaways.length; i += BATCH_SIZE) {
+        const batch = giveaways.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.allSettled(
+          batch.map((g) =>
+            this.supabase.rpc('giveaway_remove_entry', {
+              p_giveaway_id: g.id,
+              p_user_id: userId,
+            }),
+          ),
+        );
+        results.push(...batchResults);
+      }
 
       // V10 Audit L-1: giveaway_remove_entry returns void, so r.value.data
       // is always null. Check for fulfilled + no error instead.

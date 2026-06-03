@@ -444,6 +444,12 @@ export class AuditService {
   start(): void {
     // Listen to every event
     this.eventBus.onAny(async (event: PlatformEvent) => {
+      // V11 Audit H-1: Only log events for our guild. The event bus is a
+      // process-level singleton and AuditService is per-guild, so without
+      // this filter every guild's AuditService writes entries for ALL guilds,
+      // producing N² duplicate rows.
+      if (event.guildId !== this.guildId) return;
+
       const mapping = EVENT_TO_AUDIT[event.type];
       if (!mapping) return; // untracked event type
 

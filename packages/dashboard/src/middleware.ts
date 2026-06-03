@@ -237,7 +237,10 @@ export async function middleware(request: NextRequest) {
         sameSite: 'strict',
         secure: process.env.NODE_ENV === 'production',
         path: '/',
-        maxAge: 120, // 2 minutes — longer than the 60s grace window
+        // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
+        // buffer. Previously 120s which stored the cookie well past the 60s
+        // acceptance window, wasting cookie bandwidth and leaking timing info.
+        maxAge: 90,
       });
     }
 

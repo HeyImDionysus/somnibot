@@ -24,7 +24,8 @@ import { createLogger } from '@somnibot/shared';
 const log = createLogger('Heartbeat');
 
 const VALKEY_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
-// Keep legacy per-guild key prefix for backwards-compatible reads
+// V11 Audit L-2: Legacy per-guild prefix kept ONLY for backwards-compatible reads.
+// Writes to the per-guild key are removed (see writeValkeyHeartbeat).
 const VALKEY_HEARTBEAT_KEY_PREFIX = 'somnibot:heartbeat:';
 const VALKEY_HEARTBEAT_TTL = 120; // 2 minutes — auto-expires if bot dies
 const VALKEY_INTERVAL_MS = 30_000; // 30 seconds
@@ -85,7 +86,12 @@ export class HeartbeatService {
    * Write heartbeat to Valkey with TTL.
    * Stores timestamp + uptime + guildCount + memory so the dashboard
    * can determine freshness and overall health from a single key.
-   * Also writes to per-guild key for backwards-compatible dashboard reads.
+   *
+   * V11 Audit H-2 + L-2: Only write the bot-level key. The per-guild key
+   * was a backwards-compat measure that added an unnecessary Valkey write
+   * every tick and only covered the primary guild — non-primary guilds
+   * never got a heartbeat key, so the dashboard showed them as offline.
+   * readHeartbeat() already falls back to the per-guild key for old data.
    */
   private async writeValkeyHeartbeat(): Promise<void> {
     try {
@@ -97,12 +103,8 @@ export class HeartbeatService {
         memoryUsageMB: Math.round(memUsage.rss / 1024 / 1024),
       });
 
-      // Write bot-level key
+      // Write bot-level key only
       await this.valkey.set(VALKEY_HEARTBEAT_KEY, payload, 'EX', VALKEY_HEARTBEAT_TTL);
-
-      // Write per-guild key for backwards compatibility (dashboard reads per-guild)
-      const guildKey = `${VALKEY_HEARTBEAT_KEY_PREFIX}${this.primaryGuildId}`;
-      await this.valkey.set(guildKey, payload, 'EX', VALKEY_HEARTBEAT_TTL);
     } catch (err) {
       log.warn('Valkey write failed:', err instanceof Error ? err.message : err);
     }

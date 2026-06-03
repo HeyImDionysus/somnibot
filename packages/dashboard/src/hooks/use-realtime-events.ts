@@ -29,6 +29,12 @@ export function useRealtimeEvents(
   enabled: boolean = true,
 ) {
   const channelsRef = useRef<RealtimeChannel[]>([]);
+  // V11 Audit M-9: Store the latest handlers in a ref so the Realtime
+  // callback always invokes the current closure. Previously the effect
+  // dep array used `handlers.length`, meaning handler function updates
+  // without length changes captured stale closures.
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
 
   useEffect(() => {
     if (!enabled || handlers.length === 0) return;
@@ -36,7 +42,9 @@ export function useRealtimeEvents(
     const supabase = createClient();
     const channels: RealtimeChannel[] = [];
 
-    for (const handler of handlers) {
+    for (let i = 0; i < handlers.length; i++) {
+      const handler = handlers[i]!;
+      const handlerIndex = i;
       const channelName = `events-${handler.table}-${Date.now()}-${crypto.randomUUID().slice(0, 4)}`;
 
       const channel = supabase
@@ -52,7 +60,8 @@ export function useRealtimeEvents(
           (payload) => {
             const eventType = payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE';
             const record = (eventType === 'DELETE' ? payload.old : payload.new) as Record<string, unknown>;
-            handler.onEvent(eventType, record);
+            // Use ref to avoid stale closure
+            handlersRef.current[handlerIndex]?.onEvent(eventType, record);
           },
         )
         .subscribe();

@@ -45,6 +45,22 @@ const SETTINGS_TO_ENV: Record<string, string> = {
 };
 
 /**
+ * V11 Audit C-1: Secret fields that must NEVER be written to the database.
+ * The bot reads these from env vars or the launcher — storing them in
+ * instance_settings would expose them to anyone with Supabase read access.
+ * syncConfigToDatabase() writes only a boolean `_configured` flag for these.
+ */
+const SECRET_KEYS = new Set([
+  'discord_bot_token',
+  'discord_client_secret',
+  'paypal_client_secret',
+  'lavalink_password',
+  'supabase_access_token',
+  'supabase_db_url',
+  'valkey_url',
+]);
+
+/**
  * Load missing config values from instance_settings into process.env.
  * Call this BEFORE loadConfig() in the boot sequence.
  *
@@ -176,6 +192,18 @@ export async function syncConfigToDatabase(): Promise<number> {
     for (const [settingsKey, envVar] of Object.entries(SETTINGS_TO_ENV)) {
       const value = process.env[envVar];
       if (value) {
+        // V11 Audit C-1: Never write secret values to the database.
+        // Store a boolean flag so the dashboard can show "configured" status
+        // without exposing the actual credential.
+        if (SECRET_KEYS.has(settingsKey)) {
+          rows.push({
+            key: `${settingsKey}_configured`,
+            value: 'true',
+            section: KEY_TO_SECTION[settingsKey] ?? 'other',
+            updated_at: new Date().toISOString(),
+          });
+          continue;
+        }
         rows.push({
           key: settingsKey,
           value,

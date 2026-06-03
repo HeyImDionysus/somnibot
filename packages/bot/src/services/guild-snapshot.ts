@@ -227,12 +227,15 @@ export async function writeGuildSnapshot(
   }
 
   // ── Members (for MemberPicker and useDiscordNames in dashboard) ──
-  // Fetch all guild members so the dashboard can search/resolve them.
-  // Cap at 10 000 to keep JSONB size manageable; the member list is used
-  // for display-name resolution and member search, not as a full roster.
+  // V11 Audit C-3: Use the *already-cached* member list instead of calling
+  // guild.members.fetch() every snapshot cycle. The full fetch hammered the
+  // Discord API every 60 seconds, risking rate-limit exhaustion and creating
+  // 3–5 MB JSONB writes. The cache is populated by Discord.js from gateway
+  // events (GUILD_MEMBERS_CHUNK on ready, GUILD_MEMBER_ADD/REMOVE/UPDATE
+  // ongoing). For dashboard name resolution this is sufficient — the cache
+  // reflects the live member list within seconds.
   let memberSnapshots: MemberSnapshot[] | null = null;
   try {
-    await guild.members.fetch();
     const allMembers = guild.members.cache;
     const snapshots: MemberSnapshot[] = [];
     for (const [, member] of allMembers) {
@@ -251,18 +254,22 @@ export async function writeGuildSnapshot(
     }
     memberSnapshots = snapshots;
   } catch (err) {
-    log.warn('Failed to fetch members for snapshot:', { error: String(err) });
+    log.warn('Failed to build member snapshot from cache:', { error: String(err) });
   }
 
   // ── Write to Supabase ──
+  // V11 Audit L-1: roles/channels/categories/memberSnapshots are already
+  // plain data objects built from scratch above — no BigInt, no circular refs.
+  // The previous JSON.parse(JSON.stringify()) round-trip was unnecessary and
+  // doubled memory allocation on large payloads.
   const { error } = await supabase.from('guild_live_state').upsert(
     {
       guild_id: guild.id,
-      roles: JSON.parse(JSON.stringify(roles)),
-      channels: JSON.parse(JSON.stringify(channels)),
-      categories: JSON.parse(JSON.stringify(categories)),
+      roles,
+      channels,
+      categories,
       member_count: guild.memberCount,
-      members: memberSnapshots ? JSON.parse(JSON.stringify(memberSnapshots)) : null,
+      members: memberSnapshots,
       bot_role_id: botRole?.id ?? null,
       bot_role_position: botRole?.position ?? 0,
       onboarding_enabled: onboardingEnabled,
@@ -298,11 +305,15 @@ function classifyRoleSource(role: Role, templateKey: string | null): string {
 /**
  * Start periodic snapshot writes.
  * Writes immediately on start, then every `intervalMs`.
+ *
+ * V11 Audit C-3: Default increased from 60 s to 5 min. The snapshot no
+ * longer calls guild.members.fetch() (uses cache), so the interval is
+ * only about how fresh the dashboard's role/channel data needs to be.
  */
 export function startPeriodicSnapshots(
   guild: Guild,
   supabase: SupabaseClient,
-  intervalMs = 60_000,
+  intervalMs = 300_000,
 ): NodeJS.Timeout {
   // Immediate first write
   writeGuildSnapshot(guild, supabase).catch((err) =>

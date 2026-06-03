@@ -1100,27 +1100,50 @@ export async function startActionQueueListener(
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();
 
-  // Subscribe to new inserts
-  supabase
-    .channel('bot-action-queue')
-    .on(
-      'postgres_changes',
-      {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'bot_action_queue',
-        filter: `guild_id=eq.${guild.id}`,
-      },
-      async (payload) => {
-        const action = payload.new as ActionRow;
-        if (action.status === 'pending') {
-          await processAction(guild, supabase, action);
+  // V11 Audit H-5: Subscribe to new inserts with automatic reconnection.
+  // The Supabase Realtime subscription can silently disconnect (server
+  // restart, network blip). On error/timeout/closed we resubscribe after
+  // a delay, with exponential backoff capped at 30s.
+  let reconnectDelay = 1_000;
+  const MAX_RECONNECT_DELAY = 30_000;
+
+  function subscribeToQueue(): void {
+    supabase
+      .channel(`bot-action-queue-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'bot_action_queue',
+          filter: `guild_id=eq.${guild.id}`,
+        },
+        async (payload) => {
+          const action = payload.new as ActionRow;
+          if (action.status === 'pending') {
+            await processAction(guild, supabase, action);
+          }
+        },
+      )
+      .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          log.info('Realtime subscription: SUBSCRIBED');
+          reconnectDelay = 1_000; // reset backoff on success
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          log.warn(`Realtime subscription ${status}, reconnecting in ${reconnectDelay}ms`, {
+            error: err ? String(err) : undefined,
+          });
+          setTimeout(() => {
+            subscribeToQueue();
+          }, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+        } else {
+          log.info(`Realtime subscription: ${status}`);
         }
-      },
-    )
-    .subscribe((status) => {
-      log.info(`Realtime subscription: ${status}`);
-    });
+      });
+  }
+
+  subscribeToQueue();
 
   log.info('Action queue listener active');
 
