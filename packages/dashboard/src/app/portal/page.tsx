@@ -98,7 +98,8 @@ export default function PortalDashboard() {
           fetch('/api/portal/downloads', { headers }),
         ]);
 
-        if (licensesRes.status === 401 || ordersRes.status === 401) {
+        // V11 Re-Audit UX-2: Include downloadsRes in 401 check for consistency.
+        if (licensesRes.status === 401 || ordersRes.status === 401 || downloadsRes.status === 401) {
           setError('not_authenticated');
           localStorage.removeItem('portal_token');
           return;

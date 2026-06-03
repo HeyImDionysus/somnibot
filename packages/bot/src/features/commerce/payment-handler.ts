@@ -300,6 +300,26 @@ export async function handleBuyButton(
       return;
     }
 
+    // V11 Re-Audit UX-4: Create a pending order record for subscriptions,
+    // matching the one-time purchase flow. Without this, subscription attempts
+    // that are abandoned have no record in the orders table, and the owner's
+    // dashboard shows no trace of the purchase attempt.
+    const { data: seqResult } = await supabase.rpc('generate_order_number') as { data: string | null; error: unknown };
+    const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
+
+    await supabase.from('orders').insert({
+      order_number: orderNumber,
+      customer_id: customerId,
+      guild_id: guildId,
+      product_id: productId,
+      plan_id: plan.id,
+      paypal_subscription_id: subData.id,
+      amount_cents: plan.price_cents,
+      currency: plan.currency,
+      status: 'pending',
+      source: 'purchase',
+    });
+
     await interaction.editReply({
       embeds: [
         new EmbedBuilder()

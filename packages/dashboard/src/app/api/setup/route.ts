@@ -359,23 +359,51 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
     }
 
+    // V11 Re-Audit L-1: Whitelist of credential keys accepted during finalize.
+    // Previously any key was accepted, allowing arbitrary writes to instance_settings.
+    const ALLOWED_CREDENTIAL_KEYS = new Set([
+      'discord_bot_token',
+      'discord_application_id',
+      'discord_client_secret',
+      'discord_guild_id',
+      'paypal_client_id',
+      'paypal_client_secret',
+      'paypal_webhook_id',
+      'paypal_sandbox',
+      'lavalink_host',
+      'lavalink_port',
+      'lavalink_password',
+      'valkey_url',
+      'supabase_access_token',
+      'supabase_db_url',
+      'dashboard_url',
+    ]);
+
+    const SECTION_BY_PREFIX: Record<string, string> = {
+      discord_: 'discord',
+      supabase_: 'supabase',
+      paypal_: 'paypal',
+      lavalink_: 'lavalink',
+      valkey_: 'valkey',
+      dashboard_: 'general',
+    };
+
     // Save any additional credentials passed in
     const credentials = (body as Record<string, unknown>).credentials as Record<string, string> | undefined;
     if (credentials) {
       for (const [key, value] of Object.entries(credentials)) {
         if (!value?.trim()) continue;
+
+        // Reject unknown keys
+        if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
+          console.warn(`[Setup] Rejected unknown credential key: ${key}`);
+          continue;
+        }
+
         // Determine section from key prefix
-        const section = key.startsWith('discord_')
-          ? 'discord'
-          : key.startsWith('supabase_')
-            ? 'supabase'
-            : key.startsWith('paypal_')
-              ? 'paypal'
-              : key.startsWith('lavalink_')
-                ? 'lavalink'
-                : key.startsWith('valkey_')
-                  ? 'valkey'
-                  : 'general';
+        const section = Object.entries(SECTION_BY_PREFIX).find(
+          ([prefix]) => key.startsWith(prefix),
+        )?.[1] ?? 'general';
 
         await supabase
           .from('instance_settings')

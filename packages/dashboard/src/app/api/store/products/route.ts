@@ -219,11 +219,22 @@ export async function POST(req: NextRequest) {
   // 3. Auto-create PayPal Billing Plans for subscription products
   const createdPlans: { id: string; paypalPlanId: string | null }[] = [];
 
+  // V11 Re-Audit L-4: Typed plan definition — replaces `as any` cast.
+  // The Zod schema already validates planDefs as z.array(z.record(z.unknown())),
+  // but property access needs an explicit interface to avoid type escapes.
+  interface PlanDefinition {
+    name?: string;
+    interval_unit?: string;
+    interval_count?: number;
+    price_cents?: number;
+  }
+
   if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const planDef of planDefs as Array<Record<string, any>>) {
+    for (const rawPlan of planDefs) {
+      const planDef = rawPlan as PlanDefinition;
       const paypalPlanId = await createPayPalBillingPlan(
         paypalProductId,
-        planDef.name ?? `${name} — ${planDef.interval_unit}`,
+        planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
         planDef.price_cents ?? price_cents,
         currency ?? 'USD',
         planDef.interval_unit ?? 'MONTH',
@@ -235,7 +246,7 @@ export async function POST(req: NextRequest) {
         .insert({
           product_id: data.id,
           guild_id: guildId,
-          name: planDef.name ?? `${name} — ${planDef.interval_unit}`,
+          name: planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
           paypal_plan_id: paypalPlanId,
           interval_unit: planDef.interval_unit ?? 'MONTH',
           interval_count: planDef.interval_count ?? 1,
