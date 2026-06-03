@@ -13,6 +13,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 const STORAGE_BUCKET = 'product-files';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -64,7 +65,7 @@ export async function GET(req: NextRequest) {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'store/files');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -189,7 +190,7 @@ export async function POST(req: NextRequest) {
     .eq('product_id', productId);
 
   // Create database record
-  const { data: fileRecord, error: dbError } = await supabase
+  const { data: fileRecord, error: insertError } = await supabase
     .from('product_files')
     .insert({
       product_id: productId,
@@ -207,13 +208,10 @@ export async function POST(req: NextRequest) {
     .select()
     .single();
 
-  if (dbError) {
+  if (insertError) {
     // Clean up uploaded file on DB failure
     await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
-    return NextResponse.json(
-      { success: false, error: `Database error: ${dbError.message}` },
-      { status: 500 },
-    );
+    return dbError(insertError, 'store/files');
   }
 
   return NextResponse.json({ success: true, data: fileRecord });

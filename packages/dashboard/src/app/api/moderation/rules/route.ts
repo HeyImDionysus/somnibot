@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { typedPick } from '@/lib/api/typed-pick';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 export async function GET() {
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
@@ -28,7 +29,7 @@ export async function GET() {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'moderation/rules');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -81,7 +82,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'moderation/rules');
   }
 
   await notifyBot('moderation');
@@ -120,7 +121,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'moderation/rules');
   }
 
   await notifyBot('moderation');
@@ -151,7 +152,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'moderation/rules');
   }
 
   await notifyBot('moderation');

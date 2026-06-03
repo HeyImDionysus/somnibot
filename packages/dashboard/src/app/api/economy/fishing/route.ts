@@ -13,6 +13,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
+import { dbError } from '@/lib/api/response';
 
 const speciesSchema = z.object({
   id: z.string().uuid().optional(),
@@ -38,7 +39,7 @@ export async function GET() {
       .order('name')
       .limit(500);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/fishing');
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -72,7 +73,7 @@ export async function POST(request: NextRequest) {
       .select('*')
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/fishing');
     await notifyBot('economy');
     return NextResponse.json({ data }, { status: 201 });
   } catch (err: unknown) {
@@ -111,7 +112,7 @@ export async function PUT(request: NextRequest) {
       .select('*')
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/fishing');
     await notifyBot('economy');
     return NextResponse.json({ data });
   } catch (err: unknown) {
@@ -137,7 +138,7 @@ export async function DELETE(request: NextRequest) {
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/fishing');
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

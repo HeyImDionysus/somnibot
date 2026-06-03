@@ -319,9 +319,11 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      return NextResponse.json({ valid: false, error: error.message });
+      console.error('[setup/validate-supabase] DB error:', error.message);
+      return NextResponse.json({ valid: false, error: 'Could not connect to Supabase — check your credentials' });
     } catch (err) {
-      return NextResponse.json({ valid: false, error: String(err) });
+      console.error('[setup/validate-supabase] Error:', err);
+      return NextResponse.json({ valid: false, error: 'Could not connect to Supabase — check your credentials' });
     }
   }
 

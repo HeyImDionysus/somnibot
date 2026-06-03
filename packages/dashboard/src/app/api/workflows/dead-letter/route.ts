@@ -8,6 +8,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const deadLetterAction = z.object({
   action: z.enum(['retry', 'discard']),
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest) {
     if (source) query = query.eq('source', source);
 
     const { data, count, error } = await query;
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'workflows/dead-letter');
 
     // Summary
     const { data: allItems } = await admin
@@ -91,7 +92,7 @@ export async function POST(request: NextRequest) {
         .select()
         .single();
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (error) return dbError(error, 'workflows/dead-letter');
       return NextResponse.json({ success: true, data });
     }
 
@@ -109,7 +110,7 @@ export async function POST(request: NextRequest) {
         .select()
         .single();
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (error) return dbError(error, 'workflows/dead-letter');
       return NextResponse.json({ success: true, data });
     }
 
@@ -127,7 +128,7 @@ export async function POST(request: NextRequest) {
         .select()
         .single();
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      if (error) return dbError(error, 'workflows/dead-letter');
       return NextResponse.json({ success: true, data });
     }
 

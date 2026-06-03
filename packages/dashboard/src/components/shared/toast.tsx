@@ -70,7 +70,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const toast = useCallback(
     (t: Omit<Toast, 'id'>): string => {
-      const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const id = `toast-${Date.now()}-${crypto.randomUUID().slice(0, 5)}`;
       const newToast: Toast = { ...t, id };
       setToasts((prev) => [...prev.slice(-4), newToast]); // max 5 visible
 

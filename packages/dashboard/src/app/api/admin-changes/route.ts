@@ -8,6 +8,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const undoChangeSchema = z.object({
   action: z.literal('undo'),
@@ -73,7 +74,7 @@ export async function GET(request: NextRequest) {
     if (undoableOnly) query = query.eq('is_undoable', true).eq('is_undone', false);
 
     const { data, count, error } = await query;
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'admin-changes');
 
     return NextResponse.json({
       success: true,
@@ -126,7 +127,7 @@ export async function POST(request: NextRequest) {
         .update(undo.data as Record<string, unknown>)
         .match(undo.match as Record<string, unknown>);
 
-      if (undoError) return NextResponse.json({ error: `Undo failed: ${undoError.message}` }, { status: 500 });
+      if (undoError) return dbError(undoError, 'admin-changes');
     }
 
     // Mark as undone
@@ -141,7 +142,7 @@ export async function POST(request: NextRequest) {
       .eq('id', body.id)
       .eq('guild_id', ctx.guildId);
 
-    if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
+    if (updateError) return dbError(updateError, 'admin-changes');
 
     // Create a reverse change record
     const { data: undoRecord } = await admin

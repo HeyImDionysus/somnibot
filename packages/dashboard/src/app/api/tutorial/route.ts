@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const tutorialPutSchema = z.object({
   config: z.object({
@@ -89,7 +90,7 @@ export async function PUT(req: NextRequest) {
     );
 
   if (configError) {
-    return NextResponse.json({ success: false, error: configError.message }, { status: 500 });
+    return dbError(configError, 'tutorial');
   }
 
   // Replace all steps: delete existing, insert new
@@ -108,7 +109,7 @@ export async function PUT(req: NextRequest) {
 
     const { error: stepsError } = await supabase.from('tutorial_steps').insert(rows);
     if (stepsError) {
-      return NextResponse.json({ success: false, error: stepsError.message }, { status: 500 });
+      return dbError(stepsError, 'tutorial');
     }
   }
 

@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'standard');
@@ -22,7 +23,7 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false })
       .limit(50);
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/heist');
     return NextResponse.json({ data: data ?? [] });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);

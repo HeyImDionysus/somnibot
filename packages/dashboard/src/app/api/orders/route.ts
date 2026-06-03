@@ -8,6 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 export async function GET(req: NextRequest) {
@@ -50,7 +51,7 @@ export async function GET(req: NextRequest) {
   const { data, error, count } = await query;
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'orders');
   }
 
   return NextResponse.json({ success: true, data: data ?? [], total: count ?? 0 });

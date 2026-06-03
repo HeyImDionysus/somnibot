@@ -8,6 +8,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { sanitizeSearch } from '@/lib/utils/sanitize-search';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
@@ -43,7 +44,7 @@ export async function GET(req: NextRequest) {
   const { data: members, count, error } = await query;
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return dbError(error, 'members');
   }
 
   return NextResponse.json({

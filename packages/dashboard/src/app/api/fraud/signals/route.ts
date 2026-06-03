@@ -8,6 +8,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const fraudSignalUpdate = z.object({
   id: z.string().uuid(),
@@ -39,7 +40,7 @@ export async function GET(request: NextRequest) {
     if (signalType) query = query.eq('signal_type', signalType);
 
     const { data, count, error } = await query;
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/signals');
 
     // Summary stats
     const { data: stats } = await admin
@@ -96,7 +97,7 @@ export async function PATCH(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'fraud/signals');
     return NextResponse.json({ success: true, data });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

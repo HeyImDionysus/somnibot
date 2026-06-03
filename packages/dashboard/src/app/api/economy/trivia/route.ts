@@ -5,6 +5,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody } from '@/lib/api/validation';
+import { dbError } from '@/lib/api/response';
 
 const triviaQuestionSchema = z.object({
   id: z.string().uuid().optional(),
@@ -25,7 +26,7 @@ export async function GET() {
       .eq('guild_id', ctx.guildId)
       .order('created_at', { ascending: false })
       .limit(500);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/trivia');
     return NextResponse.json({ success: true, questions: data ?? [] });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 401 });
@@ -54,7 +55,7 @@ export async function POST(request: NextRequest) {
       })
       .select()
       .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
@@ -87,7 +88,7 @@ export async function PUT(request: NextRequest) {
       .eq('guild_id', ctx.guildId)
       .select()
       .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
@@ -110,7 +111,7 @@ export async function DELETE(request: NextRequest) {
       .delete()
       .eq('id', id)
       .eq('guild_id', ctx.guildId);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/trivia');
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (e) {

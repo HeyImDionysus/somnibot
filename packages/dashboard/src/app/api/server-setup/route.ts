@@ -10,6 +10,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const serverSetupSchema = z.object({
   action: z.literal('confirm'),
@@ -125,7 +126,7 @@ export async function POST(request: NextRequest) {
       .eq('id', guildId);
 
     if (error)
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return dbError(error, 'server-setup');
 
     // Audit log
     await admin.from('audit_logs').insert({

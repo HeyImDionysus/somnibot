@@ -8,6 +8,7 @@ import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const achSchema = z.object({
   id: z.string().uuid().optional(),
@@ -31,7 +32,7 @@ export async function GET() {
       .eq('guild_id', auth.guildId)
       .order('created_at', { ascending: true })
       .limit(500);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/achievements');
     return NextResponse.json({ data });
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AuthError') return authErrorResponse(err);
@@ -54,7 +55,7 @@ export async function POST(req: NextRequest) {
       .insert({ ...parsed.data, guild_id: auth.guildId })
       .select()
       .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
     return NextResponse.json({ data });
   } catch (err: unknown) {
@@ -82,7 +83,7 @@ export async function PUT(req: NextRequest) {
       .eq('guild_id', auth.guildId)
       .select()
       .single();
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
     return NextResponse.json({ data });
   } catch (err: unknown) {
@@ -106,7 +107,7 @@ export async function DELETE(req: NextRequest) {
       .delete()
       .eq('id', id)
       .eq('guild_id', auth.guildId);
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'economy/achievements');
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

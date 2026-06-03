@@ -10,6 +10,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const embedSendSchema = z.object({
   embed_id: z.string().uuid(),
@@ -61,10 +62,7 @@ export async function POST(req: NextRequest) {
     });
 
   if (queueError) {
-    return NextResponse.json(
-      { success: false, error: queueError.message },
-      { status: 500 },
-    );
+    return dbError(queueError, 'embeds/send');
   }
 
   return NextResponse.json({ success: true });

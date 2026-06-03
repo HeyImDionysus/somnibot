@@ -12,6 +12,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const actionQueuePostSchema = z.object({
   action: z.enum(['acknowledge', 'retry']),
@@ -52,7 +53,7 @@ export async function GET(request: NextRequest) {
   const { data, count, error } = await query;
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'action-queue');
   }
 
   return NextResponse.json({
@@ -94,7 +95,7 @@ export async function POST(request: NextRequest) {
       .in('id', ids);
 
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return dbError(error, 'action-queue');
     }
 
     return NextResponse.json({ success: true, acknowledged: ids.length });
@@ -111,7 +112,7 @@ export async function POST(request: NextRequest) {
       .limit(1000);
 
     if (fetchErr) {
-      return NextResponse.json({ success: false, error: fetchErr.message }, { status: 500 });
+      return dbError(fetchErr, 'action-queue');
     }
 
     let retried = 0;

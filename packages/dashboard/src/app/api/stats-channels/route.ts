@@ -14,6 +14,7 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { typedPick } from '@/lib/api/typed-pick';
+import { dbError } from '@/lib/api/response';
 
 const statsChannelUpdate = z.object({
   id: z.string().uuid(),
@@ -37,7 +38,7 @@ export async function GET() {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'stats-channels');
   }
 
   return NextResponse.json({ success: true, data: data ?? [] });
@@ -91,7 +92,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'stats-channels');
   }
 
   await notifyBot('stats-channels');
@@ -124,7 +125,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'stats-channels');
   }
 
   await notifyBot('stats-channels');
@@ -155,7 +156,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'stats-channels');
   }
 
   await notifyBot('stats-channels');

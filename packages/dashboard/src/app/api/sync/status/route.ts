@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 
 export async function GET(request: NextRequest) {
@@ -31,7 +32,7 @@ export async function GET(request: NextRequest) {
   ]);
 
   if (configResult.error) {
-    return NextResponse.json({ success: false, error: configResult.error.message }, { status: 500 });
+    return dbError(configResult.error, 'sync/status');
   }
 
   return NextResponse.json({

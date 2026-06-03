@@ -12,6 +12,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const MAX_RESULTS = 25;
 const MAX_ID_RESOLVE = 100;
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
     if (error.message.includes('search_guild_members')) {
       return legacySearch(admin, guildId, query, ids);
     }
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'members/search');
   }
 
   const members = (data ?? []).map((row: Record<string, unknown>) => ({

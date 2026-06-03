@@ -7,6 +7,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
@@ -52,7 +53,7 @@ export async function GET(req: NextRequest) {
     .limit(500);
 
   if (error) {
-    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return dbError(error, 'license/sessions');
   }
 
   const activeCount = (sessions ?? []).filter((s) => s.active).length;

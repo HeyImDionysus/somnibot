@@ -14,6 +14,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { notifyBot } from '@/lib/notify-bot';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
+import { dbError } from '@/lib/api/response';
 
 const guildConfigPatchSchema = z.object({
   mod_log_channel_id: z.string().nullable().optional(),
@@ -215,7 +216,7 @@ export async function PATCH(request: NextRequest) {
     .from('guild_config')
     .upsert({ guild_id: guildId, ...updates }, { onConflict: 'guild_id' });
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (error) return dbError(error, 'guild');
 
   // Notify the bot so it hot-reloads the changed config immediately.
   // Fields in this schema span multiple feature areas — use 'all' to cover them.

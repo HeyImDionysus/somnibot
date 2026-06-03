@@ -71,7 +71,7 @@ const COLOR_OPTIONS = [
 const EMOJI_OPTIONS = ['🎫', '💳', '🔧', '❓', '📦', '🛡️', '💬', '🎁', '⚡', '🔑'];
 
 function generateId(): string {
-  return Math.random().toString(36).substring(2, 10);
+  return crypto.randomUUID().slice(0, 8);
 }
 
 function TicketMemberName({ id }: { id: string }) {

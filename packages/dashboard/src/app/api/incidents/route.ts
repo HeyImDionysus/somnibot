@@ -9,6 +9,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 const snowflake = z.string().regex(/^\d{17,20}$/);
 
@@ -61,7 +62,7 @@ export async function GET(request: NextRequest) {
     if (severity) query = query.eq('severity', severity);
 
     const { data, count, error } = await query;
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'incidents');
 
     // Summary counts
     const { data: allIncidents } = await admin
@@ -125,7 +126,7 @@ export async function POST(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'incidents');
 
     // Create initial event
     await admin.from('incident_events').insert({
@@ -190,7 +191,7 @@ export async function PATCH(request: NextRequest) {
       .select()
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return dbError(error, 'incidents');
 
     // Add timeline event
     const eventType = body.status ? 'status_change' : body.note ? 'note' : 'updated';

@@ -9,6 +9,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { dbError } from '@/lib/api/response';
 
 export async function POST(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'bulk');
@@ -43,7 +44,7 @@ export async function POST(req: NextRequest) {
       );
 
       if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return dbError(error, 'members/bulk');
       }
 
       // Audit log
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
       });
 
       if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return dbError(error, 'members/bulk');
       }
 
       await admin.from('audit_logs').insert({
@@ -100,7 +101,7 @@ export async function POST(req: NextRequest) {
         .limit(1000);
 
       if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return dbError(error, 'members/bulk');
       }
 
       return NextResponse.json({
@@ -129,7 +130,7 @@ export async function POST(req: NextRequest) {
       );
 
       if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        return dbError(error, 'members/bulk');
       }
 
       await admin.from('audit_logs').insert({
