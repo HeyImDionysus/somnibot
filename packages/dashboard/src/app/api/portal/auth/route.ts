@@ -17,7 +17,7 @@ import { randomBytes, createHash } from 'crypto';
 import { rateLimits } from '@/lib/api/rate-limit';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
-import { dbError } from '@/lib/api/response';
+import { dbError, apiServerError } from '@/lib/api/response';
 
 const portalAuthSchema = z.object({
   action: z.literal('login'),
@@ -184,8 +184,7 @@ export async function POST(request: NextRequest) {
       });
     }
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiServerError(e, 'POST /api/portal/auth');
   }
 }
 
@@ -223,7 +222,6 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiServerError(e, 'GET /api/portal/auth');
   }
 }

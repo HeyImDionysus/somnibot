@@ -177,8 +177,9 @@ export async function POST(req: NextRequest) {
     });
 
   if (uploadError) {
+    console.error('[Store/Files] Upload failed:', uploadError.message);
     return NextResponse.json(
-      { success: false, error: `Upload failed: ${uploadError.message}` },
+      { success: false, error: 'File upload failed. Please try again.' },
       { status: 500 },
     );
   }
@@ -265,10 +266,7 @@ export async function DELETE(req: NextRequest) {
     .eq('id', fileId);
 
   if (error) {
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 },
-    );
+    return dbError(error, 'store/files');
   }
 
   return NextResponse.json({ success: true });

@@ -29,7 +29,7 @@ export async function GET() {
     if (error) return dbError(error, 'economy/trivia');
     return NextResponse.json({ success: true, questions: data ?? [] });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 401 });
+    return authErrorResponse(e);
   }
 }
 
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 401 });
+    return authErrorResponse(e);
   }
 }
 
@@ -92,7 +92,7 @@ export async function PUT(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true, question: data });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 401 });
+    return authErrorResponse(e);
   }
 }
 
@@ -115,6 +115,6 @@ export async function DELETE(request: NextRequest) {
     await notifyBot('economy');
     return NextResponse.json({ success: true });
   } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 401 });
+    return authErrorResponse(e);
   }
 }
