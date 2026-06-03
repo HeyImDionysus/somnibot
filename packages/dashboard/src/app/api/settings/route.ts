@@ -6,6 +6,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { apiServerError } from '@/lib/api/response';
 
 const settingsUpdate = z.object({
   section: z.string().min(1).max(64),
@@ -166,8 +167,7 @@ export async function GET() {
 
     return NextResponse.json({ values, statuses, sources });
   } catch (err) {
-    console.error('[Settings] Error:', err);
-    return NextResponse.json({ values: {}, statuses: {}, sources: {} });
+    return apiServerError(err, 'GET /api/settings');
   }
 }
 

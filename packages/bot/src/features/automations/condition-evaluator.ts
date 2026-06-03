@@ -151,12 +151,16 @@ async function evaluateCondition(
         const pattern = new RegExp(raw, 'i');
         // V5 Audit [V5-3]: Guard against catastrophic backtracking.
         // Run regex in a bounded context with a timeout.
+        // SECURITY: node:vm is NOT a security sandbox. We only use it for
+        // timeout enforcement — the evaluated expression is a hardcoded
+        // string, never user input. microtaskMode prevents timeout bypass
+        // via microtask scheduling.
         const input = ctx.messageContent.slice(0, 2000);
         const { runInNewContext } = await import('node:vm');
         const result = runInNewContext(
           'pattern.test(input)',
           { pattern, input },
-          { timeout: 50 }, // 50ms max execution time
+          { timeout: 50, microtaskMode: 'afterEvaluate' },
         );
         return Boolean(result);
       } catch {

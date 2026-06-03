@@ -16,6 +16,7 @@ const IPC_CHANNELS = [
   'updater:checking', 'updater:available', 'updater:not-available',
   'updater:progress', 'updater:downloaded', 'updater:error',
   'lavalink-status', 'lavalink-log', 'lavalink-download-progress',
+  'valkey-download-progress',
 ] as const;
 
 window.addEventListener('beforeunload', () => {
@@ -99,6 +100,11 @@ export interface SomniBotAPI {
   onLavalinkStatus: (callback: (info: { status: string; jarPresent: boolean; error: string }) => void) => () => void;
   onLavalinkLog: (callback: (log: { type: string; line: string }) => void) => () => void;
   onLavalinkDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => () => void;
+
+  // Phase 6: Valkey management
+  getValkeyInfo: () => Promise<{ status: string; binaryPresent: boolean; error: string }>;
+  downloadValkey: () => Promise<{ ok: boolean; error?: string }>;
+  onValkeyDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => () => void;
 
   // App
   getVersion: () => Promise<string>;
@@ -218,6 +224,15 @@ contextBridge.exposeInMainWorld('somnibot', {
     const handler = (_event: Electron.IpcRendererEvent, progress: { percent: number; downloadedMB: string; totalMB: string }) => callback(progress);
     ipcRenderer.on('lavalink-download-progress', handler);
     return () => { ipcRenderer.removeListener('lavalink-download-progress', handler); };
+  },
+
+  // Phase 6: Valkey management
+  getValkeyInfo: () => ipcRenderer.invoke('get-valkey-info'),
+  downloadValkey: () => ipcRenderer.invoke('download-valkey'),
+  onValkeyDownloadProgress: (callback: (progress: { percent: number; downloadedMB: string; totalMB: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: { percent: number; downloadedMB: string; totalMB: string }) => callback(progress);
+    ipcRenderer.on('valkey-download-progress', handler);
+    return () => { ipcRenderer.removeListener('valkey-download-progress', handler); };
   },
 
   // App

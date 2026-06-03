@@ -267,11 +267,17 @@ function checkWordFilter(
           // regex.test() completed, which didn't protect against catastrophic
           // backtracking blocking the event loop. This matches the approach
           // used in automations/condition-evaluator.ts.
+          //
+          // SECURITY: node:vm is NOT a security sandbox (per Node.js docs).
+          // We only use it for timeout enforcement — the evaluated expression
+          // is a hardcoded string, never user input. microtaskMode ensures
+          // microtasks scheduled inside the context are drained within the
+          // same timeout boundary, preventing a class of timeout bypass.
           const input = content.slice(0, 2000);
           const matched = runInNewContext(
             'regex.test(input)',
             { regex, input },
-            { timeout: 50 },
+            { timeout: 50, microtaskMode: 'afterEvaluate' },
           );
 
           if (matched) {
