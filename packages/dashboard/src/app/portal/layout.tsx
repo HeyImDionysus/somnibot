@@ -1,8 +1,11 @@
 /**
  * Customer Portal layout — separate from admin dashboard.
  * Clean, customer-facing design with minimal navigation.
+ *
+ * V11 Re-Audit UX-3: Added PortalLogout button so customers can sign out.
  */
 import type { Metadata } from 'next';
+import { PortalLogout } from '@/components/portal/portal-logout';
 
 export const metadata: Metadata = {
   title: 'Customer Portal — SomniBot',
@@ -32,6 +35,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
             <a href="/portal/orders" className="rounded-md px-3 py-1.5 text-sm text-discord-text-secondary hover:text-discord-text-primary hover:bg-discord-bg-tertiary transition-colors">
               Orders
             </a>
+            <PortalLogout />
           </nav>
         </div>
       </header>

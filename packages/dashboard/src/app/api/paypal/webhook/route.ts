@@ -160,8 +160,10 @@ export async function POST(req: NextRequest) {
         .eq('event_id', eventId);
     }
 
+    // V11 Re-Audit L-2: Don't leak event_type in error responses.
+    // Internal details help attackers fingerprint webhook handling.
     return NextResponse.json(
-      { error: 'Processing failed', event_type: event.event_type },
+      { error: 'Processing failed' },
       { status: 500 },
     );
   }

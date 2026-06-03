@@ -150,6 +150,12 @@ function isExempt(
  *
  * Returns true if the message was handled (deleted/action taken).
  */
+// V11 Re-Audit L-3: Per-message aggregate time budget.
+// Individual regex rules are capped at 50ms each, but N rules × 50ms can still
+// block the event loop for an unacceptable duration. This deadline caps the total
+// time spent checking ALL rules on a single message.
+const MESSAGE_RULE_BUDGET_MS = 500;
+
 export async function processMessage(
   client: SomniClient,
   message: Message,
@@ -167,8 +173,15 @@ export async function processMessage(
 
   const member = message.member;
   const channelId = message.channel.id;
+  const deadline = Date.now() + MESSAGE_RULE_BUDGET_MS;
 
   for (const rule of rules) {
+    // V11 Re-Audit L-3: Bail out if cumulative rule checking exceeds budget
+    if (Date.now() > deadline) {
+      log.warn(`Automod budget exhausted (${MESSAGE_RULE_BUDGET_MS}ms) — skipped remaining rules for message ${message.id}`);
+      break;
+    }
+
     if (isExempt(member, rule, channelId)) continue;
 
     const violation = await checkRule(client, message, rule);

@@ -39,9 +39,19 @@ export default function PortalLicenses() {
   useEffect(() => {
     async function load() {
       const token = localStorage.getItem('portal_token');
-      if (!token) return;
+      // V11 Re-Audit UX-1: Redirect to portal login if no token instead of
+      // silently leaving the user on an infinite loading spinner.
+      if (!token) {
+        window.location.href = '/portal';
+        return;
+      }
       try {
         const res = await fetch('/api/portal/licenses', { headers: { 'x-portal-token': token } });
+        if (res.status === 401) {
+          localStorage.removeItem('portal_token');
+          window.location.href = '/portal';
+          return;
+        }
         const json = await res.json();
         if (json.success) setKeys(json.data);
       } finally {
