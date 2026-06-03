@@ -24,9 +24,8 @@ import { createLogger } from '@somnibot/shared';
 const log = createLogger('Heartbeat');
 
 const VALKEY_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
-// V11 Audit L-2: Legacy per-guild prefix kept ONLY for backwards-compatible reads.
-// Writes to the per-guild key are removed (see writeValkeyHeartbeat).
-const VALKEY_HEARTBEAT_KEY_PREFIX = 'somnibot:heartbeat:';
+// V11 Audit M-8: Removed legacy VALKEY_HEARTBEAT_KEY_PREFIX — per-guild keys
+// are no longer written, so the backwards-compat fallback was dead code.
 const VALKEY_HEARTBEAT_TTL = 120; // 2 minutes — auto-expires if bot dies
 const VALKEY_INTERVAL_MS = 30_000; // 30 seconds
 const SUPABASE_INTERVAL_MS = 60_000; // 60 seconds
@@ -143,16 +142,13 @@ export class HeartbeatService {
  */
 export async function readHeartbeat(
   valkey: Valkey,
-  guildId: string,
+  /** @deprecated guildId is no longer used — kept for API compat. */
+  _guildId?: string,
 ): Promise<{ timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number } | null> {
   try {
-    // Try bot-level key first
-    let raw = await valkey.get(VALKEY_HEARTBEAT_KEY);
-    if (!raw) {
-      // Fallback to per-guild key (backwards compat)
-      const key = `${VALKEY_HEARTBEAT_KEY_PREFIX}${guildId}`;
-      raw = await valkey.get(key);
-    }
+    // V11 Audit M-8: Read bot-level key only — per-guild fallback removed
+    // since per-guild keys are no longer written.
+    const raw = await valkey.get(VALKEY_HEARTBEAT_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number };
   } catch {

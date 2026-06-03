@@ -62,6 +62,11 @@ export function startHealthServer(client: SomniClient): void {
     res.end(JSON.stringify({ status: healthy ? 'ok' : 'unhealthy', checks }));
   });
 
+  // V11 Audit L-2: Set timeouts to prevent slow clients from holding
+  // connections open indefinitely (slowloris-style resource exhaustion).
+  server.headersTimeout = 5_000;
+  server.requestTimeout = 10_000;
+
   server.listen(port, '0.0.0.0', () => {
     log.info(`Listening on :${port}/health`);
   });

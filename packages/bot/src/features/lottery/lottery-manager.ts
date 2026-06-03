@@ -23,6 +23,11 @@ export function registerLotteryManager(mgr: LotteryManager, guildId: string): vo
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterLotteryManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateLotteryCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.clearCache();

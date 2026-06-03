@@ -115,6 +115,11 @@ export function registerFishingManager(mgr: FishingManager, guildId: string): vo
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterFishingManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateFishingCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateCache();

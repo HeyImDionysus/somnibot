@@ -1,2 +1,2 @@
-export { ProfilesManager, registerProfilesManager, invalidateProfilesCache } from './profiles-manager.js';
+export { ProfilesManager, registerProfilesManager, unregisterProfilesManager, invalidateProfilesCache } from './profiles-manager.js';
 export { buildProfileCommands, handleProfileCommand } from './commands.js';

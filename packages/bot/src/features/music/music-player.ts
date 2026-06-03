@@ -264,7 +264,8 @@ export class MusicPlayerManager {
       player = await this.shoukaku.joinVoiceChannel({
         guildId: this.guild.id,
         channelId: voiceChannel.id,
-        shardId: 0,
+        // V11 Audit M-4: Use the guild's actual shard ID for multi-shard support.
+        shardId: this.guild.shardId,
         deaf: true,
       });
 

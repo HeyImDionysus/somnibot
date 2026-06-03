@@ -14,6 +14,11 @@ export function registerCraftingManager(mgr: CraftingManager, guildId: string): 
   _managers.set(guildId, mgr);
 }
 
+/** V11 Audit M-2: Remove manager reference when guild context is destroyed. */
+export function unregisterCraftingManager(guildId: string): void {
+  _managers.delete(guildId);
+}
+
 export function invalidateCraftingCache(guildId?: string): void {
   if (guildId) {
     _managers.get(guildId)?.invalidateConfig();

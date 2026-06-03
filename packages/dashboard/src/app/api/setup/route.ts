@@ -12,7 +12,7 @@
  * - GET remains public so the setup page can detect state.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
@@ -35,8 +35,8 @@ function createSetupSupabase(url?: string, key?: string) {
 /**
  * Check whether setup has been completed (setup_completed_at exists).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getSetupLock(supabase: any) {
+// V11 Audit L-7: Replace `any` with typed SupabaseClient.
+async function getSetupLock(supabase: SupabaseClient) {
   const { data: completedRow } = await supabase
     .from('instance_settings')
     .select('value')
