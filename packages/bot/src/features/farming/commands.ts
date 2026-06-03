@@ -33,7 +33,7 @@ export function buildFarmingCommands(): Record<string, SlashCommandBuilder> {
           .addIntegerOption((opt) =>
             opt.setName('plot').setDescription('Plot number (1-9)').setRequired(true),
           ),
-      ) as unknown as SlashCommandBuilder,
+      ) as SlashCommandBuilder,
   };
 }
 

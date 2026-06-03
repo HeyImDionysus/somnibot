@@ -269,7 +269,7 @@ export class CraftingManager {
     });
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'craft').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return {
       embed: new EmbedBuilder()

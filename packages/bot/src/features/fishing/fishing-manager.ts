@@ -108,14 +108,19 @@ const DEFAULT_SPECIES: Omit<FishSpecies, 'id'>[] = [
 
 // ── Manager ───────────────────────────────────────────────
 
-let _instance: FishingManager | null = null;
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, FishingManager>();
 
-export function registerFishingManager(mgr: FishingManager): void {
-  _instance = mgr;
+export function registerFishingManager(mgr: FishingManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateFishingCache(): void {
-  _instance?.invalidateCache();
+export function invalidateFishingCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateCache();
+  }
 }
 
 export class FishingManager {
@@ -216,7 +221,9 @@ export class FishingManager {
     if (!data || data.length === 0) return null;
     // Supabase !inner join returns a single object at runtime, but generated types
     // may infer an array. Cast through unknown to satisfy both.
-    const inv = data[0] as unknown as { item_id: string; quantity: number; economy_items: { name: string } };
+    const raw = data[0];
+    const joinedItems = Array.isArray(raw.economy_items) ? raw.economy_items[0] : raw.economy_items;
+    const inv = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { name: string } };
 
     // V47-M1: atomic decrement that RETURNS BOOLEAN. If a concurrent
     // /fish call already consumed the last bait, the RPC returns false
@@ -335,7 +342,7 @@ export class FishingManager {
     // (V48-M1) cooldown was already claimed via SET NX above
 
     // Quest progress
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'fish').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'fish').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     return { embed, cooldownKey: cdKey };
   }

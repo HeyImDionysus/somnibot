@@ -18,9 +18,20 @@ const log = createLogger('Polls');
 
 // ── Module-level state ────────────────────────────────────
 
-let _manager: PollsManager | null = null;
-export function registerPollsManager(mgr: PollsManager): void { _manager = mgr; }
-export function invalidatePollsCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, PollsManager>();
+
+export function registerPollsManager(mgr: PollsManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidatePollsCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.clearCache();
+  }
+}
 
 // ── Manager ───────────────────────────────────────────────
 
@@ -180,7 +191,7 @@ export class PollsManager {
         return;
       }
 
-      getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+      getQuestsManager(buttonInteraction.guildId ?? undefined)?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
       await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
       return;
     }
@@ -205,7 +216,7 @@ export class PollsManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(buttonInteraction.guildId ?? undefined)?.trackProgress(buttonInteraction.guildId!, userId, 'poll_vote').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await buttonInteraction.reply({ content: '✅ Vote recorded!', ephemeral: true });
   }

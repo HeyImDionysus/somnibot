@@ -20,9 +20,20 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Pets');
 
-let _manager: PetsManager | null = null;
-export function registerPetsManager(mgr: PetsManager): void { _manager = mgr; }
-export function invalidatePetsCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, PetsManager>();
+
+export function registerPetsManager(mgr: PetsManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidatePetsCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.clearCache();
+  }
+}
 
 const PET_PLAY_COOLDOWN_SECS = 30; // 30-second cooldown on /pet play
 
@@ -313,7 +324,7 @@ export class PetsManager {
       return;
     }
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_feed').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -410,7 +421,7 @@ export class PetsManager {
     if (tr.leveled_up) desc += `\n🎉 *Level up! Now level ${tr.new_level}!*`;
     if (tr.stat_bonus) desc += `\n⭐ +1 ${tr.stat_bonus}!`;
 
-    getQuestsManager()?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(guildId)?.trackProgress(guildId, interaction.user.id, 'pet_train').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     await interaction.reply({
       embeds: [new EmbedBuilder().setTitle('💪 Training Complete!').setDescription(desc).setColor(0x57F287)],

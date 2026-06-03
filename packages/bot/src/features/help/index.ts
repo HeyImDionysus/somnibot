@@ -150,8 +150,7 @@ export async function handleHelpCommand(
   const specificCommand = interaction.options.getString('command');
 
   // Read command registry from client (set during boot)
-  const registeredCommands =
-    ((client as unknown as Record<string, unknown>)._registeredCommands as RESTPostAPIApplicationCommandsJSONBody[]) ?? [];
+  const registeredCommands = (client as SomniClient)._registeredCommands ?? [];
 
   const categories = buildCategoriesFromRegistry(registeredCommands);
 
@@ -225,8 +224,7 @@ export async function handleHelpCategorySelect(
 ): Promise<void> {
   const categoryName = interaction.values[0];
 
-  const registeredCommands =
-    ((client as unknown as Record<string, unknown>)._registeredCommands as RESTPostAPIApplicationCommandsJSONBody[]) ?? [];
+  const registeredCommands = (client as SomniClient)._registeredCommands ?? [];
 
   const categories = buildCategoriesFromRegistry(registeredCommands);
   const category = categories.find((c) => c.name === categoryName);

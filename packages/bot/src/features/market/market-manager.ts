@@ -46,14 +46,19 @@ interface MarketListing {
 
 // ── Manager ───────────────────────────────────────────────
 
-let _instance: MarketManager | null = null;
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, MarketManager>();
 
-export function registerMarketManager(mgr: MarketManager): void {
-  _instance = mgr;
+export function registerMarketManager(mgr: MarketManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateMarketCache(): void {
-  _instance?.invalidateCache();
+export function invalidateMarketCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateCache();
+  }
 }
 
 export class MarketManager {
@@ -138,7 +143,9 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    const invEntry = inv[0] as unknown as { item_id: string; quantity: number; economy_items: { id: string; name: string } };
+    const raw = inv[0];
+    const joinedItems = Array.isArray(raw.economy_items) ? raw.economy_items[0] : raw.economy_items;
+    const invEntry = { item_id: raw.item_id as string, quantity: raw.quantity as number, economy_items: joinedItems as { id: string; name: string } };
     if (invEntry.quantity < quantity) {
       return new EmbedBuilder()
         .setDescription(`❌ You only have **${invEntry.quantity}x** ${itemName} (trying to list ${quantity}).`)
@@ -417,7 +424,7 @@ export class MarketManager {
     }
 
     // Quest progress — market trade (buyer counts as completing a trade)
-    getQuestsManager()?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, userId, 'market_trade').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
 
     // V5 Audit §4.2: Inform user when fewer items were purchased than requested
     const qtyNote = buyQty < quantity

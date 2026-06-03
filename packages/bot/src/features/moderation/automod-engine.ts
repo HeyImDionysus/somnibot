@@ -65,7 +65,7 @@ async function loadRules(client: SomniClient, guildId: string): Promise<DbAutomo
 
   // Sort by priority descending — higher priority rules execute first
   const rules = ((data ?? []) as DbAutomodRule[]).sort(
-    (a, b) => ((b as unknown as Record<string, number>).priority ?? 0) - ((a as unknown as Record<string, number>).priority ?? 0),
+    (a, b) => (b.priority ?? 0) - (a.priority ?? 0),
   );
 
   // V7 Audit §14.P3b — warn when a guild has an unusually large rule set.
@@ -191,21 +191,21 @@ async function checkRule(
 ): Promise<string | null> {
   switch (rule.type) {
     case 'word_filter':
-      return checkWordFilter(message.content, rule.config as unknown as WordFilterConfig);
+      return checkWordFilter(message.content, rule.config as WordFilterConfig);
     case 'link_filter':
-      return checkLinkFilter(message.content, rule.config as unknown as LinkFilterConfig);
+      return checkLinkFilter(message.content, rule.config as LinkFilterConfig);
     case 'invite_filter':
-      return await checkInviteFilter(client, message.content, rule.config as unknown as InviteFilterConfig, message.guild?.id);
+      return await checkInviteFilter(client, message.content, rule.config as InviteFilterConfig, message.guild?.id);
     case 'spam_filter':
-      return await checkSpamFilter(client, message, rule.config as unknown as SpamFilterConfig);
+      return await checkSpamFilter(client, message, rule.config as SpamFilterConfig);
     case 'duplicate_filter':
-      return await checkDuplicateFilter(client, message, rule.config as unknown as DuplicateFilterConfig);
+      return await checkDuplicateFilter(client, message, rule.config as DuplicateFilterConfig);
     case 'caps_filter':
-      return checkCapsFilter(message.content, rule.config as unknown as CapsFilterConfig);
+      return checkCapsFilter(message.content, rule.config as CapsFilterConfig);
     case 'mention_spam':
-      return checkMentionSpam(message, rule.config as unknown as MentionSpamConfig);
+      return checkMentionSpam(message, rule.config as MentionSpamConfig);
     case 'newline_spam':
-      return checkNewlineSpam(message.content, rule.config as unknown as NewlineSpamConfig);
+      return checkNewlineSpam(message.content, rule.config as NewlineSpamConfig);
     default:
       return null;
   }

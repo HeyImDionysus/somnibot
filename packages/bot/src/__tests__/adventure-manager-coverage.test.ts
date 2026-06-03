@@ -121,7 +121,7 @@ describe('AdventureManager', () => {
     });
 
     it('register and get', () => {
-      registerAdventureManager(mgr);
+      registerAdventureManager(mgr, 'test-guild-id');
       expect(getAdventureManager()).toBe(mgr);
       invalidateAdventureCache();
     });

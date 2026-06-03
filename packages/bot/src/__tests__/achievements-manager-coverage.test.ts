@@ -104,12 +104,12 @@ describe('AchievementsManager', () => {
 
   describe('registerAchievementsManager / invalidateAchievementsCache', () => {
     it('registers and invalidates without error', () => {
-      registerAchievementsManager(mgr);
+      registerAchievementsManager(mgr, 'test-guild-id');
       invalidateAchievementsCache();
     });
 
     it('invalidateAchievementsCache with null manager', () => {
-      registerAchievementsManager(null as any);
+      registerAchievementsManager(null as any, 'test-guild-id');
       invalidateAchievementsCache(); // should not throw
     });
   });

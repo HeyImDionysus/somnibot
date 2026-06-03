@@ -25,7 +25,7 @@ import { writeAuditLog } from './audit.js';
 import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
-import { createLogger } from '@somnibot/shared';
+import { createLogger, type PlatformEventMap, type PlatformEventType } from '@somnibot/shared';
 
 const log = createLogger('ActionQueue');
 
@@ -463,9 +463,9 @@ async function handleConfigReload(
   if (auditEvent?.type && auditEvent.data) {
     try {
       eventBus.emit(
-        auditEvent.type as import('@somnibot/shared').PlatformEventType,
+        auditEvent.type as PlatformEventType,
         guild.id,
-        auditEvent.data as never,
+        auditEvent.data as unknown as PlatformEventMap[PlatformEventType],
       );
     } catch (err) {
       log.warn('Failed to emit audit event from config_reload:', { type: auditEvent.type, error: String(err) });
@@ -743,9 +743,9 @@ async function handleEmitAuditEvent(
   }
 
   eventBus.emit(
-    eventType as import('@somnibot/shared').PlatformEventType,
+    eventType as PlatformEventType,
     guild.id,
-    eventData as never,
+    eventData as unknown as PlatformEventMap[PlatformEventType],
   );
 
   return { success: true, data: { eventType } };

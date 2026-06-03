@@ -9,10 +9,24 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Quests');
 
-let _manager: QuestsManager | null = null;
-export function registerQuestsManager(mgr: QuestsManager): void { _manager = mgr; }
-export function invalidateQuestsCache(): void { _manager?.clearCache(); }
-export function getQuestsManager(): QuestsManager | null { return _manager; }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, QuestsManager>();
+
+export function registerQuestsManager(mgr: QuestsManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateQuestsCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.clearCache();
+  }
+}
+export function getQuestsManager(guildId?: string): QuestsManager | null {
+  if (guildId) return _managers.get(guildId) ?? null;
+  return _managers.values().next().value ?? null;
+}
 
 export class QuestsManager {
   private supabase: SupabaseClient;

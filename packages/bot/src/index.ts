@@ -24,6 +24,8 @@ import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer, stopHealthServer } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
+import { startAntiRaidPruner } from './features/anti-raid/index.js';
+import { BotPresenceManager } from './features/discord-ux/index.js';
 import { EmbedBuilder, Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -171,6 +173,17 @@ async function main(): Promise<void> {
       const botHeartbeat = new HeartbeatService(client.valkey, client.supabase, client.guildId, client);
       botHeartbeat.start();
       log.info('Bot-level heartbeat started');
+
+      // V10 Audit L-3: Anti-raid pruner is process-wide (idempotent singleton).
+      // Start once at bot level instead of per-guild in guild-init.ts.
+      startAntiRaidPruner();
+      log.info('Anti-raid pruner started');
+
+      // V10 Audit L-4: BotPresenceManager sets client-wide presence.
+      // Create once at bot level (using primary guild for config/member count).
+      const botPresence = new BotPresenceManager(client, client.guildId, client.supabase);
+      botPresence.start();
+      log.info('Bot-level presence rotation started');
     } catch (err) {
       log.error('Primary guild initialization failed', { error: String(err) });
     }
@@ -192,9 +205,9 @@ async function main(): Promise<void> {
     // Store command registry for /help (from primary guild context)
     const primaryCtx = client.router.getContextSync(client.guildId);
     if (primaryCtx) {
-      const commands = primaryCtx.getManager('_commands');
+      const commands = primaryCtx.getManager<import('discord.js').RESTPostAPIApplicationCommandsJSONBody[]>('_commands');
       if (commands) {
-        (client as unknown as Record<string, unknown>)._registeredCommands = commands;
+        client._registeredCommands = commands;
       }
     }
 

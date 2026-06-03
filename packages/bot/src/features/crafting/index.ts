@@ -7,12 +7,17 @@ export { CraftingManager } from './crafting-manager.js';
 export type { CraftingConfig } from './crafting-manager.js';
 export { buildCraftingCommands, handleCraftingCommand } from './commands.js';
 
-let _managerInstance: CraftingManager | null = null;
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, CraftingManager>();
 
-export function registerCraftingManager(mgr: CraftingManager): void {
-  _managerInstance = mgr;
+export function registerCraftingManager(mgr: CraftingManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateCraftingCache(): void {
-  _managerInstance?.invalidateConfig();
+export function invalidateCraftingCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateConfig();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateConfig();
+  }
 }

@@ -196,7 +196,7 @@ export class ForumTicketService {
 
       // Update tags — remove open, add closed
       if (forumConfig) {
-        const currentTags = (thread as unknown as { appliedTags: string[] }).appliedTags ?? [];
+        const currentTags = thread.appliedTags ?? [];
         let newTags = currentTags.filter((t: string) => t !== forumConfig.open_tag_id);
         if (forumConfig.closed_tag_id) {
           newTags.push(forumConfig.closed_tag_id);

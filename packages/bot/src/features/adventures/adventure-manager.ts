@@ -382,18 +382,25 @@ const DEFAULT_ADVENTURES: DefaultAdventure[] = [
 
 // ── Manager ───────────────────────────────────────────────
 
-let _instance: AdventureManager | null = null;
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, AdventureManager>();
 
-export function registerAdventureManager(mgr: AdventureManager): void {
-  _instance = mgr;
+export function registerAdventureManager(mgr: AdventureManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateAdventureCache(): void {
-  _instance?.invalidateCache();
+export function invalidateAdventureCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateCache();
+  }
 }
 
-export function getAdventureManager(): AdventureManager | null {
-  return _instance;
+export function getAdventureManager(guildId?: string): AdventureManager | null {
+  if (guildId) return _managers.get(guildId) ?? null;
+  // Fallback: return first registered (single-guild compat)
+  return _managers.values().next().value ?? null;
 }
 
 export class AdventureManager {
@@ -890,6 +897,6 @@ export class AdventureManager {
     }
 
     // Quest progress — count completed adventures
-    getQuestsManager()?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
+    getQuestsManager(this.guild.id)?.trackProgress(this.guild.id, session.user_id, 'adventure').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
   }
 }

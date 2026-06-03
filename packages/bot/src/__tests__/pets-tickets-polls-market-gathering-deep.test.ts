@@ -199,7 +199,7 @@ describe('PetsManager interactions', () => {
   it('registerPetsManager and invalidatePetsCache', async () => {
     const mod = await import('../features/pets/pets-manager.js');
     const mgr = makePetsMgr();
-    mod.registerPetsManager(mgr);
+    mod.registerPetsManager(mgr, 'test-guild-id');
     mod.invalidatePetsCache(); // calls clearCache
   });
 

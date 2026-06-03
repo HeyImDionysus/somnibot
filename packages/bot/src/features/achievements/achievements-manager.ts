@@ -8,9 +8,20 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Achievements');
 
-let _manager: AchievementsManager | null = null;
-export function registerAchievementsManager(mgr: AchievementsManager): void { _manager = mgr; }
-export function invalidateAchievementsCache(): void { _manager?.clearCache(); }
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, AchievementsManager>();
+
+export function registerAchievementsManager(mgr: AchievementsManager, guildId: string): void {
+  _managers.set(guildId, mgr);
+}
+
+export function invalidateAchievementsCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.clearCache();
+  } else {
+    for (const mgr of _managers.values()) mgr?.clearCache();
+  }
+}
 
 /**
  * V10 Audit §14.P3a — Max config-cache entries (defense-in-depth).

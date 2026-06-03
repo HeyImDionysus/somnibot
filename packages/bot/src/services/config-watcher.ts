@@ -141,22 +141,22 @@ export class ConfigWatcher {
             await this.reloadAll();
             break;
           case 'economy':
-            invalidateEconomyCache();
-            invalidateGatheringCache();
-            invalidateCraftingCache();
-            invalidateFarmingCache();
-            invalidateFishingCache();
-            invalidateAdventureCache();
-            invalidateMarketCache();
-            invalidateTriviaCache();
-            invalidateGamesCache();
-            invalidateLotteryCache();
-            invalidatePollsCache();
-            invalidatePetsCache();
-            invalidateQuestsCache();
-            invalidateAchievementsCache();
-            invalidateProfilesCache();
-            invalidateHeistCache();
+            invalidateEconomyCache(this.guild.id);
+            invalidateGatheringCache(this.guild.id);
+            invalidateCraftingCache(this.guild.id);
+            invalidateFarmingCache(this.guild.id);
+            invalidateFishingCache(this.guild.id);
+            invalidateAdventureCache(this.guild.id);
+            invalidateMarketCache(this.guild.id);
+            invalidateTriviaCache(this.guild.id);
+            invalidateGamesCache(this.guild.id);
+            invalidateLotteryCache(this.guild.id);
+            invalidatePollsCache(this.guild.id);
+            invalidatePetsCache(this.guild.id);
+            invalidateQuestsCache(this.guild.id);
+            invalidateAchievementsCache(this.guild.id);
+            invalidateProfilesCache(this.guild.id);
+            invalidateHeistCache(this.guild.id);
             log.info('Economy/Gathering/Crafting/Farming config cache invalidated');
             break;
           case 'all':
@@ -323,22 +323,22 @@ export class ConfigWatcher {
     invalidateStarboardCache();
     invalidateMessageLogCache();
     // Invalidate V31 economy in-memory caches
-    invalidateEconomyCache();
-    invalidateGatheringCache();
-    invalidateCraftingCache();
-    invalidateFarmingCache();
-    invalidateFishingCache();
-    invalidateAdventureCache();
-    invalidateMarketCache();
-    invalidateTriviaCache();
-    invalidateGamesCache();
-    invalidateLotteryCache();
-    invalidatePollsCache();
-    invalidatePetsCache();
-    invalidateQuestsCache();
-    invalidateAchievementsCache();
-    invalidateProfilesCache();
-    invalidateHeistCache();
+    invalidateEconomyCache(this.guild.id);
+    invalidateGatheringCache(this.guild.id);
+    invalidateCraftingCache(this.guild.id);
+    invalidateFarmingCache(this.guild.id);
+    invalidateFishingCache(this.guild.id);
+    invalidateAdventureCache(this.guild.id);
+    invalidateMarketCache(this.guild.id);
+    invalidateTriviaCache(this.guild.id);
+    invalidateGamesCache(this.guild.id);
+    invalidateLotteryCache(this.guild.id);
+    invalidatePollsCache(this.guild.id);
+    invalidatePetsCache(this.guild.id);
+    invalidateQuestsCache(this.guild.id);
+    invalidateAchievementsCache(this.guild.id);
+    invalidateProfilesCache(this.guild.id);
+    invalidateHeistCache(this.guild.id);
     log.info('Full config reload complete (incl. economy caches)');
   }
 

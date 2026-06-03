@@ -157,7 +157,8 @@ export async function sendReceiptDM(
         await dm.send({
           components: [container],
           flags: [4096], // IS_COMPONENTS_V2
-        } as never);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Discord Components V2 not yet typed in discord.js
+        } as Parameters<typeof dm.send>[0]);
         return true;
       } catch {
         // Fall through to embed

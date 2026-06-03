@@ -40,6 +40,7 @@ export class SomniClient extends Client {
   public guildId: string;
   public readonly env: BotEnv;
   public router!: GuildRouter;
+  public _registeredCommands?: import('discord.js').RESTPostAPIApplicationCommandsJSONBody[];
 
   constructor() {
     const env = getConfig();

@@ -7,8 +7,6 @@
  */
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
-const GUILD_ID = process.env.DISCORD_GUILD_ID!;
-
 export type ConfigSection =
   | 'welcome'
   | 'onboarding'
@@ -42,10 +40,19 @@ export async function notifyBot(
   changedBy: string = 'dashboard',
   auditEvent?: { type: string; data: Record<string, unknown> },
 ): Promise<void> {
+  // V10 Audit M-1: Guard against empty/unset DISCORD_GUILD_ID.
+  // Previously used a top-level non-null assertion that silently inserted
+  // empty guild_id values the bot would never pick up.
+  const guildId = process.env.DISCORD_GUILD_ID;
+  if (!guildId) {
+    console.warn('[notifyBot] DISCORD_GUILD_ID not set — skipping bot notification');
+    return;
+  }
+
   try {
     const supabase = createAdminSupabase();
     await supabase.from('bot_action_queue').insert({
-      guild_id: GUILD_ID,
+      guild_id: guildId,
       action: 'config_reload',
       payload: {
         section,

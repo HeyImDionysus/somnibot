@@ -268,7 +268,7 @@ describe('FishingManager deeper', () => {
 
   it('register and invalidate cache', async () => {
     const mgr = new FishingManager(mockGuild(), mockSupabase(), mockValkey());
-    registerFishingManager(mgr);
+    registerFishingManager(mgr, 'test-guild-id');
     invalidateFishingCache();
   });
 
@@ -358,7 +358,7 @@ describe('HeistManager deeper', () => {
   it('register and invalidate', async () => {
     const mod = await import('../features/heist/heist-manager.js');
     const mgr = new HeistManager(mockSupabase(), mockValkey() as any);
-    mod.registerHeistManager(mgr);
+    mod.registerHeistManager(mgr, 'test-guild-id');
     mod.invalidateHeistCache();
     expect(mod.getHeistManager()).toBe(mgr);
   });

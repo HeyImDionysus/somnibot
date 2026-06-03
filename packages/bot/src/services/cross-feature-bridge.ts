@@ -274,8 +274,8 @@ export class CrossFeatureBridge {
         log.error(`Error handling ${event}:`, err);
       });
     };
-    this.eventBus.on(event as never, wrapped as never);
-    this.listeners.push(() => this.eventBus.off(event as never, wrapped as never));
+    this.eventBus.on(event, wrapped);
+    this.listeners.push(() => this.eventBus.off(event, wrapped));
   }
 
   private async sendSatisfactionSurvey(ticketId: string, creatorId: string): Promise<void> {
@@ -316,9 +316,10 @@ export class CrossFeatureBridge {
 
   private async grantPurchaseRole(userId: string, productId: string): Promise<void> {
     try {
-      // Check if this product is a role-grant item
+      // V10 Audit H-2: Was querying 'economy_items' but purchase.completed
+      // events come from the commerce system where productId refers to 'products'.
       const { data: product } = await this.supabase
-        .from('economy_items')
+        .from('products')
         .select('metadata')
         .eq('id', productId)
         .maybeSingle();
@@ -376,10 +377,12 @@ export class CrossFeatureBridge {
         ),
       );
 
+      // V10 Audit L-1: giveaway_remove_entry returns void, so r.value.data
+      // is always null. Check for fulfilled + no error instead.
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
-        if (r.status === 'fulfilled' && r.value.data && r.value.data.length > 0) {
-          log.info(`Removed ${userId} from giveaway ${giveaways[i].id} (${reason})`);
+        if (r.status === 'fulfilled' && !r.value.error) {
+          log.info(`Removed ${userId} from giveaway ${giveaways[i]!.id} (${reason})`);
         }
       }
     } catch (err) {

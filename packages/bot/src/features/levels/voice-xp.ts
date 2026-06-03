@@ -16,8 +16,15 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('VoiceXP');
 
-/** Set of user IDs currently in non-AFK voice channels and not deafened/muted */
-const activeVoiceUsers = new Map<string, { channelId: string; roles: string[] }>();
+/**
+ * Guild-scoped map of active voice users.
+ * Outer key: guildId, inner key: userId.
+ *
+ * V10 Audit C-1: Previously keyed by userId only, which leaked state
+ * across guilds in a multi-guild deployment (guild B's ticker would
+ * grant XP to users tracked from guild A).
+ */
+const activeVoiceUsers = new Map<string, Map<string, { channelId: string; roles: string[] }>>();
 
 /**
  * Track voice state changes to know who is active.
@@ -26,6 +33,7 @@ export function onVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): 
   const member = newState.member ?? oldState.member;
   if (!member || member.user.bot) return;
 
+  const guildId = newState.guild.id;
   const userId = member.id;
 
   // Left voice entirely or is now muted/deafened or in AFK channel
@@ -35,12 +43,17 @@ export function onVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): 
     newState.serverDeaf ||
     (newState.guild.afkChannelId && newState.channelId === newState.guild.afkChannelId)
   ) {
-    activeVoiceUsers.delete(userId);
+    activeVoiceUsers.get(guildId)?.delete(userId);
     return;
   }
 
   // In a valid voice channel, not deafened
-  activeVoiceUsers.set(userId, {
+  let guildMap = activeVoiceUsers.get(guildId);
+  if (!guildMap) {
+    guildMap = new Map();
+    activeVoiceUsers.set(guildId, guildMap);
+  }
+  guildMap.set(userId, {
     channelId: newState.channelId,
     roles: member.roles.cache.map((r) => r.id),
   });
@@ -76,11 +89,12 @@ export async function startVoiceXpTicker(
     try {
       const config = await loadLevelConfig(supabase, guild.id);
       if (!config.levels_enabled || !config.voice_xp_enabled) return;
-      if (activeVoiceUsers.size === 0) return;
+      const guildUsers = activeVoiceUsers.get(guild.id);
+      if (!guildUsers || guildUsers.size === 0) return;
 
       const xpAmount = config.voice_xp_per_interval;
 
-      for (const [userId, info] of activeVoiceUsers) {
+      for (const [userId, info] of guildUsers) {
         try {
           const result = await grantVoiceXp(
             supabase,
@@ -118,17 +132,20 @@ export async function startVoiceXpTicker(
  * Initialize voice state tracking — populate activeVoiceUsers from current state.
  */
 export async function initVoiceTracking(guild: Guild): Promise<void> {
+  const guildMap = new Map<string, { channelId: string; roles: string[] }>();
+
   for (const [, state] of guild.voiceStates.cache) {
     if (!state.member || state.member.user.bot) continue;
     if (!state.channelId) continue;
     if (state.selfDeaf || state.serverDeaf) continue;
     if (guild.afkChannelId && state.channelId === guild.afkChannelId) continue;
 
-    activeVoiceUsers.set(state.member.id, {
+    guildMap.set(state.member.id, {
       channelId: state.channelId,
       roles: state.member.roles.cache.map((r) => r.id),
     });
   }
 
-  log.info(`Initialized with ${activeVoiceUsers.size} active voice users`);
+  activeVoiceUsers.set(guild.id, guildMap);
+  log.info(`Initialized with ${guildMap.size} active voice users`);
 }

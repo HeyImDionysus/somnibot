@@ -67,7 +67,7 @@ describe('module-level helpers', () => {
   it('registerQuestsManager + getQuestsManager roundtrips', () => {
     const supabase = { from: vi.fn(() => supaChain()), rpc: vi.fn(async () => ({ data: null, error: null })) } as any;
     const mgr = new QuestsManager(supabase);
-    registerQuestsManager(mgr);
+    registerQuestsManager(mgr, 'test-guild-id');
     expect(getQuestsManager()).toBe(mgr);
   });
 
@@ -75,14 +75,14 @@ describe('module-level helpers', () => {
     const supabase = { from: vi.fn(() => supaChain()), rpc: vi.fn(async () => ({ data: null, error: null })) } as any;
     const mgr = new QuestsManager(supabase);
     const spy = vi.spyOn(mgr, 'clearCache');
-    registerQuestsManager(mgr);
+    registerQuestsManager(mgr, 'test-guild-id');
     invalidateQuestsCache();
     expect(spy).toHaveBeenCalled();
   });
 
   it('invalidateQuestsCache does nothing when no manager registered', () => {
     // Reset by registering null through internal path
-    registerQuestsManager(null as any);
+    registerQuestsManager(null as any, 'test-guild-id');
     expect(() => invalidateQuestsCache()).not.toThrow();
   });
 });

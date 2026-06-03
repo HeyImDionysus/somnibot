@@ -7,12 +7,17 @@ export { FarmingManager } from './farming-manager.js';
 export type { FarmingConfig } from './farming-manager.js';
 export { buildFarmingCommands, handleFarmingCommand } from './commands.js';
 
-let _managerInstance: FarmingManager | null = null;
+// V10 Audit H-1: Guild-scoped manager registry for cache invalidation.
+const _managers = new Map<string, FarmingManager>();
 
-export function registerFarmingManager(mgr: FarmingManager): void {
-  _managerInstance = mgr;
+export function registerFarmingManager(mgr: FarmingManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateFarmingCache(): void {
-  _managerInstance?.invalidateConfig();
+export function invalidateFarmingCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateConfig();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateConfig();
+  }
 }

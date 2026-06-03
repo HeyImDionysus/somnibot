@@ -8,14 +8,20 @@ export type { EconomyConfig, WalletData, TransactionResult } from './economy-man
 export { buildEconomyCommands, handleEconomyCommand } from './commands.js';
 export { buildTimersCommand, handleTimersCommand } from './timers-command.js';
 
-// ── Module-level manager registry for cache invalidation ──
+// ── Guild-scoped manager registry for cache invalidation ──
+// V10 Audit H-1: Was a single `let _manager` that got overwritten on
+// multi-guild init, breaking cache invalidation for all but the last guild.
 
-let _managerInstance: EconomyManager | null = null;
+const _managers = new Map<string, EconomyManager>();
 
-export function registerEconomyManager(mgr: EconomyManager): void {
-  _managerInstance = mgr;
+export function registerEconomyManager(mgr: EconomyManager, guildId: string): void {
+  _managers.set(guildId, mgr);
 }
 
-export function invalidateEconomyCache(): void {
-  _managerInstance?.invalidateConfig();
+export function invalidateEconomyCache(guildId?: string): void {
+  if (guildId) {
+    _managers.get(guildId)?.invalidateConfig();
+  } else {
+    for (const mgr of _managers.values()) mgr?.invalidateConfig();
+  }
 }

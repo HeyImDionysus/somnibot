@@ -125,7 +125,7 @@ describe('module-level helpers', () => {
     const supabase = makeSupabase();
     const client = makeClient();
     const mgr = new HeistManager(supabase as any, client as any);
-    registerHeistManager(mgr);
+    registerHeistManager(mgr, 'test-guild-id');
     expect(getHeistManager()).toBe(mgr);
     invalidateHeistCache();
   });
