@@ -25,6 +25,8 @@ interface DriftItem {
   entityType: string;
   entityName: string;
   entityDiscordId?: string;
+  templateKey?: string;
+  template_key?: string;
   description: string;
   details?: Record<string, { expected: unknown; actual: unknown }>;
   suggestedAction: 'repair' | 'accept' | 'ignore';
@@ -113,12 +115,7 @@ export default function SyncPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          driftItem: {
-            entityType: item.entityType,
-            entityName: item.entityName,
-            entityDiscordId: item.entityDiscordId,
-            type: item.type,
-          },
+          driftItem: item,
         }),
       });
       const json = await res.json();

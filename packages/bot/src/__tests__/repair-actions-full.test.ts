@@ -218,7 +218,55 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     }));
   });
 
-  it('returns error when no ID mapping found', async () => {
+  it('recreates a deleted role from a queued template key when the old Discord ID is absent', async () => {
+    const guild = makeGuild();
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'discord_id_map') {
+          return supaChain({ template_key: 'role:moderator', entity_type: 'role' });
+        }
+        if (table === 'guild_desired_state') {
+          return supaChain({
+            roles: [{ key: 'moderator', name: 'Moderator', permissions: '0', color: 0xFF0000 }],
+            channels: [],
+          });
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const drift = {
+      type: 'MISSING_RESOURCE' as const,
+      entityType: 'role' as const,
+      entityName: 'Moderator',
+      templateKey: 'moderator',
+    };
+
+    const result = await repairDriftItem(guild, supabase, drift as any);
+    expect(result.success).toBe(true);
+    expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Moderator',
+    }));
+  });
+
+  it('fails channel permission repair instead of removing drift without fixing overwrites', async () => {
+    const guild = makeGuild();
+    const supabase = makeSupabase();
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → mod',
+      entityDiscordId: 'ch1',
+    };
+
+    const result = await repairDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('permission drift repair requires manual review');
+    expect(guild.channels.cache.get('ch1').edit).not.toHaveBeenCalled();
+  });
+
+  it('returns error when neither ID mapping nor desired config can identify the missing resource', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase({ discord_id_map: null });
     const drift = {
@@ -230,7 +278,7 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
 
     const result = await repairDriftItem(guild, supabase, drift as any);
     expect(result.success).toBe(false);
-    expect(result.error).toContain('No ID mapping');
+    expect(result.error).toContain('No desired config');
   });
 });
 

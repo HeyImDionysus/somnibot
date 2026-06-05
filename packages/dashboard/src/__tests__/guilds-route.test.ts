@@ -124,6 +124,7 @@ describe('GET /api/guilds', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.active_guild_id).toBe('g1');
+    expect(res.headers.get('set-cookie')).toContain('active_guild_id=g1');
   });
 
   it('returns 429 when rate-limited', async () => {

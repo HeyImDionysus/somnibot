@@ -20,6 +20,12 @@ interface DriftActionRequest {
     entityName: string;
     entityDiscordId?: string;
     type: string;
+    severity?: 'critical' | 'warning' | 'info';
+    description?: string;
+    details?: Record<string, { expected: unknown; actual: unknown }>;
+    suggestedAction?: 'repair' | 'accept' | 'ignore';
+    templateKey?: string;
+    template_key?: string;
   };
 }
 

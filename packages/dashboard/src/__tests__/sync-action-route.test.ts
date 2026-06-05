@@ -41,7 +41,9 @@ const driftItem = {
   entityType: 'role',
   entityName: 'Moderator',
   entityDiscordId: 'role-1',
+  templateKey: 'role:moderator',
   type: 'PERMISSION_DRIFT',
+  details: { permissions: { expected: '2048', actual: '1024' } },
 };
 
 beforeEach(() => {
@@ -68,7 +70,10 @@ describe('POST /api/sync/action', () => {
     expect(inserted[0]).toMatchObject({
       guild_id: 'guild-1',
       action: 'sync_repair_drift',
-      payload: { driftItem },
+      payload: { driftItem: expect.objectContaining({
+        templateKey: 'role:moderator',
+        details: { permissions: { expected: '2048', actual: '1024' } },
+      }) },
       status: 'pending',
     });
   });

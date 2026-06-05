@@ -112,6 +112,21 @@ describe('computeStateDiff', () => {
     expect(diff.roles[0].changes?.['name']).toEqual({ from: 'Moderator', to: 'Moderator-v2' });
   });
 
+  it('preserves the old Discord ID when a mapped role is missing', () => {
+    const idMap = new Map([['role:mod', 'deleted-role-1']]);
+    const desired = baseDesiredState({
+      roles: [makeDesiredRole('mod', { name: 'Moderator' })],
+    });
+    const diff = computeStateDiff(desired, baseActualState(), idMap);
+
+    expect(diff.roles).toHaveLength(1);
+    expect(diff.roles[0]).toMatchObject({
+      action: 'create',
+      key: 'mod',
+      discordId: 'deleted-role-1',
+    });
+  });
+
   it('flags extra (unmanaged, non-everyone) roles for deletion', () => {
     const actual = baseActualState({
       roles: [
@@ -285,6 +300,25 @@ describe('classifyDrift', () => {
     expect(roleDrift).toBeDefined();
     expect(roleDrift!.type).toBe('PERMISSION_DRIFT');
     expect(roleDrift!.severity).toBe('warning');
+    expect(roleDrift!.templateKey).toBe('mod');
+  });
+
+  it('classifies a mapped deleted role with the old ID and template key', () => {
+    const idMap = new Map([['role:mod', 'deleted-role-1']]);
+    const diff = computeStateDiff(
+      baseDesiredState({ roles: [makeDesiredRole('mod', { name: 'Moderator' })] }),
+      baseActualState(),
+      idMap,
+    );
+    const items = classifyDrift(diff);
+    const missing = items.find(i => i.type === 'MISSING_RESOURCE');
+
+    expect(missing).toMatchObject({
+      entityType: 'role',
+      entityName: 'Moderator',
+      entityDiscordId: 'deleted-role-1',
+      templateKey: 'mod',
+    });
   });
 
   it('classifies extra roles as info-level EXTRA_RESOURCE', () => {

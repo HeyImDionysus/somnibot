@@ -49,9 +49,21 @@ export async function GET(req: NextRequest) {
     ? cookieGuildId
     : guilds[0]?.id;
 
-  return NextResponse.json({
+  const response = NextResponse.json({
     success: true,
     guilds,
     active_guild_id: activeGuildId,
   });
+
+  if (activeGuildId && cookieGuildId !== activeGuildId) {
+    response.cookies.set('active_guild_id', activeGuildId, {
+      path: '/',
+      maxAge: 60 * 60 * 24 * 365,
+      sameSite: 'lax',
+    });
+  } else if (!activeGuildId && cookieGuildId) {
+    response.cookies.delete('active_guild_id');
+  }
+
+  return response;
 }

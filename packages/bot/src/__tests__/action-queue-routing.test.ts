@@ -480,6 +480,24 @@ describe('action-queue deep routing', () => {
     expect(repairDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
   });
 
+  it('rejects queued channel permission drift repair instead of reporting false success', async () => {
+    const driftItem = {
+      entityType: 'channel',
+      entityName: 'general → mod',
+      entityDiscordId: 'channel-1',
+      type: 'PERMISSION_DRIFT',
+    };
+    const actions = [{
+      id: 'act-sync-repair-channel', guild_id: 'guild-1', action: 'sync_repair_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+    expect(repairDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
+  });
+
   it('processes sync_accept_drift action with acceptDriftItem', async () => {
     const driftItem = {
       entityType: 'role',

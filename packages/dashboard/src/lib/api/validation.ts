@@ -516,7 +516,13 @@ const syncAction = z.object({
     entityName: z.string(),
     entityDiscordId: z.string().optional(),
     type: z.string(),
-  }).optional(),
+    severity: z.enum(['critical', 'warning', 'info']).optional(),
+    description: z.string().optional(),
+    details: z.record(z.object({ expected: z.unknown(), actual: z.unknown() })).optional(),
+    suggestedAction: z.enum(['repair', 'accept', 'ignore']).optional(),
+    templateKey: z.string().optional(),
+    template_key: z.string().optional(),
+  }).passthrough().optional(),
 });
 
 const syncConfig = z.object({

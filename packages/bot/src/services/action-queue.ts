@@ -833,6 +833,15 @@ async function handleSyncRepairDrift(
 ): Promise<ActionResult> {
   const driftItem = getQueuedDriftItem(payload);
   if (!driftItem) return { success: false, error: 'Missing required driftItem' };
+  if (
+    driftItem.type === 'PERMISSION_DRIFT' &&
+    (driftItem.entityType === 'channel' || driftItem.entityType === 'category')
+  ) {
+    return {
+      success: false,
+      error: `${driftItem.entityType} permission drift repair requires manual review`,
+    };
+  }
   return repairDriftItem(guild, supabase, driftItem);
 }
 
