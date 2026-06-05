@@ -13,6 +13,7 @@ import {
   type DesiredRole,
   type ActualRole,
   type DesiredChannel,
+  type DesiredCategory,
   type ActualChannel,
 } from '../engine/diff.js';
 
@@ -318,6 +319,61 @@ describe('classifyDrift', () => {
       entityName: 'Moderator',
       entityDiscordId: 'deleted-role-1',
       templateKey: 'mod',
+    });
+  });
+
+  it('classifies a mapped deleted channel with the old ID and template key', () => {
+    const idMap = new Map([['channel:rules', 'deleted-channel-1']]);
+    const diff = computeStateDiff(
+      baseDesiredState({
+        channels: [{
+          key: 'rules',
+          name: 'rules',
+          type: 0,
+          categoryKey: null,
+          position: 0,
+          topic: null,
+          slowmode: 0,
+          nsfw: false,
+          templateId: 't-rules',
+          overrides: [],
+        } as DesiredChannel],
+      }),
+      baseActualState(),
+      idMap,
+    );
+    const items = classifyDrift(diff);
+    const missing = items.find(i => i.type === 'MISSING_RESOURCE' && i.entityType === 'channel');
+
+    expect(missing).toMatchObject({
+      entityType: 'channel',
+      entityName: 'rules',
+      entityDiscordId: 'deleted-channel-1',
+      templateKey: 'rules',
+    });
+  });
+
+  it('classifies a mapped deleted category with the old ID and template key', () => {
+    const idMap = new Map([['category:onboarding', 'deleted-category-1']]);
+    const diff = computeStateDiff(
+      baseDesiredState({
+        categories: [{
+          key: 'onboarding',
+          name: 'Onboarding',
+          position: 0,
+        } as DesiredCategory],
+      }),
+      baseActualState(),
+      idMap,
+    );
+    const items = classifyDrift(diff);
+    const missing = items.find(i => i.type === 'MISSING_RESOURCE' && i.entityType === 'category');
+
+    expect(missing).toMatchObject({
+      entityType: 'category',
+      entityName: 'Onboarding',
+      entityDiscordId: 'deleted-category-1',
+      templateKey: 'onboarding',
     });
   });
 

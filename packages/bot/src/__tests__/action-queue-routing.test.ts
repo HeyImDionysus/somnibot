@@ -498,6 +498,31 @@ describe('action-queue deep routing', () => {
     expect(repairDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
   });
 
+  it('does not retry deterministic manual-review permission drift failures', async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const driftItem = {
+      entityType: 'category',
+      entityName: 'restricted → mod',
+      entityDiscordId: 'category-1',
+      type: 'PERMISSION_DRIFT',
+    };
+    const actions = [{
+      id: 'act-sync-repair-category', guild_id: 'guild-1', action: 'sync_repair_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+
+    await startActionQueueListener(guild, supa);
+
+    expect(repairDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
   it('processes sync_accept_drift action with acceptDriftItem', async () => {
     const driftItem = {
       entityType: 'role',

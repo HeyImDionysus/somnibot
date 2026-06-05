@@ -17,7 +17,7 @@ const log = createLogger('RepairActions');
 
 type IdMapping = {
   template_key: string;
-  entity_type: string;
+  entity_type: DriftItem['entityType'];
 };
 
 function getDriftTemplateKey(driftItem: DriftItem): string | undefined {
@@ -40,6 +40,14 @@ function getConfigTemplateKey(config: Record<string, unknown>, entityType: Drift
   if (typeof raw !== 'string' || !raw.trim()) return null;
   const variants = templateKeyVariants(raw, entityType);
   return variants[0] ?? raw.trim();
+}
+
+function getCanonicalTemplateKey(key: string | undefined, entityType: DriftItem['entityType']): string | null {
+  if (!key) return null;
+  const trimmed = key.trim();
+  if (!trimmed) return null;
+  const withoutPrefix = trimmed.includes(':') ? trimmed.slice(trimmed.indexOf(':') + 1) : trimmed;
+  return `${entityType}:${withoutPrefix}`;
 }
 
 function configMatchesTemplateKey(
@@ -74,6 +82,7 @@ async function findMissingResourceMapping(
       .from('discord_id_map')
       .select('template_key, entity_type')
       .eq('guild_id', guild.id)
+      .eq('entity_type', driftItem.entityType)
       .eq('template_key', candidate)
       .maybeSingle();
     if (data) return data as IdMapping;
@@ -517,7 +526,10 @@ async function recreateResource(
     return { success: false, error: 'No desired config found for recreating resource' };
   }
 
-  const templateKey = mapping?.template_key ?? getConfigTemplateKey(config, driftItem.entityType);
+  const templateKey = getCanonicalTemplateKey(
+    mapping?.template_key ?? getConfigTemplateKey(config, driftItem.entityType) ?? driftTemplateKey,
+    entityType,
+  );
   if (!templateKey) {
     return { success: false, error: 'No template key found for recreating resource' };
   }

@@ -46,6 +46,7 @@ interface ActionResult {
   success: boolean;
   data?: Record<string, unknown>;
   error?: string;
+  retryable?: boolean;
 }
 
 // ============================================================
@@ -840,6 +841,7 @@ async function handleSyncRepairDrift(
     return {
       success: false,
       error: `${driftItem.entityType} permission drift repair requires manual review`,
+      retryable: false,
     };
   }
   return repairDriftItem(guild, supabase, driftItem);
@@ -966,7 +968,8 @@ async function processAction(
       .maybeSingle();
 
     const retryCount = (currentRow?.retry_count ?? 0) + 1;
-    const isTransient = !result.error?.includes('Unknown action') &&
+    const isTransient = result.retryable !== false &&
+                        !result.error?.includes('Unknown action') &&
                         !result.error?.includes('Missing required');
 
     if (isTransient && retryCount <= 3) {

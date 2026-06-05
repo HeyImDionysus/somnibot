@@ -521,9 +521,36 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
     }
   }
 
+  // Category drifts
+  for (const categoryDiff of diff.categories) {
+    if (categoryDiff.action === 'create' && categoryDiff.discordId) {
+      items.push({
+        type: 'MISSING_RESOURCE',
+        severity: 'warning',
+        entityType: 'category',
+        entityName: categoryDiff.name,
+        entityDiscordId: categoryDiff.discordId,
+        templateKey: categoryDiff.key,
+        description: `Category "${categoryDiff.name}" was deleted from Discord`,
+        suggestedAction: 'repair',
+      });
+    }
+  }
+
   // Channel drifts
   for (const chanDiff of diff.channels) {
-    if (chanDiff.action === 'update' && chanDiff.changes) {
+    if (chanDiff.action === 'create' && chanDiff.discordId) {
+      items.push({
+        type: 'MISSING_RESOURCE',
+        severity: 'warning',
+        entityType: 'channel',
+        entityName: chanDiff.name,
+        entityDiscordId: chanDiff.discordId,
+        templateKey: chanDiff.key,
+        description: `Channel "${chanDiff.name}" was deleted from Discord`,
+        suggestedAction: 'repair',
+      });
+    } else if (chanDiff.action === 'update' && chanDiff.changes) {
       items.push({
         type: 'EXTERNAL_CHANGE',
         severity: 'info',

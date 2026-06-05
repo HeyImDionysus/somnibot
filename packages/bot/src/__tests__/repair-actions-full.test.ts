@@ -220,10 +220,11 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
 
   it('recreates a deleted role from a queued template key when the old Discord ID is absent', async () => {
     const guild = makeGuild();
+    const idMapChain = supaChain({ template_key: 'role:moderator', entity_type: 'role' });
     const supabase = {
       from: vi.fn((table: string) => {
         if (table === 'discord_id_map') {
-          return supaChain({ template_key: 'role:moderator', entity_type: 'role' });
+          return idMapChain;
         }
         if (table === 'guild_desired_state') {
           return supaChain({
@@ -247,6 +248,42 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
     expect(guild.roles.create).toHaveBeenCalledWith(expect.objectContaining({
       name: 'Moderator',
     }));
+    expect(idMapChain.eq).toHaveBeenCalledWith('entity_type', 'role');
+  });
+
+  it('normalizes recreated role mappings to the prefixed template key format', async () => {
+    const guild = makeGuild();
+    const idMapChain = supaChain(null);
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'discord_id_map') return idMapChain;
+        if (table === 'guild_desired_state') {
+          return supaChain({
+            roles: [{ key: 'moderator', name: 'Moderator', permissions: '0', color: 0xFF0000 }],
+            channels: [],
+          });
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const drift = {
+      type: 'MISSING_RESOURCE' as const,
+      entityType: 'role' as const,
+      entityName: 'Moderator',
+      templateKey: 'moderator',
+    };
+
+    const result = await repairDriftItem(guild, supabase, drift as any);
+    expect(result.success).toBe(true);
+    expect(idMapChain.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entity_type: 'role',
+        template_key: 'role:moderator',
+        discord_id: 'new-role',
+      }),
+      { onConflict: 'guild_id,entity_type,template_key' },
+    );
   });
 
   it('fails channel permission repair instead of removing drift without fixing overwrites', async () => {
