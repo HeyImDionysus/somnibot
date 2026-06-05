@@ -38,6 +38,34 @@ function isPermissionOverwriteDrift(
     (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
 }
 
+function stringDetail(
+  driftItem: NonNullable<DriftActionRequest['driftItem']>,
+  key: string,
+): string | undefined {
+  const detail = driftItem.details?.[key];
+  const actual = detail?.actual;
+  const expected = detail?.expected;
+  if (typeof actual === 'string' && actual.trim()) return actual.trim();
+  if (typeof expected === 'string' && expected.trim()) return expected.trim();
+  return undefined;
+}
+
+function hasStructuredPermissionOverwriteDetails(
+  driftItem: NonNullable<DriftActionRequest['driftItem']>,
+): boolean {
+  if (driftItem.entityType !== 'channel') return false;
+  const channelId = driftItem.entityDiscordId;
+  const channelKey = driftItem.templateKey ?? driftItem.template_key ?? stringDetail(driftItem, 'overrideChannelKey');
+  const roleKey = stringDetail(driftItem, 'overrideRoleKey');
+  const roleId = stringDetail(driftItem, 'overrideRoleId');
+  return Boolean(
+    channelId &&
+    channelKey &&
+    roleKey &&
+    (roleId || roleKey === 'everyone'),
+  );
+}
+
 function toBotQueueAction(action: QueuedSyncAction): string {
   return action === 'repair' ? 'sync_repair_drift' : 'sync_accept_drift';
 }
@@ -106,11 +134,15 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (body.action === 'accept' && isPermissionOverwriteDrift(body.driftItem)) {
+  if (
+    body.action === 'accept' &&
+    isPermissionOverwriteDrift(body.driftItem) &&
+    !hasStructuredPermissionOverwriteDetails(body.driftItem)
+  ) {
     return NextResponse.json(
       {
         success: false,
-        error: `${body.driftItem.entityType} permission drift accept requires manual review`,
+        error: `${body.driftItem.entityType} permission drift accept requires structured permission overwrite details`,
       },
       { status: 400 },
     );

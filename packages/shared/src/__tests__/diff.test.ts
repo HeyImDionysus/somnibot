@@ -418,5 +418,19 @@ describe('classifyDrift', () => {
     const overDrift = items.find(i => i.type === 'PERMISSION_DRIFT');
     expect(overDrift).toBeDefined();
     expect(overDrift!.severity).toBe('warning');
+    expect(overDrift).toMatchObject({
+      entityType: 'channel',
+      entityName: 'gen → mod',
+      entityDiscordId: 'ch-1',
+      templateKey: 'gen',
+      details: {
+        overrideChannelKey: { expected: 'gen', actual: 'gen' },
+        overrideRoleKey: { expected: 'mod', actual: 'mod' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'update', actual: 'update' },
+        allow: { expected: '2048', actual: '0' },
+        deny: { expected: '0', actual: '0' },
+      },
+    });
   });
 });

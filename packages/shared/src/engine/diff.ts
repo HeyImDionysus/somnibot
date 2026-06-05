@@ -578,14 +578,32 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
 
   // Override drifts
   for (const overrideDiff of diff.overrides) {
-    if (overrideDiff.action === 'update') {
+    if (overrideDiff.action === 'create' || overrideDiff.action === 'update') {
       items.push({
         type: 'PERMISSION_DRIFT',
         severity: 'warning',
         entityType: 'channel',
         entityName: `${overrideDiff.channelKey} → ${overrideDiff.roleKey}`,
         entityDiscordId: overrideDiff.channelDiscordId,
+        templateKey: overrideDiff.channelKey,
         description: `Permission override changed for ${overrideDiff.roleKey} in channel`,
+        details: {
+          overrideChannelKey: { expected: overrideDiff.channelKey, actual: overrideDiff.channelKey },
+          overrideRoleKey: { expected: overrideDiff.roleKey, actual: overrideDiff.roleKey },
+          overrideRoleId: {
+            expected: overrideDiff.roleDiscordId ?? null,
+            actual: overrideDiff.roleDiscordId ?? null,
+          },
+          overrideAction: { expected: overrideDiff.action, actual: overrideDiff.action },
+          allow: {
+            expected: overrideDiff.allow?.to ?? '0',
+            actual: overrideDiff.allow?.from ?? '0',
+          },
+          deny: {
+            expected: overrideDiff.deny?.to ?? '0',
+            actual: overrideDiff.deny?.from ?? '0',
+          },
+        },
         suggestedAction: 'repair',
       });
     }

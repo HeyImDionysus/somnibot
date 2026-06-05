@@ -97,7 +97,41 @@ describe('POST /api/sync/action', () => {
     });
   });
 
-  it('rejects channel permission drift accept instead of queuing false success', async () => {
+  it('queues structured channel permission drift accepts through bot_action_queue', async () => {
+    const { supabase, inserted } = makeSupabase();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const permissionDrift = {
+      entityType: 'channel',
+      entityName: 'general → moderator',
+      entityDiscordId: 'channel-1',
+      templateKey: 'general',
+      type: 'PERMISSION_DRIFT',
+      details: {
+        overrideChannelKey: { expected: 'general', actual: 'general' },
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'update', actual: 'update' },
+        allow: { expected: '2048', actual: '1024' },
+        deny: { expected: '0', actual: '0' },
+      },
+    };
+
+    const res = await POST(makeRequest({ action: 'accept', driftItem: permissionDrift }));
+    const body = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(body.success).toBe(true);
+    expect(supabase.from).toHaveBeenCalledWith('bot_action_queue');
+    expect(inserted[0]).toMatchObject({
+      guild_id: 'guild-1',
+      action: 'sync_accept_drift',
+      payload: { driftItem: permissionDrift },
+      status: 'pending',
+    });
+  });
+
+  it('rejects unstructured channel permission drift accept instead of queuing false success', async () => {
     const { supabase, inserted } = makeSupabase();
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
 
@@ -115,7 +149,7 @@ describe('POST /api/sync/action', () => {
 
     expect(res.status).toBe(400);
     expect(body.success).toBe(false);
-    expect(body.error).toContain('manual review');
+    expect(body.error).toContain('structured permission overwrite details');
     expect(supabase.from).not.toHaveBeenCalledWith('bot_action_queue');
     expect(inserted).toHaveLength(0);
   });

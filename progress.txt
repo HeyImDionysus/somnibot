@@ -110,3 +110,47 @@ Proof:
 - Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
 - Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
 - Direct package build chain passed: `corepack pnpm --filter @somnibot/shared build && corepack pnpm --filter @somnibot/bot build && NEXT_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=... DISCORD_GUILD_ID=000000000000000000 corepack pnpm --filter @somnibot/dashboard build && corepack pnpm --filter @somnibot/license-sdk build && corepack pnpm --filter @somnibot/launcher build`.
+
+2026-06-05 - workspace-26p - Structured permission-overwrite drift accept
+
+Implemented real channel permission-overwrite drift accept. Shared drift classification now emits structured overwrite identity/details for channel override drift. The dashboard action endpoint only queues permission overwrite accepts when the payload identifies the channel, role, role Discord ID, and desired/actual allow/deny values. The bot action queue rejects malformed permission overwrite accepts without retries, while structured accepts call `acceptDriftItem`. Direct accept now reads the current Discord overwrite, updates `guild_desired_state.channels[].overrides`, removes the drift item only after the desired-state update, and writes the accepted audit log. If Discord no longer has the overwrite, accept removes the desired override.
+
+Changed:
+- packages/shared/src/engine/diff.ts
+- packages/shared/src/__tests__/diff.test.ts
+- packages/dashboard/src/app/api/sync/action/route.ts
+- packages/dashboard/src/__tests__/sync-action-route.test.ts
+- packages/bot/src/services/action-queue.ts
+- packages/bot/src/sync/repair-actions.ts
+- packages/bot/src/__tests__/action-queue-routing.test.ts
+- packages/bot/src/__tests__/repair-actions-full.test.ts
+
+Proof:
+- Shared focused test passed: `corepack pnpm --filter @somnibot/shared test -- src/__tests__/diff.test.ts` -> 1 file passed, 16 tests passed.
+- Dashboard focused tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/sync-action-route.test.ts src/__tests__/sync-route.test.ts` -> 2 files passed, 6 tests passed.
+- Bot focused tests passed after edge-case addition: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts src/__tests__/repair-actions-full.test.ts` -> 2 files passed, 51 tests passed.
+- Shared type-check passed: `corepack pnpm --filter @somnibot/shared type-check`.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- `git diff --check` passed.
+- Shared build passed: `corepack pnpm --filter @somnibot/shared build`.
+- Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; it emitted pre-existing webpack cache-size warnings and the existing Edge Runtime warning for `packages/dashboard/src/lib/api/csrf.ts`.
+
+2026-06-05 - workspace-26p - Codex review follow-up on PR #195
+
+Addressed Codex review findings for structured permission-overwrite accept. The bot now validates that the channel template key maps to the supplied channel Discord ID and that the role template key maps to the supplied role Discord ID before copying Discord overwrite values into desired state. Desired-state update errors are checked before drift removal/audit. The action queue now honors queued `template_key` and treats structured permission accept failures as deterministic/non-retryable.
+
+Changed:
+- packages/bot/src/services/action-queue.ts
+- packages/bot/src/sync/repair-actions.ts
+- packages/bot/src/__tests__/action-queue-routing.test.ts
+- packages/bot/src/__tests__/repair-actions-full.test.ts
+
+Proof:
+- Focused bot tests passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts src/__tests__/repair-actions-full.test.ts` -> 2 files passed, 56 tests passed.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
+- Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,599 tests passed.
+- `git diff --check` passed.

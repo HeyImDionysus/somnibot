@@ -546,13 +546,22 @@ describe('action-queue deep routing', () => {
     expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
   });
 
-  it('rejects queued channel permission drift accept instead of reporting false success', async () => {
+  it('processes structured queued channel permission drift accept with acceptDriftItem', async () => {
     vi.mocked(acceptDriftItem).mockClear();
     const driftItem = {
       entityType: 'channel',
-      entityName: 'general -> Moderator',
+      entityName: 'general → Moderator',
       entityDiscordId: 'ch-1',
+      templateKey: 'general',
       type: 'PERMISSION_DRIFT',
+      details: {
+        overrideChannelKey: { expected: 'general', actual: 'general' },
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'update', actual: 'update' },
+        allow: { expected: '2048', actual: '1024' },
+        deny: { expected: '0', actual: '0' },
+      },
     };
     const actions = [{
       id: 'act-sync-accept-channel-perms', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
@@ -563,11 +572,101 @@ describe('action-queue deep routing', () => {
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
 
+    expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
+  });
+
+  it('processes structured queued channel permission drift accept with snake_case template_key', async () => {
+    vi.mocked(acceptDriftItem).mockClear();
+    const driftItem = {
+      entityType: 'channel',
+      entityName: 'general → Moderator',
+      entityDiscordId: 'ch-1',
+      template_key: 'general',
+      type: 'PERMISSION_DRIFT',
+      details: {
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'update', actual: 'update' },
+        allow: { expected: '2048', actual: '1024' },
+        deny: { expected: '0', actual: '0' },
+      },
+    };
+    const actions = [{
+      id: 'act-sync-accept-channel-perms-snake', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+
+    expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
+  });
+
+  it('rejects unstructured queued channel permission drift accept without retrying', async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    vi.mocked(acceptDriftItem).mockClear();
+    const driftItem = {
+      entityType: 'channel',
+      entityName: 'general -> Moderator',
+      entityDiscordId: 'ch-1',
+      type: 'PERMISSION_DRIFT',
+    };
+    const actions = [{
+      id: 'act-sync-accept-channel-perms-unstructured', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+
     expect(acceptDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
     expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
       status: 'failed',
-      error_message: expect.stringContaining('permission drift accept requires manual review'),
+      error_message: expect.stringContaining('structured permission overwrite details'),
     }));
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('does not retry structured channel permission drift accept failures', async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    vi.mocked(acceptDriftItem).mockResolvedValueOnce({
+      success: false,
+      error: 'No desired config found for this channel permission overwrite',
+    });
+    const driftItem = {
+      entityType: 'channel',
+      entityName: 'general → Moderator',
+      entityDiscordId: 'ch-1',
+      templateKey: 'general',
+      type: 'PERMISSION_DRIFT',
+      details: {
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+      },
+    };
+    const actions = [{
+      id: 'act-sync-accept-channel-perms-fails', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+
+    expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('No desired config'),
+    }));
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+    vi.useRealTimers();
   });
 
   it('processes market_item_reconcile action', async () => {
