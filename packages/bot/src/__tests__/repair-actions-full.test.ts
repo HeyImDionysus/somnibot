@@ -94,6 +94,41 @@ function makeSupabase(tableResponses: Record<string, any> = {}) {
   } as any;
 }
 
+function makeIdentitySupabase(
+  desiredChain: any,
+  mappings: Array<Record<string, unknown>>,
+  fallbackError: any = null,
+) {
+  function mappingChain() {
+    const filters: Record<string, unknown> = {};
+    const c: any = {};
+    for (const m of ['select','insert','update','upsert','delete','neq','gte','lt','lte',
+      'limit','order','in','head','filter','single','match']) {
+      c[m] = vi.fn((..._: any[]) => c);
+    }
+    c.eq = vi.fn((key: string, value: unknown) => {
+      filters[key] = value;
+      return c;
+    });
+    c.maybeSingle = vi.fn(async () => ({
+      data: mappings.find((mapping) =>
+        Object.entries(filters).every(([key, value]) => mapping[key] === value),
+      ) ?? null,
+      error: null,
+    }));
+    c.then = (resolve: any) => resolve({ data: null, error: null });
+    return c;
+  }
+
+  return {
+    from: vi.fn((table: string) => {
+      if (table === 'discord_id_map') return mappingChain();
+      if (table === 'guild_desired_state') return desiredChain;
+      return supaChain(null, fallbackError);
+    }),
+  } as any;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -417,12 +452,10 @@ describe('acceptDriftItem', () => {
         entityName: 'general → moderator',
       }],
     });
-    const supabase = {
-      from: vi.fn((table: string) => {
-        if (table === 'guild_desired_state') return desiredChain;
-        return supaChain();
-      }),
-    } as any;
+    const supabase = makeIdentitySupabase(desiredChain, [
+      { guild_id: 'g1', entity_type: 'channel', template_key: 'general', discord_id: 'ch1' },
+      { guild_id: 'g1', entity_type: 'role', template_key: 'moderator', discord_id: 'role-1' },
+    ]);
     const drift = {
       type: 'PERMISSION_DRIFT' as const,
       entityType: 'channel' as const,
@@ -478,12 +511,10 @@ describe('acceptDriftItem', () => {
         entityName: 'general → moderator',
       }],
     });
-    const supabase = {
-      from: vi.fn((table: string) => {
-        if (table === 'guild_desired_state') return desiredChain;
-        return supaChain();
-      }),
-    } as any;
+    const supabase = makeIdentitySupabase(desiredChain, [
+      { guild_id: 'g1', entity_type: 'channel', template_key: 'general', discord_id: 'ch1' },
+      { guild_id: 'g1', entity_type: 'role', template_key: 'moderator', discord_id: 'role-1' },
+    ]);
     const drift = {
       type: 'PERMISSION_DRIFT' as const,
       entityType: 'channel' as const,
@@ -509,6 +540,129 @@ describe('acceptDriftItem', () => {
         overrides: [],
       })],
     }));
+  });
+
+  it('rejects structured channel permission drift when channel key and Discord ID do not match', async () => {
+    const guild = makeGuild();
+    const overwriteCache = new MockCollection();
+    overwriteCache.set('role-1', {
+      id: 'role-1',
+      allow: { bitfield: 1024n },
+      deny: { bitfield: 0n },
+    });
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: overwriteCache };
+
+    const desiredChain = supaChain({
+      channels: [{ key: 'general', name: 'general', overrides: [{ roleKey: 'moderator', allow: '2048', deny: '0' }] }],
+      drift_details: [],
+    });
+    const supabase = makeIdentitySupabase(desiredChain, [
+      { guild_id: 'g1', entity_type: 'channel', template_key: 'general', discord_id: 'different-channel' },
+      { guild_id: 'g1', entity_type: 'role', template_key: 'moderator', discord_id: 'role-1' },
+    ]);
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → moderator',
+      entityDiscordId: 'ch1',
+      templateKey: 'general',
+      details: {
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+      },
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('channel key does not match');
+    expect(desiredChain.update).not.toHaveBeenCalled();
+    expect(writeAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'drift.accepted' }),
+    );
+  });
+
+  it('rejects structured channel permission drift when role key and Discord ID do not match', async () => {
+    const guild = makeGuild();
+    const overwriteCache = new MockCollection();
+    overwriteCache.set('role-2', {
+      id: 'role-2',
+      allow: { bitfield: 1024n },
+      deny: { bitfield: 0n },
+    });
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: overwriteCache };
+
+    const desiredChain = supaChain({
+      channels: [{ key: 'general', name: 'general', overrides: [{ roleKey: 'moderator', allow: '2048', deny: '0' }] }],
+      drift_details: [],
+    });
+    const supabase = makeIdentitySupabase(desiredChain, [
+      { guild_id: 'g1', entity_type: 'channel', template_key: 'general', discord_id: 'ch1' },
+      { guild_id: 'g1', entity_type: 'role', template_key: 'moderator', discord_id: 'role-1' },
+    ]);
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → moderator',
+      entityDiscordId: 'ch1',
+      templateKey: 'general',
+      details: {
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-2', actual: 'role-2' },
+      },
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('role key does not match');
+    expect(desiredChain.update).not.toHaveBeenCalled();
+    expect(writeAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'drift.accepted' }),
+    );
+  });
+
+  it('does not clear drift or audit success when desired-state overwrite update fails', async () => {
+    const guild = makeGuild();
+    const overwriteCache = new MockCollection();
+    overwriteCache.set('role-1', {
+      id: 'role-1',
+      allow: { bitfield: 1024n },
+      deny: { bitfield: 0n },
+    });
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: overwriteCache };
+
+    const desiredChain = supaChain({
+      channels: [{ key: 'general', name: 'general', overrides: [{ roleKey: 'moderator', allow: '2048', deny: '0' }] }],
+      drift_details: [{ type: 'PERMISSION_DRIFT', entityType: 'channel', entityName: 'general → moderator' }],
+    }, { message: 'update failed' });
+    const supabase = makeIdentitySupabase(desiredChain, [
+      { guild_id: 'g1', entity_type: 'channel', template_key: 'general', discord_id: 'ch1' },
+      { guild_id: 'g1', entity_type: 'role', template_key: 'moderator', discord_id: 'role-1' },
+    ]);
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → moderator',
+      entityDiscordId: 'ch1',
+      templateKey: 'general',
+      details: {
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+      },
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Failed to update desired channel overwrites');
+    expect(desiredChain.update).toHaveBeenCalledWith(expect.objectContaining({ channels: expect.any(Array) }));
+    expect(writeAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'drift.accepted' }),
+    );
   });
 });
 

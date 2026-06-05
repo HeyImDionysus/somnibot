@@ -137,3 +137,20 @@ Proof:
 - Shared build passed: `corepack pnpm --filter @somnibot/shared build`.
 - Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; it emitted pre-existing webpack cache-size warnings and the existing Edge Runtime warning for `packages/dashboard/src/lib/api/csrf.ts`.
+
+2026-06-05 - workspace-26p - Codex review follow-up on PR #195
+
+Addressed Codex review findings for structured permission-overwrite accept. The bot now validates that the channel template key maps to the supplied channel Discord ID and that the role template key maps to the supplied role Discord ID before copying Discord overwrite values into desired state. Desired-state update errors are checked before drift removal/audit. The action queue now honors queued `template_key` and treats structured permission accept failures as deterministic/non-retryable.
+
+Changed:
+- packages/bot/src/services/action-queue.ts
+- packages/bot/src/sync/repair-actions.ts
+- packages/bot/src/__tests__/action-queue-routing.test.ts
+- packages/bot/src/__tests__/repair-actions-full.test.ts
+
+Proof:
+- Focused bot tests passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts src/__tests__/repair-actions-full.test.ts` -> 2 files passed, 56 tests passed.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
+- Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,599 tests passed.
+- `git diff --check` passed.

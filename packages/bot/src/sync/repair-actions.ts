@@ -18,6 +18,7 @@ const log = createLogger('RepairActions');
 type IdMapping = {
   template_key: string;
   entity_type: DriftItem['entityType'];
+  discord_id?: string;
 };
 
 type PermissionOverwriteIdentity = {
@@ -161,6 +162,26 @@ function desiredOverrideMatchesRole(override: Record<string, unknown>, roleKey: 
   if (typeof raw !== 'string' || !raw.trim()) return false;
   const roleVariants = new Set(templateKeyVariants(roleKey, 'role'));
   return templateKeyVariants(raw, 'role').some((variant) => roleVariants.has(variant));
+}
+
+async function findMappingByTemplateKey(
+  guild: Guild,
+  supabase: SupabaseClient,
+  entityType: DriftItem['entityType'],
+  templateKey: string | undefined,
+): Promise<IdMapping | null> {
+  for (const candidate of templateKeyVariants(templateKey, entityType)) {
+    const { data } = await supabase
+      .from('discord_id_map')
+      .select('template_key, entity_type, discord_id')
+      .eq('guild_id', guild.id)
+      .eq('entity_type', entityType)
+      .eq('template_key', candidate)
+      .maybeSingle();
+    if (data) return data as IdMapping;
+  }
+
+  return null;
 }
 
 async function findMissingResourceMapping(
@@ -427,6 +448,28 @@ async function acceptPermissionOverwriteDrift(
     return { success: false, error: 'Permission overwrite accept requires role Discord ID' };
   }
 
+  const channelMapping = await findMappingByTemplateKey(guild, supabase, 'channel', identity.channelKey);
+  if (!channelMapping?.discord_id) {
+    return { success: false, error: 'No ID mapping found for this channel permission overwrite' };
+  }
+  if (channelMapping.discord_id !== identity.channelDiscordId) {
+    return { success: false, error: 'Permission overwrite channel key does not match channel Discord ID' };
+  }
+
+  if (roleKey === 'everyone') {
+    if (roleDiscordId !== guild.id) {
+      return { success: false, error: 'Permission overwrite role key does not match @everyone Discord ID' };
+    }
+  } else {
+    const roleMapping = await findMappingByTemplateKey(guild, supabase, 'role', roleKey);
+    if (!roleMapping?.discord_id) {
+      return { success: false, error: 'No ID mapping found for this role permission overwrite' };
+    }
+    if (roleMapping.discord_id !== roleDiscordId) {
+      return { success: false, error: 'Permission overwrite role key does not match role Discord ID' };
+    }
+  }
+
   const { data: state } = await supabase
     .from('guild_desired_state')
     .select('channels')
@@ -481,10 +524,19 @@ async function acceptPermissionOverwriteDrift(
 
   channelConfig.overrides = nextOverrides;
 
-  await supabase
+  const { error: updateError } = await supabase
     .from('guild_desired_state')
     .update({ channels: nextChannels })
     .eq('guild_id', guild.id);
+
+  if (updateError) {
+    const message = updateError instanceof Error
+      ? updateError.message
+      : typeof updateError === 'object' && updateError && 'message' in updateError
+        ? String((updateError as { message?: unknown }).message)
+        : String(updateError);
+    return { success: false, error: `Failed to update desired channel overwrites: ${message}` };
+  }
 
   await removeDriftFromDb(supabase, guild.id, driftItem);
 

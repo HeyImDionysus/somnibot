@@ -843,7 +843,10 @@ function stringDetail(driftItem: DriftItem, key: string): string | undefined {
 
 function hasStructuredPermissionOverwriteDetails(driftItem: DriftItem): boolean {
   if (driftItem.entityType !== 'channel') return false;
-  const channelKey = driftItem.templateKey ?? stringDetail(driftItem, 'overrideChannelKey');
+  const rawTemplateKey = (driftItem as DriftItem & { template_key?: unknown }).template_key;
+  const channelKey = driftItem.templateKey
+    ?? (typeof rawTemplateKey === 'string' && rawTemplateKey.trim() ? rawTemplateKey.trim() : undefined)
+    ?? stringDetail(driftItem, 'overrideChannelKey');
   const roleKey = stringDetail(driftItem, 'overrideRoleKey');
   const roleId = stringDetail(driftItem, 'overrideRoleId');
   return Boolean(
@@ -888,7 +891,11 @@ async function handleSyncAcceptDrift(
       retryable: false,
     };
   }
-  return acceptDriftItem(guild, supabase, driftItem);
+  const result = await acceptDriftItem(guild, supabase, driftItem);
+  if (isPermissionOverwriteDrift(driftItem) && !result.success) {
+    return { ...result, retryable: false };
+  }
+  return result;
 }
 
 async function handleSyncIgnoreDrift(
