@@ -57,6 +57,7 @@ function makeSupa(pendingActions: any[] = []) {
   // Track sequential calls to .from('bot_action_queue') to differentiate
   // the recover RPC, the pending query, and the status updates
   let pendingReturned = false;
+  const queueUpdates: Record<string, unknown>[] = [];
 
   const makeChain = (data: any = null) => {
     const chain: any = {};
@@ -89,7 +90,10 @@ function makeSupa(pendingActions: any[] = []) {
           };
           return inner;
         });
-        chain.update = vi.fn(() => chain);
+        chain.update = vi.fn((row: Record<string, unknown>) => {
+          queueUpdates.push(row);
+          return chain;
+        });
         return chain;
       }
       if (table === 'guild_config') {
@@ -114,6 +118,7 @@ function makeSupa(pendingActions: any[] = []) {
       subscribe: vi.fn((cb: Function) => { cb?.('SUBSCRIBED'); return 'subscribed'; }),
     })),
   };
+  supa.__queueUpdates = queueUpdates;
   return supa;
 }
 
@@ -559,6 +564,10 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
 
     expect(acceptDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('permission drift accept requires manual review'),
+    }));
   });
 
   it('processes market_item_reconcile action', async () => {

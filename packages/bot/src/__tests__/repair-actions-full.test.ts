@@ -392,6 +392,7 @@ describe('acceptDriftItem', () => {
       expect.anything(),
       expect.objectContaining({ action: 'drift.accepted' }),
     );
+    expect(supabase.from).not.toHaveBeenCalledWith('guild_desired_state');
   });
 });
 

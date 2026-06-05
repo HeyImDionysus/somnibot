@@ -90,3 +90,23 @@ Proof:
 Known environment note:
 - Dashboard build still emits the pre-existing Next Edge Runtime warning for `crypto` imported by `packages/dashboard/src/lib/api/csrf.ts`.
 - Full bot tests still emit pre-existing `MaxListenersExceededWarning` process-listener warnings in several test files. This task did not introduce those warnings.
+
+2026-06-05 - workspace-dzm - Codex PR review follow-up
+
+Addressed Codex PR review findings on PR #194. The legacy `/api/sync` route now also rejects channel/category `PERMISSION_DRIFT` accepts, closing the older client path that could still return `accept queued`. Strengthened the bot queue test to assert already-queued unsupported accepts are marked failed with the manual-review error, and strengthened the direct repair-action test to assert no `guild_desired_state` update path runs on direct reject.
+
+Changed:
+- packages/dashboard/src/app/api/sync/route.ts
+- packages/dashboard/src/__tests__/sync-route.test.ts
+- packages/bot/src/__tests__/action-queue-routing.test.ts
+- packages/bot/src/__tests__/repair-actions-full.test.ts
+
+Proof:
+- Focused dashboard route tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/sync-route.test.ts src/__tests__/sync-action-route.test.ts` -> 2 files passed, 5 tests passed.
+- Focused bot tests passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts src/__tests__/repair-actions-full.test.ts` -> 2 files passed, 48 tests passed.
+- Full dashboard suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 34 files passed, 275 tests passed.
+- Full bot suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,591 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Direct package build chain passed: `corepack pnpm --filter @somnibot/shared build && corepack pnpm --filter @somnibot/bot build && NEXT_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=... DISCORD_GUILD_ID=000000000000000000 corepack pnpm --filter @somnibot/dashboard build && corepack pnpm --filter @somnibot/license-sdk build && corepack pnpm --filter @somnibot/launcher build`.
