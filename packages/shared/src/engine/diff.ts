@@ -178,6 +178,7 @@ export interface DriftItem {
   entityType: 'role' | 'channel' | 'category' | 'everyone';
   entityName: string;
   entityDiscordId?: string;
+  templateKey?: string;
   description: string;
   details?: Record<string, { expected: unknown; actual: unknown }>;
   suggestedAction: 'repair' | 'accept' | 'ignore';
@@ -236,6 +237,7 @@ export function computeStateDiff(
           action: 'create',
           key: desiredRole.key,
           name: desiredRole.name,
+          discordId,
           desired: desiredRole,
         });
       } else {
@@ -309,6 +311,7 @@ export function computeStateDiff(
           action: 'create',
           key: desiredCat.key,
           name: desiredCat.name,
+          discordId,
           desired: desiredCat,
         });
       } else {
@@ -350,6 +353,7 @@ export function computeStateDiff(
           action: 'create',
           key: desiredChan.key,
           name: desiredChan.name,
+          discordId,
           desired: desiredChan,
         });
       } else {
@@ -486,6 +490,7 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         entityType: 'role',
         entityName: roleDiff.name,
         entityDiscordId: roleDiff.discordId,
+        templateKey: roleDiff.key,
         description: `Role "${roleDiff.name}" was modified outside the dashboard`,
         details: Object.fromEntries(
           Object.entries(roleDiff.changes).map(([k, v]) => [k, { expected: v.to, actual: v.from }]),
@@ -498,6 +503,8 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         severity: 'warning',
         entityType: 'role',
         entityName: roleDiff.name,
+        entityDiscordId: roleDiff.discordId,
+        templateKey: roleDiff.key,
         description: `Role "${roleDiff.name}" was deleted from Discord`,
         suggestedAction: 'repair',
       });
@@ -514,9 +521,36 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
     }
   }
 
+  // Category drifts
+  for (const categoryDiff of diff.categories) {
+    if (categoryDiff.action === 'create' && categoryDiff.discordId) {
+      items.push({
+        type: 'MISSING_RESOURCE',
+        severity: 'warning',
+        entityType: 'category',
+        entityName: categoryDiff.name,
+        entityDiscordId: categoryDiff.discordId,
+        templateKey: categoryDiff.key,
+        description: `Category "${categoryDiff.name}" was deleted from Discord`,
+        suggestedAction: 'repair',
+      });
+    }
+  }
+
   // Channel drifts
   for (const chanDiff of diff.channels) {
-    if (chanDiff.action === 'update' && chanDiff.changes) {
+    if (chanDiff.action === 'create' && chanDiff.discordId) {
+      items.push({
+        type: 'MISSING_RESOURCE',
+        severity: 'warning',
+        entityType: 'channel',
+        entityName: chanDiff.name,
+        entityDiscordId: chanDiff.discordId,
+        templateKey: chanDiff.key,
+        description: `Channel "${chanDiff.name}" was deleted from Discord`,
+        suggestedAction: 'repair',
+      });
+    } else if (chanDiff.action === 'update' && chanDiff.changes) {
       items.push({
         type: 'EXTERNAL_CHANGE',
         severity: 'info',

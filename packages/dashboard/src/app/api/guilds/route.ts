@@ -44,11 +44,26 @@ export async function GET(req: NextRequest) {
   }
 
   const cookieStore = await cookies();
-  const activeGuildId = cookieStore.get('active_guild_id')?.value ?? guilds[0]?.id;
+  const cookieGuildId = cookieStore.get('active_guild_id')?.value;
+  const activeGuildId = guilds.some((g) => g.id === cookieGuildId)
+    ? cookieGuildId
+    : guilds[0]?.id;
 
-  return NextResponse.json({
+  const response = NextResponse.json({
     success: true,
     guilds,
     active_guild_id: activeGuildId,
   });
+
+  if (activeGuildId && cookieGuildId !== activeGuildId) {
+    response.cookies.set('active_guild_id', activeGuildId, {
+      path: '/',
+      maxAge: 60 * 60 * 24 * 365,
+      sameSite: 'lax',
+    });
+  } else if (!activeGuildId && cookieGuildId) {
+    response.cookies.delete('active_guild_id');
+  }
+
+  return response;
 }

@@ -97,12 +97,19 @@ export async function requireGuildOwner(): Promise<OwnerResult> {
     activeGuild = guilds.find(g => g.id === requestedGuildId)!;
   } else if (requestedGuildId) {
     // V5 Audit [1.2]: Log when a user requests a guild ID they don't own.
-    // This helps detect probing attempts without leaking info to the caller
-    // (they still get their default guild, not a 403).
+    // Deny instead of falling back so admin actions cannot silently apply
+    // to a different guild than the one selected in the dashboard.
     console.warn(
       `[requireGuildOwner] Guild probe: user ${discordId} requested guild ${requestedGuildId} ` +
-      `but only owns [${guilds.map(g => g.id).join(', ')}]. Falling back to default guild.`,
+      `but only owns [${guilds.map(g => g.id).join(', ')}].`,
     );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: 'Forbidden — requested guild is not accessible' },
+        { status: 403 },
+      ),
+    };
   }
 
   return {

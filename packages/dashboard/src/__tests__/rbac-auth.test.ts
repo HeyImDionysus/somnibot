@@ -8,8 +8,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mock dependencies before imports ────────────────────────
 
+const { mockCookieGet, mockHeaderGet } = vi.hoisted(() => ({
+  mockCookieGet: vi.fn(),
+  mockHeaderGet: vi.fn(),
+}));
+
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/supabase/server', () => ({ createServerSupabase: vi.fn() }));
+vi.mock('next/headers', () => ({
+  cookies: vi.fn().mockResolvedValue({
+    get: mockCookieGet,
+  }),
+  headers: vi.fn().mockResolvedValue({
+    get: mockHeaderGet,
+  }),
+}));
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { createServerSupabase } from '@/lib/supabase/server';
@@ -157,6 +170,8 @@ describe('requireGuildOwner — 401/403 responses', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCookieGet.mockReturnValue(undefined);
+    mockHeaderGet.mockReturnValue(null);
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdminSupabase);
   });
 
@@ -208,6 +223,38 @@ describe('requireGuildOwner — 401/403 responses', () => {
       select: vi.fn().mockReturnValue({
         eq: vi.fn().mockReturnValue({
           limit: vi.fn().mockResolvedValue({ data: [] }),
+        }),
+      }),
+    });
+
+    const { requireGuildOwner } = await import('@/lib/api/require-owner');
+    const result = await requireGuildOwner();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(403);
+    }
+  });
+
+  it('returns 403 when requested guild is not owned', async () => {
+    const mockServerSupabase = {
+      auth: {
+        getUser: vi.fn().mockResolvedValue({
+          data: { user: { id: 'u1', user_metadata: { provider_id: 'discord-123' } } },
+        }),
+      },
+    };
+    (createServerSupabase as ReturnType<typeof vi.fn>).mockResolvedValue(mockServerSupabase);
+    mockHeaderGet.mockImplementation((name: string) =>
+      name === 'x-guild-id' ? 'guild-2' : null,
+    );
+
+    (mockAdminSupabase.from as ReturnType<typeof vi.fn>).mockReturnValue({
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          limit: vi.fn().mockResolvedValue({
+            data: [{ id: 'guild-1', owner_discord_id: 'discord-123' }],
+          }),
         }),
       }),
     });

@@ -5,6 +5,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Mocks ────────────────────────────────────────────────────
+const { mockCookieGet } = vi.hoisted(() => ({
+  mockCookieGet: vi.fn(),
+}));
+
 vi.mock('@/lib/api/require-owner', () => ({
   requireAuth: vi.fn(),
 }));
@@ -16,7 +20,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 }));
 vi.mock('next/headers', () => ({
   cookies: vi.fn().mockResolvedValue({
-    get: vi.fn().mockReturnValue(undefined),
+    get: mockCookieGet,
   }),
 }));
 
@@ -37,6 +41,7 @@ function makeRequest(headers?: Record<string, string>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCookieGet.mockReturnValue(undefined);
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockAdmin);
 });
 
@@ -90,6 +95,36 @@ describe('GET /api/guilds', () => {
     expect(body.success).toBe(true);
     expect(body.guilds).toEqual([{ id: 'g1', name: 'Test Guild' }]);
     expect(body.active_guild_id).toBe('g1');
+  });
+
+  it('normalizes a stale active guild cookie to the first owned guild', async () => {
+    (requireAuth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      userId: 'user-1',
+      discordId: 'discord-123',
+    });
+    mockCookieGet.mockImplementation((name: string) =>
+      name === 'active_guild_id' ? { value: 'stale-guild' } : undefined,
+    );
+
+    const chain = {
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue({
+        data: [
+          { id: 'g1', name: 'Guild One' },
+          { id: 'g2', name: 'Guild Two' },
+        ],
+        error: null,
+      }),
+    };
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest() as never);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.active_guild_id).toBe('g1');
+    expect(res.headers.get('set-cookie')).toContain('active_guild_id=g1');
   });
 
   it('returns 429 when rate-limited', async () => {

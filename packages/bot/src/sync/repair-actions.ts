@@ -15,6 +15,82 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('RepairActions');
 
+type IdMapping = {
+  template_key: string;
+  entity_type: DriftItem['entityType'];
+};
+
+function getDriftTemplateKey(driftItem: DriftItem): string | undefined {
+  const raw = (driftItem as DriftItem & { templateKey?: unknown; template_key?: unknown }).templateKey
+    ?? (driftItem as DriftItem & { templateKey?: unknown; template_key?: unknown }).template_key;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function templateKeyVariants(key: string | undefined, entityType: DriftItem['entityType']): string[] {
+  if (!key) return [];
+  const trimmed = key.trim();
+  if (!trimmed) return [];
+  const withoutPrefix = trimmed.includes(':') ? trimmed.slice(trimmed.indexOf(':') + 1) : trimmed;
+  const withPrefix = trimmed.includes(':') ? trimmed : `${entityType}:${trimmed}`;
+  return [...new Set([trimmed, withoutPrefix, withPrefix])];
+}
+
+function getConfigTemplateKey(config: Record<string, unknown>, entityType: DriftItem['entityType']): string | null {
+  const raw = config.template_key ?? config.templateKey ?? config.key;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const variants = templateKeyVariants(raw, entityType);
+  return variants[0] ?? raw.trim();
+}
+
+function getCanonicalTemplateKey(key: string | undefined, entityType: DriftItem['entityType']): string | null {
+  if (!key) return null;
+  const trimmed = key.trim();
+  if (!trimmed) return null;
+  const withoutPrefix = trimmed.includes(':') ? trimmed.slice(trimmed.indexOf(':') + 1) : trimmed;
+  return `${entityType}:${withoutPrefix}`;
+}
+
+function configMatchesTemplateKey(
+  config: Record<string, unknown>,
+  mappingKey: string | undefined,
+  entityType: DriftItem['entityType'],
+): boolean {
+  if (!mappingKey) return false;
+  const configKey = getConfigTemplateKey(config, entityType);
+  if (!configKey) return false;
+  const mappingVariants = new Set(templateKeyVariants(mappingKey, entityType));
+  return templateKeyVariants(configKey, entityType).some((variant) => mappingVariants.has(variant));
+}
+
+async function findMissingResourceMapping(
+  guild: Guild,
+  supabase: SupabaseClient,
+  driftItem: DriftItem,
+): Promise<IdMapping | null> {
+  if (driftItem.entityDiscordId) {
+    const { data } = await supabase
+      .from('discord_id_map')
+      .select('template_key, entity_type')
+      .eq('guild_id', guild.id)
+      .eq('discord_id', driftItem.entityDiscordId)
+      .maybeSingle();
+    if (data) return data as IdMapping;
+  }
+
+  for (const candidate of templateKeyVariants(getDriftTemplateKey(driftItem), driftItem.entityType)) {
+    const { data } = await supabase
+      .from('discord_id_map')
+      .select('template_key, entity_type')
+      .eq('guild_id', guild.id)
+      .eq('entity_type', driftItem.entityType)
+      .eq('template_key', candidate)
+      .maybeSingle();
+    if (data) return data as IdMapping;
+  }
+
+  return null;
+}
+
 /**
  * Repair a single drift item — revert Discord to desired state.
  */
@@ -45,6 +121,12 @@ export async function repairDriftItem(
       case 'PERMISSION_DRIFT': {
         if (driftItem.entityType === 'role' && driftItem.entityDiscordId) {
           return await repairRole(guild, supabase, driftItem);
+        }
+        if (
+          driftItem.type === 'PERMISSION_DRIFT' &&
+          (driftItem.entityType === 'channel' || driftItem.entityType === 'category')
+        ) {
+          return { success: false, error: `${driftItem.entityType} permission drift repair requires manual review` };
         }
         if ((driftItem.entityType === 'channel' || driftItem.entityType === 'category') && driftItem.entityDiscordId) {
           return await repairChannel(guild, supabase, driftItem);
@@ -422,21 +504,11 @@ async function recreateResource(
   supabase: SupabaseClient,
   driftItem: DriftItem,
 ): Promise<{ success: boolean; error?: string }> {
-  // For missing resources, we need to recreate from desired state
-  // Look up the template key from the old discord ID
-  const { data: mapping } = await supabase
-    .from('discord_id_map')
-    .select('template_key, entity_type')
-    .eq('guild_id', guild.id)
-    .eq('discord_id', driftItem.entityDiscordId ?? '')
-    .maybeSingle();
-
-  if (!mapping) {
-    return { success: false, error: 'No ID mapping found — cannot determine what to recreate' };
-  }
+  const mapping = await findMissingResourceMapping(guild, supabase, driftItem);
+  const entityType = mapping?.entity_type ?? driftItem.entityType;
 
   // Look up desired config from the JSONB array
-  const arrayKey = mapping.entity_type === 'role' ? 'roles' : 'channels';
+  const arrayKey = entityType === 'role' ? 'roles' : 'channels';
   const { data: state } = await supabase
     .from('guild_desired_state')
     .select('roles, channels')
@@ -445,15 +517,24 @@ async function recreateResource(
 
   const stateRecord = state as Record<string, unknown> | null;
   const arr = (stateRecord?.[arrayKey] as Record<string, unknown>[]) ?? [];
-  const config = arr.find(
-    (item) => (item.template_key ?? item.templateKey) === mapping.template_key,
-  );
+  const driftTemplateKey = getDriftTemplateKey(driftItem);
+  const config = arr.find((item) =>
+    configMatchesTemplateKey(item, mapping?.template_key ?? driftTemplateKey, driftItem.entityType),
+  ) ?? arr.find((item) => item.name === driftItem.entityName);
 
   if (!config) {
     return { success: false, error: 'No desired config found for recreating resource' };
   }
 
-  if (mapping.entity_type === 'role') {
+  const templateKey = getCanonicalTemplateKey(
+    mapping?.template_key ?? getConfigTemplateKey(config, driftItem.entityType) ?? driftTemplateKey,
+    entityType,
+  );
+  if (!templateKey) {
+    return { success: false, error: 'No template key found for recreating resource' };
+  }
+
+  if (entityType === 'role') {
     const newRole = await guild.roles.create({
       name: (config.name as string) ?? driftItem.entityName,
       permissions: BigInt((config.permissions as string) ?? '0'),
@@ -466,16 +547,18 @@ async function recreateResource(
     // Update ID map with new Discord ID
     await supabase
       .from('discord_id_map')
-      .update({ discord_id: newRole.id })
-      .eq('guild_id', guild.id)
-      .eq('entity_type', 'role')
-      .eq('template_key', mapping.template_key);
+      .upsert({
+        guild_id: guild.id,
+        entity_type: 'role',
+        template_key: templateKey,
+        discord_id: newRole.id,
+      }, { onConflict: 'guild_id,entity_type,template_key' });
 
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };
   }
 
-  if (mapping.entity_type === 'channel' || mapping.entity_type === 'category') {
+  if (entityType === 'channel' || entityType === 'category') {
     const channelType = (config.type as number) ?? 0;
     const parentId = config.parentId as string | undefined;
 
@@ -503,14 +586,16 @@ async function recreateResource(
 
     await supabase
       .from('discord_id_map')
-      .update({ discord_id: newChannel.id })
-      .eq('guild_id', guild.id)
-      .eq('entity_type', mapping.entity_type)
-      .eq('template_key', mapping.template_key);
+      .upsert({
+        guild_id: guild.id,
+        entity_type: entityType,
+        template_key: templateKey,
+        discord_id: newChannel.id,
+      }, { onConflict: 'guild_id,entity_type,template_key' });
 
     await removeDriftFromDb(supabase, guild.id, driftItem);
     return { success: true };
   }
 
-  return { success: false, error: `Unknown entity type: ${mapping.entity_type}` };
+  return { success: false, error: `Unknown entity type: ${entityType}` };
 }
