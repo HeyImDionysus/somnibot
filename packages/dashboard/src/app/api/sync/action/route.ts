@@ -31,6 +31,13 @@ interface DriftActionRequest {
 
 type QueuedSyncAction = 'repair' | 'accept';
 
+function isPermissionOverwriteDrift(
+  driftItem: DriftActionRequest['driftItem'] | null | undefined,
+): boolean {
+  return driftItem?.type === 'PERMISSION_DRIFT' &&
+    (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
+}
+
 function toBotQueueAction(action: QueuedSyncAction): string {
   return action === 'repair' ? 'sync_repair_drift' : 'sync_accept_drift';
 }
@@ -95,6 +102,16 @@ export async function POST(req: NextRequest) {
   if (!body.driftItem) {
     return NextResponse.json(
       { success: false, error: 'Missing driftItem' },
+      { status: 400 },
+    );
+  }
+
+  if (body.action === 'accept' && isPermissionOverwriteDrift(body.driftItem)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: `${body.driftItem.entityType} permission drift accept requires manual review`,
+      },
       { status: 400 },
     );
   }
