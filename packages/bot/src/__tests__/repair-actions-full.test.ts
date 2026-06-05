@@ -374,7 +374,7 @@ describe('acceptDriftItem', () => {
     expect(supabase.from).toHaveBeenCalledWith('discord_id_map');
   });
 
-  it('rejects channel permission drift accept instead of removing drift without updating overwrites', async () => {
+  it('rejects unstructured channel permission drift accept instead of removing drift without updating overwrites', async () => {
     const guild = makeGuild();
     const supabase = makeSupabase();
     const drift = {
@@ -387,12 +387,128 @@ describe('acceptDriftItem', () => {
     const result = await acceptDriftItem(guild, supabase, drift as any);
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('permission drift accept requires manual review');
+    expect(result.error).toContain('structured permission overwrite details');
     expect(writeAuditLog).not.toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ action: 'drift.accepted' }),
     );
     expect(supabase.from).not.toHaveBeenCalledWith('guild_desired_state');
+  });
+
+  it('accepts structured channel permission drift by updating desired overwrites to Discord reality', async () => {
+    const guild = makeGuild();
+    const overwriteCache = new MockCollection();
+    overwriteCache.set('role-1', {
+      id: 'role-1',
+      allow: { bitfield: 1024n },
+      deny: { bitfield: 8n },
+    });
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: overwriteCache };
+
+    const desiredChain = supaChain({
+      channels: [{
+        key: 'general',
+        name: 'general',
+        overrides: [{ roleKey: 'moderator', allow: '2048', deny: '0' }],
+      }],
+      drift_details: [{
+        type: 'PERMISSION_DRIFT',
+        entityType: 'channel',
+        entityName: 'general → moderator',
+      }],
+    });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return desiredChain;
+        return supaChain();
+      }),
+    } as any;
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → moderator',
+      entityDiscordId: 'ch1',
+      templateKey: 'general',
+      details: {
+        overrideChannelKey: { expected: 'general', actual: 'general' },
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'update', actual: 'update' },
+        allow: { expected: '2048', actual: '1024' },
+        deny: { expected: '0', actual: '8' },
+      },
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(true);
+    expect(desiredChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      channels: [expect.objectContaining({
+        key: 'general',
+        overrides: [expect.objectContaining({
+          roleKey: 'moderator',
+          allow: '1024',
+          deny: '8',
+        })],
+      })],
+    }));
+    expect(writeAuditLog).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: 'drift.accepted',
+        targetType: 'channel',
+        targetId: 'ch1',
+      }),
+    );
+  });
+
+  it('accepts a missing Discord overwrite by removing the desired override', async () => {
+    const guild = makeGuild();
+    guild.channels.cache.get('ch1').permissionOverwrites = { cache: new MockCollection() };
+
+    const desiredChain = supaChain({
+      channels: [{
+        key: 'general',
+        name: 'general',
+        overrides: [{ roleKey: 'moderator', allow: '2048', deny: '0' }],
+      }],
+      drift_details: [{
+        type: 'PERMISSION_DRIFT',
+        entityType: 'channel',
+        entityName: 'general → moderator',
+      }],
+    });
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return desiredChain;
+        return supaChain();
+      }),
+    } as any;
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general → moderator',
+      entityDiscordId: 'ch1',
+      templateKey: 'general',
+      details: {
+        overrideChannelKey: { expected: 'general', actual: 'general' },
+        overrideRoleKey: { expected: 'moderator', actual: 'moderator' },
+        overrideRoleId: { expected: 'role-1', actual: 'role-1' },
+        overrideAction: { expected: 'create', actual: 'create' },
+        allow: { expected: '2048', actual: '0' },
+        deny: { expected: '0', actual: '0' },
+      },
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(true);
+    expect(desiredChain.update).toHaveBeenCalledWith(expect.objectContaining({
+      channels: [expect.objectContaining({
+        key: 'general',
+        overrides: [],
+      })],
+    }));
   });
 });
 

@@ -20,6 +20,19 @@ type IdMapping = {
   entity_type: DriftItem['entityType'];
 };
 
+type PermissionOverwriteIdentity = {
+  channelKey: string;
+  channelDiscordId: string;
+  roleKey: string;
+  roleDiscordId?: string;
+};
+
+type PermissionOverwriteLike = {
+  id?: string;
+  allow?: unknown;
+  deny?: unknown;
+};
+
 function isPermissionOverwriteDrift(driftItem: DriftItem): boolean {
   return driftItem.type === 'PERMISSION_DRIFT' &&
     (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
@@ -65,6 +78,89 @@ function configMatchesTemplateKey(
   if (!configKey) return false;
   const mappingVariants = new Set(templateKeyVariants(mappingKey, entityType));
   return templateKeyVariants(configKey, entityType).some((variant) => mappingVariants.has(variant));
+}
+
+function unprefixedTemplateKey(key: string): string {
+  const trimmed = key.trim();
+  return trimmed.includes(':') ? trimmed.slice(trimmed.indexOf(':') + 1) : trimmed;
+}
+
+function detailString(driftItem: DriftItem, key: string): string | undefined {
+  const detail = driftItem.details?.[key];
+  const actual = detail?.actual;
+  const expected = detail?.expected;
+  if (typeof actual === 'string' && actual.trim()) return actual.trim();
+  if (typeof expected === 'string' && expected.trim()) return expected.trim();
+  return undefined;
+}
+
+function getPermissionOverwriteIdentity(driftItem: DriftItem): PermissionOverwriteIdentity | null {
+  if (!isPermissionOverwriteDrift(driftItem) || driftItem.entityType !== 'channel') return null;
+
+  const channelKey = getDriftTemplateKey(driftItem) ?? detailString(driftItem, 'overrideChannelKey');
+  const channelDiscordId = driftItem.entityDiscordId ?? detailString(driftItem, 'overrideChannelId');
+  const roleKey = detailString(driftItem, 'overrideRoleKey');
+  const roleDiscordId = detailString(driftItem, 'overrideRoleId');
+
+  if (!channelKey || !channelDiscordId || !roleKey) return null;
+
+  return {
+    channelKey,
+    channelDiscordId,
+    roleKey,
+    roleDiscordId,
+  };
+}
+
+function bitfieldString(value: unknown): string | null {
+  if (typeof value === 'bigint' || typeof value === 'number' || typeof value === 'string') {
+    return value.toString();
+  }
+  if (value && typeof value === 'object' && 'bitfield' in value) {
+    const bitfield = (value as { bitfield?: unknown }).bitfield;
+    if (typeof bitfield === 'bigint' || typeof bitfield === 'number' || typeof bitfield === 'string') {
+      return bitfield.toString();
+    }
+  }
+  return null;
+}
+
+function getCurrentOverwrite(
+  channel: unknown,
+  roleDiscordId: string,
+): PermissionOverwriteLike | null {
+  const permissionOverwrites = (channel as {
+    permissionOverwrites?: {
+      cache?: {
+        get?: (id: string) => unknown;
+        find?: (fn: (value: PermissionOverwriteLike) => boolean) => unknown;
+        values?: () => IterableIterator<unknown>;
+      };
+    };
+  }).permissionOverwrites;
+
+  const cache = permissionOverwrites?.cache;
+  const direct = cache?.get?.(roleDiscordId);
+  if (direct) return direct as PermissionOverwriteLike;
+
+  const found = cache?.find?.((overwrite) => overwrite.id === roleDiscordId);
+  if (found) return found as PermissionOverwriteLike;
+
+  if (cache?.values) {
+    for (const value of cache.values()) {
+      const overwrite = value as PermissionOverwriteLike;
+      if (overwrite.id === roleDiscordId) return overwrite;
+    }
+  }
+
+  return null;
+}
+
+function desiredOverrideMatchesRole(override: Record<string, unknown>, roleKey: string): boolean {
+  const raw = override.roleKey ?? override.role_key ?? override.templateKey ?? override.template_key;
+  if (typeof raw !== 'string' || !raw.trim()) return false;
+  const roleVariants = new Set(templateKeyVariants(roleKey, 'role'));
+  return templateKeyVariants(raw, 'role').some((variant) => roleVariants.has(variant));
 }
 
 async function findMissingResourceMapping(
@@ -184,7 +280,7 @@ export async function acceptDriftItem(
 ): Promise<{ success: boolean; error?: string }> {
   try {
     if (isPermissionOverwriteDrift(driftItem)) {
-      return { success: false, error: `${driftItem.entityType} permission drift accept requires manual review` };
+      return await acceptPermissionOverwriteDrift(guild, supabase, driftItem);
     }
 
     if (driftItem.entityType === 'everyone') {
@@ -307,6 +403,108 @@ export async function acceptDriftItem(
     const message = err instanceof Error ? err.message : String(err);
     return { success: false, error: message };
   }
+}
+
+async function acceptPermissionOverwriteDrift(
+  guild: Guild,
+  supabase: SupabaseClient,
+  driftItem: DriftItem,
+): Promise<{ success: boolean; error?: string }> {
+  const identity = getPermissionOverwriteIdentity(driftItem);
+  if (!identity) {
+    return {
+      success: false,
+      error: `${driftItem.entityType} permission drift accept requires structured permission overwrite details`,
+    };
+  }
+
+  const channel = guild.channels.cache.get(identity.channelDiscordId);
+  if (!channel) return { success: false, error: 'Channel not found in cache' };
+
+  const roleKey = unprefixedTemplateKey(identity.roleKey);
+  const roleDiscordId = identity.roleDiscordId ?? (roleKey === 'everyone' ? guild.id : undefined);
+  if (!roleDiscordId) {
+    return { success: false, error: 'Permission overwrite accept requires role Discord ID' };
+  }
+
+  const { data: state } = await supabase
+    .from('guild_desired_state')
+    .select('channels')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  const channelsArr = (state?.channels as Record<string, unknown>[]) ?? [];
+  const channelIdx = channelsArr.findIndex((config) =>
+    configMatchesTemplateKey(config, identity.channelKey, 'channel')
+  );
+
+  if (channelIdx < 0) {
+    return { success: false, error: 'No desired config found for this channel permission overwrite' };
+  }
+
+  const nextChannels = channelsArr.map((config, idx) =>
+    idx === channelIdx ? { ...config } : config,
+  );
+  const channelConfig = nextChannels[channelIdx];
+  const currentOverrides = Array.isArray(channelConfig.overrides)
+    ? [...(channelConfig.overrides as Record<string, unknown>[])]
+    : [];
+  const overwriteIdx = currentOverrides.findIndex((override) =>
+    desiredOverrideMatchesRole(override, identity.roleKey)
+  );
+
+  const currentOverwrite = getCurrentOverwrite(channel, roleDiscordId);
+  let nextOverrides: Record<string, unknown>[];
+
+  if (currentOverwrite) {
+    const allow = bitfieldString(currentOverwrite.allow);
+    const deny = bitfieldString(currentOverwrite.deny);
+    if (allow === null || deny === null) {
+      return { success: false, error: 'Current permission overwrite has unreadable allow/deny bitfields' };
+    }
+
+    const acceptedOverride = {
+      ...(overwriteIdx >= 0 ? currentOverrides[overwriteIdx] : {}),
+      roleKey,
+      allow,
+      deny,
+    };
+
+    nextOverrides = [...currentOverrides];
+    if (overwriteIdx >= 0) nextOverrides[overwriteIdx] = acceptedOverride;
+    else nextOverrides.push(acceptedOverride);
+  } else {
+    nextOverrides = currentOverrides.filter((override) =>
+      !desiredOverrideMatchesRole(override, identity.roleKey)
+    );
+  }
+
+  channelConfig.overrides = nextOverrides;
+
+  await supabase
+    .from('guild_desired_state')
+    .update({ channels: nextChannels })
+    .eq('guild_id', guild.id);
+
+  await removeDriftFromDb(supabase, guild.id, driftItem);
+
+  await writeAuditLog(supabase, {
+    guildId: guild.id,
+    actorType: 'bot',
+    actorId: 'sync-engine',
+    action: 'drift.accepted',
+    targetType: 'channel',
+    targetId: identity.channelDiscordId,
+    details: {
+      entityName: driftItem.entityName,
+      driftType: driftItem.type,
+      channelKey: identity.channelKey,
+      roleKey,
+      roleDiscordId,
+    },
+  });
+
+  return { success: true };
 }
 
 /**

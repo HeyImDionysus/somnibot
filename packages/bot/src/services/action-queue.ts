@@ -832,6 +832,28 @@ function isPermissionOverwriteDrift(driftItem: DriftItem): boolean {
     (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
 }
 
+function stringDetail(driftItem: DriftItem, key: string): string | undefined {
+  const detail = driftItem.details?.[key];
+  const actual = detail?.actual;
+  const expected = detail?.expected;
+  if (typeof actual === 'string' && actual.trim()) return actual.trim();
+  if (typeof expected === 'string' && expected.trim()) return expected.trim();
+  return undefined;
+}
+
+function hasStructuredPermissionOverwriteDetails(driftItem: DriftItem): boolean {
+  if (driftItem.entityType !== 'channel') return false;
+  const channelKey = driftItem.templateKey ?? stringDetail(driftItem, 'overrideChannelKey');
+  const roleKey = stringDetail(driftItem, 'overrideRoleKey');
+  const roleId = stringDetail(driftItem, 'overrideRoleId');
+  return Boolean(
+    driftItem.entityDiscordId &&
+    channelKey &&
+    roleKey &&
+    (roleId || roleKey === 'everyone'),
+  );
+}
+
 async function handleSyncRepairDrift(
   guild: Guild,
   supabase: SupabaseClient,
@@ -859,10 +881,10 @@ async function handleSyncAcceptDrift(
 ): Promise<ActionResult> {
   const driftItem = getQueuedDriftItem(payload);
   if (!driftItem) return { success: false, error: 'Missing required driftItem' };
-  if (isPermissionOverwriteDrift(driftItem)) {
+  if (isPermissionOverwriteDrift(driftItem) && !hasStructuredPermissionOverwriteDetails(driftItem)) {
     return {
       success: false,
-      error: `${driftItem.entityType} permission drift accept requires manual review`,
+      error: `${driftItem.entityType} permission drift accept requires structured permission overwrite details`,
       retryable: false,
     };
   }
