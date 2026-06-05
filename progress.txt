@@ -1,0 +1,61 @@
+2026-06-05 - workspace-8an - Dashboard active-guild RBAC scoping
+
+Fixed dashboard authorization so API routes honor the requested active guild only when the authenticated user can access it. Previously, multi-guild users could select one guild while RBAC-backed routes silently fell back to another owned or assigned guild.
+
+Changed:
+- packages/dashboard/src/lib/rbac.ts
+- packages/dashboard/src/lib/api/require-owner.ts
+- packages/dashboard/src/app/api/guilds/route.ts
+- packages/dashboard/src/__tests__/rbac.test.ts
+- packages/dashboard/src/__tests__/rbac-auth.test.ts
+- packages/dashboard/src/__tests__/guilds-route.test.ts
+
+Proof:
+- Red regression before fix: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/rbac.test.ts` failed because active_guild_id was ignored and inaccessible requested guilds were not rejected.
+- Focused regression suite passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/rbac.test.ts src/__tests__/rbac-auth.test.ts src/__tests__/guilds-route.test.ts` -> 3 files passed, 43 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing warnings in unrelated files.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 32 files passed, 270 tests passed.
+
+Known environment note:
+- Root Turbo `type-check` is blocked in this sandbox because Turbo cannot find a plain `pnpm` binary on PATH. Direct `corepack pnpm --filter ...` package checks work.
+
+2026-06-05 - workspace-yw1.7.1 - Dashboard sync repair action consumer
+
+Fixed the dashboard-to-bot bridge for manual sync drift actions. Previously `/api/sync/action` inserted `repair` and best-effort `accept` rows into `sync_actions`, but the bot only listens to `bot_action_queue`, so manual repair could sit unprocessed and manual accept could remove drift without updating desired state from Discord. The route now queues `repair` and `accept` into `bot_action_queue`, and the bot action queue routes those actions to the existing sync repair functions.
+
+Changed:
+- packages/dashboard/src/app/api/sync/action/route.ts
+- packages/dashboard/src/__tests__/sync-action-route.test.ts
+- packages/bot/src/services/action-queue.ts
+- packages/bot/src/__tests__/action-queue-routing.test.ts
+
+Proof:
+- Red regression before fix: dashboard sync-action route tests failed because repair returned 200 from the old `sync_actions` path, and accept tried to mutate `guild_desired_state` directly.
+- Red regression before fix: bot action-queue routing tests failed because `sync_repair_drift` and `sync_accept_drift` did not call the existing repair functions.
+- Focused route test passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/sync-action-route.test.ts` -> 1 file passed, 2 tests passed.
+- Focused bot queue test passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts` -> 1 file passed, 30 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 33 files passed, 272 tests passed.
+- Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,582 tests passed.
+
+2026-06-05 - workspace-yw1.7.2 - Deploy listener multi-guild scoping
+
+Fixed the bot deploy listener so dashboard deploy requests are not limited to the primary configured guild. Previously the Realtime subscription filtered `guild_desired_state` updates to `client.guildId`, and event-bus deploy requests queried that same primary guild. In a multi-guild install, a deploy requested from the dashboard for a non-primary active guild could remain pending because the bot never picked it up.
+
+Changed:
+- packages/bot/src/deploy/deploy-listener.ts
+- packages/bot/src/__tests__/deploy-listener-coverage.test.ts
+
+Proof:
+- Red regression before fix: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/deploy-listener-coverage.test.ts` failed because the listener subscribed with `filter: guild_id=eq.g1`, realtime deploy used guild `g1` for a `g2` row, and event-bus deploy queried `g1` instead of `g2`.
+- Focused listener suite passed after fix: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/deploy-listener-coverage.test.ts` -> 1 file passed, 20 tests passed.
+- Legacy listener suite passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/deploy-listener.test.ts` -> 1 file passed, 3 tests passed.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Full bot suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,589 tests passed.
+- `git diff --check` passed.
+
+Known environment note:
+- Full bot tests still emit pre-existing `MaxListenersExceededWarning` process-listener warnings in several test files. This task did not introduce those warnings.

@@ -26,6 +26,7 @@ const log = createLogger('DeployListener');
 // ============================================================
 
 interface DeployStatus {
+  guildId: string;
   deployId: string;
   status: 'pending' | 'running' | 'success' | 'failed';
   currentStep: number;
@@ -36,10 +37,13 @@ interface DeployStatus {
   result?: DeployResult;
 }
 
-let currentDeploy: DeployStatus | null = null;
+const deployStatuses = new Map<string, DeployStatus>();
+let latestDeployGuildId: string | null = null;
 
-export function getDeployStatus(): DeployStatus | null {
-  return currentDeploy;
+export function getDeployStatus(guildId?: string): DeployStatus | null {
+  if (guildId) return deployStatuses.get(guildId) ?? null;
+  if (latestDeployGuildId) return deployStatuses.get(latestDeployGuildId) ?? null;
+  return null;
 }
 
 // ============================================================
@@ -50,9 +54,9 @@ export function getDeployStatus(): DeployStatus | null {
  * Start listening for deploy requests on the guild_desired_state table.
  */
 export function startDeployListener(client: SomniClient): void {
-  const guildId = client.guildId;
+  const primaryGuildId = client.guildId;
 
-  log.info('Starting deploy listener for guild:', guildId);
+  log.info('Starting deploy listener for all guilds', { primaryGuildId });
 
   // Subscribe to changes on guild_desired_state
   client.supabase
@@ -63,10 +67,10 @@ export function startDeployListener(client: SomniClient): void {
         event: 'UPDATE',
         schema: 'public',
         table: 'guild_desired_state',
-        filter: `guild_id=eq.${guildId}`,
       },
       async (payload) => {
         const newState = payload.new as Record<string, unknown>;
+        const guildId = getGuildIdFromRow(newState, primaryGuildId);
 
         // Deploy is requested when applied_at is cleared and there's data
         if (
@@ -75,8 +79,8 @@ export function startDeployListener(client: SomniClient): void {
           Array.isArray(newState.roles) &&
           newState.roles.length > 0
         ) {
-          log.info('Detected deploy request via Realtime');
-          await executeDeploy(client, newState);
+          log.info('Detected deploy request via Realtime', { guildId });
+          await executeDeploy(client, newState, guildId);
         }
       },
     )
@@ -86,7 +90,9 @@ export function startDeployListener(client: SomniClient): void {
 
   // Also listen via event bus for direct deploy requests (API / tests)
   client.eventBus.on('deploy.requested', async (event) => {
-    log.info('Received deploy request via event bus');
+    const guildId = event.guildId || primaryGuildId;
+
+    log.info('Received deploy request via event bus', { guildId });
     // For event-bus triggered deploys, fetch the desired state from Supabase
     const { data: stateRow } = await client.supabase
       .from('guild_desired_state')
@@ -95,7 +101,7 @@ export function startDeployListener(client: SomniClient): void {
       .single();
 
     if (stateRow) {
-      await executeDeploy(client, stateRow as Record<string, unknown>);
+      await executeDeploy(client, stateRow as Record<string, unknown>, guildId);
     } else {
       log.error('No desired state found for guild:', guildId);
     }
@@ -140,15 +146,23 @@ function parseDesiredState(row: Record<string, unknown>): DesiredState {
   };
 }
 
+function getGuildIdFromRow(row: Record<string, unknown>, fallbackGuildId: string): string {
+  return typeof row.guild_id === 'string' && row.guild_id.length > 0
+    ? row.guild_id
+    : fallbackGuildId;
+}
+
 /**
  * Execute a deployment from a Supabase Realtime payload.
  */
 async function executeDeploy(
   client: SomniClient,
   stateRow: Record<string, unknown>,
+  requestedGuildId?: string,
 ): Promise<void> {
+  const guildId = getGuildIdFromRow(stateRow, requestedGuildId ?? client.guildId);
   const desiredState = parseDesiredState(stateRow);
-  await executeDeployDirect(client, desiredState);
+  await executeDeployDirect(client, desiredState, guildId);
 }
 
 /**
@@ -157,14 +171,15 @@ async function executeDeploy(
 async function executeDeployDirect(
   client: SomniClient,
   desiredState: DesiredState,
+  guildId: string,
   optionOverrides?: Partial<DeployOptions>,
 ): Promise<void> {
-  if (currentDeploy?.status === 'running') {
-    log.warn('Deployment already in progress — ignoring');
+  const existingDeploy = deployStatuses.get(guildId);
+  if (existingDeploy?.status === 'running') {
+    log.warn('Deployment already in progress for guild — ignoring', { guildId });
     return;
   }
 
-  const guildId = client.guildId;
   const deployId = `deploy_${Date.now()}`;
   const guild = client.guilds.cache.get(guildId);
 
@@ -173,7 +188,8 @@ async function executeDeployDirect(
     return;
   }
 
-  currentDeploy = {
+  const deployStatus: DeployStatus = {
+    guildId,
     deployId,
     status: 'running',
     currentStep: 0,
@@ -181,6 +197,8 @@ async function executeDeployDirect(
     currentAction: 'Initializing...',
     startedAt: new Date().toISOString(),
   };
+  deployStatuses.set(guildId, deployStatus);
+  latestDeployGuildId = guildId;
 
   // Audit: deploy started
   await writeAuditLog(client.supabase, {
@@ -200,10 +218,11 @@ async function executeDeployDirect(
     cleanExisting: true,
     dryRun: false,
     onProgress: (step, total, action) => {
-      if (currentDeploy) {
-        currentDeploy.currentStep = step;
-        currentDeploy.totalSteps = total;
-        currentDeploy.currentAction = action;
+      const activeStatus = deployStatuses.get(guildId);
+      if (activeStatus?.deployId === deployId) {
+        activeStatus.currentStep = step;
+        activeStatus.totalSteps = total;
+        activeStatus.currentAction = action;
       }
       log.info(`[${step}/${total}] ${action}`);
     },
@@ -219,9 +238,9 @@ async function executeDeployDirect(
       options,
     );
 
-    currentDeploy.status = result.success ? 'success' : 'failed';
-    currentDeploy.completedAt = new Date().toISOString();
-    currentDeploy.result = result;
+    deployStatus.status = result.success ? 'success' : 'failed';
+    deployStatus.completedAt = new Date().toISOString();
+    deployStatus.result = result;
 
     // Store ID mappings in discord_id_map
     if (result.idMappings.length > 0) {
@@ -329,9 +348,9 @@ async function executeDeployDirect(
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error('Fatal deployment error:', errMsg);
 
-    currentDeploy.status = 'failed';
-    currentDeploy.completedAt = new Date().toISOString();
-    currentDeploy.currentAction = `Fatal error: ${errMsg}`;
+    deployStatus.status = 'failed';
+    deployStatus.completedAt = new Date().toISOString();
+    deployStatus.currentAction = `Fatal error: ${errMsg}`;
 
     await writeAuditLog(client.supabase, {
       guildId: guildId,

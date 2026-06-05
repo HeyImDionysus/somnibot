@@ -56,9 +56,17 @@ function chainBuilder(resolveValue: Record<string, unknown> = { data: null, erro
   return chain;
 }
 
+function makeGuild(id: string) {
+  return { id, name: `Guild ${id}` };
+}
+
 function makeClient() {
   let realtimeCallback: ((payload: Record<string, unknown>) => Promise<void>) | null = null;
   let eventBusListeners: Record<string, Function[]> = {};
+  const guilds = new Map([
+    ['g1', makeGuild('g1')],
+    ['g2', makeGuild('g2')],
+  ]);
 
   const channelObj = {
     on: vi.fn().mockImplementation((_event: string, _filter: unknown, cb: Function) => {
@@ -72,7 +80,7 @@ function makeClient() {
     guildId: 'g1',
     guilds: {
       cache: {
-        get: vi.fn().mockReturnValue({ id: 'g1', name: 'TestGuild' }),
+        get: vi.fn((guildId: string) => guilds.get(guildId)),
       },
     },
     supabase: {
@@ -87,9 +95,9 @@ function makeClient() {
       emit: vi.fn(),
     },
     _realtimeCallback: () => realtimeCallback,
-    _fireEvent: async (event: string, data?: unknown) => {
+    _fireEvent: async (event: string, data?: unknown, guildId = 'g1') => {
       for (const cb of eventBusListeners[event] || []) {
-        await cb(data);
+        await cb({ type: event, guildId, timestamp: Date.now(), data: data ?? {} });
       }
     },
     _channelObj: channelObj,
@@ -115,6 +123,22 @@ describe('startDeployListener', () => {
     startDeployListener(client as any);
     expect(client.supabase.channel).toHaveBeenCalledWith('deploy-listener');
     expect(client._channelObj.subscribe).toHaveBeenCalled();
+  });
+
+  it('subscribes to all guild desired-state updates', () => {
+    const client = makeClient();
+    startDeployListener(client as any);
+
+    expect(client._channelObj.on).toHaveBeenCalledWith(
+      'postgres_changes',
+      expect.objectContaining({
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'guild_desired_state',
+      }),
+      expect.any(Function),
+    );
+    expect(client._channelObj.on.mock.calls[0][1]).not.toHaveProperty('filter');
   });
 
   it('registers event bus listener for deploy.requested', () => {
@@ -144,6 +168,30 @@ describe('startDeployListener', () => {
     expect(mockWriteAuditLog).toHaveBeenCalled();
   });
 
+  it('handles realtime deploy trigger for a non-primary guild', async () => {
+    const client = makeClient();
+    startDeployListener(client as any);
+
+    const cb = client._realtimeCallback();
+    await cb!({
+      new: {
+        guild_id: 'g2',
+        applied_at: null,
+        roles: [{ name: 'Admin', permissions: '8' }],
+        channels: [{ name: 'general', type: 'text' }],
+      },
+    });
+
+    expect(client.guilds.cache.get).toHaveBeenCalledWith('g2');
+    expect(mockDeployServerState).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'g2' }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(getDeployStatus('g2')).toEqual(expect.objectContaining({ guildId: 'g2' }));
+  });
+
   it('ignores realtime updates when applied_at is set', async () => {
     const client = makeClient();
     startDeployListener(client as any);
@@ -167,19 +215,25 @@ describe('startDeployListener', () => {
 
   it('handles event bus deploy.requested', async () => {
     const client = makeClient();
-    client.supabase.from.mockReturnValue(
-      chainBuilder({
-        data: {
-          roles: [{ name: 'Mod', permissions: '0' }],
-          channels: [],
-        },
-        error: null,
-      }),
-    );
+    const desiredStateQuery = chainBuilder({
+      data: {
+        guild_id: 'g2',
+        roles: [{ name: 'Mod', permissions: '0' }],
+        channels: [],
+      },
+      error: null,
+    });
+    client.supabase.from.mockReturnValue(desiredStateQuery);
     startDeployListener(client as any);
 
-    await client._fireEvent('deploy.requested', {});
-    expect(mockDeployServerState).toHaveBeenCalled();
+    await client._fireEvent('deploy.requested', {}, 'g2');
+    expect(desiredStateQuery.eq).toHaveBeenCalledWith('guild_id', 'g2');
+    expect(mockDeployServerState).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'g2' }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('handles event bus deploy when no state found', async () => {
