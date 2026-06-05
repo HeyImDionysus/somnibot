@@ -96,4 +96,27 @@ describe('POST /api/sync/action', () => {
       status: 'pending',
     });
   });
+
+  it('rejects channel permission drift accept instead of queuing false success', async () => {
+    const { supabase, inserted } = makeSupabase();
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(makeRequest({
+      action: 'accept',
+      driftItem: {
+        entityType: 'channel',
+        entityName: 'general -> moderator',
+        entityDiscordId: 'channel-1',
+        type: 'PERMISSION_DRIFT',
+        details: { overwrite: { expected: '2048', actual: '1024' } },
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('manual review');
+    expect(supabase.from).not.toHaveBeenCalledWith('bot_action_queue');
+    expect(inserted).toHaveLength(0);
+  });
 });

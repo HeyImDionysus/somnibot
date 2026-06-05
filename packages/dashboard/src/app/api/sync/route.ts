@@ -29,6 +29,15 @@ const syncDriftAction = z.object({
 
 const syncAction = z.discriminatedUnion('action', [syncConfigAction, syncDriftAction]);
 
+function isPermissionOverwriteDrift(input: {
+  action?: string;
+  entityType?: string | null;
+  driftType?: string | null;
+}) {
+  return input.action === 'accept'
+    && input.driftType === 'PERMISSION_DRIFT'
+    && (input.entityType === 'channel' || input.entityType === 'category');
+}
 
 export async function GET() {
   const auth = await requireGuildOwner();
@@ -106,6 +115,16 @@ export async function POST(request: NextRequest) {
   }
 
   if (body.action === 'repair' || body.action === 'accept' || body.action === 'ignore') {
+    if (isPermissionOverwriteDrift(body)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Channel/category permission drift accept requires manual review',
+        },
+        { status: 400 },
+      );
+    }
+
     // Log the action — the bot picks it up and executes
     await admin.from('audit_logs').insert({
       guild_id: guildId,

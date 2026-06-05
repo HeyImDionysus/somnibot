@@ -373,6 +373,27 @@ describe('acceptDriftItem', () => {
     expect(result.success).toBe(true);
     expect(supabase.from).toHaveBeenCalledWith('discord_id_map');
   });
+
+  it('rejects channel permission drift accept instead of removing drift without updating overwrites', async () => {
+    const guild = makeGuild();
+    const supabase = makeSupabase();
+    const drift = {
+      type: 'PERMISSION_DRIFT' as const,
+      entityType: 'channel' as const,
+      entityName: 'general -> Moderator',
+      entityDiscordId: 'ch1',
+    };
+
+    const result = await acceptDriftItem(guild, supabase, drift as any);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('permission drift accept requires manual review');
+    expect(writeAuditLog).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'drift.accepted' }),
+    );
+    expect(supabase.from).not.toHaveBeenCalledWith('guild_desired_state');
+  });
 });
 
 describe('repairDriftItem — error handling', () => {

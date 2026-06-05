@@ -827,6 +827,11 @@ function getQueuedDriftItem(payload: Record<string, unknown>): DriftItem | null 
   return driftItem as DriftItem;
 }
 
+function isPermissionOverwriteDrift(driftItem: DriftItem): boolean {
+  return driftItem.type === 'PERMISSION_DRIFT' &&
+    (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
+}
+
 async function handleSyncRepairDrift(
   guild: Guild,
   supabase: SupabaseClient,
@@ -854,6 +859,13 @@ async function handleSyncAcceptDrift(
 ): Promise<ActionResult> {
   const driftItem = getQueuedDriftItem(payload);
   if (!driftItem) return { success: false, error: 'Missing required driftItem' };
+  if (isPermissionOverwriteDrift(driftItem)) {
+    return {
+      success: false,
+      error: `${driftItem.entityType} permission drift accept requires manual review`,
+      retryable: false,
+    };
+  }
   return acceptDriftItem(guild, supabase, driftItem);
 }
 

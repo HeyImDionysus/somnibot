@@ -57,6 +57,7 @@ function makeSupa(pendingActions: any[] = []) {
   // Track sequential calls to .from('bot_action_queue') to differentiate
   // the recover RPC, the pending query, and the status updates
   let pendingReturned = false;
+  const queueUpdates: Record<string, unknown>[] = [];
 
   const makeChain = (data: any = null) => {
     const chain: any = {};
@@ -89,7 +90,10 @@ function makeSupa(pendingActions: any[] = []) {
           };
           return inner;
         });
-        chain.update = vi.fn(() => chain);
+        chain.update = vi.fn((row: Record<string, unknown>) => {
+          queueUpdates.push(row);
+          return chain;
+        });
         return chain;
       }
       if (table === 'guild_config') {
@@ -114,6 +118,7 @@ function makeSupa(pendingActions: any[] = []) {
       subscribe: vi.fn((cb: Function) => { cb?.('SUBSCRIBED'); return 'subscribed'; }),
     })),
   };
+  supa.__queueUpdates = queueUpdates;
   return supa;
 }
 
@@ -539,6 +544,30 @@ describe('action-queue deep routing', () => {
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
     expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
+  });
+
+  it('rejects queued channel permission drift accept instead of reporting false success', async () => {
+    vi.mocked(acceptDriftItem).mockClear();
+    const driftItem = {
+      entityType: 'channel',
+      entityName: 'general -> Moderator',
+      entityDiscordId: 'ch-1',
+      type: 'PERMISSION_DRIFT',
+    };
+    const actions = [{
+      id: 'act-sync-accept-channel-perms', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+
+    expect(acceptDriftItem).not.toHaveBeenCalledWith(guild, supa, driftItem);
+    expect(supa.__queueUpdates).toContainEqual(expect.objectContaining({
+      status: 'failed',
+      error_message: expect.stringContaining('permission drift accept requires manual review'),
+    }));
   });
 
   it('processes market_item_reconcile action', async () => {

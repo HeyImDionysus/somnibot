@@ -10,8 +10,8 @@
 import { ChannelType, type Guild, type GuildChannelTypes } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DriftItem } from '@somnibot/shared';
-import { writeAuditLog } from '../services/audit.js';
 import { createLogger } from '@somnibot/shared';
+import { writeAuditLog } from '../services/audit.js';
 
 const log = createLogger('RepairActions');
 
@@ -19,6 +19,11 @@ type IdMapping = {
   template_key: string;
   entity_type: DriftItem['entityType'];
 };
+
+function isPermissionOverwriteDrift(driftItem: DriftItem): boolean {
+  return driftItem.type === 'PERMISSION_DRIFT' &&
+    (driftItem.entityType === 'channel' || driftItem.entityType === 'category');
+}
 
 function getDriftTemplateKey(driftItem: DriftItem): string | undefined {
   const raw = (driftItem as DriftItem & { templateKey?: unknown; template_key?: unknown }).templateKey
@@ -178,6 +183,10 @@ export async function acceptDriftItem(
   driftItem: DriftItem,
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    if (isPermissionOverwriteDrift(driftItem)) {
+      return { success: false, error: `${driftItem.entityType} permission drift accept requires manual review` };
+    }
+
     if (driftItem.entityType === 'everyone') {
       // Don't allow accepting @everyone drift — it's always supposed to be 0
       return { success: false, error: '@everyone drift cannot be accepted — it must always be 0' };
