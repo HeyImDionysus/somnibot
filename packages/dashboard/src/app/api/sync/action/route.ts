@@ -1,9 +1,9 @@
 /**
  * /api/sync/action — POST repair/accept/ignore actions on drift items.
  *
- * The dashboard sends the action + drift item. For actions that require
- * Discord API calls (repair, delete), the bot picks them up via Supabase
- * Realtime. For accept/ignore, we update Supabase directly.
+ * The dashboard sends the action + drift item. Actions that require
+ * Discord state/API calls are queued in bot_action_queue for the bot.
+ * Ignore/clear_all can update Supabase directly.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -21,6 +21,31 @@ interface DriftActionRequest {
     entityDiscordId?: string;
     type: string;
   };
+}
+
+type QueuedSyncAction = 'repair' | 'accept';
+
+function toBotQueueAction(action: QueuedSyncAction): string {
+  return action === 'repair' ? 'sync_repair_drift' : 'sync_accept_drift';
+}
+
+async function queueBotSyncAction(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  action: QueuedSyncAction,
+  driftItem: NonNullable<DriftActionRequest['driftItem']>,
+) {
+  return supabase
+    .from('bot_action_queue')
+    .insert({
+      guild_id: guildId,
+      action: toBotQueueAction(action),
+      payload: { driftItem },
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single();
 }
 
 export async function POST(req: NextRequest) {
@@ -96,66 +121,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true });
   }
 
-  // For 'accept' — clear from drift list directly, then optionally queue for bot
+  // For 'accept' — queue for the bot so desired state can be updated from Discord.
   if (body.action === 'accept') {
-    const { data: current } = await supabase
-      .from('guild_desired_state')
-      .select('drift_details')
-      .eq('guild_id', guildId)
-      .maybeSingle();
+    const { data, error } = await queueBotSyncAction(supabase, guildId, body.action, body.driftItem);
+    if (error) return dbError(error, 'sync/action');
 
-    const items = Array.isArray(current?.drift_details) ? current.drift_details : [];
-    const filtered = items.filter(
-      (i: Record<string, unknown>) =>
-        !(
-          i.entityType === body.driftItem!.entityType &&
-          i.entityName === body.driftItem!.entityName
-        ),
+    return NextResponse.json(
+      { success: true, actionId: data?.id ?? null, message: 'Accept action queued for bot execution' },
+      { status: 202 },
     );
-
-    await supabase
-      .from('guild_desired_state')
-      .update({
-        drift_detected: filtered.length > 0,
-        drift_details: filtered,
-      })
-      .eq('guild_id', guildId);
-
-    // Also queue for bot to update its id_map (best-effort)
-    await supabase.from('sync_actions').insert({
-      guild_id: guildId,
-      action_type: body.action,
-      action: body.action,
-      target_type: body.driftItem?.entityType ?? 'unknown',
-      target_id: body.driftItem?.entityDiscordId ?? null,
-      details: body.driftItem,
-      drift_item: body.driftItem,
-      status: 'pending',
-      created_at: new Date().toISOString(),
-    }).then(() => {}, () => {}); // Ignore insert errors
-
-    return NextResponse.json({ success: true });
   }
 
-  // For 'repair' — queue action for the bot to execute via Realtime
-  const { error } = await supabase.from('sync_actions').insert({
-    guild_id: guildId,
-    action_type: body.action,
-    action: body.action,
-    target_type: body.driftItem?.entityType ?? 'unknown',
-    target_id: body.driftItem?.entityDiscordId ?? null,
-    details: body.driftItem,
-    drift_item: body.driftItem,
-    status: 'pending',
-    created_at: new Date().toISOString(),
-  });
+  // For 'repair' — queue action for the bot to execute through its durable queue.
+  const { data, error } = await queueBotSyncAction(supabase, guildId, body.action, body.driftItem);
+  if (error) return dbError(error, 'sync/action');
 
-  if (error) {
-    return NextResponse.json({
-      success: false,
-      error: 'Repair requires the bot to be running. The bot will auto-repair on next sync cycle.',
-    }, { status: 503 });
-  }
-
-  return NextResponse.json({ success: true, message: 'Repair action queued for bot execution' });
+  return NextResponse.json(
+    { success: true, actionId: data?.id ?? null, message: 'Repair action queued for bot execution' },
+    { status: 202 },
+  );
 }

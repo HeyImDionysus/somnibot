@@ -11,10 +11,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────
 
-const { mockGetUser, mockAdminFrom } = vi.hoisted(() => {
+const { mockGetUser, mockAdminFrom, mockCookieGet, mockHeaderGet } = vi.hoisted(() => {
   const mockGetUser = vi.fn();
   const mockAdminFrom = vi.fn();
-  return { mockGetUser, mockAdminFrom };
+  const mockCookieGet = vi.fn();
+  const mockHeaderGet = vi.fn();
+  return { mockGetUser, mockAdminFrom, mockCookieGet, mockHeaderGet };
 });
 
 vi.mock('@/lib/supabase/server', () => ({
@@ -29,8 +31,19 @@ vi.mock('@/lib/supabase/admin', () => ({
   }),
 }));
 
+vi.mock('next/headers', () => ({
+  cookies: vi.fn().mockResolvedValue({
+    get: mockCookieGet,
+  }),
+  headers: vi.fn().mockResolvedValue({
+    get: mockHeaderGet,
+  }),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCookieGet.mockReturnValue(undefined);
+  mockHeaderGet.mockReturnValue(null);
 });
 
 // ── Helper to build chainable Supabase query mock ──────────
@@ -43,6 +56,21 @@ function chainMock(resolvedData: unknown) {
   chain.limit = vi.fn().mockReturnValue(chain);
   chain.single = vi.fn().mockResolvedValue(resolvedData);
   chain.maybeSingle = vi.fn().mockResolvedValue(resolvedData);
+  chain.then = (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
+    Promise.resolve(resolvedData).then(resolve, reject);
+  return chain;
+}
+
+function supabaseListMock(listData: unknown[], singleData: unknown = listData[0] ?? null) {
+  const chain: Record<string, ReturnType<typeof vi.fn> | unknown> = {};
+  chain.select = vi.fn().mockReturnValue(chain);
+  chain.eq = vi.fn().mockReturnValue(chain);
+  chain.in = vi.fn().mockReturnValue(chain);
+  chain.limit = vi.fn().mockReturnValue(chain);
+  chain.single = vi.fn().mockResolvedValue({ data: singleData });
+  chain.maybeSingle = vi.fn().mockResolvedValue({ data: singleData });
+  chain.then = (resolve: (value: { data: unknown[]; error: null }) => unknown, reject?: (reason: unknown) => unknown) =>
+    Promise.resolve({ data: listData, error: null }).then(resolve, reject);
   return chain;
 }
 
@@ -140,6 +168,59 @@ describe('getAuthContext', () => {
     expect(ctx!.permissions).toContain('dashboard.full_access');
     expect(ctx!.discordId).toBe('discord_owner');
     expect(ctx!.guildId).toBe('guild_1');
+  });
+
+  it('uses active_guild_id cookie when owner has multiple guilds', async () => {
+    mockGetUser.mockResolvedValue({
+      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      error: null,
+    });
+    mockCookieGet.mockImplementation((name: string) =>
+      name === 'active_guild_id' ? { value: 'guild_2' } : undefined,
+    );
+
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === 'guild') {
+        return supabaseListMock([
+          { id: 'guild_1', owner_discord_id: 'discord_owner' },
+          { id: 'guild_2', owner_discord_id: 'discord_owner' },
+        ]);
+      }
+      return supabaseListMock([]);
+    });
+
+    const { getAuthContext } = await import('@/lib/rbac');
+    const ctx = await getAuthContext();
+
+    expect(ctx).not.toBeNull();
+    expect(ctx!.isOwner).toBe(true);
+    expect(ctx!.guildId).toBe('guild_2');
+  });
+
+  it('denies an inaccessible requested guild instead of falling back', async () => {
+    mockGetUser.mockResolvedValue({
+      data: { user: { id: 'u1', user_metadata: { provider_id: 'discord_owner' } } },
+      error: null,
+    });
+    mockHeaderGet.mockImplementation((name: string) =>
+      name === 'x-guild-id' ? 'guild_other' : null,
+    );
+
+    mockAdminFrom.mockImplementation((table: string) => {
+      if (table === 'guild') {
+        return supabaseListMock([
+          { id: 'guild_1', owner_discord_id: 'discord_owner' },
+        ]);
+      }
+      return supabaseListMock([]);
+    });
+
+    const { requirePermission, AuthError } = await import('@/lib/rbac');
+
+    await expect(requirePermission(null)).rejects.toMatchObject({
+      name: 'AuthError',
+      status: 403,
+    } satisfies Partial<InstanceType<typeof AuthError>>);
   });
 
   it('extracts discordId from sub when provider_id is missing', async () => {

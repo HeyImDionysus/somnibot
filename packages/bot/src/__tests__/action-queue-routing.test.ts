@@ -42,7 +42,15 @@ vi.mock('../sync/sync-engine.js', () => ({
   runSyncCycle: vi.fn(async () => ({ driftItems: [], repaired: 0, timestamp: Date.now() })),
 }));
 
+vi.mock('../sync/repair-actions.js', () => ({
+  repairDriftItem: vi.fn(async () => ({ success: true })),
+  acceptDriftItem: vi.fn(async () => ({ success: true })),
+  ignoreDriftItem: vi.fn(async () => ({ success: true })),
+  clearAllDrift: vi.fn(async () => {}),
+}));
+
 import { startActionQueueListener } from '../services/action-queue.js';
+import { repairDriftItem, acceptDriftItem } from '../sync/repair-actions.js';
 
 // Multi-table Supabase mock that returns different data per table/call
 function makeSupa(pendingActions: any[] = []) {
@@ -452,6 +460,42 @@ describe('action-queue deep routing', () => {
     await startActionQueueListener(guild, supa);
       expect(supa.from).toHaveBeenCalledWith('bot_action_queue');
     // runSyncCycle is mocked
+  });
+
+  it('processes sync_repair_drift action with repairDriftItem', async () => {
+    const driftItem = {
+      entityType: 'role',
+      entityName: 'Moderator',
+      entityDiscordId: 'role-1',
+      type: 'PERMISSION_DRIFT',
+    };
+    const actions = [{
+      id: 'act-sync-repair', guild_id: 'guild-1', action: 'sync_repair_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+    expect(repairDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
+  });
+
+  it('processes sync_accept_drift action with acceptDriftItem', async () => {
+    const driftItem = {
+      entityType: 'role',
+      entityName: 'Moderator',
+      entityDiscordId: 'role-1',
+      type: 'EXTERNAL_CHANGE',
+    };
+    const actions = [{
+      id: 'act-sync-accept', guild_id: 'guild-1', action: 'sync_accept_drift', status: 'pending',
+      payload: { driftItem },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+    expect(acceptDriftItem).toHaveBeenCalledWith(guild, supa, driftItem);
   });
 
   it('processes market_item_reconcile action', async () => {

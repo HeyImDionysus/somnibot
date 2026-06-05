@@ -44,7 +44,10 @@ export async function GET(req: NextRequest) {
   }
 
   const cookieStore = await cookies();
-  const activeGuildId = cookieStore.get('active_guild_id')?.value ?? guilds[0]?.id;
+  const cookieGuildId = cookieStore.get('active_guild_id')?.value;
+  const activeGuildId = guilds.some((g) => g.id === cookieGuildId)
+    ? cookieGuildId
+    : guilds[0]?.id;
 
   return NextResponse.json({
     success: true,

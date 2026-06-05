@@ -25,7 +25,8 @@ import { writeAuditLog } from './audit.js';
 import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
-import { createLogger, type PlatformEventMap, type PlatformEventType } from '@somnibot/shared';
+import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
+import { createLogger, type DriftItem, type PlatformEventMap, type PlatformEventType } from '@somnibot/shared';
 
 const log = createLogger('ActionQueue');
 
@@ -819,6 +820,50 @@ async function handleBulkSendDm(
   return { success: true, data: { memberId } };
 }
 
+function getQueuedDriftItem(payload: Record<string, unknown>): DriftItem | null {
+  const driftItem = payload.driftItem;
+  if (!driftItem || typeof driftItem !== 'object') return null;
+  return driftItem as DriftItem;
+}
+
+async function handleSyncRepairDrift(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const driftItem = getQueuedDriftItem(payload);
+  if (!driftItem) return { success: false, error: 'Missing required driftItem' };
+  return repairDriftItem(guild, supabase, driftItem);
+}
+
+async function handleSyncAcceptDrift(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const driftItem = getQueuedDriftItem(payload);
+  if (!driftItem) return { success: false, error: 'Missing required driftItem' };
+  return acceptDriftItem(guild, supabase, driftItem);
+}
+
+async function handleSyncIgnoreDrift(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const driftItem = getQueuedDriftItem(payload);
+  if (!driftItem) return { success: false, error: 'Missing required driftItem' };
+  return ignoreDriftItem(supabase, guild.id, driftItem);
+}
+
+async function handleSyncClearAllDrift(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<ActionResult> {
+  await clearAllDrift(supabase, guild.id);
+  return { success: true };
+}
+
 const ACTION_HANDLERS: Record<
   string,
   (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
@@ -846,6 +891,10 @@ const ACTION_HANDLERS: Record<
   bulk_role_remove: handleBulkRoleRemove,
   bulk_send_dm: handleBulkSendDm,
   emit_audit_event: handleEmitAuditEvent,
+  sync_repair_drift: handleSyncRepairDrift,
+  sync_accept_drift: handleSyncAcceptDrift,
+  sync_ignore_drift: handleSyncIgnoreDrift,
+  sync_clear_all_drift: handleSyncClearAllDrift,
 };
 
 async function processAction(
