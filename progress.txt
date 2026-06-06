@@ -409,3 +409,18 @@ Proof:
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - Launcher compile check still passed: `corepack pnpm --filter @somnibot/launcher exec tsc --noEmit`.
+
+2026-06-06 - workspace-blv.7 - CI dashboard coverage repair
+
+GitHub CI dashboard tests passed behaviorally but failed the coverage gate at 69.34% statements against the 70% threshold. Added focused admin rate-limit coverage for preset budgets, route/IP key construction, pass-through behavior, and 429 retry headers instead of weakening the threshold.
+
+Changed:
+- packages/dashboard/src/__tests__/admin-rate-limit.test.ts
+- progress.txt
+
+Proof:
+- Focused test passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/admin-rate-limit.test.ts` -> 1 file passed, 3 tests passed.
+- Exact CI dashboard coverage command passed: `corepack pnpm --filter @somnibot/dashboard test -- --coverage --coverage.thresholds.statements=70 --coverage.reporter=text --coverage.reporter=json-summary --reporter=verbose` -> 36 files passed, 293 tests passed, statements 71.49%.
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
