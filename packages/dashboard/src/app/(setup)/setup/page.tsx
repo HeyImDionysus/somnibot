@@ -110,9 +110,11 @@ export default function SetupWizardPage() {
           setGuildDetected(true);
           setGuildName(data.guildName || '');
         }
-        // If everything is already set up, jump to done
-        if (data.supabaseConnected && data.databaseInitialized && data.guildDetected) {
+        // If setup has already been finalized, jump to done.
+        if (data.setupCompleted) {
           setCurrentStep(4);
+        } else if (data.supabaseConnected && data.databaseInitialized && data.guildDetected) {
+          setCurrentStep(3);
         }
       }
     } catch {

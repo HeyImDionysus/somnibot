@@ -38,6 +38,47 @@ describe('Supabase Discord auth auto-config', () => {
     expect(getDashboardBaseUrl({})).toBe('http://localhost:3000');
   });
 
+  it('prioritizes explicit manual Discord auth provider confirmation over a stale token', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_ACCESS_TOKEN = 'stale-or-unusable-token';
+    process.env.SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED = 'true';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider();
+
+    expect(result).toEqual({ success: true, alreadyConfigured: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses a setup-provided management token when env does not have one', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.DISCORD_APPLICATION_ID = '123456789012345678';
+    process.env.DISCORD_CLIENT_SECRET = 'discord-client-secret';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          EXTERNAL_DISCORD_ENABLED: true,
+        }),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({ accessToken: 'setup-provided-token' });
+
+    expect(result).toEqual({ success: true, alreadyConfigured: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.supabase.com/v1/projects/abcdefghijklmnopqrst/config/auth',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer setup-provided-token',
+        }),
+      }),
+    );
+  });
+
   it('patches Supabase auth config with the configured dashboard callback URL', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
     process.env.SUPABASE_ACCESS_TOKEN = 'supabase-management-token';

@@ -107,6 +107,7 @@ Before starting, make sure you have these installed on your computer:
 5. Copy the **Project URL** — save this.
 6. Under "Project API keys," copy the **secret** key (starts with `sb_secret_`, click the eye icon to reveal it) — save this.
 7. Also copy the **publishable** key (starts with `sb_publishable_`) — save this too (needed for the dashboard).
+8. For automatic setup wizard auth configuration, go to **Account → Access Tokens** and create a Supabase personal access token. Save it as `SUPABASE_ACCESS_TOKEN`. If you skip this, configure the Supabase Discord auth provider manually, allow the dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
 
 ### Step 3: Clone and Set Up
 
@@ -146,6 +147,9 @@ DISCORD_APPLICATION_ID=paste-your-client-id-here
 DISCORD_CLIENT_SECRET=paste-your-client-secret-here
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=sb_secret_...your-secret-key
+SUPABASE_ACCESS_TOKEN=sbp_...your-supabase-personal-access-token
+# Manual-auth fallback only: set true after manually configuring Supabase Discord auth
+SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=false
 
 # Dashboard runtime config:
 NEXT_PUBLIC_APP_URL=http://localhost:3000
@@ -264,6 +268,8 @@ If you want to run SomniBot 24/7 without keeping your computer on:
 | `DISCORD_CLIENT_SECRET` | Discord Developer Portal → OAuth2 → Client Secret |
 | `SUPABASE_URL` | Supabase → Settings → API → Project URL |
 | `SUPABASE_SECRET_KEY` | Supabase → Settings → API → secret key (sb_secret_...) |
+| `SUPABASE_ACCESS_TOKEN` | Supabase → Account → Access Tokens; required for automatic setup wizard Discord auth configuration |
+| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Set to `true` only after manually enabling Supabase Discord auth and callback URLs |
 
 Railway will deploy three services:
 - **Bot** — the Discord bot
@@ -282,6 +288,8 @@ Railway will deploy three services:
 | `NEXT_PUBLIC_SUPABASE_URL` | Same Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key (Settings → API) |
 | `SUPABASE_SECRET_KEY` | Same secret key |
+| `SUPABASE_ACCESS_TOKEN` | Supabase personal access token; required for `/setup` to auto-configure Discord auth |
+| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Manual fallback; set `true` only after Supabase Discord auth is configured manually |
 | `DISCORD_APPLICATION_ID` | Same Client ID |
 | `DISCORD_CLIENT_SECRET` | Same Client Secret |
 | `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
@@ -364,7 +372,8 @@ somnibot/
 | `PAYPAL_WEBHOOK_ID` | PayPal webhook ID for signature verification |
 | `PAYPAL_WEBHOOK_URL` | PayPal webhook endpoint URL |
 | `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music reliability) |
-| `SUPABASE_ACCESS_TOKEN` | Supabase Management API token (for auto-migration) |
+| `SUPABASE_ACCESS_TOKEN` | Supabase Management API token for auto-migration and setup wizard Discord auth auto-configuration |
+| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Set to `true` only after manually enabling Supabase Discord auth and allowing the dashboard callback URL |
 | `SUPABASE_DB_URL` | Direct Postgres connection URL (alternative for auto-migration) |
 
 ---
@@ -387,7 +396,7 @@ Slash commands can take up to an hour to register with Discord the first time. I
 2. Restart the dashboard (Ctrl+C → `./scripts/start-dashboard.sh`).
 
 ### "Login redirects back to login"
-The Supabase Discord auth provider needs to be configured. Run the setup wizard at `/setup` — step 2 handles this automatically.
+The Supabase Discord auth provider needs to be configured. Run the setup wizard at `/setup`; it can handle this automatically only when `SUPABASE_ACCESS_TOKEN` is set. If you do not use that token, manually enable the Discord provider in Supabase, allow your dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
 
 ### PayPal checkout errors
 1. Make sure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are set in `.env`.
