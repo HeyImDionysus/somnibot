@@ -238,6 +238,7 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
     }));
 
     process.env.NEXT_RUNTIME = 'nodejs';
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
     process.env.SESSION_TOKEN_FILE = '/tmp/test-token-file';
     delete process.env.SESSION_TOKEN;
 
@@ -265,6 +266,7 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
     }));
 
     process.env.NEXT_RUNTIME = 'nodejs';
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
     process.env.SESSION_TOKEN_FILE = '/tmp/nonexistent';
     delete process.env.SESSION_TOKEN;
 
@@ -323,6 +325,39 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
     delete process.env.SESSION_TOKEN_FILE;
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
     process.env.SESSION_TOKEN = 'accidental-cloud-token';
+
+    vi.doMock('@somnibot/shared', () => ({
+      DashboardEnvSchema: {
+        safeParse: () => ({
+          success: false,
+          error: {
+            issues: [
+              { path: ['DISCORD_CLIENT_SECRET'], message: 'Required' },
+            ],
+          },
+        }),
+      },
+    }));
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const mod = await import('@/instrumentation');
+    await mod.register();
+
+    expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Aborting: cloud deploy requires all env vars'),
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('still exits on invalid non-serverless env when token file is set without launcher marker', async () => {
+    process.env.NEXT_RUNTIME = 'nodejs';
+    delete process.env.VERCEL;
+    delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
+    process.env.SESSION_TOKEN = 'accidental-cloud-token';
+    process.env.SESSION_TOKEN_FILE = '/tmp/accidental-cloud-token-file';
 
     vi.doMock('@somnibot/shared', () => ({
       DashboardEnvSchema: {

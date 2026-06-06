@@ -534,3 +534,31 @@ Proof:
 - Root build passed: `corepack pnpm build`, with log scan clean.
 - Focused webhook tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/paypal-webhook.test.ts src/__tests__/paypal-webhook-edge.test.ts` -> 2 files passed, 13 tests passed.
 - Script/JSON syntax checks passed: `bash -n scripts/setup.sh`; `node -e "JSON.parse(...)"` for root and dashboard package manifests.
+
+2026-06-06 - workspace-id9 - Explicit dashboard local-mode marker
+
+Final QA of dashboard startup/auth hardening found a remaining narrow local-mode trust gap: instrumentation no longer treated a bare `SESSION_TOKEN` as cloud-safe local mode, but `SESSION_TOKEN_FILE` plus `SESSION_TOKEN` could still suppress the invalid-env hard exit without the explicit launcher marker. The CSRF issuance route also still used `SESSION_TOKEN` alone for the fixed local session. Dashboard local-mode startup, middleware auth bypass, CSRF enforcement exemption, and CSRF fixed-session issuance now require `SOMNIBOT_DASHBOARD_LOCAL_MODE=1`; `SESSION_TOKEN` and `SESSION_TOKEN_FILE` remain local-mode credentials/transport, not proof of local mode by themselves.
+
+Changed:
+- packages/dashboard/src/instrumentation.ts
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/lib/api/csrf.ts
+- packages/dashboard/src/app/api/csrf/route.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- packages/dashboard/src/__tests__/middleware-health-public.test.ts
+- packages/dashboard/src/__tests__/csrf.test.ts
+- packages/dashboard/src/__tests__/csrf-route.test.ts
+- progress.txt
+
+Proof:
+- Focused dashboard regression suite passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/v10-audit-coverage.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/csrf.test.ts src/__tests__/csrf-route.test.ts` -> 4 files passed, 57 tests passed.
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 40 files passed, 313 tests passed.
+- Clean dashboard build passed: `corepack pnpm --filter @somnibot/dashboard clean`; `env NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm --filter @somnibot/dashboard build`.
+- Dashboard build log scan passed with no warning/error/failure matches.
+- Root lint passed: `corepack pnpm lint`, with log scan clean.
+- Root type-check passed: `corepack pnpm type-check`, with log scan clean.
+- Root build passed: `env NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm build`, with log scan clean.
+- Dashboard production start smoke passed: `corepack pnpm --filter @somnibot/dashboard start` served `/api/health` as HTTP 200 JSON `status:"degraded"` with `services.config:"valid"`, served `/setup` as HTTP 200, and pre-shutdown startup log scan was clean.
+- `git diff --check` passed.

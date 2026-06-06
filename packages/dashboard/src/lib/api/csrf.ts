@@ -143,7 +143,7 @@ export function verifyCsrfToken(
  * Returns null if valid, or a NextResponse error if invalid.
  *
  * Exemptions:
- * - Local-mode (SESSION_TOKEN env is set + localhost)
+ * - Local-mode (explicit launcher marker + SESSION_TOKEN env + localhost)
  * - Webhook routes (/api/paypal/webhook, /api/license/*)
  * - Portal routes (use their own token auth)
  * - GET/HEAD/OPTIONS requests
@@ -156,7 +156,8 @@ export async function checkCsrf(request: NextRequest): Promise<NextResponse | nu
 
   // Skip local-mode (Electron launcher — bound to localhost)
   const sessionToken = process.env.SESSION_TOKEN;
-  if (sessionToken) {
+  const launcherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1';
+  if (launcherLocalMode && sessionToken) {
     const host = request.headers.get('host') ?? '';
     const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
     if (isLocalhost) return null;

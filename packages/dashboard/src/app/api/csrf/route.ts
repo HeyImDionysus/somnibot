@@ -17,8 +17,10 @@ export async function GET() {
   // Get session identifier
   let sessionId: string;
 
-  // In local-mode, use a fixed session ID (CSRF is exempt anyway for localhost)
-  if (process.env.SESSION_TOKEN) {
+  // In explicit launcher local mode, use a fixed session ID. SESSION_TOKEN
+  // alone is not proof of launcher ownership; it can be accidentally set in
+  // cloud environments.
+  if (process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1' && process.env.SESSION_TOKEN) {
     sessionId = 'local-session';
   } else {
     const supabase = await createServerSupabase();

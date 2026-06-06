@@ -15,7 +15,9 @@ export async function register() {
     // The launcher writes the token to a file with 0600 perms and passes
     // the path via SESSION_TOKEN_FILE. This avoids exposing the token in
     // /proc/<pid>/environ on Linux.
-    if (process.env.SESSION_TOKEN_FILE && !process.env.SESSION_TOKEN) {
+    const isLauncherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1';
+
+    if (isLauncherLocalMode && process.env.SESSION_TOKEN_FILE && !process.env.SESSION_TOKEN) {
       try {
         const { readFileSync, unlinkSync } = await import('node:fs');
         const token = readFileSync(process.env.SESSION_TOKEN_FILE, 'utf-8').trim();
@@ -50,11 +52,10 @@ export async function register() {
         'For cloud deploy, set them in your Railway/Vercel environment.\n',
       );
 
-      // Don't hard-exit in launcher local mode. SESSION_TOKEN alone is not
-      // enough to prove local mode, because a cloud deploy could accidentally
-      // configure that secret and otherwise hide invalid environment config.
-      const isLauncherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1'
-        || Boolean(process.env.SESSION_TOKEN_FILE && process.env.SESSION_TOKEN);
+      // Don't hard-exit in launcher local mode. SESSION_TOKEN or
+      // SESSION_TOKEN_FILE alone is not enough to prove local mode, because a
+      // cloud deploy could accidentally configure those secrets and otherwise
+      // hide invalid environment config.
 
       // In launcher local mode, CSRF is exempt, so missing CSRF_SECRET is
       // non-fatal.

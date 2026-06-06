@@ -33,6 +33,8 @@ function makeMutatingRequest(
 describe('CSRF Protection', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.SESSION_TOKEN;
+    delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
   });
 
   describe('generateCsrfToken', () => {
@@ -124,6 +126,29 @@ describe('CSRF Protection', () => {
       // Should fail with 403 (missing token), not be skipped
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
+    });
+
+    it('does not skip CSRF when SESSION_TOKEN is set without launcher marker', async () => {
+      process.env.SESSION_TOKEN = 'accidental-cloud-token';
+
+      const req = makeMutatingRequest('/api/config', {
+        headers: { host: 'localhost' },
+      });
+      const result = await checkCsrf(req);
+
+      expect(result).not.toBeNull();
+      expect(result!.status).toBe(403);
+    });
+
+    it('skips CSRF in explicit launcher local mode on localhost', async () => {
+      process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+      process.env.SESSION_TOKEN = 'launcher-token';
+
+      const req = makeMutatingRequest('/api/config', {
+        headers: { host: 'localhost' },
+      });
+
+      expect(await checkCsrf(req)).toBeNull();
     });
   });
 
