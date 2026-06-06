@@ -424,3 +424,58 @@ Proof:
 - Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+
+2026-06-06 - workspace-blv.13 - Setup finalize Supabase auth fail-closed
+
+Fixed first-use setup finalization so the dashboard no longer locks setup or reports Ready when Supabase Discord auth auto-configuration fails. The setup finalize route now saves submitted credentials first, passes any submitted `supabase_access_token` into the auth auto-config helper, returns a 400 fail-closed response before writing `setup_completed_at` if Discord auth cannot be configured, and only returns `ok:true` after auth succeeds and setup is locked. Manual Supabase Auth confirmation with `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` now wins before any token/API path, including stale tokens. The setup wizard now advances preconfigured-but-unlocked installs to the finalization step and only moves to Ready when the API reports `setupCompleted`.
+
+Changed:
+- README.md
+- DEPLOYMENT.md
+- .env.example
+- packages/shared/src/validators/env.ts
+- packages/dashboard/src/lib/supabase/auto-config.ts
+- packages/dashboard/src/app/api/setup/route.ts
+- packages/dashboard/src/app/(setup)/setup/page.tsx
+- packages/dashboard/src/__tests__/setup-route.test.ts
+- packages/dashboard/src/__tests__/setup-wizard-client.test.ts
+- packages/dashboard/src/__tests__/supabase-auto-config.test.ts
+
+Proof:
+- Focused setup/auth tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/setup-route.test.ts src/__tests__/setup-wizard-client.test.ts src/__tests__/supabase-auto-config.test.ts` -> 3 files passed, 13 tests passed.
+- Shared build passed: `corepack pnpm --filter @somnibot/shared build`.
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 39 files passed, 306 tests passed.
+- PR #210 fresh CI passed after Codex review comments were addressed.
+- PR #210 was squash-merged as `da3377be0733490c5a9db5c58acb5c2e5e638b40`.
+- Main CI run `27060936688` passed on `da3377be0733490c5a9db5c58acb5c2e5e638b40`, including Integration Tests and CI Gate.
+
+2026-06-06 - workspace-blv.14 - Corepack-only root build path
+
+Final first-use QA found that a machine following the documented Corepack pnpm path could still fail at the build step if it had Corepack but no global `pnpm` shim. In this sandbox, `command -v pnpm` returned empty, and the exact setup/rebuild build path `corepack pnpm build` failed through Turbo with `Unable to find package manager binary: cannot find binary path`. Root `pnpm build` now runs a small workspace build helper that resolves `pnpm` or `corepack pnpm` and builds each package directly. The launcher build script now uses the same resolver for package builds, deploy, and electron-builder instead of hardcoding `pnpm`. Dashboard production builds disable webpack filesystem cache so first-run/CI build logs do not emit the `PackFileCacheStrategy` serialization warnings.
+
+Changed:
+- package.json
+- packages/dashboard/next.config.ts
+- packages/dashboard/tsconfig.json
+- packages/shared/package.json
+- packages/shared/tsconfig.json
+- scripts/build-workspace.mjs
+- scripts/lib/pnpm.mjs
+- scripts/build-launcher.mjs
+- progress.txt
+
+Proof:
+- Red reproduction before fix: `command -v pnpm || true; corepack pnpm build` showed no pnpm shim and failed with Turbo `Unable to find package manager binary: cannot find binary path`.
+- Script syntax checks passed: `node --check scripts/lib/pnpm.mjs && node --check scripts/build-workspace.mjs && node --check scripts/build-launcher.mjs`.
+- Exact Corepack-only root build passed after the build-info redirect: `command -v pnpm || true; corepack pnpm build 2>&1 | tee /tmp/somnibot-corepack-root-build-after-tsbuildinfo-fix.log`.
+- Root build log scan passed with no matches for `PackFileCacheStrategy`, `<w>`, `warning`, `Warning`, `ERROR`, `Error`, `failed`, `Failed`, or `Unable to find package manager`.
+- Post-build status confirmed no tracked `tsconfig.tsbuildinfo` churn remained.
+- Clean dashboard build passed after disabling production filesystem cache: `corepack pnpm --filter @somnibot/dashboard clean && corepack pnpm --filter @somnibot/dashboard build 2>&1 | tee /tmp/somnibot-dashboard-clean-build-after-cache-fix.log`.
+- Clean dashboard build log scan passed with no warning matches.
+- `git diff --check` passed.
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 39 files passed, 306 tests passed.

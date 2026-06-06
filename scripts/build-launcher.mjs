@@ -2,7 +2,7 @@
 /**
  * SomniBot Launcher — Build Pipeline
  *
- * Orchestrates the full build: turbo build → stage resources → electron-builder.
+ * Orchestrates the full build: package builds -> stage resources -> electron-builder.
  *
  * Usage:
  *   node scripts/build-launcher.mjs              # Build for current platform
@@ -11,13 +11,13 @@
  *   node scripts/build-launcher.mjs --linux       # Build for Linux
  *   node scripts/build-launcher.mjs --all         # Build for all platforms
  *   node scripts/build-launcher.mjs --dir         # Pack to directory (no installer, for testing)
- *   node scripts/build-launcher.mjs --skip-build  # Skip turbo build (use existing artifacts)
+ *   node scripts/build-launcher.mjs --skip-build  # Skip package builds (use existing artifacts)
  */
 
-import { execSync } from 'node:child_process';
 import { cpSync, mkdirSync, rmSync, existsSync, readdirSync, statSync, readFileSync, lstatSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runPnpm } from './lib/pnpm.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -33,11 +33,6 @@ const platformArg = args.find((a) =>
 const skipBuild = args.includes('--skip-build');
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
-
-function run(cmd, opts = {}) {
-  console.log(`\n\x1b[36m> ${cmd}\x1b[0m\n`);
-  execSync(cmd, { stdio: 'inherit', cwd: ROOT, ...opts });
-}
 
 function ensureDir(dir) {
   mkdirSync(dir, { recursive: true });
@@ -287,17 +282,20 @@ function fixAllMissingDeps(stagingDir, extras, label) {
   }
 }
 
-/* ── Step 1: Build all packages via Turbo ──────────────────────────── */
+/* ── Step 1: Build all packages ────────────────────────────────────── */
 
 function buildPackages() {
   if (skipBuild) {
-    console.log('\n⏭  Skipping turbo build (--skip-build)\n');
+    console.log('\n⏭  Skipping package builds (--skip-build)\n');
     return;
   }
-  console.log('\n📦 Building all packages via Turbo...\n');
-  // Turbo resolves the dependency graph: shared → bot + dashboard.
-  // Launcher is excluded — we build its TypeScript separately before electron-builder.
-  run('pnpm turbo build --filter=@somnibot/shared --filter=@somnibot/bot --filter=@somnibot/dashboard');
+  console.log('\n📦 Building launcher runtime packages...\n');
+  // Keep this path compatible with machines that use Corepack without a
+  // global pnpm shim. Turbo requires a discoverable pnpm binary, so the
+  // launcher build invokes package builds directly.
+  runPnpm(['--filter', '@somnibot/shared', 'build']);
+  runPnpm(['--filter', '@somnibot/bot', 'build']);
+  runPnpm(['--filter', '@somnibot/dashboard', 'build']);
 }
 
 /* ── Step 2: Stage bot ─────────────────────────────────────────────── */
@@ -316,7 +314,7 @@ function stageBot() {
   //   - Workspace deps (@somnibot/shared) bundled as real packages
   //   - Native modules (@napi-rs/canvas) included for the current platform
   //   - devDependencies excluded
-  run(`pnpm --filter @somnibot/bot deploy "${botStaging}" --prod`);
+  runPnpm(['--filter', '@somnibot/bot', 'deploy', botStaging, '--prod']);
 
   // Verify the deploy produced what we expect
   assertExists(path.join(botStaging, 'dist', 'index.js'), 'Bot entry (dist/index.js)');
@@ -422,7 +420,7 @@ function buildElectron() {
   console.log('\n⚡ Building Electron app...\n');
 
   // Build launcher TypeScript (src/main/*.ts → dist/main/*.js)
-  run('pnpm --filter @somnibot/launcher run build');
+  runPnpm(['--filter', '@somnibot/launcher', 'run', 'build']);
 
   // Determine platform flags for electron-builder
   const platformFlags =
@@ -436,7 +434,7 @@ function buildElectron() {
 
   // Run electron-builder from the launcher directory.
   // GH_TOKEN env var enables GitHub Releases publishing.
-  run(`pnpm exec electron-builder ${platformFlags} --config electron-builder.yml`, {
+  runPnpm(['exec', 'electron-builder', ...platformFlags.split(' ').filter(Boolean), '--config', 'electron-builder.yml'], {
     cwd: LAUNCHER_DIR,
   });
 
