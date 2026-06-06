@@ -16,6 +16,8 @@ import {
   AlertCircle,
   ChevronRight,
 } from 'lucide-react';
+import { useCsrf } from '@/hooks/use-csrf';
+import { buildSetupRequestHeaders, SETUP_CSRF_UNAVAILABLE_MESSAGE } from '@/lib/setup-wizard-client';
 
 // ============================================================
 // Types
@@ -39,6 +41,7 @@ interface SetupStatus {
   guildName: string | null;
   dashboardUrl: string | null;
   discordClientId: string | null;
+  setupCompleted?: boolean;
 }
 
 const STEPS: StepConfig[] = [
@@ -56,6 +59,7 @@ export default function SetupWizardPage() {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const { csrfToken, refreshCsrf } = useCsrf();
 
   // Step 1 state
   const [discordToken, setDiscordToken] = useState('');
@@ -80,6 +84,8 @@ export default function SetupWizardPage() {
   const [pollingForGuild, setPollingForGuild] = useState(false);
   const [guildDetected, setGuildDetected] = useState(false);
   const [guildName, setGuildName] = useState('');
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalizeError, setFinalizeError] = useState('');
 
   // Clipboard
   const [copied, setCopied] = useState('');
@@ -120,6 +126,21 @@ export default function SetupWizardPage() {
     fetchStatus();
   }, [fetchStatus]);
 
+  const postSetup = useCallback(async (body: Record<string, unknown>) => {
+    let activeHeaders: Record<string, string> = csrfToken ? { 'X-CSRF-Token': csrfToken } : {};
+
+    if (!csrfToken) {
+      const refreshed = await refreshCsrf();
+      activeHeaders = refreshed ? { 'X-CSRF-Token': refreshed } : {};
+    }
+
+    return fetch('/api/setup', {
+      method: 'POST',
+      headers: buildSetupRequestHeaders(activeHeaders),
+      body: JSON.stringify(body),
+    });
+  }, [csrfToken, refreshCsrf]);
+
   // ─── Step 1: Verify Discord Credentials ───
 
   const verifyDiscord = async () => {
@@ -130,15 +151,11 @@ export default function SetupWizardPage() {
     setDiscordVerifying(true);
     setDiscordError('');
     try {
-      const res = await fetch('/api/setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'verify-discord',
-          token: discordToken,
-          clientId: discordClientId,
-          clientSecret: discordClientSecret,
-        }),
+      const res = await postSetup({
+        action: 'verify-discord',
+        token: discordToken,
+        clientId: discordClientId,
+        clientSecret: discordClientSecret,
       });
       const data = await res.json();
       if (data.valid) {
@@ -149,7 +166,7 @@ export default function SetupWizardPage() {
         setDiscordError(data.error || 'Invalid credentials');
       }
     } catch (err) {
-      setDiscordError(`Connection error: ${err}`);
+      setDiscordError(err instanceof Error ? err.message : `Connection error: ${err}`);
     } finally {
       setDiscordVerifying(false);
     }
@@ -165,14 +182,10 @@ export default function SetupWizardPage() {
     setSupabaseVerifying(true);
     setSupabaseError('');
     try {
-      const res = await fetch('/api/setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'verify-supabase',
-          url: supabaseUrl,
-          serviceRoleKey: supabaseKey,
-        }),
+      const res = await postSetup({
+        action: 'verify-supabase',
+        url: supabaseUrl,
+        serviceRoleKey: supabaseKey,
       });
       const data = await res.json();
       if (data.valid) {
@@ -182,7 +195,7 @@ export default function SetupWizardPage() {
         setSupabaseError(data.error || 'Connection failed');
       }
     } catch (err) {
-      setSupabaseError(`Connection error: ${err}`);
+      setSupabaseError(err instanceof Error ? err.message : `Connection error: ${err}`);
     } finally {
       setSupabaseVerifying(false);
     }
@@ -194,16 +207,41 @@ export default function SetupWizardPage() {
     const clientId = discordClientId || status?.discordClientId;
     if (!clientId) return;
 
-    const res = await fetch('/api/setup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'generate-invite', clientId }),
-    });
-    const data = await res.json();
-    if (data.inviteUrl) {
-      setInviteUrl(data.inviteUrl);
-      window.open(data.inviteUrl, '_blank');
-      startPollingForGuild();
+    try {
+      setFinalizeError('');
+      const res = await postSetup({ action: 'generate-invite', clientId });
+      const data = await res.json();
+      if (data.inviteUrl) {
+        setInviteUrl(data.inviteUrl);
+        window.open(data.inviteUrl, '_blank');
+        startPollingForGuild();
+      } else if (data.error) {
+        setFinalizeError(data.error);
+      }
+    } catch (err) {
+      setFinalizeError(err instanceof Error ? err.message : SETUP_CSRF_UNAVAILABLE_MESSAGE);
+    }
+  };
+
+  const finalizeSetup = async () => {
+    setFinalizing(true);
+    setFinalizeError('');
+
+    try {
+      const res = await postSetup({ action: 'finalize' });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.ok) {
+        setFinalizeError(data.error || 'Setup could not be finalized. Check the server logs and try again.');
+        return;
+      }
+
+      setStatus((prev) => prev ? { ...prev, setupCompleted: true } : prev);
+      setCurrentStep(4);
+    } catch (err) {
+      setFinalizeError(err instanceof Error ? err.message : SETUP_CSRF_UNAVAILABLE_MESSAGE);
+    } finally {
+      setFinalizing(false);
     }
   };
 
@@ -676,6 +714,13 @@ export default function SetupWizardPage() {
                 </div>
               )}
 
+              {finalizeError && (
+                <div className="flex items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  {finalizeError}
+                </div>
+              )}
+
               {/* Actions */}
               <div className="flex justify-between">
                 <button
@@ -685,12 +730,16 @@ export default function SetupWizardPage() {
                   Back
                 </button>
                 <button
-                  onClick={() => setCurrentStep(4)}
-                  disabled={!guildDetected}
+                  onClick={finalizeSetup}
+                  disabled={!guildDetected || finalizing}
                   className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
-                  Continue
-                  <ChevronRight className="h-4 w-4" />
+                  {finalizing ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
+                  Finalize Setup
                 </button>
               </div>
             </div>
