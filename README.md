@@ -159,13 +159,14 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
 # Generate each secret with: openssl rand -hex 32
 CSRF_SECRET=generate-a-secret
 NEXTAUTH_SECRET=generate-a-secret
+WEBHOOK_REPLAY_SECRET=generate-a-secret
 
 # Local Docker services — generate with: openssl rand -hex 16
 LAVALINK_PASSWORD=generate-a-lavalink-password
 ```
 
 > **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
-> Generate `CSRF_SECRET` and `NEXTAUTH_SECRET` separately with `openssl rand -hex 32`; generate `LAVALINK_PASSWORD` with `openssl rand -hex 16`. Do not reuse your Supabase or Discord secrets.
+> Generate `CSRF_SECRET`, `NEXTAUTH_SECRET`, and `WEBHOOK_REPLAY_SECRET` separately with `openssl rand -hex 32`; generate `LAVALINK_PASSWORD` with `openssl rand -hex 16`. Do not reuse your Supabase or Discord secrets.
 
 Save the file.
 
@@ -294,6 +295,7 @@ Railway will deploy three services:
 | `DISCORD_CLIENT_SECRET` | Same Client Secret |
 | `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
 | `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
+| `WEBHOOK_REPLAY_SECRET` | Generate with `openssl rand -hex 32` |
 | `NEXT_PUBLIC_APP_URL` | Your deployed dashboard URL |
 
 5. Click **Deploy**. Once deployed, open your dashboard URL → go to `/setup` to finish configuration.
@@ -350,6 +352,7 @@ somnibot/
 | `DISCORD_CLIENT_SECRET` | Same OAuth2 client secret |
 | `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
 | `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
+| `WEBHOOK_REPLAY_SECRET` | Dedicated webhook replay secret; generate with `openssl rand -hex 32` |
 
 ### Auto-Configured (defaults work with Docker Compose)
 | Variable | Default | Notes |
@@ -363,7 +366,6 @@ somnibot/
 ### Optional
 | Variable | Description |
 |---|---|
-| `WEBHOOK_REPLAY_SECRET` | Dedicated webhook replay secret (recommended; falls back to derived secret) |
 | `DOWNLOAD_SIGNING_SECRET` | Dedicated signed-download secret (recommended; falls back to app secrets) |
 | `PAYPAL_CLIENT_ID` | PayPal app client ID (for commerce features) |
 | `PAYPAL_CLIENT_SECRET` | PayPal app secret |

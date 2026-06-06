@@ -498,3 +498,39 @@ Proof:
 - Post-clean root build passed: `corepack pnpm build`.
 - Lint/type-check/build log scan passed with no matches for `PackFileCacheStrategy`, `<w>`, `warning`, `Warning`, `ERROR`, `Error`, `failed`, `Failed`, or `Unable to find package manager`.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-xvp - Dashboard production start warnings
+
+Final first-use QA found that a built dashboard production start still emitted operator-facing warnings: package `start` used `next start` while the dashboard builds with `output: 'standalone'`, and a normal env without `WEBHOOK_REPLAY_SECRET` logged a fallback warning that replay auth was being derived from `NEXTAUTH_SECRET`. Dashboard `start` now runs the generated standalone server directly, `WEBHOOK_REPLAY_SECRET` is required in the dashboard env schema and first-use docs/scripts, the launcher generates a dedicated replay secret for local mode, and credential rotation docs include replay-secret rotation.
+
+Changed:
+- .env.example
+- README.md
+- DEPLOYMENT.md
+- docs/CREDENTIAL_ROTATION.md
+- scripts/setup.sh
+- scripts/setup.bat
+- packages/dashboard/package.json
+- packages/shared/src/validators/env.ts
+- packages/shared/src/__tests__/env.test.ts
+- packages/launcher/src/main/config-store.ts
+- packages/bot/src/__tests__/launcher-config.test.ts
+- progress.txt
+
+Proof:
+- Red reproduction: `corepack pnpm --filter @somnibot/dashboard start -- --hostname 127.0.0.1 --port 43107` forwarded a literal `--` and failed; direct package `corepack pnpm start --hostname 127.0.0.1 --port 43107` started but logged the Next standalone warning plus the `WEBHOOK_REPLAY_SECRET` fallback warning.
+- Standalone command proof before patch: `node .next/standalone/packages/dashboard/server.js` started cleanly with `WEBHOOK_REPLAY_SECRET` set and `/api/health` returned HTTP 200 JSON degraded/valid.
+- `git diff --check` passed.
+- Focused shared env tests passed: `corepack pnpm --filter @somnibot/shared test -- src/__tests__/env.test.ts` -> 1 file passed, 2 tests passed.
+- Focused launcher env tests passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/launcher-config.test.ts` -> 1 file passed, 10 tests passed.
+- Shared build passed: `corepack pnpm --filter @somnibot/shared build`.
+- Launcher compile passed: `corepack pnpm --filter @somnibot/launcher exec tsc --noEmit`.
+- Dashboard clean, type-check, and build passed: `corepack pnpm --filter @somnibot/dashboard clean`; `corepack pnpm --filter @somnibot/dashboard type-check`; `corepack pnpm --filter @somnibot/dashboard build`.
+- Dashboard build log scan passed with no warning/error/failure matches.
+- Dashboard package start smoke passed: `corepack pnpm --filter @somnibot/dashboard start` now runs `node .next/standalone/packages/dashboard/server.js`; `/setup` returned HTTP 200 HTML; `/api/health` returned HTTP 200 JSON with `status:"degraded"` and `services.config:"valid"`.
+- Dashboard pre-shutdown startup log scan passed with no warning/error/failure matches; the only later log matches were the intentional SIGTERM used to stop the local smoke server.
+- Root lint passed: `corepack pnpm lint`, with log scan clean.
+- Root type-check passed: `corepack pnpm type-check`, with log scan clean.
+- Root build passed: `corepack pnpm build`, with log scan clean.
+- Focused webhook tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/paypal-webhook.test.ts src/__tests__/paypal-webhook-edge.test.ts` -> 2 files passed, 13 tests passed.
+- Script/JSON syntax checks passed: `bash -n scripts/setup.sh`; `node -e "JSON.parse(...)"` for root and dashboard package manifests.

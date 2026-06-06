@@ -224,12 +224,13 @@ export function buildEnvVars(
     // Fall back to env var for backward compatibility.
     SESSION_TOKEN: sessionToken,
 
-    // Security — CSRF protection + session signing.
+    // Security — CSRF protection, session signing, and internal webhook replay.
     // Generated once per launcher session. Local-mode is CSRF-exempt,
     // but these are still required so the dashboard env schema validates
     // and so cloud-deploy settings pages work if configured.
     CSRF_SECRET: randomBytes(32).toString('hex'),
     NEXTAUTH_SECRET: randomBytes(32).toString('hex'),
+    WEBHOOK_REPLAY_SECRET: randomBytes(32).toString('hex'),
 
     // Dashboard binding
     PORT: '3456',

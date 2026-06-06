@@ -47,6 +47,7 @@ function buildEnvVars(config: LauncherConfig, sessionToken: string): Record<stri
     LAVALINK_PORT: '2333',
     LAVALINK_PASSWORD: 'test-secure-password-1234',
     VALKEY_URL: 'redis://127.0.0.1:6379',
+    WEBHOOK_REPLAY_SECRET: 'test-webhook-replay-secret',
     NODE_ENV: 'production',
   };
 }
@@ -114,6 +115,11 @@ describe('buildEnvVars', () => {
   it('sets NODE_ENV to production', () => {
     const env = buildEnvVars(makeConfig(), 'sess');
     expect(env.NODE_ENV).toBe('production');
+  });
+
+  it('sets a dedicated webhook replay secret for dashboard local mode', () => {
+    const env = buildEnvVars(makeConfig(), 'sess');
+    expect(env.WEBHOOK_REPLAY_SECRET).toBe('test-webhook-replay-secret');
   });
 
   it('dashboard runs on port 3456 by default', () => {

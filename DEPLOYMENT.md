@@ -57,8 +57,8 @@
 | `DISCORD_CLIENT_SECRET` | Discord Developer Portal |
 | `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
 | `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
+| `WEBHOOK_REPLAY_SECRET` | Generate with `openssl rand -hex 32` |
 | `VALKEY_URL` or `REDIS_URL` | Redis/Valkey connection string for rate limiting (recommended in production) |
-| `WEBHOOK_REPLAY_SECRET` | Generate with `openssl rand -hex 32` (recommended for webhook replay isolation) |
 | `DOWNLOAD_SIGNING_SECRET` | Generate with `openssl rand -hex 32` (recommended for signed download links) |
 
 4. Deploy → navigate to `/setup` to complete first-run configuration

@@ -13,6 +13,7 @@
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase Dashboard → Settings → API | 1. Copy the same anon/publishable key 2. Update dashboard `.env`, launcher, hosting env vars, and dashboard build env 3. Rebuild/redeploy dashboard |
 | `NEXTAUTH_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (sessions invalidated) |
 | `CSRF_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard |
+| `WEBHOOK_REPLAY_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` / hosting env vars 3. Restart dashboard |
 | `DOWNLOAD_SIGNING_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (existing signed URLs invalidated) |
 | `PAYPAL_CLIENT_ID` | PayPal Developer Dashboard | 1. Create new REST app or rotate credentials 2. Update `.env` 3. Restart dashboard |
 | `PAYPAL_CLIENT_SECRET` | PayPal Developer Dashboard | Same as PAYPAL_CLIENT_ID |
@@ -53,6 +54,7 @@ If you suspect any credential has been compromised, rotate **all** secrets:
 # Generate new secrets
 openssl rand -hex 32  # → NEXTAUTH_SECRET
 openssl rand -hex 32  # → CSRF_SECRET
+openssl rand -hex 32  # → WEBHOOK_REPLAY_SECRET
 openssl rand -hex 32  # → DOWNLOAD_SIGNING_SECRET
 ```
 
