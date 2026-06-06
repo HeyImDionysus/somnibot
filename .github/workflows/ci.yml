@@ -61,8 +61,16 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+      - id: node-modules-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - run: pnpm install --frozen-lockfile
       - uses: actions/cache/save@v5
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
           path: |
             node_modules
@@ -186,7 +194,7 @@ jobs:
             --reporter=verbose
       - name: Upload coverage summary
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-bot
           path: packages/bot/coverage/
@@ -225,7 +233,7 @@ jobs:
             --reporter=verbose
       - name: Upload coverage summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-dashboard
           path: packages/dashboard/coverage/
@@ -548,8 +556,8 @@ jobs:
     name: 🔄 DB Type Drift Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Regenerate types and diff
