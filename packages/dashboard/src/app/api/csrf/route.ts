@@ -11,8 +11,7 @@
  */
 import { NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
-import { generateCsrfToken, CSRF_COOKIE_NAME } from '@/lib/api/csrf';
-import { randomBytes } from 'crypto';
+import { generateCsrfToken, generateRandomHex, CSRF_COOKIE_NAME } from '@/lib/api/csrf';
 
 export async function GET() {
   // Get session identifier
@@ -24,10 +23,10 @@ export async function GET() {
   } else {
     const supabase = await createServerSupabase();
     const { data: { user } } = await supabase.auth.getUser();
-    sessionId = user?.id?.slice(-16) ?? randomBytes(8).toString('hex');
+    sessionId = user?.id?.slice(-16) ?? generateRandomHex(8);
   }
 
-  const { token, nonce } = generateCsrfToken(sessionId);
+  const { token, nonce } = await generateCsrfToken(sessionId);
 
   const response = NextResponse.json({ token });
 

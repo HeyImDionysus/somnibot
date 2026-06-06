@@ -154,3 +154,21 @@ Proof:
 - Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
 - Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,599 tests passed.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-blv.1 - Edge-safe dashboard CSRF middleware
+
+Replaced the dashboard CSRF helper's Node `crypto` dependency with Web Crypto so the middleware path stays compatible with Next/Vercel Edge Runtime. The CSRF API route now reuses the same Web Crypto random helper, middleware awaits token generation/checking, and CSRF/grace-period tests cover the async helper behavior.
+
+Changed:
+- packages/dashboard/src/lib/api/csrf.ts
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/app/api/csrf/route.ts
+- packages/dashboard/src/__tests__/csrf.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+
+Proof:
+- Focused CSRF tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/csrf.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 2 files passed, 42 tests passed.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; the fresh build log had no `crypto` or `Edge Runtime` warning for `csrf.ts`.
+- Dashboard type-check passed after the fresh build regenerated `.next/types`: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- `git diff --check` passed.

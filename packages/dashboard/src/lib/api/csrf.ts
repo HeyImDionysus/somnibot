@@ -14,9 +14,7 @@
  *
  * Local-mode (Electron launcher) is exempt since it's bound to localhost.
  */
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { type NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 
 const CSRF_COOKIE_NAME = 'somnibot-csrf-token';
 /**
@@ -67,15 +65,64 @@ function getCsrfSecret(): string {
   return secret;
 }
 
+let _csrfKey: CryptoKey | undefined;
+const encoder = new TextEncoder();
+
+function getWebCrypto(): Crypto {
+  const crypto = globalThis.crypto;
+  if (!crypto?.subtle) {
+    throw new Error('Web Crypto API is required for CSRF protection');
+  }
+  return crypto;
+}
+
+export function generateRandomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  getWebCrypto().getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function getCsrfKey(): Promise<CryptoKey> {
+  if (_csrfKey) return _csrfKey;
+  _csrfKey = await getWebCrypto().subtle.importKey(
+    'raw',
+    encoder.encode(getCsrfSecret()),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  return _csrfKey;
+}
+
+function toHex(buffer: ArrayBuffer): string {
+  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function signCsrfValue(nonce: string, sessionId: string): Promise<string> {
+  const signature = await getWebCrypto().subtle.sign(
+    'HMAC',
+    await getCsrfKey(),
+    encoder.encode(`${nonce}:${sessionId}`),
+  );
+  return toHex(signature);
+}
+
 /**
  * Generate a CSRF token tied to a session identifier.
  * The token is an HMAC of a random nonce + the session ID.
  */
-export function generateCsrfToken(sessionId: string): { token: string; nonce: string } {
-  const nonce = randomBytes(16).toString('hex');
-  const token = createHmac('sha256', getCsrfSecret())
-    .update(`${nonce}:${sessionId}`)
-    .digest('hex');
+export async function generateCsrfToken(sessionId: string): Promise<{ token: string; nonce: string }> {
+  const nonce = generateRandomHex(16);
+  const token = await signCsrfValue(nonce, sessionId);
   return { token, nonce };
 }
 
@@ -86,14 +133,9 @@ export function verifyCsrfToken(
   token: string,
   nonce: string,
   sessionId: string,
-): boolean {
-  const expected = createHmac('sha256', getCsrfSecret())
-    .update(`${nonce}:${sessionId}`)
-    .digest('hex');
-
-  // Constant-time comparison — V6 Audit §9.8: direct import, no try/catch fallback
-  if (token.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+): Promise<boolean> {
+  return signCsrfValue(nonce, sessionId)
+    .then((expected) => constantTimeEqual(token, expected));
 }
 
 /**
@@ -106,7 +148,7 @@ export function verifyCsrfToken(
  * - Portal routes (use their own token auth)
  * - GET/HEAD/OPTIONS requests
  */
-export function checkCsrf(request: NextRequest): NextResponse | null {
+export async function checkCsrf(request: NextRequest): Promise<NextResponse | null> {
   const method = request.method.toUpperCase();
 
   // Only check mutating methods
@@ -158,7 +200,7 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
   const bangIdx = rest.lastIndexOf('!');
   const sessionId = bangIdx === -1 ? rest : rest.slice(0, bangIdx);
 
-  if (!verifyCsrfToken(headerToken, nonce, sessionId)) {
+  if (!(await verifyCsrfToken(headerToken, nonce, sessionId))) {
     // V10 Audit §5: Try previous token during rotation grace period.
     // When the middleware rotates the CSRF cookie, the client's in-memory
     // X-CSRF-Token header still holds the old token. Accept the old nonce
@@ -173,7 +215,7 @@ export function checkCsrf(request: NextRequest): NextResponse | null {
         const prevTimestamp = parseInt(prevCookie.slice(prevBangIdx + 1), 10);
 
         if (!Number.isNaN(prevTimestamp) && Date.now() - prevTimestamp < CSRF_GRACE_PERIOD_MS) {
-          if (verifyCsrfToken(headerToken, prevNonce, prevRest)) {
+          if (await verifyCsrfToken(headerToken, prevNonce, prevRest)) {
             return null; // Previous token still valid within grace period
           }
         }
