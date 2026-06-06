@@ -189,6 +189,8 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/auth') ||
     request.nextUrl.pathname === '/setup' ||
     request.nextUrl.pathname.startsWith('/api/setup') ||
+    // Health checks must be reachable by unauthenticated platform monitors.
+    request.nextUrl.pathname === '/api/health' ||
     request.nextUrl.pathname.startsWith('/api/paypal/webhook') ||
     request.nextUrl.pathname.startsWith('/api/license/validate') ||
     request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||

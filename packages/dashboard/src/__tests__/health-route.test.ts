@@ -84,6 +84,7 @@ describe('GET /api/health', () => {
 
     // JSON.parse throws → caught → bot: unknown
     expect(res.status).toBe(200);
+    expect(body.status).toBe('degraded');
     expect(body.services.bot).toBe('unknown');
   });
 

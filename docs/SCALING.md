@@ -110,8 +110,10 @@ Current usage is lightweight (~100 keys per guild).
 
 ### Endpoints
 - `GET /api/health` — Dashboard app health. Always returns HTTP 200 when
-  the route responds; read JSON `status: "healthy" | "degraded"` plus
-  `services.valkey` and `services.bot` for dependency alerts.
+  the route responds; read JSON `status: "healthy" | "degraded"` for
+  dependency alerts. `status` is `healthy` only when Valkey is connected and
+  the bot heartbeat is online; use `services.valkey` and `services.bot` for
+  diagnosis.
 - Bot `GET /health` — Bot process/container health. Returns HTTP 200 only
   when Discord gateway and Valkey are healthy; returns HTTP 503 when either
   dependency is unhealthy.
@@ -126,7 +128,7 @@ services:
     # Route/process liveness only. Do not treat degraded JSON as a
     # platform restart signal; alert on the JSON status separately.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -134,7 +136,7 @@ services:
   bot:
     # Hard process health for Discord + Valkey connectivity.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health"]
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 3

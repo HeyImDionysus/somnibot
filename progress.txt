@@ -199,10 +199,15 @@ Aligned operator docs and the dashboard smoke expectation with the existing heal
 Changed:
 - docs/SCALING.md
 - docs/production-checklist.md
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/app/api/health/route.ts
+- packages/dashboard/src/__tests__/health-route.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- packages/dashboard/src/__tests__/middleware-health-public.test.ts
 - packages/dashboard/src/__tests__/smoke/dashboard-smoke.test.ts
 
 Proof:
-- Focused dashboard health tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 2 files passed, 18 tests passed.
+- Focused dashboard health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/csrf-exempt-audit.test.ts` -> 4 files passed, 23 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
