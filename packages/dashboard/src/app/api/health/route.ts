@@ -17,8 +17,16 @@ import { checkValkeyHealth, readValkeyKey } from '@/lib/api/rate-limit';
 const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
 const BOT_HEARTBEAT_STALE_MS = 120_000; // 2 minutes — matches bot TTL
 
+async function getValkeyHealth(): Promise<boolean> {
+  try {
+    return await checkValkeyHealth();
+  } catch {
+    return false;
+  }
+}
+
 export async function GET() {
-  const valkeyUp = await checkValkeyHealth();
+  const valkeyUp = await getValkeyHealth();
 
   // V10 Audit §7: Check bot heartbeat if Valkey is available
   let botStatus: 'online' | 'offline' | 'unknown' = 'unknown';

@@ -75,6 +75,19 @@ describe('GET /api/health', () => {
     expect(mockReadKey).not.toHaveBeenCalled();
   });
 
+  it('returns degraded JSON when the Valkey health probe throws', async () => {
+    mockCheckHealth.mockRejectedValue(new Error('probe failed'));
+
+    const res = await GET();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('degraded');
+    expect(body.services.valkey).toBe('fallback');
+    expect(body.services.bot).toBe('unknown');
+    expect(mockReadKey).not.toHaveBeenCalled();
+  });
+
   it('treats unparseable heartbeat JSON as unknown, not crash', async () => {
     mockCheckHealth.mockResolvedValue(true);
     mockReadKey.mockResolvedValue('not-json');

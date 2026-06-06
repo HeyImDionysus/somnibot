@@ -265,3 +265,22 @@ Proof:
 - Docker rotation command assertion passed: the runbook uses `docker compose -f docker-compose.prod.yml up -d --build`.
 - `git diff --check` passed.
 - Full `docker compose config` could not be run in this sandbox because Docker is not installed.
+
+2026-06-06 - workspace-blv.7 - Dashboard health probe fallback
+
+Final production-readiness QA found the live dashboard health endpoint returning a Next/Vercel HTML 500 page instead of the route's documented JSON 200 degraded response. The dashboard health route now treats a thrown Valkey health probe as Valkey unavailable and continues through the existing degraded response path, preserving the monitor contract and avoiding platform-level health failures for dependency degradation.
+
+Changed:
+- packages/dashboard/src/app/api/health/route.ts
+- packages/dashboard/src/__tests__/health-route.test.ts
+- progress.txt
+
+Proof:
+- Red test reproduced the escaped probe failure before the fix: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts` failed with `Error: probe failed`.
+- Focused health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts` -> 2 files passed, 9 tests passed.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Dashboard type-check passed after the build completed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- `git diff --check` passed.
+- Fresh reviewer found no blocking issues; residual gaps are import-time failures or a hanging probe, not the escaped rejection fixed here.
+- One earlier `type-check` run failed because it was incorrectly run in parallel with `next build`, while `.next/types` was being regenerated. The sequential rerun passed.
