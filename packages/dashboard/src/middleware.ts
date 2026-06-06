@@ -217,7 +217,7 @@ export async function middleware(request: NextRequest) {
   }
 
   // V53 Phase 1.8: CSRF protection for mutating requests
-  const csrfError = checkCsrf(request);
+  const csrfError = await checkCsrf(request);
   if (csrfError) {
     applyCspHeaders(csrfError, nonce);
     return csrfError;
@@ -244,7 +244,7 @@ export async function middleware(request: NextRequest) {
       });
     }
 
-    const csrf = generateCsrfToken(sessionId);
+    const csrf = await generateCsrfToken(sessionId);
     supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${Date.now()}`, {
       httpOnly: true,
       sameSite: 'strict',

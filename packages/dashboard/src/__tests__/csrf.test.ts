@@ -36,91 +36,91 @@ describe('CSRF Protection', () => {
   });
 
   describe('generateCsrfToken', () => {
-    it('returns a token and nonce', () => {
-      const result = generateCsrfToken('session-123');
+    it('returns a token and nonce', async () => {
+      const result = await generateCsrfToken('session-123');
       expect(result.token).toMatch(/^[0-9a-f]{64}$/);
       expect(result.nonce).toMatch(/^[0-9a-f]{32}$/);
     });
 
-    it('generates unique tokens for different sessions', () => {
-      const a = generateCsrfToken('session-a');
-      const b = generateCsrfToken('session-b');
+    it('generates unique tokens for different sessions', async () => {
+      const a = await generateCsrfToken('session-a');
+      const b = await generateCsrfToken('session-b');
       expect(a.token).not.toBe(b.token);
     });
 
-    it('generates unique nonces on each call', () => {
-      const a = generateCsrfToken('session-123');
-      const b = generateCsrfToken('session-123');
+    it('generates unique nonces on each call', async () => {
+      const a = await generateCsrfToken('session-123');
+      const b = await generateCsrfToken('session-123');
       expect(a.nonce).not.toBe(b.nonce);
     });
   });
 
   describe('verifyCsrfToken', () => {
-    it('accepts valid token', () => {
-      const { token, nonce } = generateCsrfToken('session-123');
-      expect(verifyCsrfToken(token, nonce, 'session-123')).toBe(true);
+    it('accepts valid token', async () => {
+      const { token, nonce } = await generateCsrfToken('session-123');
+      expect(await verifyCsrfToken(token, nonce, 'session-123')).toBe(true);
     });
 
-    it('rejects wrong session', () => {
-      const { token, nonce } = generateCsrfToken('session-123');
-      expect(verifyCsrfToken(token, nonce, 'session-wrong')).toBe(false);
+    it('rejects wrong session', async () => {
+      const { token, nonce } = await generateCsrfToken('session-123');
+      expect(await verifyCsrfToken(token, nonce, 'session-wrong')).toBe(false);
     });
 
-    it('rejects tampered token', () => {
-      const { nonce } = generateCsrfToken('session-123');
-      expect(verifyCsrfToken('0'.repeat(64), nonce, 'session-123')).toBe(false);
+    it('rejects tampered token', async () => {
+      const { nonce } = await generateCsrfToken('session-123');
+      expect(await verifyCsrfToken('0'.repeat(64), nonce, 'session-123')).toBe(false);
     });
 
-    it('rejects wrong nonce', () => {
-      const { token } = generateCsrfToken('session-123');
-      expect(verifyCsrfToken(token, '0'.repeat(32), 'session-123')).toBe(false);
+    it('rejects wrong nonce', async () => {
+      const { token } = await generateCsrfToken('session-123');
+      expect(await verifyCsrfToken(token, '0'.repeat(32), 'session-123')).toBe(false);
     });
   });
 
   describe('checkCsrf — exemptions', () => {
-    it('skips GET requests', () => {
+    it('skips GET requests', async () => {
       const req = makeMutatingRequest('/api/config', { method: 'GET' });
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips HEAD requests', () => {
+    it('skips HEAD requests', async () => {
       const req = makeMutatingRequest('/api/config', { method: 'HEAD' });
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips OPTIONS requests', () => {
+    it('skips OPTIONS requests', async () => {
       const req = makeMutatingRequest('/api/config', { method: 'OPTIONS' });
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips PayPal webhook path', () => {
+    it('skips PayPal webhook path', async () => {
       const req = makeMutatingRequest('/api/paypal/webhook');
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips license paths', () => {
+    it('skips license paths', async () => {
       const req = makeMutatingRequest('/api/license/validate');
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips portal paths', () => {
+    it('skips portal paths', async () => {
       const req = makeMutatingRequest('/api/portal/auth');
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips auth paths', () => {
+    it('skips auth paths', async () => {
       const req = makeMutatingRequest('/api/auth/callback');
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('skips download paths', () => {
+    it('skips download paths', async () => {
       const req = makeMutatingRequest('/api/downloads/abc');
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('does NOT skip /api/setup', () => {
+    it('does NOT skip /api/setup', async () => {
       const req = makeMutatingRequest('/api/setup');
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       // Should fail with 403 (missing token), not be skipped
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
@@ -128,40 +128,40 @@ describe('CSRF Protection', () => {
   });
 
   describe('checkCsrf — enforcement', () => {
-    it('rejects POST without CSRF header', () => {
+    it('rejects POST without CSRF header', async () => {
       const req = makeMutatingRequest('/api/config');
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
     });
 
-    it('rejects POST with header but missing cookie', () => {
+    it('rejects POST with header but missing cookie', async () => {
       const req = makeMutatingRequest('/api/config', {
         headers: { 'x-csrf-token': 'abc' },
       });
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
     });
 
-    it('rejects POST with invalid token', () => {
-      const { nonce } = generateCsrfToken('session-123');
+    it('rejects POST with invalid token', async () => {
+      const { nonce } = await generateCsrfToken('session-123');
       const req = makeMutatingRequest('/api/config', {
         headers: { 'x-csrf-token': 'invalid-token' },
         cookies: { 'somnibot-csrf-token': `${nonce}:session-123` },
       });
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
     });
 
-    it('accepts POST with valid CSRF token', () => {
-      const { token, nonce } = generateCsrfToken('session-123');
+    it('accepts POST with valid CSRF token', async () => {
+      const { token, nonce } = await generateCsrfToken('session-123');
       const req = makeMutatingRequest('/api/config', {
         headers: { 'x-csrf-token': token },
         cookies: { 'somnibot-csrf-token': `${nonce}:session-123` },
       });
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       expect(result).toBeNull();
     });
   });
@@ -171,10 +171,10 @@ describe('CSRF Protection', () => {
     // still holds the old token. The prev cookie keeps the old nonce valid for
     // 60s so in-flight requests don't 403.
 
-    it('accepts old token via prev cookie within 60s grace window', () => {
+    it('accepts old token via prev cookie within 60s grace window', async () => {
       const sessionId = 'grace-session';
-      const old = generateCsrfToken(sessionId);
-      const fresh = generateCsrfToken(sessionId);
+      const old = await generateCsrfToken(sessionId);
+      const fresh = await generateCsrfToken(sessionId);
 
       // Simulate: current cookie has new nonce, prev cookie has old nonce + recent timestamp
       const now = String(Date.now());
@@ -187,13 +187,13 @@ describe('CSRF Protection', () => {
         },
       });
 
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
 
-    it('rejects old token after grace window expires', () => {
+    it('rejects old token after grace window expires', async () => {
       const sessionId = 'grace-session';
-      const old = generateCsrfToken(sessionId);
-      const fresh = generateCsrfToken(sessionId);
+      const old = await generateCsrfToken(sessionId);
+      const fresh = await generateCsrfToken(sessionId);
 
       // 120s ago — beyond the 60s grace window
       const expired = String(Date.now() - 120_000);
@@ -206,13 +206,13 @@ describe('CSRF Protection', () => {
         },
       });
 
-      const result = checkCsrf(req);
+      const result = await checkCsrf(req);
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
     });
 
-    it('rejects when prev cookie has no colon separator', () => {
-      const fresh = generateCsrfToken('session-123');
+    it('rejects when prev cookie has no colon separator', async () => {
+      const fresh = await generateCsrfToken('session-123');
       const req = makeMutatingRequest('/api/config', {
         method: 'POST',
         headers: { 'x-csrf-token': 'wrong-token' },
@@ -222,13 +222,13 @@ describe('CSRF Protection', () => {
         },
       });
 
-      expect(checkCsrf(req)).not.toBeNull();
+      expect(await checkCsrf(req)).not.toBeNull();
     });
 
-    it('rejects when prev cookie has non-numeric timestamp', () => {
+    it('rejects when prev cookie has non-numeric timestamp', async () => {
       const sessionId = 'session-123';
-      const old = generateCsrfToken(sessionId);
-      const fresh = generateCsrfToken(sessionId);
+      const old = await generateCsrfToken(sessionId);
+      const fresh = await generateCsrfToken(sessionId);
 
       const req = makeMutatingRequest('/api/config', {
         method: 'POST',
@@ -239,12 +239,12 @@ describe('CSRF Protection', () => {
         },
       });
 
-      expect(checkCsrf(req)).not.toBeNull();
+      expect(await checkCsrf(req)).not.toBeNull();
     });
 
-    it('does not fall back to prev cookie when current token is valid', () => {
+    it('does not fall back to prev cookie when current token is valid', async () => {
       const sessionId = 'session-123';
-      const current = generateCsrfToken(sessionId);
+      const current = await generateCsrfToken(sessionId);
 
       // Current token is valid — prev cookie should be irrelevant
       const req = makeMutatingRequest('/api/config', {
@@ -256,36 +256,36 @@ describe('CSRF Protection', () => {
         },
       });
 
-      expect(checkCsrf(req)).toBeNull();
+      expect(await checkCsrf(req)).toBeNull();
     });
   });
 
   describe('shouldRotateCsrf', () => {
-    it('returns false when no CSRF cookie exists', () => {
+    it('returns false when no CSRF cookie exists', async () => {
       const req = new NextRequest('http://localhost/api/config');
       expect(shouldRotateCsrf(req)).toBe(false);
     });
 
-    it('returns true for legacy cookie without timestamp', () => {
+    it('returns true for legacy cookie without timestamp', async () => {
       const req = new NextRequest('http://localhost/api/config');
       req.cookies.set('somnibot-csrf-token', 'abc123:session-id');
       expect(shouldRotateCsrf(req)).toBe(true);
     });
 
-    it('returns false for recently-issued cookie', () => {
+    it('returns false for recently-issued cookie', async () => {
       const req = new NextRequest('http://localhost/api/config');
       req.cookies.set('somnibot-csrf-token', `abc123:session-id!${Date.now()}`);
       expect(shouldRotateCsrf(req)).toBe(false);
     });
 
-    it('returns true when cookie is older than 30 minutes', () => {
+    it('returns true when cookie is older than 30 minutes', async () => {
       const req = new NextRequest('http://localhost/api/config');
       const thirtyOneMinAgo = Date.now() - 31 * 60 * 1000;
       req.cookies.set('somnibot-csrf-token', `abc123:session-id!${thirtyOneMinAgo}`);
       expect(shouldRotateCsrf(req)).toBe(true);
     });
 
-    it('returns true when timestamp is unparseable', () => {
+    it('returns true when timestamp is unparseable', async () => {
       const req = new NextRequest('http://localhost/api/config');
       req.cookies.set('somnibot-csrf-token', 'abc123:session-id!garbage');
       expect(shouldRotateCsrf(req)).toBe(true);

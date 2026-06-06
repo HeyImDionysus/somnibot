@@ -41,10 +41,10 @@ function makeRequest(
 describe('CSRF grace-period (V10 §5)', () => {
   const sessionId = 'grace-session-01';
 
-  it('accepts the previous token within the grace window', () => {
+  it('accepts the previous token within the grace window', async () => {
     // Generate two tokens — "old" and "new"
-    const old = generateCsrfToken(sessionId);
-    const fresh = generateCsrfToken(sessionId);
+    const old = await generateCsrfToken(sessionId);
+    const fresh = await generateCsrfToken(sessionId);
 
     // Current cookie holds the NEW nonce, prev cookie holds old nonce + timestamp within window
     const nowStr = String(Date.now());
@@ -57,13 +57,13 @@ describe('CSRF grace-period (V10 §5)', () => {
       },
     });
 
-    const result = checkCsrf(req);
+    const result = await checkCsrf(req);
     expect(result).toBeNull(); // accepted via grace period
   });
 
-  it('rejects the previous token after the grace window expires', () => {
-    const old = generateCsrfToken(sessionId);
-    const fresh = generateCsrfToken(sessionId);
+  it('rejects the previous token after the grace window expires', async () => {
+    const old = await generateCsrfToken(sessionId);
+    const fresh = await generateCsrfToken(sessionId);
 
     // Timestamp 120 seconds ago — beyond the 60s grace window
     const expiredStr = String(Date.now() - 120_000);
@@ -76,13 +76,13 @@ describe('CSRF grace-period (V10 §5)', () => {
       },
     });
 
-    const result = checkCsrf(req);
+    const result = await checkCsrf(req);
     expect(result).not.toBeNull();
     expect(result!.status).toBe(403);
   });
 
-  it('rejects when prev cookie has malformed format', () => {
-    const fresh = generateCsrfToken(sessionId);
+  it('rejects when prev cookie has malformed format', async () => {
+    const fresh = await generateCsrfToken(sessionId);
     const req = makeRequest('/api/settings', {
       method: 'PUT',
       headers: { 'x-csrf-token': 'bad-token' },
@@ -92,14 +92,14 @@ describe('CSRF grace-period (V10 §5)', () => {
       },
     });
 
-    const result = checkCsrf(req);
+    const result = await checkCsrf(req);
     expect(result).not.toBeNull();
     expect(result!.status).toBe(403);
   });
 
-  it('rejects when prev cookie timestamp is NaN', () => {
-    const old = generateCsrfToken(sessionId);
-    const fresh = generateCsrfToken(sessionId);
+  it('rejects when prev cookie timestamp is NaN', async () => {
+    const old = await generateCsrfToken(sessionId);
+    const fresh = await generateCsrfToken(sessionId);
     const req = makeRequest('/api/settings', {
       method: 'PUT',
       headers: { 'x-csrf-token': old.token },
@@ -109,7 +109,7 @@ describe('CSRF grace-period (V10 §5)', () => {
       },
     });
 
-    const result = checkCsrf(req);
+    const result = await checkCsrf(req);
     expect(result).not.toBeNull();
   });
 });
