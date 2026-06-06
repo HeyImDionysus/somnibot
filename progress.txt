@@ -284,3 +284,21 @@ Proof:
 - `git diff --check` passed.
 - Fresh reviewer found no blocking issues; residual gaps are import-time failures or a hanging probe, not the escaped rejection fixed here.
 - One earlier `type-check` run failed because it was incorrectly run in parallel with `next build`, while `.next/types` was being regenerated. The sequential rerun passed.
+
+2026-06-06 - workspace-blv.7 - Dashboard health middleware bypass follow-up
+
+After PR #202 merged, production `/api/health` still returned an HTML 500. Follow-up analysis found the middleware declared `/api/health` public only after creating a Supabase server client and calling `supabase.auth.getUser()`, so production Supabase/session-refresh failures could still kill the request before the health route handler ran. The middleware now lets `/api/health` pass through before remote auth/session refresh while still applying CSP/security headers.
+
+Changed:
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/__tests__/middleware-health-public.test.ts
+- progress.txt
+
+Proof:
+- Red middleware test reproduced the issue: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/middleware-health-public.test.ts` failed because `/api/health` initialized Supabase before the fix.
+- Focused health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts` -> 2 files passed, 11 tests passed.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- `git diff --check` passed.
+- Fresh reviewer found no blocking issues and flagged two residual risks. Both are addressed here: the bypass is method-gated to GET/HEAD, and the regression test asserts CSP/frame headers remain on the health response.
