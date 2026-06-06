@@ -225,7 +225,7 @@ jobs:
             --reporter=verbose
       - name: Upload coverage summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-dashboard
           path: packages/dashboard/coverage/
@@ -548,8 +548,8 @@ jobs:
     name: 🔄 DB Type Drift Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Regenerate types and diff
