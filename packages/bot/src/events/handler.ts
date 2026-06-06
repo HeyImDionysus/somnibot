@@ -60,6 +60,9 @@ import { handleSetupCommand } from '../features/setup-wizard/index.js';
 import { handleTicketCommand } from '../features/tickets/index.js';
 
 const log = createLogger('Events');
+const processCronCleanups = new Set<() => void>();
+let processSafetyNetsRegistered = false;
+let processCronCleanupRegistered = false;
 
 // ── Command Registry Registrations ──────────────────────────────────
 // Moderation
@@ -81,8 +84,10 @@ registerCommand('tutorial', (i) => handleTutorialCommand(i));
 registerCommand('setup', handleSetupCommand);
 registerCommand('ticket', handleTicketCommand);
 
-export function registerEvents(client: SomniClient): void {
-  // ── Safety nets ──
+function registerProcessSafetyNets(): void {
+  if (processSafetyNetsRegistered) return;
+  processSafetyNetsRegistered = true;
+
   process.on('unhandledRejection', (error) => {
     log.error('Unhandled promise rejection', { error: String(error) });
   });
@@ -91,6 +96,32 @@ export function registerEvents(client: SomniClient): void {
     log.error('Uncaught exception — process is now unstable, exiting', { error: String(error) });
     setTimeout(() => process.exit(1), 1_000);
   });
+}
+
+function registerProcessCronCleanup(cleanup: () => void): void {
+  processCronCleanups.add(cleanup);
+  if (processCronCleanupRegistered) return;
+  processCronCleanupRegistered = true;
+
+  const cleanupAllCrons = () => {
+    for (const registeredCleanup of processCronCleanups) {
+      registeredCleanup();
+    }
+    processCronCleanups.clear();
+  };
+
+  process.once('SIGTERM', cleanupAllCrons);
+  process.once('SIGINT', cleanupAllCrons);
+}
+
+function trackCronHandle(cronHandles: NodeJS.Timeout[], handle: NodeJS.Timeout): void {
+  handle.unref?.();
+  cronHandles.push(handle);
+}
+
+export function registerEvents(client: SomniClient): void {
+  // ── Safety nets ──
+  registerProcessSafetyNets();
 
   // ── Ready ──
   client.once(Events.ClientReady, async (readyClient) => {
@@ -363,7 +394,7 @@ export function registerEvents(client: SomniClient): void {
   const cronHandles: NodeJS.Timeout[] = [];
 
   // Infraction expiry (every 15 min)
-  cronHandles.push(setInterval(async () => {
+  trackCronHandle(cronHandles, setInterval(async () => {
     for (const ctx of client.router.all()) {
       try { await expireInfractions(client.supabase, ctx.guildId); }
       catch (err) { log.error('Infraction expiry error', { guildId: ctx.guildId, error: String(err) }); }
@@ -371,7 +402,7 @@ export function registerEvents(client: SomniClient): void {
   }, 15 * 60 * 1000));
 
   // Ticket inactivity check (every 30 min)
-  cronHandles.push(setInterval(async () => {
+  trackCronHandle(cronHandles, setInterval(async () => {
     for (const ctx of client.router.all()) {
       try { await checkInactiveTickets(client.supabase, ctx.guild, client.eventBus); }
       catch (err) { log.error('Ticket inactivity check error', { guildId: ctx.guildId, error: String(err) }); }
@@ -380,7 +411,7 @@ export function registerEvents(client: SomniClient): void {
 
   // Temp role grant expiry sweep (every 15 min)
   // Audit Finding #3: temp_role_grants rows have expires_at but were never swept.
-  cronHandles.push(setInterval(async () => {
+  trackCronHandle(cronHandles, setInterval(async () => {
     try {
       const { data: expired } = await client.supabase
         .from('temp_role_grants')
@@ -415,7 +446,7 @@ export function registerEvents(client: SomniClient): void {
   // V5 Audit §14.P3b: Iterate guilds and prune each individually so a failure
   // in one guild doesn't block cleanup for others, and so the single RPC call
   // doesn't lock tables across all guilds simultaneously.
-  cronHandles.push(setInterval(async () => {
+  trackCronHandle(cronHandles, setInterval(async () => {
     let totalPruned = 0;
     const guilds = [...client.router.all()];
     for (const ctx of guilds) {
@@ -439,8 +470,7 @@ export function registerEvents(client: SomniClient): void {
     for (const handle of cronHandles) clearInterval(handle);
     cronHandles.length = 0;
   };
-  process.once('SIGTERM', cleanupCrons);
-  process.once('SIGINT', cleanupCrons);
+  registerProcessCronCleanup(cleanupCrons);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

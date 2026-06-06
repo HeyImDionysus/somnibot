@@ -172,6 +172,18 @@ describe('events/handler', () => {
     expect(registeredEvents).toContain('interactionCreate');
   });
 
+  it('registerEvents does not duplicate process-level handlers', () => {
+    const events = ['unhandledRejection', 'uncaughtException', 'SIGTERM', 'SIGINT'] as const;
+    const before = new Map(events.map((event) => [event, process.listenerCount(event)]));
+
+    registerEvents(makeClient());
+    registerEvents(makeClient());
+
+    for (const event of events) {
+      expect(process.listenerCount(event) - before.get(event)!).toBeLessThanOrEqual(1);
+    }
+  });
+
   it('handles ready event', async () => {
     registerEvents(client);
     await client._emit('ready', client);
