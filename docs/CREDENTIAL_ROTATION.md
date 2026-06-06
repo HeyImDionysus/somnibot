@@ -67,7 +67,9 @@ openssl rand -hex 32  # → DOWNLOAD_SIGNING_SECRET
 ```bash
 # Docker deployment
 docker compose -f docker-compose.prod.yml down
-docker compose -f docker-compose.prod.yml up -d
+# --build is required so NEXT_PUBLIC_* browser values are inlined from
+# the rotated dashboard build environment instead of reusing an old image.
+docker compose -f docker-compose.prod.yml up -d --build
 
 # Launcher deployment
 # Simply restart the launcher — it will use updated env/config
