@@ -194,7 +194,7 @@ jobs:
             --reporter=verbose
       - name: Upload coverage summary
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-bot
           path: packages/bot/coverage/
@@ -233,7 +233,7 @@ jobs:
             --reporter=verbose
       - name: Upload coverage summary
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-dashboard
           path: packages/dashboard/coverage/
