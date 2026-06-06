@@ -150,6 +150,18 @@ export async function middleware(request: NextRequest) {
     return localResponse;
   }
 
+  // Health checks must not depend on Supabase auth/session refresh. If this
+  // route touches remote auth before the health handler runs, a production
+  // auth outage can turn the monitor endpoint into a platform 500.
+  if (
+    request.nextUrl.pathname === '/api/health' &&
+    (request.method === 'GET' || request.method === 'HEAD')
+  ) {
+    const healthResponse = NextResponse.next({ request });
+    applyCspHeaders(healthResponse, nonce);
+    return healthResponse;
+  }
+
   // ── Remote mode: Supabase session refresh + Discord OAuth ──
   let supabaseResponse = NextResponse.next({
     request,
@@ -189,8 +201,6 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/auth') ||
     request.nextUrl.pathname === '/setup' ||
     request.nextUrl.pathname.startsWith('/api/setup') ||
-    // Health checks must be reachable by unauthenticated platform monitors.
-    request.nextUrl.pathname === '/api/health' ||
     request.nextUrl.pathname.startsWith('/api/paypal/webhook') ||
     request.nextUrl.pathname.startsWith('/api/license/validate') ||
     request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||

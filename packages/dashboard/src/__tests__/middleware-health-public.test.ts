@@ -31,6 +31,30 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
+  it('does not touch Supabase auth for /api/health', async () => {
+    mockCreateServerClient.mockImplementation(() => {
+      throw new Error('health checks must not depend on Supabase auth');
+    });
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(res.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('does not bypass remote auth for non-GET /api/health requests', async () => {
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health', { method: 'POST' }));
+
+    expect(mockCreateServerClient).toHaveBeenCalled();
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/login');
+  });
+
   it('still redirects unauthenticated protected routes to /login', async () => {
     const { middleware } = await import('../middleware');
     const res = await middleware(new NextRequest('http://localhost:3000/dashboard'));
