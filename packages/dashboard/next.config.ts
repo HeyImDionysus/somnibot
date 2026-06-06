@@ -12,6 +12,14 @@ const nextConfig: NextConfig = {
   // Trace dependencies from monorepo root so standalone includes everything
   outputFileTracingRoot: path.join(__dirname, '../../'),
   transpilePackages: ['@somnibot/shared'],
+  webpack(config, { dev }) {
+    if (!dev) {
+      // Production/CI builds should be deterministic and warning-free. Webpack's
+      // filesystem cache warns about serializing large strings in this app.
+      config.cache = false;
+    }
+    return config;
+  },
   images: {
     remotePatterns: [
       {
@@ -55,4 +63,3 @@ const nextConfig: NextConfig = {
 };
 
 export default nextConfig;
-

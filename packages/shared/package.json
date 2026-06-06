@@ -24,7 +24,7 @@
     }
   },
   "scripts": {
-    "build": "node ../../scripts/clean.mjs dist tsconfig.tsbuildinfo && tsc",
+    "build": "node ../../scripts/clean.mjs dist && tsc",
     "dev": "tsc --watch",
     "type-check": "tsc --noEmit",
     "clean": "node ../../scripts/clean.mjs dist",

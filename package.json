@@ -7,7 +7,7 @@
   },
   "scripts": {
     "dev": "turbo dev",
-    "build": "turbo build",
+    "build": "node scripts/build-workspace.mjs",
     "lint": "turbo lint",
     "type-check": "turbo type-check",
     "clean": "turbo clean",
