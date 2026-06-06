@@ -32,7 +32,17 @@ COPY packages/dashboard/public ./packages/dashboard/public
 RUN pnpm install --frozen-lockfile
 
 # Build (shared first via turbo)
+ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+RUN test -n "$NEXT_PUBLIC_SUPABASE_URL" \
+    || (echo "ERROR: NEXT_PUBLIC_SUPABASE_URL build arg is required for dashboard browser config" && exit 1)
+RUN test -n "$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY" \
+    || (echo "ERROR: NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY build arg is required for dashboard browser config" && exit 1)
 RUN pnpm turbo build --filter=@somnibot/dashboard
 
 # V11 Audit L-5: Verify standalone output exists before pruning/copying.

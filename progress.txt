@@ -248,3 +248,20 @@ Proof:
 - Corepack fallback resolved in this sandbox: `scripts/lib/pnpm.sh` selected `corepack pnpm`, version `9.15.4`.
 - First-run setup assertions passed: README/setup scripts mention required dashboard runtime envs and Corepack fallback.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-3oi - Credential rotation env-name alignment
+
+Final first-use/ops QA found that the credential rotation runbook still told operators to update only the bot/server Supabase publishable-key alias. The dashboard requires `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, so a compromise-response rotation could leave dashboard config stale. The runbook now documents all configured server aliases, dashboard public env names, and the build-time requirement for `NEXT_PUBLIC_` values. The production Docker path now passes the dashboard public env values as build args, fails clearly if required browser config is missing, and the rotation command rebuilds the dashboard image instead of reusing stale inlined browser config.
+
+Changed:
+- docker-compose.prod.yml
+- docs/CREDENTIAL_ROTATION.md
+- packages/dashboard/Dockerfile
+- progress.txt
+
+Proof:
+- Credential rotation env-name assertions passed: docs mention `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, dashboard env/hosting updates, and dashboard rebuild/redeploy verification.
+- Dashboard Docker build-env wiring assertions passed: `docker-compose.prod.yml` dashboard build args and `packages/dashboard/Dockerfile` required public build args are present.
+- Docker rotation command assertion passed: the runbook uses `docker compose -f docker-compose.prod.yml up -d --build`.
+- `git diff --check` passed.
+- Full `docker compose config` could not be run in this sandbox because Docker is not installed.

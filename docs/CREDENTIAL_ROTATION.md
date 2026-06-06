@@ -9,7 +9,8 @@
 | `DISCORD_TOKEN` | Discord Dev Portal → Bot → Reset Token | 1. Reset in portal 2. Update `.env` / launcher 3. Restart bot |
 | `DISCORD_CLIENT_SECRET` | Discord Dev Portal → OAuth2 → Reset Secret | 1. Reset in portal 2. Update `.env` / launcher 3. Restart dashboard |
 | `SUPABASE_SECRET_KEY` | Supabase Dashboard → Settings → API | 1. Rotate in Supabase dashboard 2. Update `.env` / launcher 3. Restart all services |
-| `SUPABASE_PUBLISHABLE_KEY` | Supabase Dashboard → Settings → API | 1. Copy new key 2. Update `.env` / launcher 3. Rebuild dashboard |
+| `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_ANON_KEY` | Supabase Dashboard → Settings → API | 1. Copy new anon/publishable key 2. Update every configured bot/server `.env` alias; if both aliases exist, update both 3. Restart services that read server env |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase Dashboard → Settings → API | 1. Copy the same anon/publishable key 2. Update dashboard `.env`, launcher, hosting env vars, and dashboard build env 3. Rebuild/redeploy dashboard |
 | `NEXTAUTH_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (sessions invalidated) |
 | `CSRF_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard |
 | `DOWNLOAD_SIGNING_SECRET` | Self-generated (`openssl rand -hex 32`) | 1. Generate new secret 2. Update `.env` 3. Restart dashboard (existing signed URLs invalidated) |
@@ -38,7 +39,13 @@ If you suspect any credential has been compromised, rotate **all** secrets:
 ```bash
 # Supabase Dashboard → Settings → API → Rotate Keys
 # Copy new service_role key → update SUPABASE_SECRET_KEY
-# Copy new anon key → update SUPABASE_PUBLISHABLE_KEY
+# Copy new anon/publishable key → update every configured server alias:
+#   SUPABASE_PUBLISHABLE_KEY and/or SUPABASE_ANON_KEY
+# If both aliases exist in the environment, update both.
+# Copy the same key → update dashboard public env:
+#   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+# NEXT_PUBLIC_* values are inlined during next build, so the rotated key
+# must be present in the dashboard build environment before rebuilding.
 ```
 
 ### 3. Application Secrets
@@ -60,7 +67,9 @@ openssl rand -hex 32  # → DOWNLOAD_SIGNING_SECRET
 ```bash
 # Docker deployment
 docker compose -f docker-compose.prod.yml down
-docker compose -f docker-compose.prod.yml up -d
+# --build is required so NEXT_PUBLIC_* browser values are inlined from
+# the rotated dashboard build environment instead of reusing an old image.
+docker compose -f docker-compose.prod.yml up -d --build
 
 # Launcher deployment
 # Simply restart the launcher — it will use updated env/config
@@ -70,6 +79,7 @@ docker compose -f docker-compose.prod.yml up -d
 
 - [ ] All services start without auth errors
 - [ ] Bot appears online in Discord
+- [ ] Dashboard was rebuilt/redeployed with the new `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` present at build time
 - [ ] Dashboard login works (Discord OAuth)
 - [ ] PayPal webhooks still arrive (check `/api/paypal/webhook` logs)
 - [ ] Existing download links will fail (expected — they were signed with old secret)
