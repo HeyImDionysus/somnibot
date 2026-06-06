@@ -109,38 +109,75 @@ Current usage is lightweight (~100 keys per guild).
 ## Health Monitoring
 
 ### Endpoints
-- `GET /api/health` — Dashboard + Valkey health
+- `GET /api/health` — Dashboard app health. Always returns HTTP 200 when
+  the route responds; read JSON `status: "healthy" | "degraded"` plus
+  `services.valkey` and `services.bot` for dependency alerts.
+- Bot `GET /health` — Bot process/container health. Returns HTTP 200 only
+  when Discord gateway and Valkey are healthy; returns HTTP 503 when either
+  dependency is unhealthy.
 - Valkey key `somnibot:heartbeat:bot` — Bot liveness (30s interval, 120s TTL)
 - Supabase `bot_diagnostics` table — Bot heartbeat fallback (60s interval)
 
 ### Recommended Probes (Docker/K8s)
 ```yaml
 # Docker Compose
-healthcheck:
-  test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
-  interval: 30s
-  timeout: 5s
-  retries: 3
+services:
+  dashboard:
+    # Route/process liveness only. Do not treat degraded JSON as a
+    # platform restart signal; alert on the JSON status separately.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
-# Kubernetes
-livenessProbe:
-  httpGet:
-    path: /api/health
-    port: 3000
-  initialDelaySeconds: 15
-  periodSeconds: 30
-readinessProbe:
-  httpGet:
-    path: /api/health
-    port: 3000
-  initialDelaySeconds: 5
-  periodSeconds: 10
+  bot:
+    # Hard process health for Discord + Valkey connectivity.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+# Kubernetes container probe fragments
+containers:
+  - name: dashboard
+    # Dependency degradation should be handled by JSON-aware monitoring of
+    # /api/health, not by this HTTP status probe.
+    livenessProbe:
+      httpGet:
+        path: /api/health
+        port: 3000
+      initialDelaySeconds: 15
+      periodSeconds: 30
+    readinessProbe:
+      httpGet:
+        path: /api/health
+        port: 3000
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+  - name: bot
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 3001
+      initialDelaySeconds: 15
+      periodSeconds: 30
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 3001
+      initialDelaySeconds: 5
+      periodSeconds: 10
 ```
 
 ### Alert Thresholds
 | Metric | Warning | Critical |
 |--------|---------|----------|
-| `/api/health` response | 503 for >60s | 503 for >5min |
+| Dashboard `/api/health` HTTP fetch | non-2xx/error for >60s | non-2xx/error for >5min |
+| Dashboard `/api/health` JSON status | `degraded` for >60s | `degraded` for >5min |
+| Bot `/health` HTTP response | 503 for >60s | 503 for >5min |
 | Bot heartbeat age | >90s | >300s |
 | Dashboard response time | >2s p95 | >5s p95 |
 | Valkey memory | >80% | >95% |
