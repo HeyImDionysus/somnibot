@@ -34,6 +34,8 @@ describe('setup wizard page wiring', () => {
   it('finalizes setup before showing the ready step', () => {
     expect(source).toContain("action: 'finalize'");
     expect(source).toContain('onClick={finalizeSetup}');
+    expect(source).toContain('if (data.setupCompleted)');
+    expect(source).toContain('setCurrentStep(3)');
     expect(source).not.toContain('onClick={() => setCurrentStep(4)}');
   });
 });

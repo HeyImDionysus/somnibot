@@ -30,6 +30,7 @@ export const BotEnvSchema = z.object({
 
   // ─── Supabase Management API (optional, for auto-migration) ───
   SUPABASE_ACCESS_TOKEN: z.string().optional().default(''),
+  SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED: z.string().optional().default('false'),
   SUPABASE_DB_URL: z.string().optional().default(''),
   // V5-Audit §6.1: Pooled connection URL for multi-replica deployments (pgbouncer)
   SUPABASE_DB_URL_POOLED: z.string().optional().default(''),
@@ -90,6 +91,8 @@ export const DashboardEnvSchema = z.object({
   // Server-only — set either one (new name or legacy); transform resolves both.
   SUPABASE_SECRET_KEY: z.string().min(1).optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+  SUPABASE_ACCESS_TOKEN: z.string().optional().default(''),
+  SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED: z.string().optional().default('false'),
   DISCORD_CLIENT_SECRET: z.string().min(1, 'DISCORD_CLIENT_SECRET is required'),
   DISCORD_APPLICATION_ID: z.string().min(1, 'DISCORD_APPLICATION_ID is required'),
   DISCORD_GUILD_ID: z.string().optional().default(''),

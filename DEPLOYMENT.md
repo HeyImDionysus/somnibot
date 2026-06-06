@@ -29,13 +29,14 @@
    - `SUPABASE_URL` (Project URL)
    - `SUPABASE_SECRET_KEY` (service_role key — **keep secret**)
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (anon key)
-3. Run all migrations in order:
+3. For automatic `/setup` Discord auth configuration, go to **Account → Access Tokens** and create a personal access token for `SUPABASE_ACCESS_TOKEN`. If you do not set it, complete steps 5 and 6 manually, then set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
+4. Run all migrations in order:
    ```bash
    cd packages/supabase
    supabase db push    # or apply migrations manually via SQL editor
    ```
-4. Go to **Authentication → Providers → Discord** → enable with your Client ID and Secret
-5. Go to **Authentication → URL Configuration** and allow the dashboard callback URL: `https://your-dashboard.vercel.app/api/auth/callback`
+5. Go to **Authentication → Providers → Discord** → enable with your Client ID and Secret
+6. Go to **Authentication → URL Configuration** and allow the dashboard callback URL: `https://your-dashboard.vercel.app/api/auth/callback`
    - This must match the dashboard OAuth callback route used by the app and setup wizard.
 
 ## 3. Dashboard (Vercel)
@@ -50,6 +51,8 @@
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase anon key |
 | `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service_role key |
+| `SUPABASE_ACCESS_TOKEN` | Supabase personal access token; required if `/setup` should auto-configure Discord auth |
+| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Manual fallback; set `true` only after Supabase Discord auth and callback URLs are configured manually |
 | `DISCORD_APPLICATION_ID` | Discord Developer Portal |
 | `DISCORD_CLIENT_SECRET` | Discord Developer Portal |
 | `CSRF_SECRET` | Generate with `openssl rand -hex 32` |

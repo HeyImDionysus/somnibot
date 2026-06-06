@@ -4,7 +4,8 @@
  * Uses the Supabase Management API to enable Discord as an auth provider
  * so operators never touch the Supabase dashboard manually.
  *
- * Requires SUPABASE_ACCESS_TOKEN (personal access token from supabase.com/dashboard/account/tokens).
+ * Requires SUPABASE_ACCESS_TOKEN (personal access token from supabase.com/dashboard/account/tokens),
+ * unless SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true confirms manual provider setup.
  * Reads Discord Client ID + Secret from env vars or instance_settings.
  */
 
@@ -21,6 +22,10 @@ interface DashboardUrlEnv {
   VERCEL_URL?: string;
 }
 
+interface AutoConfigOptions {
+  accessToken?: string;
+}
+
 /**
  * Extract Supabase project ref from the project URL.
  * e.g. "https://YOUR_PROJECT.supabase.co" → "YOUR_PROJECT_REF"
@@ -34,8 +39,12 @@ function getProjectRef(): string | null {
 /**
  * Get the Supabase Management API access token.
  */
-function getAccessToken(): string | null {
-  return process.env.SUPABASE_ACCESS_TOKEN || null;
+function getAccessToken(options?: AutoConfigOptions): string | null {
+  return options?.accessToken?.trim() || process.env.SUPABASE_ACCESS_TOKEN || null;
+}
+
+function isManualDiscordAuthProviderConfigured(): boolean {
+  return process.env.SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED?.toLowerCase() === 'true';
 }
 
 /**
@@ -129,17 +138,21 @@ async function isDiscordProviderEnabled(
  * Enable Discord as an OAuth provider in Supabase.
  * Also adds the dashboard callback URL to the redirect allow list.
  */
-export async function ensureDiscordAuthProvider(): Promise<AutoConfigResult> {
+export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Promise<AutoConfigResult> {
   const projectRef = getProjectRef();
   if (!projectRef) {
     return { success: false, error: 'Could not extract Supabase project ref from URL' };
   }
 
-  const accessToken = getAccessToken();
+  if (isManualDiscordAuthProviderConfigured()) {
+    return { success: true, alreadyConfigured: true };
+  }
+
+  const accessToken = getAccessToken(options);
   if (!accessToken) {
     return {
       success: false,
-      error: 'SUPABASE_ACCESS_TOKEN not set — cannot auto-configure auth provider. Set it in env vars or configure Discord auth manually in Supabase dashboard.',
+      error: 'SUPABASE_ACCESS_TOKEN not set — cannot auto-configure auth provider. Set it in env vars, or manually configure Discord auth in Supabase and set SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true.',
     };
   }
 

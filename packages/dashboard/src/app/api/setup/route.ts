@@ -390,6 +390,7 @@ export async function POST(request: NextRequest) {
 
     // Save any additional credentials passed in
     const credentials = (body as Record<string, unknown>).credentials as Record<string, string> | undefined;
+    let submittedSupabaseAccessToken: string | undefined;
     if (credentials) {
       for (const [key, value] of Object.entries(credentials)) {
         if (!value?.trim()) continue;
@@ -398,6 +399,10 @@ export async function POST(request: NextRequest) {
         if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
           console.warn(`[Setup] Rejected unknown credential key: ${key}`);
           continue;
+        }
+
+        if (key === 'supabase_access_token') {
+          submittedSupabaseAccessToken = value.trim();
         }
 
         // Determine section from key prefix
@@ -415,7 +420,23 @@ export async function POST(request: NextRequest) {
     }
 
     // Ensure Discord auth provider is configured
-    const authResult = await ensureDiscordAuthProvider();
+    const authResult = await ensureDiscordAuthProvider({
+      accessToken: submittedSupabaseAccessToken,
+    });
+    if (!authResult.success) {
+      console.warn('[Setup] Could not finalize setup because Discord auth is not configured:', authResult.error);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: authResult.error
+            || 'Discord auth provider could not be configured. Set SUPABASE_ACCESS_TOKEN, or configure Discord auth manually and set SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true before finalizing setup.',
+          authConfigured: false,
+          authError: authResult.error || null,
+          setupLocked: false,
+        },
+        { status: 400 },
+      );
+    }
 
     // ── LOCK: Mark setup as completed ──
     await supabase
