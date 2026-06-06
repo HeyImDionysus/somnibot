@@ -100,6 +100,7 @@ export const DashboardEnvSchema = z.object({
   // Security — required for CSRF protection and webhook replay
   CSRF_SECRET: z.string().min(1, 'CSRF_SECRET is required — generate with: openssl rand -hex 32'),
   NEXTAUTH_SECRET: z.string().min(1, 'NEXTAUTH_SECRET is required — generate with: openssl rand -hex 32'),
+  WEBHOOK_REPLAY_SECRET: z.string().min(1, 'WEBHOOK_REPLAY_SECRET is required — generate with: openssl rand -hex 32'),
 
   // Valkey/Redis — used for rate limiting
   VALKEY_URL: z.string().optional().default(''),

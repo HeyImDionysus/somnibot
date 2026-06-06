@@ -87,7 +87,8 @@ if not exist .env (
     echo        DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET
     echo        SUPABASE_URL, SUPABASE_SECRET_KEY
     echo        NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-    echo        CSRF_SECRET, NEXTAUTH_SECRET ^(generate each with: openssl rand -hex 32^)
+    echo        CSRF_SECRET, NEXTAUTH_SECRET, WEBHOOK_REPLAY_SECRET
+    echo        ^(generate each with: openssl rand -hex 32^)
     echo        LAVALINK_PASSWORD ^(generate with: openssl rand -hex 16^)
     echo.
 ) else (
