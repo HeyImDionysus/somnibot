@@ -44,7 +44,9 @@ install → typecheck → lint → build → test → integration-test → migra
 1. Open Vercel dashboard → somnibot → **Deployments** tab
 2. Find the last green deployment → click three-dot menu → **Promote to Production**
 3. Vercel routes traffic to that build within seconds
-4. Verify: visit `https://<domain>/api/diagnostics` — should return `{ status: 'ok' }`
+4. Verify: visit `https://<domain>/api/health` — should return HTTP 200 with JSON `status: "healthy"` or `status: "degraded"`
+   - Treat HTTP fetch failure as a dashboard rollback failure.
+   - Treat `status: "degraded"` as a dependency alert, not a failed dashboard process rollback by itself.
 
 ### Database Migrations
 Migrations are **forward-only**. To undo a migration:
@@ -75,7 +77,8 @@ Anti-raid and rate limiting will rebuild state on next event. Economy cooldowns 
 
 - **Heartbeat:** Valkey (30s, 2-min TTL) + Supabase fallback (60s)
 - **Dashboard:** Green (<90s) · Yellow (>90s) · Red (>5min = offline)
-- **Health:** `GET /api/diagnostics` — uptime, memory, Lavalink, Valkey, guild count
+- **Public health:** `GET /api/health` — dashboard route liveness plus Valkey/bot dependency status (`healthy` or `degraded`)
+- **Operator diagnostics:** `GET /api/diagnostics` — authenticated guild-owner diagnostics for uptime, memory, Lavalink, Valkey, guild count, queues, webhooks, and sync state
 
 ### Alert Thresholds
 

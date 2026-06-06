@@ -20,7 +20,7 @@
 2. Create an application → note the **Application ID** and **Client Secret** (OAuth2 tab)
 3. Go to the **Bot** tab → create bot → note the **Bot Token**
 4. Enable these **Privileged Gateway Intents**: `GUILD_MEMBERS`, `MESSAGE_CONTENT`, `GUILD_PRESENCES`
-5. OAuth2 → Add redirect URL: `https://your-dashboard.vercel.app/auth/callback`
+5. OAuth2 → Add the Supabase Auth callback URL shown in your Supabase Discord provider settings (usually `https://<project-ref>.supabase.co/auth/v1/callback`)
 
 ## 2. Supabase Setup
 
@@ -35,7 +35,8 @@
    supabase db push    # or apply migrations manually via SQL editor
    ```
 4. Go to **Authentication → Providers → Discord** → enable with your Client ID and Secret
-5. Set redirect URL to `https://your-dashboard.vercel.app/auth/callback`
+5. Go to **Authentication → URL Configuration** and allow the dashboard callback URL: `https://your-dashboard.vercel.app/api/auth/callback`
+   - This must match the dashboard OAuth callback route used by the app and setup wizard.
 
 ## 3. Dashboard (Vercel)
 
@@ -45,11 +46,17 @@
 
 | Variable | Source |
 |---|---|
+| `NEXT_PUBLIC_APP_URL` | Public dashboard URL, e.g. `https://your-dashboard.vercel.app` |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase anon key |
-| `SUPABASE_SECRET_KEY` | Supabase service_role key |
+| `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service_role key |
 | `DISCORD_APPLICATION_ID` | Discord Developer Portal |
 | `DISCORD_CLIENT_SECRET` | Discord Developer Portal |
+| `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
+| `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
+| `VALKEY_URL` or `REDIS_URL` | Redis/Valkey connection string for rate limiting (recommended in production) |
+| `WEBHOOK_REPLAY_SECRET` | Generate with `openssl rand -hex 32` (recommended for webhook replay isolation) |
+| `DOWNLOAD_SIGNING_SECRET` | Generate with `openssl rand -hex 32` (recommended for signed download links) |
 
 4. Deploy → navigate to `/setup` to complete first-run configuration
 
