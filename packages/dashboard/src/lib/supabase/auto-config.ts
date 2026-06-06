@@ -16,6 +16,11 @@ interface AutoConfigResult {
   alreadyConfigured?: boolean;
 }
 
+interface DashboardUrlEnv {
+  NEXT_PUBLIC_APP_URL?: string;
+  VERCEL_URL?: string;
+}
+
 /**
  * Extract Supabase project ref from the project URL.
  * e.g. "https://YOUR_PROJECT.supabase.co" → "YOUR_PROJECT_REF"
@@ -31,6 +36,26 @@ function getProjectRef(): string | null {
  */
 function getAccessToken(): string | null {
   return process.env.SUPABASE_ACCESS_TOKEN || null;
+}
+
+/**
+ * Resolve the dashboard's public base URL for Supabase auth callback allow-listing.
+ */
+export function getDashboardBaseUrl(env?: DashboardUrlEnv): string {
+  const appUrl = (env?.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_APP_URL)?.trim();
+  if (appUrl) {
+    return appUrl.replace(/\/+$/, '');
+  }
+
+  const vercelUrl = (env?.VERCEL_URL ?? process.env.VERCEL_URL)?.trim();
+  if (vercelUrl) {
+    const withScheme = vercelUrl.startsWith('http://') || vercelUrl.startsWith('https://')
+      ? vercelUrl
+      : `https://${vercelUrl}`;
+    return withScheme.replace(/\/+$/, '');
+  }
+
+  return 'http://localhost:3000';
 }
 
 /**
@@ -134,9 +159,7 @@ export async function ensureDiscordAuthProvider(): Promise<AutoConfigResult> {
   }
 
   // Build the callback/redirect URL
-  const dashboardUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL
-    ? `https://${process.env.VERCEL_URL}`
-    : 'http://localhost:3000';
+  const dashboardUrl = getDashboardBaseUrl();
 
   const supabaseCallbackUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL}/auth/v1/callback`;
 
