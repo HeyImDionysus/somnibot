@@ -116,17 +116,16 @@ describe('CSRF grace-period (V10 §5)', () => {
 
 // ── §7 Health route — bot heartbeat ─────────────────────────────────
 
-// Mock rate-limit module before importing the route
-vi.mock('@/lib/api/rate-limit', () => ({
-  checkValkeyHealth: vi.fn(),
-  readValkeyKey: vi.fn(),
-}));
-
 import { GET as healthGET } from '@/app/api/health/route';
-import { checkValkeyHealth, readValkeyKey } from '@/lib/api/rate-limit';
+import { buildHealthResponse, type HealthProbe } from '@/lib/api/health-response';
 
-const mockCheckHealth = vi.mocked(checkValkeyHealth);
-const mockReadKey = vi.mocked(readValkeyKey);
+const mockCheckHealth = vi.fn<HealthProbe['checkValkeyHealth']>();
+const mockReadKey = vi.fn<HealthProbe['readValkeyKey']>();
+
+const probe: HealthProbe = {
+  checkValkeyHealth: mockCheckHealth,
+  readValkeyKey: mockReadKey,
+};
 
 describe('GET /api/health — bot heartbeat (V10 §7)', () => {
   beforeEach(() => {
@@ -139,7 +138,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
       JSON.stringify({ timestamp: Date.now() - 10_000 }), // 10s ago
     );
 
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     const body = await res.json();
 
     expect(body.status).toBe('healthy');
@@ -153,7 +152,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
       JSON.stringify({ timestamp: Date.now() - 200_000 }), // 200s ago, > 120s threshold
     );
 
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     const body = await res.json();
 
     expect(body.status).toBe('degraded');
@@ -164,7 +163,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
     mockCheckHealth.mockResolvedValue(true);
     mockReadKey.mockResolvedValue(null);
 
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     const body = await res.json();
 
     expect(body.services.bot).toBe('offline');
@@ -173,7 +172,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
   it('reports bot unknown when Valkey is down', async () => {
     mockCheckHealth.mockResolvedValue(false);
 
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     const body = await res.json();
 
     expect(body.status).toBe('degraded');
@@ -187,7 +186,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
     mockCheckHealth.mockResolvedValue(true);
     mockReadKey.mockRejectedValue(new Error('parse error'));
 
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     const body = await res.json();
 
     expect(body.status).toBe('degraded');
@@ -196,8 +195,19 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
 
   it('always returns HTTP 200', async () => {
     mockCheckHealth.mockResolvedValue(false);
-    const res = await healthGET();
+    const res = await buildHealthResponse(probe);
     expect(res.status).toBe(200);
+  });
+
+  it('production health route returns monitor-safe JSON', async () => {
+    const res = await healthGET();
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(['healthy', 'degraded']).toContain(body.status);
+    expect(['connected', 'fallback']).toContain(body.services.valkey);
+    expect(['online', 'offline', 'unknown']).toContain(body.services.bot);
+    expect(typeof body.timestamp).toBe('string');
   });
 });
 
