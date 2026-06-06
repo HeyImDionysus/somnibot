@@ -479,3 +479,22 @@ Proof:
 - Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint`.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 39 files passed, 306 tests passed.
+
+2026-06-06 - workspace-blv.15 - Corepack-only root quality scripts
+
+Final first-use QA found that root `corepack pnpm lint` still failed on a Corepack-only machine with no global `pnpm` shim because the root script still invoked Turbo directly. Root `lint` and `type-check` now use a Corepack-aware workspace task helper, and root `clean` uses the existing cleaner directly instead of Turbo.
+
+Changed:
+- package.json
+- scripts/run-workspace-task.mjs
+- progress.txt
+
+Proof:
+- Red reproduction: `corepack pnpm lint` failed through Turbo with `Unable to find package manager binary: cannot find binary path`.
+- Script syntax check passed: `node --check scripts/run-workspace-task.mjs`.
+- Root lint passed: `corepack pnpm lint`.
+- Root type-check passed: `corepack pnpm type-check`.
+- Root clean passed: `corepack pnpm clean`.
+- Post-clean root build passed: `corepack pnpm build`.
+- Lint/type-check/build log scan passed with no matches for `PackFileCacheStrategy`, `<w>`, `warning`, `Warning`, `ERROR`, `Error`, `failed`, `Failed`, or `Unable to find package manager`.
+- `git diff --check` passed.
