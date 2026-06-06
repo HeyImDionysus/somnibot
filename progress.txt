@@ -172,3 +172,22 @@ Proof:
 - Dashboard type-check passed after the fresh build regenerated `.next/types`: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-blv.2 - Bot-level lifecycle cleanup
+
+Added a testable bot shutdown helper and wired the main bot process to retain and stop bot-level heartbeat, presence rotation, and anti-raid pruner handles during graceful shutdown. Shutdown now tolerates partial startup before the guild router exists, continues cleanup if one guild context destroy fails, and still stops Discord, Lavalink, health server, and Valkey. Repeated `registerEvents()` calls now install global process safety/signal handlers only once, and event cron intervals are unref'd; this removed the full-suite `MaxListenersExceededWarning` noise from process-level handlers.
+
+Changed:
+- packages/bot/src/services/bot-shutdown.ts
+- packages/bot/src/index.ts
+- packages/bot/src/events/handler.ts
+- packages/bot/src/__tests__/bot-shutdown.test.ts
+- packages/bot/src/__tests__/event-handler.test.ts
+
+Proof:
+- Focused lifecycle tests passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/bot-shutdown.test.ts src/__tests__/event-handler.test.ts` -> 2 files passed, 20 tests passed.
+- Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
+- Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
+- Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 179 files passed, 2,603 tests passed.
+- Saved full-suite log scan found no `MaxListenersExceededWarning`.
+- `git diff --check` passed.

@@ -22,10 +22,11 @@ import { startDeployListener } from './deploy/deploy-listener.js';
 import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
-import { startHealthServer, stopHealthServer } from './services/health-server.js';
+import { startHealthServer } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
-import { startAntiRaidPruner } from './features/anti-raid/index.js';
+import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
+import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
 import { EmbedBuilder, Events } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 
@@ -116,6 +117,9 @@ async function main(): Promise<void> {
 
   // 3. Create client
   const client = new SomniClient();
+  const botLevelServices: BotLevelServices = {
+    stopAntiRaidPruner,
+  };
 
   // 4. Register events
   registerEvents(client);
@@ -172,6 +176,7 @@ async function main(): Promise<void> {
       // V5 Fix #9: Bot-level heartbeat (replaces per-guild heartbeat timers)
       const botHeartbeat = new HeartbeatService(client.valkey, client.supabase, client.guildId, client);
       botHeartbeat.start();
+      botLevelServices.heartbeat = botHeartbeat;
       log.info('Bot-level heartbeat started');
 
       // V10 Audit L-3: Anti-raid pruner is process-wide (idempotent singleton).
@@ -183,6 +188,7 @@ async function main(): Promise<void> {
       // Create once at bot level (using primary guild for config/member count).
       const botPresence = new BotPresenceManager(client, client.guildId, client.supabase);
       botPresence.start();
+      botLevelServices.presence = botPresence;
       log.info('Bot-level presence rotation started');
     } catch (err) {
       log.error('Primary guild initialization failed', { error: String(err) });
@@ -292,28 +298,7 @@ async function main(): Promise<void> {
 
   // ── Graceful shutdown ──
   const shutdown = async (signal: string) => {
-    log.info(`Received ${signal}, shutting down gracefully...`);
-
-    // Destroy all guild contexts (stops all per-guild timers and services)
-    for (const ctx of client.router.all()) {
-      destroyGuildServices(ctx);
-    }
-    client.router.destroyAll();
-
-    // Disconnect Lavalink nodes
-    client.shoukaku.nodes.forEach((node) => node.disconnect(1000, 'shutdown'));
-
-    // Disconnect Discord gateway
-    client.destroy();
-
-    // Stop health check server
-    stopHealthServer();
-
-    // Close Valkey connection
-    await client.valkey.quit().catch(() => { /* intentionally silent */ });
-
-    log.info('Goodbye.');
-    process.exit(0);
+    await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
