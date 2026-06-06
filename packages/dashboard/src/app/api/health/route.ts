@@ -37,7 +37,7 @@ export async function GET() {
     }
   }
 
-  const isHealthy = valkeyUp && botStatus !== 'offline';
+  const isHealthy = valkeyUp && botStatus === 'online';
 
   // Always return 200 — the dashboard is functional without Valkey (falls back
   // to in-memory rate limiting). Returning 503 when Valkey is down causes

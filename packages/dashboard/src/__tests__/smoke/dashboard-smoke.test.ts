@@ -18,9 +18,9 @@ async function fetchWithTimeout(url: string, timeoutMs = 5_000): Promise<Respons
 }
 
 describe('Dashboard Smoke Tests', () => {
-  it('GET /api/health returns 200 or 503 with valid JSON', async () => {
+  it('GET /api/health returns 200 with valid JSON status', async () => {
     const res = await fetchWithTimeout(`${BASE_URL}/api/health`);
-    expect([200, 503]).toContain(res.status);
+    expect(res.status).toBe(200);
 
     const body = await res.json();
     expect(body).toHaveProperty('status');

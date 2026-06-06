@@ -21,6 +21,14 @@ SHOW max_connections;
 
 ## Valkey / Rate Limiting (Audit §14.5)
 
-- Health endpoint: `GET /api/health` — returns `degraded` when Valkey is down
-- Monitor with UptimeRobot or Railway health checks
-- Alert on HTTP 503 responses
+- Dashboard health endpoint: `GET /api/health` — always returns HTTP 200 when
+  the route responds; read JSON `status` and alert when it is `degraded`.
+  `status` is `healthy` only when Valkey is connected and the bot heartbeat is
+  online; use `services.valkey` and `services.bot` to diagnose which dependency
+  is degraded.
+- Bot process health endpoint: `GET /health` — returns HTTP 503 when Discord
+  gateway or Valkey connectivity is unhealthy; use this for bot container
+  health checks.
+- Monitor dashboard degraded status with JSON-aware checks. Do not configure
+  Railway/Vercel/dashboard restarts from `/api/health` HTTP 503, because the
+  dashboard intentionally does not use 503 for dependency degradation.

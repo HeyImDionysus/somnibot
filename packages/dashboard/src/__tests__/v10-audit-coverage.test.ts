@@ -190,6 +190,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
     const res = await healthGET();
     const body = await res.json();
 
+    expect(body.status).toBe('degraded');
     expect(body.services.bot).toBe('unknown');
   });
 

@@ -191,3 +191,25 @@ Proof:
 - Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 179 files passed, 2,603 tests passed.
 - Saved full-suite log scan found no `MaxListenersExceededWarning`.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-blv.3 - Health endpoint monitoring contract alignment
+
+Aligned operator docs and the dashboard smoke expectation with the existing health route contract: dashboard `GET /api/health` is an app/dependency signal that returns HTTP 200 with JSON `status: healthy|degraded`, while the bot process `GET /health` remains the hard 200/503 container health endpoint. This avoids wiring dashboard dependency degradation to platform restart loops or alerting on a dashboard `/api/health` 503 that the route intentionally never returns.
+
+Changed:
+- docs/SCALING.md
+- docs/production-checklist.md
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/app/api/health/route.ts
+- packages/dashboard/src/__tests__/health-route.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- packages/dashboard/src/__tests__/middleware-health-public.test.ts
+- packages/dashboard/src/__tests__/smoke/dashboard-smoke.test.ts
+
+Proof:
+- Focused dashboard health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/csrf-exempt-audit.test.ts` -> 4 files passed, 23 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- `git diff --check` passed.
+- Live dashboard smoke test was not run locally because it requires a running `DASHBOARD_URL`; the smoke assertion was type/build checked and will run in the deployment smoke workflow where a live instance exists.
