@@ -61,8 +61,16 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+      - id: node-modules-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
       - run: pnpm install --frozen-lockfile
       - uses: actions/cache/save@v5
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
           path: |
             node_modules
