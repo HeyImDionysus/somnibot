@@ -248,3 +248,15 @@ Proof:
 - Corepack fallback resolved in this sandbox: `scripts/lib/pnpm.sh` selected `corepack pnpm`, version `9.15.4`.
 - First-run setup assertions passed: README/setup scripts mention required dashboard runtime envs and Corepack fallback.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-3oi - Credential rotation env-name alignment
+
+Final first-use/ops QA found that the credential rotation runbook still told operators to update only the bot/server Supabase publishable-key alias. The dashboard requires `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, so a compromise-response rotation could leave dashboard config stale. The runbook now documents both server aliases and dashboard public env names, and the post-rotation checklist calls out the required dashboard rebuild/redeploy.
+
+Changed:
+- docs/CREDENTIAL_ROTATION.md
+- progress.txt
+
+Proof:
+- Credential rotation env-name assertions passed: docs mention `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, dashboard env/hosting updates, and dashboard rebuild/redeploy verification.
+- `git diff --check` passed.
