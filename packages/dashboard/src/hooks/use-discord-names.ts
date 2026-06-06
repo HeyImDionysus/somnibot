@@ -140,6 +140,9 @@ export function useDiscordNames(options?: UseDiscordNamesOptions): UseDiscordNam
   const [loading, setLoading] = useState(true);
   const [, setTick] = useState(0);
   const mountedRef = useRef(true);
+  const memberIdsKey = options?.memberIds?.join(',') ?? '';
+  const channelIdsKey = options?.channelIds?.join(',') ?? '';
+  const roleIdsKey = options?.roleIds?.join(',') ?? '';
 
   // Force re-render to reflect cache updates
   const refresh = useCallback(() => {
@@ -152,18 +155,21 @@ export function useDiscordNames(options?: UseDiscordNamesOptions): UseDiscordNam
 
     async function load() {
       const promises: Promise<void>[] = [];
+      const memberIds = memberIdsKey ? memberIdsKey.split(',') : [];
+      const channelIds = channelIdsKey ? channelIdsKey.split(',') : [];
+      const roleIds = roleIdsKey ? roleIdsKey.split(',') : [];
 
       // Always preload channels and roles (they're small and heavily used)
       promises.push(ensureChannels());
       promises.push(ensureRoles());
 
-      if (options?.memberIds?.length) {
-        promises.push(resolveMembers(options.memberIds));
+      if (memberIds.length) {
+        promises.push(resolveMembers(memberIds));
       }
-      if (options?.channelIds?.length) {
+      if (channelIds.length) {
         promises.push(ensureChannels());
       }
-      if (options?.roleIds?.length) {
+      if (roleIds.length) {
         promises.push(ensureRoles());
       }
 
@@ -177,10 +183,9 @@ export function useDiscordNames(options?: UseDiscordNamesOptions): UseDiscordNam
     load();
     return () => { mountedRef.current = false; };
   }, [
-    // Stringify IDs to avoid infinite re-renders from array reference changes
-    options?.memberIds?.join(','),
-    options?.channelIds?.join(','),
-    options?.roleIds?.join(','),
+    memberIdsKey,
+    channelIdsKey,
+    roleIdsKey,
     refresh,
   ]);
 

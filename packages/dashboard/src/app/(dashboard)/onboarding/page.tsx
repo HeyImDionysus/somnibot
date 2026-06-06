@@ -102,7 +102,7 @@ export default function OnboardingPage() {
       }
     }
     load();
-  }, []);
+  }, [toast]);
 
   // Track unsaved changes
   const configLoaded = useRef(false);
@@ -131,7 +131,7 @@ export default function OnboardingPage() {
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, toast]);
 
   const addInterestMapping = () => {
     if (!newInterestName.trim() || !newInterestRole) return;

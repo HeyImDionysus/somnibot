@@ -144,7 +144,9 @@ describe('PUT /api/settings', () => {
   });
 
   it('returns 500 when upsert throws', async () => {
-    mock._query.upsert.mockRejectedValue(new Error('DB connection lost'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dbError = new Error('DB connection lost');
+    mock._query.upsert.mockRejectedValue(dbError);
 
     const res = await putSettings({
       section: 'discord',
@@ -154,5 +156,7 @@ describe('PUT /api/settings', () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toContain('Failed to save');
+    expect(errorSpy).toHaveBeenCalledWith('[Settings] Save error:', dbError);
+    errorSpy.mockRestore();
   });
 });

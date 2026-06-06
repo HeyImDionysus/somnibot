@@ -6,6 +6,7 @@
 'use client';
 
 import { DashboardSkeleton } from '@/components/shared/loading-skeleton';
+import Image from 'next/image';
 import { useEffect, useState, useCallback } from 'react';
 
 interface Member {
@@ -257,9 +258,12 @@ export default function MembersPage() {
                 <td className="px-3 py-2.5">
                   <div className="flex items-center gap-2">
                     {m.avatar_url ? (
-                      <img
+                      <Image
                         src={m.avatar_url}
                         alt=""
+                        width={32}
+                        height={32}
+                        unoptimized
                         className="h-8 w-8 rounded-full"
                       />
                     ) : (

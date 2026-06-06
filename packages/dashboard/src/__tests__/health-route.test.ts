@@ -20,6 +20,7 @@ const probe: HealthProbe = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete process.env.DASHBOARD_ENV_VALID;
 });
 
 describe('GET /api/health', () => {
@@ -32,6 +33,7 @@ describe('GET /api/health', () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe('healthy');
+    expect(body.services.config).toBe('unknown');
     expect(body.services.valkey).toBe('connected');
     expect(body.services.bot).toBe('online');
     expect(body.timestamp).toBeTruthy();
@@ -107,8 +109,24 @@ describe('GET /api/health', () => {
     expect(res.status).toBe(200);
   });
 
+  it('returns degraded when server config validation failed', async () => {
+    process.env.DASHBOARD_ENV_VALID = 'false';
+    mockCheckHealth.mockResolvedValue(true);
+    mockReadKey.mockResolvedValue(JSON.stringify({ timestamp: Date.now() - 30_000 }));
+
+    const res = await buildHealthResponse(probe);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe('degraded');
+    expect(body.services.config).toBe('invalid');
+    expect(body.services.valkey).toBe('connected');
+    expect(body.services.bot).toBe('online');
+  });
+
   it('production GET uses the heartbeat probe when the probe module loads', async () => {
     vi.resetModules();
+    process.env.DASHBOARD_ENV_VALID = 'true';
     const routeCheckHealth = vi.fn().mockResolvedValue(true);
     const routeReadKey = vi.fn().mockResolvedValue(
       JSON.stringify({ timestamp: Date.now() - 10_000 }),
@@ -125,6 +143,7 @@ describe('GET /api/health', () => {
 
       expect(res.status).toBe(200);
       expect(body.status).toBe('healthy');
+      expect(body.services.config).toBe('valid');
       expect(body.services.valkey).toBe('connected');
       expect(body.services.bot).toBe('online');
       expect(routeCheckHealth).toHaveBeenCalledOnce();
@@ -137,6 +156,7 @@ describe('GET /api/health', () => {
 
   it('production GET returns degraded JSON when the probe module cannot load', async () => {
     vi.resetModules();
+    delete process.env.DASHBOARD_ENV_VALID;
     vi.doMock('@/lib/api/rate-limit', () => {
       throw new Error('rate-limit module failed to load');
     });
@@ -148,6 +168,7 @@ describe('GET /api/health', () => {
 
       expect(res.status).toBe(200);
       expect(body.status).toBe('degraded');
+      expect(body.services.config).toBe('unknown');
       expect(body.services.valkey).toBe('fallback');
       expect(body.services.bot).toBe('unknown');
     } finally {
@@ -158,6 +179,7 @@ describe('GET /api/health', () => {
 
   it('production GET degrades when the loaded health probe reports unavailable', async () => {
     vi.resetModules();
+    delete process.env.DASHBOARD_ENV_VALID;
     const routeCheckHealth = vi.fn().mockResolvedValue(false);
     const routeReadKey = vi.fn();
     vi.doMock('@/lib/api/rate-limit', () => ({
@@ -172,6 +194,7 @@ describe('GET /api/health', () => {
 
       expect(res.status).toBe(200);
       expect(body.status).toBe('degraded');
+      expect(body.services.config).toBe('unknown');
       expect(body.services.valkey).toBe('fallback');
       expect(body.services.bot).toBe('unknown');
       expect(routeCheckHealth).toHaveBeenCalledOnce();

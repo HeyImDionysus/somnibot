@@ -8,6 +8,7 @@
  */
 'use client';
 
+import Image from 'next/image';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { ChevronDown, Search, X, User, Bot } from 'lucide-react';
@@ -311,9 +312,11 @@ export function MemberPicker({
                       </div>
                     )}
                     {member.avatar ? (
-                      <img
+                      <Image
                         src={`https://cdn.discordapp.com/avatars/${member.id}/${member.avatar}.png?size=32`}
                         alt=""
+                        width={20}
+                        height={20}
                         className="h-5 w-5 rounded-full shrink-0"
                       />
                     ) : (

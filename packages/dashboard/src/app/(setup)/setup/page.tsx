@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useState, useEffect, useCallback } from 'react';
 import {
   CheckCircle2,
@@ -421,7 +422,14 @@ export default function SetupWizardPage() {
               {discordVerified && (
                 <div className="flex items-center gap-3 rounded-md border border-green-500/30 bg-green-500/10 px-4 py-3">
                   {discordBotAvatar && (
-                    <img src={discordBotAvatar} alt="" className="h-10 w-10 rounded-full" />
+                    <Image
+                      src={discordBotAvatar}
+                      alt=""
+                      width={40}
+                      height={40}
+                      unoptimized
+                      className="h-10 w-10 rounded-full"
+                    />
                   )}
                   <div>
                     <p className="text-sm font-medium text-green-400">

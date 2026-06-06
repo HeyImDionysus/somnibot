@@ -34,6 +34,7 @@ export async function register() {
     const result = DashboardEnvSchema.safeParse(process.env);
 
     if (!result.success) {
+      process.env.DASHBOARD_ENV_VALID = 'false';
       const issues = result.error.issues
         .map((i) => `  ✗ ${i.path.join('.')}: ${i.message}`)
         .join('\n');
@@ -49,15 +50,28 @@ export async function register() {
         'For cloud deploy, set them in your Railway/Vercel environment.\n',
       );
 
-      // Don't hard-exit in local mode — the launcher sets SESSION_TOKEN
-      // and CSRF is exempt, so missing CSRF_SECRET is non-fatal.
-      if (!process.env.SESSION_TOKEN) {
+      // Don't hard-exit in launcher local mode. SESSION_TOKEN alone is not
+      // enough to prove local mode, because a cloud deploy could accidentally
+      // configure that secret and otherwise hide invalid environment config.
+      const isLauncherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1'
+        || Boolean(process.env.SESSION_TOKEN_FILE && process.env.SESSION_TOKEN);
+
+      // In launcher local mode, CSRF is exempt, so missing CSRF_SECRET is
+      // non-fatal.
+      //
+      // Also don't hard-exit in Vercel/serverless. `process.exit(1)` turns
+      // every dynamic route, including /api/health and /api/setup, into an
+      // opaque platform 500 before the route can return actionable JSON.
+      if (!isLauncherLocalMode && process.env.VERCEL !== '1') {
         console.error('Aborting: cloud deploy requires all env vars. Fix the above and restart.\n');
         process.exit(1);
+      } else if (process.env.VERCEL === '1') {
+        console.warn('⚠ Serverless runtime will continue so health/setup routes can report degraded config.\n');
       } else {
         console.warn('⚠ Running in local mode — some missing env vars are non-fatal.\n');
       }
     } else {
+      process.env.DASHBOARD_ENV_VALID = 'true';
       console.log('✓ Dashboard environment validation passed.');
     }
   }
