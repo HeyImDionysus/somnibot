@@ -38,14 +38,24 @@ if %NODE_MAJOR% LSS 22 (
 echo   [OK] Node.js v%NODE_RAW%
 
 REM ── pnpm ──
+set "PNPM_CMD=pnpm"
 where pnpm >nul 2>&1
-if %errorlevel% neq 0 (
-    echo   [X] pnpm not found. Run: corepack enable
-    echo       Then re-run this script ^(corepack will auto-install the correct pnpm version^).
+if errorlevel 1 (
+    where corepack >nul 2>&1
+    if errorlevel 1 (
+        echo   [X] pnpm not found. Install Node.js 22+ and run: corepack enable
+        pause
+        exit /b 1
+    )
+    set "PNPM_CMD=corepack pnpm"
+)
+call %PNPM_CMD% -v >nul 2>&1
+if errorlevel 1 (
+    echo   [X] pnpm is not available through %PNPM_CMD%. Run: corepack enable
     pause
     exit /b 1
 )
-echo   [OK] pnpm found
+echo   [OK] pnpm available via %PNPM_CMD%
 
 REM ── Docker ──
 where docker >nul 2>&1
@@ -76,6 +86,8 @@ if not exist .env (
     echo      At minimum you need:
     echo        DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET
     echo        SUPABASE_URL, SUPABASE_SECRET_KEY
+    echo        NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+    echo        CSRF_SECRET, NEXTAUTH_SECRET ^(generate each with: openssl rand -hex 32^)
     echo.
 ) else (
     echo   [OK] .env already exists, skipping.
@@ -87,7 +99,7 @@ echo [3/5] Installing dependencies (this may take a minute)...
 
 REM Suppress Node.js deprecation warnings from pnpm internals
 set "NODE_NO_WARNINGS=1"
-call pnpm install
+call %PNPM_CMD% install
 set "NODE_NO_WARNINGS="
 
 if %errorlevel% neq 0 (
@@ -105,7 +117,7 @@ REM Disable Turborepo telemetry prompt
 set "TURBO_TELEMETRY_DISABLED=1"
 set "DO_NOT_TRACK=1"
 
-call pnpm build
+call %PNPM_CMD% build
 
 if %errorlevel% neq 0 (
     echo   [X] Build failed. Check the output above for errors.

@@ -227,3 +227,24 @@ Proof:
 - Docs drift assertions passed: required dashboard deployment env vars are documented, stale `/auth/callback` and diagnostics rollback references are absent.
 - Focused dashboard health route test passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts` -> 1 file passed, 6 tests passed.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-blv.6 - First-run setup docs and Corepack pnpm handling
+
+Final first-use QA found that the README and setup scripts could strand a new operator: the main setup path still described only the old five required env vars, and the setup/start scripts required a plain `pnpm` shim even though the repo is pinned through Corepack. The README now documents the dashboard runtime secrets required by `DashboardEnvSchema`, and setup/start/rebuild scripts use `pnpm` when available or `corepack pnpm` when the shim is absent.
+
+Changed:
+- README.md
+- scripts/lib/pnpm.sh
+- scripts/setup.sh
+- scripts/setup.bat
+- scripts/start.sh
+- scripts/start.bat
+- scripts/start-bot.sh
+- scripts/rebuild.sh
+- progress.txt
+
+Proof:
+- Bash script syntax passed: `bash -n scripts/setup.sh scripts/start.sh scripts/start-bot.sh scripts/rebuild.sh scripts/lib/pnpm.sh`.
+- Corepack fallback resolved in this sandbox: `scripts/lib/pnpm.sh` selected `corepack pnpm`, version `9.15.4`.
+- First-run setup assertions passed: README/setup scripts mention required dashboard runtime envs and Corepack fallback.
+- `git diff --check` passed.
