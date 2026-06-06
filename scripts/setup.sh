@@ -69,6 +69,7 @@ if [[ ! -f .env ]]; then
   echo "       SUPABASE_SECRET_KEY    — from Supabase → Settings → API → secret key"
   echo "       NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
   echo "       CSRF_SECRET and NEXTAUTH_SECRET — generate each with: openssl rand -hex 32"
+  echo "       LAVALINK_PASSWORD — generate with: openssl rand -hex 16"
   echo ""
   echo "     The .env file is at: $REPO_ROOT/.env"
   echo ""

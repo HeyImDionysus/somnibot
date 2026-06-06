@@ -88,6 +88,7 @@ if not exist .env (
     echo        SUPABASE_URL, SUPABASE_SECRET_KEY
     echo        NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
     echo        CSRF_SECRET, NEXTAUTH_SECRET ^(generate each with: openssl rand -hex 32^)
+    echo        LAVALINK_PASSWORD ^(generate with: openssl rand -hex 16^)
     echo.
 ) else (
     echo   [OK] .env already exists, skipping.
