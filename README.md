@@ -155,10 +155,13 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
 # Generate each secret with: openssl rand -hex 32
 CSRF_SECRET=generate-a-secret
 NEXTAUTH_SECRET=generate-a-secret
+
+# Local Docker services — generate with: openssl rand -hex 16
+LAVALINK_PASSWORD=generate-a-lavalink-password
 ```
 
 > **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
-> Generate `CSRF_SECRET` and `NEXTAUTH_SECRET` separately with `openssl rand -hex 32`; do not reuse your Supabase or Discord secrets.
+> Generate `CSRF_SECRET` and `NEXTAUTH_SECRET` separately with `openssl rand -hex 32`; generate `LAVALINK_PASSWORD` with `openssl rand -hex 16`. Do not reuse your Supabase or Discord secrets.
 
 Save the file.
 
@@ -346,7 +349,7 @@ somnibot/
 | `DISCORD_GUILD_ID` | Auto-detected | Detected on first bot login |
 | `LAVALINK_HOST` | `localhost` | `lavalink.railway.internal` on Railway |
 | `LAVALINK_PORT` | `2333` | — |
-| `LAVALINK_PASSWORD` | `YOUR_LAVALINK_PASSWORD` | — |
+| `LAVALINK_PASSWORD` | Required | Generate with `openssl rand -hex 16`; used by local Docker Compose and the bot |
 | `VALKEY_URL` | `redis://127.0.0.1:6379` | `redis://valkey.railway.internal:6379` on Railway |
 
 ### Optional
