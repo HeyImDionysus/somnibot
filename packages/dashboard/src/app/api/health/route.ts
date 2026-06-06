@@ -11,56 +11,23 @@
  * V10 Audit §7: Also reads bot heartbeat from Valkey to surface bot
  * connectivity. Heartbeat staleness > 120s means the bot is down.
  */
-import { NextResponse } from 'next/server';
-import { checkValkeyHealth, readValkeyKey } from '@/lib/api/rate-limit';
+import { buildHealthResponse, type HealthProbe } from '@/lib/api/health-response';
 
-const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
-const BOT_HEARTBEAT_STALE_MS = 120_000; // 2 minutes — matches bot TTL
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
-async function getValkeyHealth(): Promise<boolean> {
+async function loadHealthProbe(): Promise<HealthProbe | null> {
   try {
-    return await checkValkeyHealth();
+    const { checkValkeyHealth, readValkeyKey } = await import('@/lib/api/rate-limit');
+    return { checkValkeyHealth, readValkeyKey };
   } catch {
-    return false;
+    return null;
   }
 }
 
 export async function GET() {
-  const valkeyUp = await getValkeyHealth();
-
-  // V10 Audit §7: Check bot heartbeat if Valkey is available
-  let botStatus: 'online' | 'offline' | 'unknown' = 'unknown';
-  if (valkeyUp) {
-    try {
-      const heartbeatRaw = await readValkeyKey(BOT_HEARTBEAT_KEY);
-      if (heartbeatRaw) {
-        const heartbeat = JSON.parse(heartbeatRaw);
-        const age = Date.now() - (heartbeat.timestamp ?? 0);
-        botStatus = age < BOT_HEARTBEAT_STALE_MS ? 'online' : 'offline';
-      } else {
-        botStatus = 'offline';
-      }
-    } catch {
-      botStatus = 'unknown';
-    }
-  }
-
-  const isHealthy = valkeyUp && botStatus === 'online';
-
-  // Always return 200 — the dashboard is functional without Valkey (falls back
-  // to in-memory rate limiting). Returning 503 when Valkey is down causes
-  // Railway/Vercel to restart the container, which doesn't fix Valkey and just
-  // creates a restart loop. The 'degraded' status field lets monitors alert
-  // without triggering platform-level restarts.
-  return NextResponse.json(
-    {
-      status: isHealthy ? 'healthy' : 'degraded',
-      services: {
-        valkey: valkeyUp ? 'connected' : 'fallback',
-        bot: botStatus,
-      },
-      timestamp: new Date().toISOString(),
-    },
-    { status: 200 },
-  );
+  // Keep the public monitor endpoint independent from a top-level raw TCP
+  // client import. If the probe path cannot load in this runtime, health still
+  // returns degraded JSON instead of a platform 500 page.
+  return buildHealthResponse(await loadHealthProbe());
 }

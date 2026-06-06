@@ -302,3 +302,22 @@ Proof:
 - Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
 - `git diff --check` passed.
 - Fresh reviewer found no blocking issues and flagged two residual risks. Both are addressed here: the bypass is method-gated to GET/HEAD, and the regression test asserts CSP/frame headers remain on the health response.
+
+2026-06-06 - workspace-blv.7 - Dashboard health route import-safety follow-up
+
+After PR #203 merged, production `/api/health` still returned an HTML 500, but the failed live response included the middleware CSP/security headers. That narrowed the remaining failure to the route/module layer rather than the middleware auth bypass. Local production smoke with fake non-secret env returned JSON 200, and the compiled health route showed the raw TCP Valkey client path bundled through the route's health probe. The health response logic now lives in a small probe-injected helper, while the production route lazily loads the Valkey probe inside a caught path. If that probe path cannot load or reports unavailable, the endpoint still returns JSON 200 degraded; if it loads and the heartbeat is fresh, it preserves the healthy/online signal.
+
+Changed:
+- packages/dashboard/src/app/api/health/route.ts
+- packages/dashboard/src/lib/api/health-response.ts
+- packages/dashboard/src/__tests__/health-route.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- progress.txt
+
+Proof:
+- Focused health/middleware/audit tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 3 files passed, 28 tests passed.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- `git diff --check` passed.
+- Compiled route inspection showed the route now calls a caught lazy chunk for the rate-limit probe instead of depending on the probe as a top-level route import.
