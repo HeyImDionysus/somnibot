@@ -31,9 +31,20 @@ if not exist node_modules (
 
 if not exist packages\bot\dist (
     echo [*] Bot not built yet. Building...
+    set "PNPM_CMD=pnpm"
+    where pnpm >nul 2>&1
+    if errorlevel 1 (
+        where corepack >nul 2>&1
+        if errorlevel 1 (
+            echo [X] pnpm not found. Install Node.js 22+ and run: corepack enable
+            pause
+            exit /b 1
+        )
+        set "PNPM_CMD=corepack pnpm"
+    )
     set "TURBO_TELEMETRY_DISABLED=1"
     set "DO_NOT_TRACK=1"
-    call pnpm build
+    call %PNPM_CMD% build
 )
 
 REM ─── Start Docker services ─────────────────────────────────

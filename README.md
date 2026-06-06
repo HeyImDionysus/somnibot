@@ -140,19 +140,25 @@ This will:
 Open the `.env` file in any text editor (it's in the `somnibot` folder). Fill in the values you saved:
 
 ```env
-# These 5 are required — paste your values after the =
+# Core bot credentials — paste your values after the =
 DISCORD_TOKEN=paste-your-bot-token-here
 DISCORD_APPLICATION_ID=paste-your-client-id-here
 DISCORD_CLIENT_SECRET=paste-your-client-secret-here
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=sb_secret_...your-secret-key
 
-# Also fill these for the dashboard:
+# Dashboard runtime config:
+NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
+
+# Generate each secret with: openssl rand -hex 32
+CSRF_SECRET=generate-a-secret
+NEXTAUTH_SECRET=generate-a-secret
 ```
 
 > **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
+> Generate `CSRF_SECRET` and `NEXTAUTH_SECRET` separately with `openssl rand -hex 32`; do not reuse your Supabase or Discord secrets.
 
 Save the file.
 
@@ -246,7 +252,7 @@ If you want to run SomniBot 24/7 without keeping your computer on:
 ### Bot → Railway
 
 1. Click the **Deploy on Railway** button at the top of this README.
-2. When prompted, enter these 5 environment variables:
+2. When prompted, enter these environment variables:
 
 | Variable | Where to find it |
 |---|---|
@@ -275,6 +281,9 @@ Railway will deploy three services:
 | `SUPABASE_SECRET_KEY` | Same secret key |
 | `DISCORD_APPLICATION_ID` | Same Client ID |
 | `DISCORD_CLIENT_SECRET` | Same Client Secret |
+| `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
+| `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
+| `NEXT_PUBLIC_APP_URL` | Your deployed dashboard URL |
 
 5. Click **Deploy**. Once deployed, open your dashboard URL → go to `/setup` to finish configuration.
 
@@ -310,7 +319,7 @@ somnibot/
 
 ## Environment Variables
 
-### Required (5)
+### Bot Required
 | Variable | Description |
 |---|---|
 | `DISCORD_TOKEN` | Bot token from Discord Developer Portal |
@@ -319,11 +328,17 @@ somnibot/
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | Supabase secret key (sb_secret_...) |
 
-### Dashboard (also required for the web UI)
+### Dashboard Required
 | Variable | Description |
 |---|---|
+| `NEXT_PUBLIC_APP_URL` | Dashboard URL (`http://localhost:3000` locally; deployed URL in production) |
 | `NEXT_PUBLIC_SUPABASE_URL` | Same as `SUPABASE_URL` |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon/public** key |
+| `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key |
+| `DISCORD_APPLICATION_ID` | Same Application/Client ID |
+| `DISCORD_CLIENT_SECRET` | Same OAuth2 client secret |
+| `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
+| `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
 
 ### Auto-Configured (defaults work with Docker Compose)
 | Variable | Default | Notes |
@@ -337,7 +352,8 @@ somnibot/
 ### Optional
 | Variable | Description |
 |---|---|
-| `NEXT_PUBLIC_APP_URL` | Dashboard URL (defaults to `http://localhost:3000`) |
+| `WEBHOOK_REPLAY_SECRET` | Dedicated webhook replay secret (recommended; falls back to derived secret) |
+| `DOWNLOAD_SIGNING_SECRET` | Dedicated signed-download secret (recommended; falls back to app secrets) |
 | `PAYPAL_CLIENT_ID` | PayPal app client ID (for commerce features) |
 | `PAYPAL_CLIENT_SECRET` | PayPal app secret |
 | `PAYPAL_SANDBOX` | `true` for sandbox mode, `false` for live (defaults to `true`) |

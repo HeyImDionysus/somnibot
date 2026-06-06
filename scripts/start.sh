@@ -9,6 +9,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=scripts/lib/pnpm.sh
+source "$REPO_ROOT/scripts/lib/pnpm.sh"
+
 # Disable telemetry noise
 export TURBO_TELEMETRY_DISABLED=1
 export DO_NOT_TRACK=1
@@ -37,7 +40,8 @@ fi
 
 if [[ ! -d packages/bot/dist ]]; then
   echo "→ Bot not built yet. Building..."
-  pnpm build
+  resolve_pnpm
+  "${PNPM_CMD[@]}" build
 fi
 
 # ─── Load .env ───────────────────────────────────────────────

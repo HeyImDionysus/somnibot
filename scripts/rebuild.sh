@@ -9,6 +9,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=scripts/lib/pnpm.sh
+source "$REPO_ROOT/scripts/lib/pnpm.sh"
+resolve_pnpm
+
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║        SomniBot — Rebuilding             ║"
@@ -29,13 +33,13 @@ echo ""
 
 # ─── Reinstall dependencies ─────────────────────────────────
 echo "→ Installing dependencies..."
-pnpm install
+"${PNPM_CMD[@]}" install
 echo "  ✅ Dependencies installed"
 echo ""
 
 # ─── Rebuild ─────────────────────────────────────────────────
 echo "→ Building all packages..."
-pnpm build
+"${PNPM_CMD[@]}" build
 echo "  ✅ Build complete"
 echo ""
 

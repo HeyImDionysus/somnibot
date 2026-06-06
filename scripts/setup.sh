@@ -8,6 +8,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=scripts/lib/pnpm.sh
+source "$REPO_ROOT/scripts/lib/pnpm.sh"
+
 echo ""
 echo "+==========================================+"
 echo "|         SomniBot — First-Time Setup      |"
@@ -25,8 +28,8 @@ elif [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 22 ]]; then
   missing+=("Node.js 22+ (you have $(node -v), need v22+)")
 fi
 
-if ! command -v pnpm &>/dev/null; then
-  missing+=("pnpm (run: corepack enable, then re-run this script)")
+if ! resolve_pnpm; then
+  missing+=("pnpm via Corepack (run: corepack enable, then re-run this script)")
 fi
 
 if ! command -v docker &>/dev/null; then
@@ -47,7 +50,7 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 
 echo "  ✅ Node.js $(node -v)"
-echo "  ✅ pnpm $(pnpm -v)"
+echo "  ✅ pnpm $("${PNPM_CMD[@]}" -v) via $(pnpm_label)"
 echo "  ✅ Docker $(docker --version | sed 's/Docker version //' | cut -d, -f1)"
 echo ""
 
@@ -64,6 +67,8 @@ if [[ ! -f .env ]]; then
   echo "       DISCORD_CLIENT_SECRET  — from Discord Developer Portal → OAuth2 → Client Secret"
   echo "       SUPABASE_URL           — from Supabase → Settings → API → Project URL"
   echo "       SUPABASE_SECRET_KEY    — from Supabase → Settings → API → secret key"
+  echo "       NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"
+  echo "       CSRF_SECRET and NEXTAUTH_SECRET — generate each with: openssl rand -hex 32"
   echo ""
   echo "     The .env file is at: $REPO_ROOT/.env"
   echo ""
@@ -75,7 +80,7 @@ fi
 echo "→ Installing dependencies (this may take a minute)..."
 
 # Suppress Node.js deprecation warnings from pnpm internals
-NODE_NO_WARNINGS=1 pnpm install
+NODE_NO_WARNINGS=1 "${PNPM_CMD[@]}" install
 
 echo "  ✅ Dependencies installed"
 echo ""
@@ -87,7 +92,7 @@ echo "→ Building all packages (shared → bot → dashboard)..."
 export TURBO_TELEMETRY_DISABLED=1
 export DO_NOT_TRACK=1
 
-pnpm build
+"${PNPM_CMD[@]}" build
 echo "  ✅ Build complete"
 echo ""
 
