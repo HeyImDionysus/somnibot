@@ -213,3 +213,17 @@ Proof:
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - `git diff --check` passed.
 - Live dashboard smoke test was not run locally because it requires a running `DASHBOARD_URL`; the smoke assertion was type/build checked and will run in the deployment smoke workflow where a live instance exists.
+
+2026-06-06 - workspace-blv.4 - Deployment and runbook drift cleanup
+
+Aligned production operator docs with the implemented dashboard auth and health contracts. The deployment guide now distinguishes Discord's Supabase Auth callback from SomniBot's `/api/auth/callback` post-auth route and lists the dashboard env vars required by `DashboardEnvSchema`. The runbook now uses public `/api/health` for Vercel rollback verification and keeps authenticated `/api/diagnostics` as an operator-only diagnostics endpoint.
+
+Changed:
+- DEPLOYMENT.md
+- RUNBOOK.md
+- progress.txt
+
+Proof:
+- Docs drift assertions passed: required dashboard deployment env vars are documented, stale `/auth/callback` and diagnostics rollback references are absent.
+- Focused dashboard health route test passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts` -> 1 file passed, 6 tests passed.
+- `git diff --check` passed.
