@@ -21,7 +21,7 @@ function buildCspHeader(nonce: string): string {
     // March 2022) supports nonce on style-src, and all current browsers handle
     // nonce correctly. Keeping unsafe-inline weakened CSP on legacy clients.
     `style-src 'self' 'nonce-${nonce}'`,
-    "img-src 'self' data: https://cdn.discordapp.com",
+    "img-src 'self' data: https:",
     "font-src 'self'",
     // connect-src: External API calls (Discord, PayPal) go through server-side
     // routes. Add origins here only for direct client-side fetches.

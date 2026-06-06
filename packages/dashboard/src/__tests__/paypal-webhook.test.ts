@@ -4,25 +4,28 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const { replaySecret } = vi.hoisted(() => {
+  const secret = 'test-webhook-replay-secret';
+  process.env.NEXTAUTH_SECRET = 'test-secret-for-webhook-tests';
+  process.env.WEBHOOK_REPLAY_SECRET = secret;
+  process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
+  return { replaySecret: secret };
+});
+
 // Mock dependencies before importing route
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/paypal', () => ({
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
-
-// Set required env
-process.env.NEXTAUTH_SECRET = 'test-secret-for-webhook-tests';
-process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
+vi.mock('@/lib/api/rate-limit', () => ({
+  rateLimits: {
+    paypalWebhook: vi.fn().mockResolvedValue({ limited: false, remaining: 1, retryAfterMs: 0 }),
+  },
+}));
 
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { createHmac } from 'crypto';
-
-// Derive replay secret same way as production code
-const replaySecret = createHmac('sha256', 'test-secret-for-webhook-tests')
-  .update('webhook-replay-secret')
-  .digest('hex');
 
 const mockFrom = vi.fn();
 const mockRpc = vi.fn();
@@ -99,20 +102,32 @@ describe('POST /api/paypal/webhook', () => {
   });
 
   it('accepts valid replay with correct secret', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     mockUpsertSuccess();
 
     const req = makeReplayRequest({
       event_type: 'PAYMENT.CAPTURE.COMPLETED',
-      resource: { id: 'CAP-123', custom_id: 'guild-1|order-1', amount: { value: '10.00', currency_code: 'USD' } },
+      resource: {
+        id: 'CAP-123',
+        custom_id: JSON.stringify({
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          guild_id: 'guild-1',
+          discord_id: 'discord-1',
+        }),
+        amount: { value: '10.00', currency_code: 'USD' },
+      },
       id: 'EVT-REPLAY-1',
     });
 
     const res = await POST(req as never);
-    // May be 200 or 500 depending on downstream mocking depth — we just check it's not 401/400
-    expect([200, 500]).toContain(res.status);
+    expect(res.status).toBe(200);
+    expect(logSpy).toHaveBeenCalledWith('[Webhook] No pending order found for payment');
+    logSpy.mockRestore();
   });
 
   it('rejects replay with wrong secret', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // No replay secret, no PayPal signature headers → should fail signature check
     // We mock fetch globally for the PayPal verification call to return failure
     const originalFetch = global.fetch;
@@ -138,12 +153,15 @@ describe('POST /api/paypal/webhook', () => {
 
       const res = await POST(req as never);
       expect(res.status).toBe(401);
+      expect(errorSpy).toHaveBeenCalledWith('[Webhook] Signature verification failed');
     } finally {
       global.fetch = originalFetch;
+      errorSpy.mockRestore();
     }
   });
 
   it('processes unhandled event types gracefully via replay', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     mockUpsertSuccess();
 
     const req = makeReplayRequest({
@@ -154,6 +172,8 @@ describe('POST /api/paypal/webhook', () => {
 
     const res = await POST(req as never);
     // Should not crash — handled by default switch case
-    expect([200, 500]).toContain(res.status);
+    expect(res.status).toBe(200);
+    expect(logSpy).toHaveBeenCalledWith('[Webhook] Unhandled event: BILLING.SUBSCRIPTION.UNKNOWN_EVENT');
+    logSpy.mockRestore();
   });
 });

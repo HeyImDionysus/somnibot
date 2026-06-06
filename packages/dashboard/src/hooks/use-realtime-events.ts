@@ -35,15 +35,19 @@ export function useRealtimeEvents(
   // without length changes captured stale closures.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  const subscriptionKey = handlers
+    .map((handler) => `${handler.table}:${handler.filter ?? ''}`)
+    .join('|');
 
   useEffect(() => {
-    if (!enabled || handlers.length === 0) return;
+    const activeHandlers = handlersRef.current;
+    if (!enabled || activeHandlers.length === 0) return;
 
     const supabase = createClient();
     const channels: RealtimeChannel[] = [];
 
-    for (let i = 0; i < handlers.length; i++) {
-      const handler = handlers[i]!;
+    for (let i = 0; i < activeHandlers.length; i++) {
+      const handler = activeHandlers[i]!;
       const handlerIndex = i;
       const channelName = `events-${handler.table}-${Date.now()}-${crypto.randomUUID().slice(0, 4)}`;
 
@@ -77,7 +81,7 @@ export function useRealtimeEvents(
       }
       channelsRef.current = [];
     };
-  }, [enabled, handlers.length]);
+  }, [enabled, subscriptionKey]);
 }
 
 /**

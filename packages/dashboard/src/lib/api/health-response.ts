@@ -8,6 +8,14 @@ export interface HealthProbe {
   readValkeyKey: (key: string) => Promise<string | null>;
 }
 
+type ConfigStatus = 'valid' | 'invalid' | 'unknown';
+
+function getConfigStatus(): ConfigStatus {
+  if (process.env.DASHBOARD_ENV_VALID === 'true') return 'valid';
+  if (process.env.DASHBOARD_ENV_VALID === 'false') return 'invalid';
+  return 'unknown';
+}
+
 async function getValkeyHealth(probe: HealthProbe | null): Promise<boolean> {
   if (!probe) return false;
 
@@ -20,6 +28,7 @@ async function getValkeyHealth(probe: HealthProbe | null): Promise<boolean> {
 
 export async function buildHealthResponse(probe: HealthProbe | null = null) {
   const valkeyUp = await getValkeyHealth(probe);
+  const configStatus = getConfigStatus();
 
   let botStatus: 'online' | 'offline' | 'unknown' = 'unknown';
   if (valkeyUp) {
@@ -37,12 +46,13 @@ export async function buildHealthResponse(probe: HealthProbe | null = null) {
     }
   }
 
-  const isHealthy = valkeyUp && botStatus === 'online';
+  const isHealthy = valkeyUp && botStatus === 'online' && configStatus !== 'invalid';
 
   return NextResponse.json(
     {
       status: isHealthy ? 'healthy' : 'degraded',
       services: {
+        config: configStatus,
         valkey: valkeyUp ? 'connected' : 'fallback',
         bot: botStatus,
       },

@@ -205,6 +205,7 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
 
     expect(res.status).toBe(200);
     expect(['healthy', 'degraded']).toContain(body.status);
+    expect(['valid', 'invalid', 'unknown']).toContain(body.services.config);
     expect(['connected', 'fallback']).toContain(body.services.valkey);
     expect(['online', 'offline', 'unknown']).toContain(body.services.bot);
     expect(typeof body.timestamp).toBe('string');
@@ -216,10 +217,15 @@ describe('GET /api/health — bot heartbeat (V10 §7)', () => {
 describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
   const originalEnv = { ...process.env };
 
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
   afterEach(() => {
     // Restore env
     process.env = { ...originalEnv };
     vi.restoreAllMocks();
+    vi.resetModules();
   });
 
   it('reads SESSION_TOKEN from file and deletes it', async () => {
@@ -275,6 +281,105 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('SESSION_TOKEN_FILE'),
+    );
+  });
+
+  it('does not exit on invalid env in Vercel serverless runtime', async () => {
+    process.env.NEXT_RUNTIME = 'nodejs';
+    process.env.VERCEL = '1';
+    delete process.env.SESSION_TOKEN;
+
+    vi.doMock('@somnibot/shared', () => ({
+      DashboardEnvSchema: {
+        safeParse: () => ({
+          success: false,
+          error: {
+            issues: [
+              { path: ['DISCORD_CLIENT_SECRET'], message: 'Required' },
+            ],
+          },
+        }),
+      },
+    }));
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const mod = await import('@/instrumentation');
+    await mod.register();
+
+    expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Dashboard Environment Validation Failed'));
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Serverless runtime will continue'),
+    );
+  });
+
+  it('still exits on invalid non-serverless cloud env', async () => {
+    process.env.NEXT_RUNTIME = 'nodejs';
+    delete process.env.VERCEL;
+    delete process.env.SESSION_TOKEN_FILE;
+    delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
+    process.env.SESSION_TOKEN = 'accidental-cloud-token';
+
+    vi.doMock('@somnibot/shared', () => ({
+      DashboardEnvSchema: {
+        safeParse: () => ({
+          success: false,
+          error: {
+            issues: [
+              { path: ['DISCORD_CLIENT_SECRET'], message: 'Required' },
+            ],
+          },
+        }),
+      },
+    }));
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const mod = await import('@/instrumentation');
+    await mod.register();
+
+    expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Aborting: cloud deploy requires all env vars'),
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('does not exit on invalid launcher local mode', async () => {
+    process.env.NEXT_RUNTIME = 'nodejs';
+    delete process.env.VERCEL;
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'launcher-token';
+
+    vi.doMock('@somnibot/shared', () => ({
+      DashboardEnvSchema: {
+        safeParse: () => ({
+          success: false,
+          error: {
+            issues: [
+              { path: ['DISCORD_CLIENT_SECRET'], message: 'Required' },
+            ],
+          },
+        }),
+      },
+    }));
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const mod = await import('@/instrumentation');
+    await mod.register();
+
+    expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Running in local mode'),
     );
   });
 });

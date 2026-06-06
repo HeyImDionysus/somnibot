@@ -77,7 +77,7 @@ export default function MusicSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     fetchConfig();

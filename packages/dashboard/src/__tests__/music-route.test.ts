@@ -101,6 +101,7 @@ describe('GET /api/music', () => {
   });
 
   it('returns 500 on database error', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockAuthSuccess();
     const chain = {
       select: vi.fn().mockReturnThis(),
@@ -114,6 +115,11 @@ describe('GET /api/music', () => {
 
     const res = await GET();
     expect(res.status).toBe(500);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[music] DB error:',
+      'connection refused',
+    );
+    errorSpy.mockRestore();
   });
 });
 

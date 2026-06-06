@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState, useCallback } from 'react';
@@ -243,9 +244,11 @@ export function Sidebar() {
       {/* Brand */}
       <div className="flex h-14 items-center gap-2.5 border-b border-discord-border-subtle px-3">
         <div className="h-9 w-9 shrink-0 overflow-hidden rounded-xl ring-1 ring-white/10">
-          <img
+          <Image
             src="/somnibot-logo.png"
             alt="SomniBot"
+            width={36}
+            height={36}
             className="h-full w-full object-cover"
           />
         </div>
@@ -371,9 +374,12 @@ export function Sidebar() {
       <div className="border-t border-discord-border-subtle px-3 py-2">
         <div className="flex items-center gap-2">
           {user?.avatarUrl ? (
-            <img
+            <Image
               src={user.avatarUrl}
               alt=""
+              width={32}
+              height={32}
+              unoptimized
               className="h-8 w-8 rounded-full"
             />
           ) : (

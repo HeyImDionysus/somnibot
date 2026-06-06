@@ -4,9 +4,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock rate-limit to force in-memory fallback
-vi.mock('./rate-limit', () => ({
-  checkRateLimit: vi.fn().mockResolvedValue({ limited: false, remaining: 1, retryAfterMs: 0 }),
+// Mock rate-limit to avoid touching the real Valkey/fallback path in this unit test.
+vi.mock('@/lib/api/rate-limit', () => ({
+  checkRateLimit: vi.fn().mockRejectedValue(new Error('Valkey unavailable')),
 }));
 
 // We need to import after mocking

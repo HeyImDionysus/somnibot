@@ -237,6 +237,7 @@ describe('requireGuildOwner — 401/403 responses', () => {
   });
 
   it('returns 403 when requested guild is not owned', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const mockServerSupabase = {
       auth: {
         getUser: vi.fn().mockResolvedValue({
@@ -266,5 +267,9 @@ describe('requireGuildOwner — 401/403 responses', () => {
     if (!result.ok) {
       expect(result.response.status).toBe(403);
     }
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('requested guild guild-2'),
+    );
+    warnSpy.mockRestore();
   });
 });

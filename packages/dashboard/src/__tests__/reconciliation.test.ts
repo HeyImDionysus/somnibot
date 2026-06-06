@@ -5,6 +5,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
+vi.mock('@/lib/api/admin-rate-limit', () => ({
+  checkAdminRateLimit: vi.fn().mockResolvedValue(null),
+}));
 
 import { GET, POST } from '@/app/api/reconciliation/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';

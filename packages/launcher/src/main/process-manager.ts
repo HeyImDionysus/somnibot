@@ -328,7 +328,11 @@ function startDashboardProcess(envVars: Record<string, string>): void {
   // permissions instead of passing it solely via env. The dashboard reads
   // the file path from SESSION_TOKEN_FILE in instrumentation.ts and deletes
   // the file after reading. The env var is still set as a fallback.
-  const dashEnv = { ...safeParentEnv(), ...envVars };
+  const dashEnv: Record<string, string> = {
+    ...safeParentEnv(),
+    ...envVars,
+    SOMNIBOT_DASHBOARD_LOCAL_MODE: '1',
+  };
   if (envVars.SESSION_TOKEN) {
     try {
       const tokenDir = path.join(os.tmpdir(), 'somnibot-launcher');

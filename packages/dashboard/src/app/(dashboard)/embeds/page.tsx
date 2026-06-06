@@ -6,6 +6,7 @@
  */
 'use client';
 
+import Image from 'next/image';
 import { useEffect, useState, useCallback } from 'react';
 import { useAutoRefresh } from '@/hooks/use-realtime-events';
 import { useToast } from '@/components/shared/toast';
@@ -396,12 +397,20 @@ export default function EmbedBuilderPage() {
               <div className="rounded-card bg-discord-bg-tertiary p-4">
                 <p className="text-xs font-medium text-discord-text-muted mb-3 uppercase tracking-wide">Live Preview</p>
                 <div className="rounded-input overflow-hidden" style={{ borderLeft: `4px solid ${draft.color || '#5865f2'}` }}>
-                  <div className="bg-discord-bg-floating p-4">
+                  <div className="relative bg-discord-bg-floating p-4">
                     {/* Author */}
                     {draft.author_name && (
                       <div className="flex items-center gap-2 mb-2">
                         {draft.author_icon_url && (
-                          <img src={draft.author_icon_url} alt="" className="h-6 w-6 rounded-full" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                          <Image
+                            src={draft.author_icon_url}
+                            alt=""
+                            width={24}
+                            height={24}
+                            unoptimized
+                            className="h-6 w-6 rounded-full"
+                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                          />
                         )}
                         <span className="text-xs font-medium text-discord-text-primary">{draft.author_name}</span>
                       </div>
@@ -431,7 +440,15 @@ export default function EmbedBuilderPage() {
 
                     {/* Image */}
                     {draft.image_url && (
-                      <img src={draft.image_url} alt="" className="mt-3 max-w-full rounded" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                      <Image
+                        src={draft.image_url}
+                        alt=""
+                        width={500}
+                        height={300}
+                        unoptimized
+                        className="mt-3 h-auto max-w-full rounded"
+                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                      />
                     )}
 
                     {/* Footer */}
@@ -446,7 +463,15 @@ export default function EmbedBuilderPage() {
                     {/* Thumbnail */}
                     {draft.thumbnail_url && (
                       <div className="absolute top-4 right-4">
-                        <img src={draft.thumbnail_url} alt="" className="h-16 w-16 rounded" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                        <Image
+                          src={draft.thumbnail_url}
+                          alt=""
+                          width={64}
+                          height={64}
+                          unoptimized
+                          className="h-16 w-16 rounded"
+                          onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                        />
                       </div>
                     )}
                   </div>

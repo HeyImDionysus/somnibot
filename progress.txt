@@ -14,7 +14,7 @@ Proof:
 - Red regression before fix: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/rbac.test.ts` failed because active_guild_id was ignored and inaccessible requested guilds were not rejected.
 - Focused regression suite passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/rbac.test.ts src/__tests__/rbac-auth.test.ts src/__tests__/guilds-route.test.ts` -> 3 files passed, 43 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing warnings in unrelated files.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 32 files passed, 270 tests passed.
 
 Known environment note:
@@ -37,7 +37,7 @@ Proof:
 - Focused bot queue test passed: `corepack pnpm --filter @somnibot/bot test -- src/__tests__/action-queue-routing.test.ts` -> 1 file passed, 30 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 33 files passed, 272 tests passed.
 - Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,582 tests passed.
 
@@ -58,7 +58,7 @@ Proof:
 - `git diff --check` passed.
 
 Known environment note:
-- Full bot tests still emit pre-existing `MaxListenersExceededWarning` process-listener warnings in several test files. This task did not introduce those warnings.
+- Open follow-up at the time: full bot tests emitted `MaxListenersExceededWarning` process-listener warnings in several test files. Later resolved by the 2026-06-06 bot-level lifecycle cleanup entry below.
 
 2026-06-05 - workspace-dzm - Permission-overwrite drift accept honesty
 
@@ -80,7 +80,7 @@ Proof:
 - Shared diff test passed: `corepack pnpm --filter @somnibot/shared test -- src/__tests__/diff.test.ts` -> 1 file passed, 16 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 33 files passed, 273 tests passed.
 - Full bot test suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,591 tests passed.
 - `git diff --check` passed.
@@ -88,8 +88,8 @@ Proof:
 - Direct package build chain passed: `corepack pnpm --filter @somnibot/shared build && corepack pnpm --filter @somnibot/bot build && NEXT_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=... DISCORD_GUILD_ID=000000000000000000 corepack pnpm --filter @somnibot/dashboard build && corepack pnpm --filter @somnibot/license-sdk build && corepack pnpm --filter @somnibot/launcher build`.
 
 Known environment note:
-- Dashboard build still emits the pre-existing Next Edge Runtime warning for `crypto` imported by `packages/dashboard/src/lib/api/csrf.ts`.
-- Full bot tests still emit pre-existing `MaxListenersExceededWarning` process-listener warnings in several test files. This task did not introduce those warnings.
+- Open follow-up at the time: dashboard build emitted the Next Edge Runtime warning for `crypto` imported by `packages/dashboard/src/lib/api/csrf.ts`. Later resolved by the 2026-06-06 Edge-safe dashboard CSRF middleware entry below.
+- Open follow-up at the time: full bot tests emitted `MaxListenersExceededWarning` process-listener warnings in several test files. Later resolved by the 2026-06-06 bot-level lifecycle cleanup entry below.
 
 2026-06-05 - workspace-dzm - Codex PR review follow-up
 
@@ -108,7 +108,7 @@ Proof:
 - Full bot suite passed: `corepack pnpm --filter @somnibot/bot test` -> 178 files passed, 2,591 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
 - Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - Direct package build chain passed: `corepack pnpm --filter @somnibot/shared build && corepack pnpm --filter @somnibot/bot build && NEXT_PUBLIC_SUPABASE_URL=https://placeholder.supabase.co NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=... DISCORD_GUILD_ID=000000000000000000 corepack pnpm --filter @somnibot/dashboard build && corepack pnpm --filter @somnibot/license-sdk build && corepack pnpm --filter @somnibot/launcher build`.
 
 2026-06-05 - workspace-26p - Structured permission-overwrite drift accept
@@ -132,11 +132,11 @@ Proof:
 - Shared type-check passed: `corepack pnpm --filter @somnibot/shared type-check`.
 - Bot type-check passed: `corepack pnpm --filter @somnibot/bot type-check`.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - `git diff --check` passed.
 - Shared build passed: `corepack pnpm --filter @somnibot/shared build`.
 - Bot build passed: `corepack pnpm --filter @somnibot/bot build`.
-- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; it emitted pre-existing webpack cache-size warnings and the existing Edge Runtime warning for `packages/dashboard/src/lib/api/csrf.ts`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; it emitted webpack cache-size warnings and the Edge Runtime warning for `packages/dashboard/src/lib/api/csrf.ts`. The Edge Runtime warning was later resolved by the 2026-06-06 Edge-safe dashboard CSRF middleware entry below.
 
 2026-06-05 - workspace-26p - Codex review follow-up on PR #195
 
@@ -170,7 +170,7 @@ Proof:
 - Focused CSRF tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/csrf.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 2 files passed, 42 tests passed.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`; the fresh build log had no `crypto` or `Edge Runtime` warning for `csrf.ts`.
 - Dashboard type-check passed after the fresh build regenerated `.next/types`: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - `git diff --check` passed.
 
 2026-06-06 - workspace-blv.2 - Bot-level lifecycle cleanup
@@ -209,9 +209,10 @@ Changed:
 Proof:
 - Focused dashboard health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/csrf-exempt-audit.test.ts` -> 4 files passed, 23 tests passed.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - `git diff --check` passed.
+
 - Live dashboard smoke test was not run locally because it requires a running `DASHBOARD_URL`; the smoke assertion was type/build checked and will run in the deployment smoke workflow where a live instance exists.
 
 2026-06-06 - workspace-blv.4 - Deployment and runbook drift cleanup
@@ -280,7 +281,7 @@ Proof:
 - Focused health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts` -> 2 files passed, 9 tests passed.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - Dashboard type-check passed after the build completed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - `git diff --check` passed.
 - Fresh reviewer found no blocking issues; residual gaps are import-time failures or a hanging probe, not the escaped rejection fixed here.
 - One earlier `type-check` run failed because it was incorrectly run in parallel with `next build`, while `.next/types` was being regenerated. The sequential rerun passed.
@@ -299,7 +300,7 @@ Proof:
 - Focused health/middleware tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts` -> 2 files passed, 11 tests passed.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - `git diff --check` passed.
 - Fresh reviewer found no blocking issues and flagged two residual risks. Both are addressed here: the bypass is method-gated to GET/HEAD, and the regression test asserts CSP/frame headers remain on the health response.
 
@@ -318,6 +319,93 @@ Proof:
 - Focused health/middleware/audit tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/middleware-health-public.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 3 files passed, 28 tests passed.
 - Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
 - Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
-- Dashboard lint passed: `corepack pnpm --filter @somnibot/dashboard lint` with 0 errors and 20 pre-existing unrelated warnings.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
 - `git diff --check` passed.
 - Compiled route inspection showed the route now calls a caught lazy chunk for the rate-limit probe instead of depending on the probe as a top-level route import.
+
+2026-06-06 - workspace-blv.7 - Dashboard serverless env validation health follow-up
+
+After PR #204 merged and deployed, production `/api/health` still returned a Next/Vercel HTML 500. Live checks showed `/api/setup` also returned HTML 500 while static `/login` returned 200 on the same build, pointing to dynamic serverless startup rather than the health route alone. Local standalone reproduction with missing required server envs showed `instrumentation.ts` could call `process.exit(1)` before dynamic routes responded. Vercel/serverless startup now records invalid dashboard config but continues so `/api/health` and setup routes can report actionable degraded JSON instead of an opaque platform 500. Health JSON now includes `services.config` as `valid`, `invalid`, or `unknown`, and invalid config forces degraded status.
+
+Changed:
+- packages/dashboard/src/instrumentation.ts
+- packages/dashboard/src/lib/api/health-response.ts
+- packages/dashboard/src/__tests__/health-route.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- progress.txt
+
+Proof:
+- Local standalone missing-env smoke passed: stripped Vercel-like env returned HTTP 200 body `{"status":"degraded","services":{"config":"invalid","valkey":"fallback","bot":"unknown"}}`.
+- Focused health/middleware/audit tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts src/__tests__/middleware-health-public.test.ts` -> 3 files passed, 31 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- `git diff --check` passed.
+
+2026-06-06 - workspace-blv.7 - Dashboard local-mode env validation hardening
+
+Fresh review found that invalid non-Vercel cloud env could still skip startup abort if `SESSION_TOKEN` was accidentally configured, because `instrumentation.ts` treated any token as launcher local mode. Dashboard startup now requires an explicit launcher marker or the temp-token-file handoff before applying the local-mode non-fatal path. The Electron launcher sets `SOMNIBOT_DASHBOARD_LOCAL_MODE=1` for its dashboard child so env-only token fallback still works locally without letting a stray cloud token hide bad config.
+
+Changed:
+- packages/dashboard/src/instrumentation.ts
+- packages/launcher/src/main/process-manager.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- progress.txt
+
+Proof:
+- Focused dashboard tests passed: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/health-route.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 2 files passed, 28 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint completed with 0 errors and 20 warnings; dashboard lint warning cleanup is tracked in the 2026-06-06 lint warning cleanup entry below.
+- Launcher compile check passed after fixing the new env object type annotation: `corepack pnpm --filter @somnibot/launcher exec tsc --noEmit`.
+- `git diff --check` passed.
+
+2026-06-06 - workspace-blv.7 - Dashboard lint warning cleanup
+
+Addressed the dashboard lint warnings that had been carried through earlier proof notes. Replaced raw `<img>` usage with `next/image` in dashboard avatar, logo, preview, and artwork surfaces; fixed hook dependency warnings with dependency/ref patterns; and widened dashboard CSP image sources from Discord-only to HTTPS images so music artwork and user-entered embed preview images can render instead of being blocked by policy.
+
+Changed:
+- packages/dashboard/src/app/(dashboard)/embeds/page.tsx
+- packages/dashboard/src/app/(dashboard)/members/page.tsx
+- packages/dashboard/src/app/(dashboard)/music/page.tsx
+- packages/dashboard/src/app/(dashboard)/onboarding/page.tsx
+- packages/dashboard/src/app/(setup)/setup/page.tsx
+- packages/dashboard/src/components/layout/sidebar.tsx
+- packages/dashboard/src/components/music/now-playing-widget.tsx
+- packages/dashboard/src/components/shared/member-picker.tsx
+- packages/dashboard/src/components/shared/toast.tsx
+- packages/dashboard/src/hooks/use-discord-names.ts
+- packages/dashboard/src/hooks/use-realtime-events.ts
+- packages/dashboard/src/hooks/use-realtime.ts
+- packages/dashboard/src/middleware.ts
+- progress.txt
+
+Proof:
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint` -> 0 errors, 0 warnings.
+- Full dashboard test suite passed: `corepack pnpm --filter @somnibot/dashboard test` -> 35 files passed, 290 tests passed.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Launcher compile check still passed: `corepack pnpm --filter @somnibot/launcher exec tsc --noEmit`.
+- `git diff --check` passed.
+
+2026-06-06 - workspace-blv.7 - Dashboard test proof log cleanup
+
+Cleaned dashboard test output so expected negative-path logs are asserted or isolated instead of leaking into the suite proof. PayPal webhook tests now set required env through hoisted test setup before route modules load, route failure-path tests assert the expected production logs, reconciliation mocks admin rate limiting instead of touching the real rate-limit path, and the download nonce test mocks the correct rate-limit module while still exercising the in-memory fallback path.
+
+Changed:
+- packages/dashboard/src/__tests__/download-nonce.test.ts
+- packages/dashboard/src/__tests__/music-route.test.ts
+- packages/dashboard/src/__tests__/paypal-webhook-edge.test.ts
+- packages/dashboard/src/__tests__/paypal-webhook.test.ts
+- packages/dashboard/src/__tests__/rbac-auth.test.ts
+- packages/dashboard/src/__tests__/reconciliation.test.ts
+- packages/dashboard/src/__tests__/settings-route.test.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- progress.txt
+
+Proof:
+- Affected dashboard test files passed clean: `corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/v10-audit-coverage.test.ts src/__tests__/rbac-auth.test.ts src/__tests__/music-route.test.ts src/__tests__/settings-route.test.ts src/__tests__/paypal-webhook.test.ts src/__tests__/paypal-webhook-edge.test.ts src/__tests__/reconciliation.test.ts src/__tests__/download-nonce.test.ts` -> 8 files passed, 80 tests passed.
+- Full dashboard test suite passed clean: `corepack pnpm --filter @somnibot/dashboard test` -> 35 files passed, 290 tests passed, with no `stderr |` or `stdout |` sections in the captured output.
+- Dashboard lint passed clean: `corepack pnpm --filter @somnibot/dashboard lint` -> 0 errors, 0 warnings.
+- Dashboard type-check passed: `corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard build passed: `corepack pnpm --filter @somnibot/dashboard build`.
+- Launcher compile check still passed: `corepack pnpm --filter @somnibot/launcher exec tsc --noEmit`.

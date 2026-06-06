@@ -81,6 +81,8 @@ export function useRealtimeSubscription<T extends Record<string, unknown>>(
   const [isConnected, setIsConnected] = useState(false);
   const [updateCount, setUpdateCount] = useState(0);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const callbacksRef = useRef({ onInsert, onUpdate, onDelete });
+  callbacksRef.current = { onInsert, onUpdate, onDelete };
 
   // Update data when initialData changes (stable reference)
   useEffect(() => {
@@ -119,7 +121,7 @@ export function useRealtimeSubscription<T extends Record<string, unknown>>(
               if (exists) return prev;
               return [...prev, newRecord];
             });
-            onInsert?.(newRecord);
+            callbacksRef.current.onInsert?.(newRecord);
           }
 
           if (payload.eventType === 'UPDATE') {
@@ -129,7 +131,7 @@ export function useRealtimeSubscription<T extends Record<string, unknown>>(
                 item[primaryKey] === updatedRecord[primaryKey] ? updatedRecord : item,
               ),
             );
-            onUpdate?.(updatedRecord);
+            callbacksRef.current.onUpdate?.(updatedRecord);
           }
 
           if (payload.eventType === 'DELETE') {
@@ -137,7 +139,7 @@ export function useRealtimeSubscription<T extends Record<string, unknown>>(
             setData((prev) =>
               prev.filter((item) => item[primaryKey] !== oldRecord[primaryKey]),
             );
-            onDelete?.(oldRecord);
+            callbacksRef.current.onDelete?.(oldRecord);
           }
         },
       )
@@ -219,6 +221,8 @@ export function usePresence(
   userData: Record<string, unknown> = {},
 ): { presences: Record<string, unknown>[]; onlineCount: number } {
   const [presences, setPresences] = useState<Record<string, unknown>[]>([]);
+  const userDataRef = useRef(userData);
+  userDataRef.current = userData;
 
   useEffect(() => {
     const supabase = createClient();
@@ -240,7 +244,7 @@ export function usePresence(
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          await channel.track({ ...userData, online_at: new Date().toISOString() });
+          await channel.track({ ...userDataRef.current, online_at: new Date().toISOString() });
         }
       });
 

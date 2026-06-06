@@ -6,6 +6,7 @@
  */
 'use client';
 
+import Image from 'next/image';
 import { useState, useEffect, useCallback } from 'react';
 
 interface NowPlaying {
@@ -115,9 +116,12 @@ export default function NowPlayingWidget() {
         <div className="p-4">
           <div className="flex items-start gap-3">
             {status.nowPlaying.thumbnail && (
-              <img
+              <Image
                 src={status.nowPlaying.thumbnail}
                 alt=""
+                width={56}
+                height={56}
+                unoptimized
                 className="w-14 h-14 rounded object-cover flex-shrink-0"
               />
             )}
