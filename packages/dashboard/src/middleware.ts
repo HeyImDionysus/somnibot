@@ -56,17 +56,18 @@ function applyCspHeaders(response: NextResponse, nonce: string): void {
 
 /* ------------------------------------------------------------------ */
 /*  Local-mode detection                                               */
-/*  When SESSION_TOKEN env var is set (by the Electron launcher),      */
-/*  we skip Supabase/Discord OAuth entirely and authenticate via a     */
-/*  simple session cookie.  The dashboard is bound to 127.0.0.1 so    */
-/*  the token never leaves the machine.                                */
+/*  When explicit launcher local mode is enabled, we skip              */
+/*  Supabase/Discord OAuth entirely and authenticate via a simple      */
+/*  session cookie. The dashboard is bound to 127.0.0.1 so the token  */
+/*  never leaves the machine.                                          */
 /* ------------------------------------------------------------------ */
 
+const LOCAL_MODE_ENABLED = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1';
 const LOCAL_SESSION_TOKEN = process.env.SESSION_TOKEN ?? null;
 const COOKIE_NAME = 'somnibot-local-session';
 
 function isLocalMode(): boolean {
-  return LOCAL_SESSION_TOKEN !== null && LOCAL_SESSION_TOKEN.length > 0;
+  return LOCAL_MODE_ENABLED && LOCAL_SESSION_TOKEN !== null && LOCAL_SESSION_TOKEN.length > 0;
 }
 
 /**

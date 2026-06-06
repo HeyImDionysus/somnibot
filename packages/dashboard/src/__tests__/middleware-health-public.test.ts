@@ -13,6 +13,7 @@ describe('middleware health access', () => {
     vi.resetModules();
     vi.clearAllMocks();
     delete process.env.SESSION_TOKEN;
+    delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'test-key';
 
@@ -57,9 +58,38 @@ describe('middleware health access', () => {
 
   it('still redirects unauthenticated protected routes to /login', async () => {
     const { middleware } = await import('../middleware');
-    const res = await middleware(new NextRequest('http://localhost:3000/dashboard'));
+    const res = await middleware(new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    }));
 
     expect(res.status).toBe(307);
     expect(res.headers.get('location')).toBe('http://localhost:3000/login');
+  });
+
+  it('does not treat SESSION_TOKEN alone as launcher local mode', async () => {
+    process.env.SESSION_TOKEN = 'accidental-cloud-token';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    }));
+
+    expect(mockCreateServerClient).toHaveBeenCalled();
+    expect(res.status).toBe(307);
+    expect(res.headers.get('location')).toBe('http://localhost:3000/login');
+  });
+
+  it('allows launcher local mode only with explicit marker and localhost', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'launcher-token';
+
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    }));
+
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(res.cookies.get('somnibot-local-session')?.value).toBe('launcher-token');
   });
 });
