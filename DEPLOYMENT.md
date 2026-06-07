@@ -29,12 +29,14 @@ experience.
 
 ## Platform Defaults
 
-SomniBot's default launch targets are regular local and VPS. The repository does
-not keep root Vercel or Railway config files because those platforms are not the
-default operating model. If an operator intentionally maintains a compatibility
-deployment on one of those hosts, it must still follow the same environment,
-Valkey/Redis, public callback, PayPal webhook, and Supabase redirect rules in
-this guide.
+SomniBot's default launch targets are regular local and VPS. The root
+`vercel.json` is intentionally limited to disabling Vercel Git deployments; it
+does not define a dashboard build, install command, output directory, or launch
+target. The repository does not keep Railway config files because Railway is not
+the default operating model. If an operator intentionally maintains a
+compatibility deployment on either host, it must still follow the same
+environment, Valkey/Redis, public callback, PayPal webhook, and Supabase redirect
+rules in this guide.
 
 ---
 
