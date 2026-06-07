@@ -147,6 +147,6 @@ echo +==========================================+
 echo.
 echo Next steps:
 echo   1. Fill in your .env file (if you haven't already)
-echo   2. Run: scripts\start.bat
+echo   2. Run the production regular-local stack: scripts\start.bat
 echo.
 pause

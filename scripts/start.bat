@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM SomniBot — Start Everything (Windows)
-REM Starts Docker services, the bot, and the dashboard.
+REM Starts Docker services, the bot, and the production dashboard.
 REM Close this window to stop, then run stop.bat.
 REM ============================================================
 
@@ -29,22 +29,33 @@ if not exist node_modules (
     exit /b 1
 )
 
-if not exist packages\bot\dist (
-    echo [*] Bot not built yet. Building...
-    set "PNPM_CMD=pnpm"
-    where pnpm >nul 2>&1
+set "PNPM_CMD=pnpm"
+where pnpm >nul 2>&1
+if errorlevel 1 (
+    where corepack >nul 2>&1
     if errorlevel 1 (
-        where corepack >nul 2>&1
-        if errorlevel 1 (
-            echo [X] pnpm not found. Install Node.js 22+ and run: corepack enable
-            pause
-            exit /b 1
-        )
-        set "PNPM_CMD=corepack pnpm"
+        echo [X] pnpm not found. Install Node.js 22+ and run: corepack enable
+        pause
+        exit /b 1
     )
+    set "PNPM_CMD=corepack pnpm"
+)
+
+set "NEEDS_BUILD=0"
+if not exist packages\bot\dist set "NEEDS_BUILD=1"
+if not exist packages\dashboard\.next\standalone set "NEEDS_BUILD=1"
+if not exist packages\dashboard\.next\static set "NEEDS_BUILD=1"
+
+if "%NEEDS_BUILD%"=="1" (
+    echo [*] Production build artifacts are missing. Building...
     set "TURBO_TELEMETRY_DISABLED=1"
     set "DO_NOT_TRACK=1"
     call %PNPM_CMD% build
+    if %errorlevel% neq 0 (
+        echo [X] Build failed. Check the output above for errors.
+        pause
+        exit /b 1
+    )
 )
 
 REM ─── Start Docker services ─────────────────────────────────
@@ -90,10 +101,21 @@ REM ─── Write PID file location ──────────────
 REM Store PID file in project root for stop.bat to use
 set "PID_FILE=%cd%\.somnibot.pid"
 
-REM ─── Start the dashboard in a new window ────────────────────
-echo [*] Starting dashboard in a new window...
-start "SomniBot Dashboard" cmd /c "cd packages\dashboard && npx next dev --turbopack --port 3000"
-echo   [OK] Dashboard starting on http://localhost:3000
+REM ─── Start the production dashboard in a new window ─────────
+if not defined PORT set "PORT=3000"
+if not defined HOSTNAME set "HOSTNAME=127.0.0.1"
+set "NODE_ENV=production"
+set "NEXT_TELEMETRY_DISABLED=1"
+echo [*] Preparing dashboard standalone runtime assets...
+node scripts\prepare-dashboard-standalone.mjs
+if %errorlevel% neq 0 (
+    echo [X] Dashboard standalone preparation failed.
+    pause
+    exit /b 1
+)
+echo [*] Starting production dashboard in a new window...
+start "SomniBot Dashboard" cmd /c "set NODE_ENV=production&& set PORT=%PORT%&& set HOSTNAME=%HOSTNAME%&& node --env-file=.env packages\dashboard\.next\standalone\packages\dashboard\server.js"
+echo   [OK] Dashboard starting on http://localhost:%PORT%
 echo.
 
 REM ─── Start the bot (this window) ───────────────────────────

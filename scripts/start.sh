@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # SomniBot — Start Everything
-# Starts Docker services, the bot, and the dashboard.
+# Starts Docker services, the bot, and the production dashboard.
 # Press Ctrl+C to stop all processes.
 # ============================================================
 set -euo pipefail
@@ -38,16 +38,24 @@ if [[ ! -d node_modules ]]; then
   exit 1
 fi
 
-if [[ ! -d packages/bot/dist ]]; then
-  echo "→ Bot not built yet. Building..."
-  resolve_pnpm
-  "${PNPM_CMD[@]}" build
-fi
+resolve_pnpm
 
 # ─── Load .env ───────────────────────────────────────────────
 set -a
 source .env
 set +a
+
+export NODE_ENV=production
+export NEXT_TELEMETRY_DISABLED=1
+export TURBO_TELEMETRY_DISABLED=1
+export DO_NOT_TRACK=1
+export PORT="${PORT:-3000}"
+export HOSTNAME="${HOSTNAME:-127.0.0.1}"
+
+if [[ ! -d packages/bot/dist || ! -d packages/dashboard/.next/standalone || ! -d packages/dashboard/.next/static ]]; then
+  echo "→ Production build artifacts are missing. Building..."
+  "${PNPM_CMD[@]}" build
+fi
 
 # ─── Track child processes for cleanup ───────────────────────
 PIDS=()
@@ -95,14 +103,14 @@ BOT_PID=$!
 echo "  ✅ Bot started (PID: $BOT_PID)"
 echo ""
 
-# ─── Step 3: Start the dashboard ────────────────────────────
-echo "→ Starting the dashboard..."
-cd packages/dashboard
-npx next dev --turbopack --port 3000 &
+# ─── Step 3: Start the production dashboard ─────────────────
+echo "→ Preparing dashboard standalone runtime assets..."
+node scripts/prepare-dashboard-standalone.mjs
+echo "→ Starting the production dashboard..."
+node packages/dashboard/.next/standalone/packages/dashboard/server.js &
 PIDS+=($!)
 DASH_PID=$!
-cd "$REPO_ROOT"
-echo "  ✅ Dashboard starting on http://localhost:3000 (PID: $DASH_PID)"
+echo "  ✅ Dashboard starting on http://localhost:${PORT} (PID: $DASH_PID)"
 echo ""
 
 # ─── Running ─────────────────────────────────────────────────
@@ -111,7 +119,7 @@ echo "|          ✅ Everything is running!        |"
 echo "+==========================================+"
 echo ""
 echo "  🤖 Bot:        Running (check this terminal for logs)"
-echo "  🌐 Dashboard:  http://localhost:3000"
+echo "  🌐 Dashboard:  http://localhost:${PORT}"
 echo "  🎵 Lavalink:   http://localhost:2333"
 echo "  📦 Valkey:     redis://localhost:6379"
 echo ""

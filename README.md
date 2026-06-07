@@ -198,7 +198,8 @@ Save the file.
 scripts\start.bat
 ```
 
-This starts Docker (Lavalink + Valkey), the bot, and the dashboard — all in one command.
+This starts the production regular-local stack: Docker (Lavalink + Valkey), the
+built bot, and the dashboard's standalone production server.
 
 You should see:
 ```
@@ -211,6 +212,10 @@ You should see:
 ```
 
 **Open [http://localhost:3000](http://localhost:3000)** in your browser to see the dashboard.
+
+If you change `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, rebuild before starting again because
+those values are baked into the production dashboard build.
 
 ### Step 7: First-Time Dashboard Setup
 
@@ -270,9 +275,9 @@ All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., 
 | Script | What it does |
 |---|---|
 | `setup.sh` / `setup.bat` | First-time setup — checks prerequisites, installs deps, builds |
-| `start.sh` / `start.bat` | Starts everything (Docker + bot + dashboard). Press Ctrl+C to stop |
+| `start.sh` / `start.bat` | Starts the production regular-local stack: Docker, built bot, and standalone dashboard. Press Ctrl+C to stop |
 | `start-bot.sh` | Starts Docker + bot only (no dashboard) |
-| `start-dashboard.sh` | Starts the dashboard only (on port 3000) |
+| `start-dashboard.sh` | Starts the dashboard development server only (on port 3000) |
 | `stop.sh` / `stop.bat` | Stops all running services |
 | `rebuild.sh` | Pulls latest code, reinstalls deps, and rebuilds |
 | `build-launcher.mjs` | Builds the Electron launcher package |
@@ -280,7 +285,7 @@ All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., 
 
 ### Common Workflows
 
-**Daily use:**
+**Production regular-local use:**
 ```bash
 ./scripts/start.sh        # Start everything
 # Ctrl+C to stop
@@ -292,7 +297,7 @@ All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., 
 ./scripts/start.sh        # Start
 ```
 
-**Running bot and dashboard in separate terminals** (useful for development — each gets its own log output):
+**Development mode in separate terminals** (each gets its own log output):
 ```bash
 # Terminal 1:
 ./scripts/start-bot.sh
@@ -316,6 +321,7 @@ Use this when SomniBot runs on your own computer.
 | Piece | Regular local value |
 |---|---|
 | Bot | Started by `./scripts/start.sh` or `scripts\start.bat` |
+| Dashboard | Built standalone production server started by `./scripts/start.sh` or `scripts\start.bat` |
 | Dashboard local URL | `http://localhost:3000` |
 | Dashboard public callback URL | Stable HTTPS tunnel to local port 3000, preferably Tailscale Funnel |
 | Lavalink | Docker on `localhost:2333` |
@@ -385,14 +391,14 @@ somnibot/
 ├── services/
 │   └── lavalink/      Lavalink configuration
 ├── scripts/           Startup and setup scripts
-├── docker-compose.yml Lavalink + Valkey for local dev
+├── docker-compose.yml Lavalink + Valkey for regular-local Docker services
 └── .env.example       Environment variable template
 ```
 
 | Service | Regular local | VPS / private network | Purpose |
 |---|---|---|---|
 | Bot | `node packages/bot/dist/index.js` | Docker Compose or process manager | Discord gateway, slash commands, all features |
-| Dashboard | `next dev` on port 3000 | Docker Compose behind Caddy/reverse proxy | Web UI for configuration and management |
+| Dashboard | Built standalone production server on port 3000 | Docker Compose behind Caddy/reverse proxy | Web UI for configuration and management |
 | Lavalink | Docker on port 2333 | Private Docker service `lavalink:2333` | Audio streaming for music player |
 | Valkey | Docker on port 6379 | Private Docker service `valkey:6379` | Caching, rate limiting, queue state |
 | Supabase | supabase.com | supabase.com | PostgreSQL database, auth, storage |
@@ -466,7 +472,7 @@ Slash commands can take up to an hour to register with Discord the first time. I
 
 ### Dashboard shows blank pages
 1. Make sure the `.env` file has `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` filled in.
-2. Restart the dashboard (Ctrl+C → `./scripts/start-dashboard.sh`).
+2. Rebuild, then restart the production stack with `./scripts/start.sh`. If you are using the dashboard development server, restart `./scripts/start-dashboard.sh`.
 
 ### "Login redirects back to login"
 The Supabase Discord auth provider needs to be configured. Run the setup wizard at `/setup`; it can handle this automatically only when `SUPABASE_ACCESS_TOKEN` is set. If you do not use that token, manually enable the Discord provider in Supabase, allow your dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
