@@ -39,7 +39,6 @@ RUN pnpm prune --prod
 # Uses the same Node base as the builder so pnpm's node_modules layout
 # (symlinks into .pnpm store) resolves correctly and native addons
 # compiled against glibc work without cross-runtime surprises.
-# The bot has no bun-specific API usage — it's pure Node/TypeScript.
 FROM node:22.16-slim AS runtime
 
 WORKDIR /app

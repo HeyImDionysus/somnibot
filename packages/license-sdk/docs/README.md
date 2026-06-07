@@ -16,7 +16,7 @@ Universal license validation SDK for SomniBot Commerce. Validate license keys, m
 ```bash
 npm install @somnibot/license-sdk
 # or
-bun add @somnibot/license-sdk
+pnpm add @somnibot/license-sdk
 ```
 
 ## Quick Start

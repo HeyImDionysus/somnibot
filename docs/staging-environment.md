@@ -27,7 +27,8 @@ SomniBot uses a separate staging environment to validate changes before deployin
 
 Option A — **Separate project** (recommended):
 - Create a new Supabase project for staging
-- Apply all migrations: `pnpm --filter @somnibot/supabase db:push`
+- Apply all migrations with the root pnpm script:
+  `SUPABASE_DB_URL=<staging-postgres-url> pnpm db:migrate`
 - Use the staging project's URL + keys in the staging `.env`
 
 Option B — **Branching** (if using Supabase branching):
@@ -121,7 +122,7 @@ To reset the staging database to a clean state:
 
 ```bash
 # Drop and recreate all tables (staging only!)
-pnpm --filter @somnibot/supabase db:reset
+pnpm db:reset
 ```
 
 Or delete and recreate the staging host/preview environment.
