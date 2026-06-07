@@ -158,9 +158,15 @@ If two migrations have the same timestamp, suffix with `000001`, `000002`, etc.
 ## Pull Request Process
 
 1. Create feature branch: `feat/v<version>-<phase>-<description>`
-2. All CI checks must pass (Install, Build, Lint, Typecheck, Security, Unit Tests, Migration Lint, Vercel)
-3. Squash merge to `main`
-4. Vercel auto-deploys dashboard on merge to `main`
+2. All required CI checks must pass for the current head SHA: install, build, lint, typecheck, security, unit tests, migration lint, integration tests, and CI Gate
+3. If a preview/deployment check exists for the branch, record whether it passed, failed, or is not relevant to the change
+4. Before handoff or merge, include a PR review-thread ledger:
+   - PR number, head SHA, base branch, CI run URL/status
+   - every review thread with URL, path, resolved state, outdated state, and disposition
+   - evidence for each fixed thread, such as code references, tests, CI, or a linked follow-up issue
+   - any watcher/worker session IDs used, their final status, and any missing/failed watcher state
+5. Do not call a PR done or merge-ready while a non-outdated review thread is unresolved unless it has a tracked blocker or follow-up explicitly accepted for later
+6. Squash merge to `main` only after CI and review-thread ledger gates are clean
 
 ## Commit Messages
 

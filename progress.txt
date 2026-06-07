@@ -747,3 +747,17 @@ push/apply path or manual owner application.
 
 No live provider config, credentials, Tailscale, PayPal, Discord, Supabase,
 DNS, deployment, or production data were touched.
+
+2026-06-07 - workspace-zzn - PR review-thread ledger contract
+
+Added a SomniBot contribution contract requiring a PR review-thread ledger
+before handoff or merge. The ledger must list the PR/head SHA, CI status,
+every review thread with resolved/outdated disposition, evidence for fixed
+threads, and any worker/watcher session state. The PR process now blocks
+"done" or merge-ready claims while non-outdated review threads remain
+unresolved without an accepted follow-up or blocker. It also treats preview or
+deployment checks as configured evidence rather than assuming Vercel as the
+default launch target.
+
+No live provider config, credentials, deploys, production data, or external
+service settings were touched.
