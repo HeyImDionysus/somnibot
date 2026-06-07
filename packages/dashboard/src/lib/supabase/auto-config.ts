@@ -19,6 +19,7 @@ interface AutoConfigResult {
 
 interface DashboardUrlEnv {
   NEXT_PUBLIC_APP_URL?: string;
+  DASHBOARD_URL?: string;
   VERCEL_URL?: string;
 }
 
@@ -65,6 +66,28 @@ export function getDashboardBaseUrl(env?: DashboardUrlEnv): string {
   }
 
   return 'http://localhost:3000';
+}
+
+function normalizeDashboardUrl(value?: string): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return trimmed.replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+export function getDashboardCallbackUrls(env?: DashboardUrlEnv): string[] {
+  const bases = [
+    getDashboardBaseUrl(env),
+    normalizeDashboardUrl(env?.DASHBOARD_URL ?? process.env.DASHBOARD_URL),
+  ].filter((base): base is string => Boolean(base));
+
+  return [...new Set(bases)].map((base) => `${base}/api/auth/callback`);
 }
 
 /**
@@ -171,8 +194,9 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     };
   }
 
-  // Build the callback/redirect URL
-  const dashboardUrl = getDashboardBaseUrl();
+  // Build the callback/redirect URLs. Regular-local mode may use a local
+  // browser URL and a separate public HTTPS callback base.
+  const dashboardCallbackUrls = getDashboardCallbackUrls();
 
   const supabaseCallbackUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL}/auth/v1/callback`;
 
@@ -194,11 +218,12 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
       currentAllowList = currentConfig.URI_ALLOW_LIST || '';
     }
 
-    // Append dashboard callback URL to allow list if not already there
-    const callbackPath = `${dashboardUrl}/api/auth/callback`;
+    // Append dashboard callback URLs to allow list if not already there
     const allowListEntries = currentAllowList ? currentAllowList.split(',').map((s: string) => s.trim()) : [];
-    if (!allowListEntries.includes(callbackPath)) {
-      allowListEntries.push(callbackPath);
+    for (const callbackPath of dashboardCallbackUrls) {
+      if (!allowListEntries.includes(callbackPath)) {
+        allowListEntries.push(callbackPath);
+      }
     }
 
     // Enable Discord provider

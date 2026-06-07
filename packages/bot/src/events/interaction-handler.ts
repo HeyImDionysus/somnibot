@@ -139,7 +139,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
         const paypalApiBase = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com';
         const paypalClientId = process.env.PAYPAL_CLIENT_ID || '';
         const paypalClientSecret = process.env.PAYPAL_CLIENT_SECRET || '';
-        const dashboardUrl = process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://dashboard.somnibot.com';
+        const dashboardUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.DASHBOARD_URL || 'https://dashboard.somnibot.com';
         if (paypalClientId) {
           await handleBuyButton(interaction, client.supabase, guildId, paypalApiBase, paypalClientId, paypalClientSecret, dashboardUrl);
           return;

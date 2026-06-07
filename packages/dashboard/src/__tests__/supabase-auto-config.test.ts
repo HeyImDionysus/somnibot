@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ensureDiscordAuthProvider,
   getDashboardBaseUrl,
+  getDashboardCallbackUrls,
 } from '@/lib/supabase/auto-config';
 
 describe('Supabase Discord auth auto-config', () => {
@@ -36,6 +37,16 @@ describe('Supabase Discord auth auto-config', () => {
 
   it('falls back to localhost for local first-run setup', () => {
     expect(getDashboardBaseUrl({})).toBe('http://localhost:3000');
+  });
+
+  it('includes both public and local dashboard callbacks for regular local mode', () => {
+    expect(getDashboardCallbackUrls({
+      NEXT_PUBLIC_APP_URL: 'https://public-callback.example/',
+      DASHBOARD_URL: 'http://localhost:3000/',
+    })).toEqual([
+      'https://public-callback.example/api/auth/callback',
+      'http://localhost:3000/api/auth/callback',
+    ]);
   });
 
   it('prioritizes explicit manual Discord auth provider confirmation over a stale token', async () => {
@@ -85,6 +96,7 @@ describe('Supabase Discord auth auto-config', () => {
     process.env.DISCORD_APPLICATION_ID = '123456789012345678';
     process.env.DISCORD_CLIENT_SECRET = 'discord-client-secret';
     process.env.NEXT_PUBLIC_APP_URL = 'https://dashboard.example.com/';
+    process.env.DASHBOARD_URL = 'http://localhost:3000';
     process.env.VERCEL_URL = 'preview.vercel.app';
 
     const fetchMock = vi.fn()
@@ -121,6 +133,7 @@ describe('Supabase Discord auth auto-config', () => {
     const body = JSON.parse(String(patchRequest[1]?.body));
     expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
     expect(body.URI_ALLOW_LIST).toContain('https://dashboard.example.com/api/auth/callback');
+    expect(body.URI_ALLOW_LIST).toContain('http://localhost:3000/api/auth/callback');
     expect(body.URI_ALLOW_LIST).not.toContain('https://undefined');
   });
 });

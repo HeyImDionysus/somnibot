@@ -247,7 +247,7 @@ Provider callback settings:
 
 | Provider | Value |
 |---|---|
-| Supabase Auth redirect allow-list | `<public-callback-base>/api/auth/callback` |
+| Supabase Auth redirect allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` |
 | Discord app OAuth2 redirect for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
 
@@ -321,12 +321,12 @@ Use this when SomniBot runs on your own computer.
 | Lavalink | Docker on `localhost:2333` |
 | Valkey/Redis | Docker on `redis://127.0.0.1:6379` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
-| Supabase dashboard callback allow-list | `<public-callback-base>/api/auth/callback` |
+| Supabase dashboard callback allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` |
 | Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for automatic setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
 
 Set `DASHBOARD_URL=http://localhost:3000` so bot messages point to the local
-dashboard, and set `NEXT_PUBLIC_APP_URL=<public-callback-base>` when providers
-must call back through the public HTTPS URL.
+operator dashboard, and set `NEXT_PUBLIC_APP_URL=<public-callback-base>` when
+providers and customer-facing PayPal return links must use the public HTTPS URL.
 
 ### VPS
 
@@ -362,7 +362,7 @@ but do not treat it as the regular-local user experience.
 | Provider | Regular local | VPS |
 |---|---|---|
 | Discord OAuth2 app callback for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` | Same |
-| Supabase Auth redirect allow-list | `<public-callback-base>/api/auth/callback` | `https://your-domain.example/api/auth/callback` |
+| Supabase Auth redirect allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` | `https://your-domain.example/api/auth/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` | `https://your-domain.example/api/paypal/webhook` |
 
 Discord is different from PayPal here: PayPal calls the dashboard directly, while
@@ -446,7 +446,7 @@ somnibot/
 | `PAYPAL_WEBHOOK_URL` | PayPal webhook endpoint URL: `<public-callback-base>/api/paypal/webhook` |
 | `YOUTUBE_OAUTH_REFRESH_TOKEN` | YouTube OAuth token (for music reliability) |
 | `SUPABASE_ACCESS_TOKEN` | Supabase Management API token for auto-migration and setup wizard Discord auth auto-configuration |
-| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Set to `true` only after manually enabling Supabase Discord auth and allowing the dashboard callback URL |
+| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Set to `true` only after manually enabling Supabase Discord auth and allowing the dashboard callback URL(s) |
 | `SUPABASE_DB_URL` | Direct Postgres connection URL (alternative for auto-migration) |
 
 ---

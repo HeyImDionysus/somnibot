@@ -113,6 +113,11 @@ set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to the stable
 HTTPS callback base before configuring PayPal webhooks or production OAuth
 redirects.
 
+Keep both `http://localhost:3000/api/auth/callback` and
+`<public-callback-base>/api/auth/callback` in the Supabase redirect allow-list
+when operators log in through the local browser URL while external providers use
+the public callback base.
+
 ## 4. VPS Setup
 
 VPS mode keeps SomniBot always-on behind a real domain. The dashboard, bot,

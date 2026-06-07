@@ -122,10 +122,10 @@ const paypalStep: WizardStep = {
     },
     {
       customId: 'paypal_webhook_id',
-      label: 'Webhook ID (leave blank if none yet)',
+      label: 'Webhook ID',
       placeholder: 'WH-1AB23456CD789012E-3FG45678HI901234J',
       style: 'short',
-      required: false,
+      required: true,
     },
     {
       customId: 'paypal_webhook_url',
@@ -146,10 +146,15 @@ const paypalStep: WizardStep = {
     const clientId = values.paypal_client_id?.trim();
     const clientSecret = values.paypal_client_secret?.trim();
     const sandbox = values.paypal_sandbox?.trim().toLowerCase();
+    const webhookId = values.paypal_webhook_id?.trim();
     const webhookUrl = values.paypal_webhook_url?.trim();
 
     if (!clientId || !clientSecret) {
       return 'Client ID and Client Secret are both required.';
+    }
+
+    if (!webhookId) {
+      return 'PayPal Webhook ID is required so SomniBot can verify webhook signatures.';
     }
 
     if (sandbox !== 'true' && sandbox !== 'false') {
@@ -223,7 +228,7 @@ const deploymentStep: WizardStep = {
     '',
     'Provider callback URLs:',
     '• PayPal webhook: `<public-callback-base>/api/paypal/webhook`',
-    '• Supabase redirect allow-list: `<public-callback-base>/api/auth/callback`',
+    '• Supabase redirect allow-list: for regular local, include both `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback`; for VPS, include `https://your-domain.example/api/auth/callback`',
     '• Discord OAuth provider callback: `https://<project-ref>.supabase.co/auth/v1/callback`',
     'Discord uses the Supabase callback because login goes through Supabase; leave Discord\'s Interactions Endpoint URL empty for this gateway-based bot.',
     '',

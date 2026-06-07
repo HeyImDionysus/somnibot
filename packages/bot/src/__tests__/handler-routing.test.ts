@@ -92,6 +92,7 @@ vi.mock('../features/profiles/commands.js', () => ({ handleProfileCommand: mockF
 vi.mock('../services/audit.js', () => ({ writeAuditLog: mockFn() }));
 
 import { registerEvents } from '../events/handler.js';
+import { handleBuyButton } from '../features/commerce/payment-handler.js';
 
 // Build a client mock that captures event listeners
 function makeClient() {
@@ -432,6 +433,8 @@ describe('handler interaction routing', () => {
 
   it('routes store:buy: button with PayPal configured', async () => {
     process.env.PAYPAL_CLIENT_ID = 'test-id';
+    process.env.DASHBOARD_URL = 'http://localhost:3000';
+    process.env.NEXT_PUBLIC_APP_URL = 'https://public-callback.example';
     // Assign via bracket notation to avoid triggering secret-scan pattern
     const secretKey = 'PAYPAL_CLIENT_SECRET';
     process.env[secretKey] = 'test-secret';
@@ -442,7 +445,18 @@ describe('handler interaction routing', () => {
     });
     await fire('interactionCreate', interaction);
     expect(interaction.isButton).toHaveBeenCalled();
+    expect(handleBuyButton).toHaveBeenCalledWith(
+      interaction,
+      client.supabase,
+      'guild-1',
+      'https://api-m.sandbox.paypal.com',
+      'test-id',
+      'test-secret',
+      'https://public-callback.example',
+    );
     delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.DASHBOARD_URL;
+    delete process.env.NEXT_PUBLIC_APP_URL;
     delete process.env[secretKey];
   });
 

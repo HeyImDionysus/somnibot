@@ -115,7 +115,7 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
   );
 
   // A step is configured if ALL required modal fields have stored values.
-  // Optional fields such as PayPal webhook ID/URL should not keep a step
+  // Optional fields such as PayPal webhook URL should not keep a step
   // permanently unconfigured after the operator submitted valid credentials.
   for (const step of WIZARD_STEPS) {
     const required = step.modalFields

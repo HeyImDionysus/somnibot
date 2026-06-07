@@ -33,12 +33,16 @@ vi.mock('../features/setup-wizard/steps.js', () => ({
       modalFields: [
         { customId: 'clientId', required: true },
         { customId: 'secret', required: true },
-        { customId: 'webhookId', required: false },
+        { customId: 'sandbox', required: true },
+        { customId: 'webhookId', required: true },
+        { customId: 'webhookUrl', required: false },
       ],
       fieldToSettingsKey: {
         clientId: 'paypal_client_id',
         secret: 'paypal_client_secret',
+        sandbox: 'paypal_sandbox',
         webhookId: 'paypal_webhook_id',
+        webhookUrl: 'paypal_webhook_url',
       },
     },
     {
@@ -206,12 +210,30 @@ describe('detectConfigured', () => {
     expect(result.has('discord')).toBe(false);
   });
 
-  it('does not require optional fields to mark a step configured', async () => {
+  it('requires PayPal webhook ID to mark PayPal configured', async () => {
     const supabase = makeSupabase({
       instance_settings: {
         data: [
           { key: 'paypal_client_id', value: 'pid' },
           { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_sandbox', value: 'true' },
+        ],
+        error: null,
+      },
+    });
+
+    const result = await detectConfigured(supabase as any);
+    expect(result.has('paypal')).toBe(false);
+  });
+
+  it('does not require optional PayPal webhook URL to mark PayPal configured', async () => {
+    const supabase = makeSupabase({
+      instance_settings: {
+        data: [
+          { key: 'paypal_client_id', value: 'pid' },
+          { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_sandbox', value: 'true' },
+          { key: 'paypal_webhook_id', value: 'WH-123' },
         ],
         error: null,
       },
