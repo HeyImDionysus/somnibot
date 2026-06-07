@@ -13,6 +13,7 @@ const SENSITIVE_KEYS = [
   'discordToken',
   'discordClientSecret',
   'supabaseSecretKey',
+  'supabaseDbPassword',
 ] as const;
 
 const MASK = '••••••••';
@@ -31,6 +32,13 @@ interface LauncherConfig {
   supabaseUrl: string;
   supabaseSecretKey: string;
   supabasePublishableKey: string;
+  supabaseDbPassword: string;
+  runtimeMode: 'regular-local' | 'vps';
+  publicCallbackBaseUrl: string;
+  vpsDomain: string;
+  vpsSshHost: string;
+  vpsSshUser: string;
+  vpsDeployPath: string;
   lavalinkEnabled: boolean;
 }
 
@@ -71,6 +79,13 @@ describe('Launcher Config', () => {
     supabaseUrl: 'https://my-project.supabase.co',
     supabaseSecretKey: 'eyJhbGciOiJIUzI1NiJ9',
     supabasePublishableKey: 'eyJhbGciOiJIUzI1NiJ9.pub',
+    supabaseDbPassword: 'database-password',
+    runtimeMode: 'regular-local',
+    publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+    vpsDomain: '',
+    vpsSshHost: '',
+    vpsSshUser: '',
+    vpsDeployPath: '',
     lavalinkEnabled: true,
   };
 
@@ -95,9 +110,11 @@ describe('Launcher Config', () => {
     expect(masked.discordToken).toBe(MASK);
     expect(masked.discordClientSecret).toBe(MASK);
     expect(masked.supabaseSecretKey).toBe(MASK);
+    expect(masked.supabaseDbPassword).toBe(MASK);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
     expect(masked.discordGuildId).toBe(validConfig.discordGuildId);
+    expect(masked.publicCallbackBaseUrl).toBe(validConfig.publicCallbackBaseUrl);
   });
 
   it('does not mask empty sensitive fields', () => {
@@ -116,7 +133,10 @@ describe('Launcher Config', () => {
       discordGuildId: '67890-new',
       supabaseUrl: 'https://updated.supabase.co',
       supabaseSecretKey: MASK,
+      supabaseDbPassword: MASK,
       supabasePublishableKey: 'new-pub-key',
+      runtimeMode: 'vps',
+      vpsDomain: 'somnibot.example.com',
     };
 
     const sanitized = stripMaskedFields(fromRenderer);
@@ -125,18 +145,22 @@ describe('Launcher Config', () => {
     expect(sanitized).not.toHaveProperty('discordToken');
     expect(sanitized).not.toHaveProperty('discordClientSecret');
     expect(sanitized).not.toHaveProperty('supabaseSecretKey');
+    expect(sanitized).not.toHaveProperty('supabaseDbPassword');
 
     // Non-masked fields are preserved
     expect(sanitized.discordApplicationId).toBe('12345');
     expect(sanitized.discordGuildId).toBe('67890-new');
     expect(sanitized.supabaseUrl).toBe('https://updated.supabase.co');
     expect(sanitized.supabasePublishableKey).toBe('new-pub-key');
+    expect(sanitized.runtimeMode).toBe('vps');
+    expect(sanitized.vpsDomain).toBe('somnibot.example.com');
   });
 
   it('preserves real values when user enters a new secret (not the mask)', () => {
     const fromRenderer: Partial<LauncherConfig> = {
       discordToken: 'brand-new-token',
       supabaseSecretKey: 'brand-new-secret',
+      supabaseDbPassword: 'brand-new-db-password',
     };
 
     const sanitized = stripMaskedFields(fromRenderer);
@@ -144,5 +168,6 @@ describe('Launcher Config', () => {
     // Real values (not the mask) should be kept
     expect(sanitized.discordToken).toBe('brand-new-token');
     expect(sanitized.supabaseSecretKey).toBe('brand-new-secret');
+    expect(sanitized.supabaseDbPassword).toBe('brand-new-db-password');
   });
 });

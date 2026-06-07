@@ -17,6 +17,7 @@ import Store from 'electron-store';
 import { safeStorage } from 'electron';
 import { randomBytes } from 'crypto';
 import { getLavalinkPassword } from './lavalink-manager.js';
+import { buildRuntimeEnvVars, type RuntimeMode } from './runtime-profile.js';
 
 /** V53 Phase 4 (4.3.3): Per-guild config for multi-guild support */
 export interface GuildEntry {
@@ -45,6 +46,14 @@ export interface LauncherConfig {
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
 
+  // ── Runtime networking ──
+  runtimeMode: RuntimeMode;
+  publicCallbackBaseUrl: string;
+  vpsDomain: string;
+  vpsSshHost: string;
+  vpsSshUser: string;
+  vpsDeployPath: string;
+
   // ── Phase 6: First-run onboarding ──
   firstRunComplete: boolean;
 
@@ -65,6 +74,12 @@ const DEFAULTS: LauncherConfig = {
   supabaseSecretKey: '',
   supabasePublishableKey: '',
   supabaseDbPassword: '',
+  runtimeMode: 'regular-local',
+  publicCallbackBaseUrl: '',
+  vpsDomain: '',
+  vpsSshHost: '',
+  vpsSshUser: '',
+  vpsDeployPath: '',
   firstRunComplete: false,
   lavalinkEnabled: false,
   lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
@@ -158,6 +173,12 @@ export function getConfig(): LauncherConfig {
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     supabaseDbPassword: getSensitive('supabaseDbPassword'),
     windowBounds: store.get('windowBounds'),
+    runtimeMode: store.get('runtimeMode', 'regular-local'),
+    publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
+    vpsDomain: store.get('vpsDomain', ''),
+    vpsSshHost: store.get('vpsSshHost', ''),
+    vpsSshUser: store.get('vpsSshUser', ''),
+    vpsDeployPath: store.get('vpsDeployPath', ''),
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
     lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),
@@ -232,14 +253,13 @@ export function buildEnvVars(
     NEXTAUTH_SECRET: randomBytes(32).toString('hex'),
     WEBHOOK_REPLAY_SECRET: randomBytes(32).toString('hex'),
 
-    // Dashboard binding
-    PORT: '3456',
-    HOSTNAME: '127.0.0.1',
-    NEXT_PUBLIC_APP_URL: 'http://localhost:3456',
+    // Runtime networking: operator dashboard URL and public callback base
+    // are intentionally separate. Regular local keeps the launcher dashboard
+    // on localhost while public providers may call back through Tailscale
+    // Funnel. VPS mode uses the VPS HTTPS domain for both.
+    ...buildRuntimeEnvVars(config),
 
     // Lavalink defaults
-    LAVALINK_HOST: 'localhost',
-    LAVALINK_PORT: '2333',
     // V7 Audit §9.8: Use the same password that was written to application.yml.
     // getLavalinkPassword() is the single source of truth — resolves from
     // LAVALINK_PASSWORD env var or a random per-launch hex, and caches the result.
@@ -250,9 +270,6 @@ export function buildEnvVars(
     // Database — direct Postgres access for migrations.
     // Construct the connection URL from the project ref + user-supplied password.
     ...buildDbUrlEnv(config.supabaseUrl, config.supabaseDbPassword),
-
-    // Valkey defaults
-    VALKEY_URL: 'redis://127.0.0.1:6379',
 
     // Production mode
     NODE_ENV: 'production',
