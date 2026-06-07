@@ -13,7 +13,7 @@
   },
   "forwardPorts": [3000, 2333, 6379],
   "postCreateCommand": "npm install -g pnpm@9.15.4 && pnpm install",
-  "postStartCommand": "echo '✅ SomniBot Codespace ready. Run: bash test-phase1.sh'",
+  "postStartCommand": "echo 'SomniBot Codespace ready. Safe checks: pnpm type-check && pnpm --filter @somnibot/bot test && pnpm --filter @somnibot/dashboard test'",
   "customizations": {
     "vscode": {
       "settings": {
