@@ -27,7 +27,9 @@ pnpm build
 ```
 
 This starts Docker-backed Lavalink and Valkey, then starts the built bot and
-dashboard on the same machine. Use `./scripts/stop.sh` to stop the stack.
+dashboard on the same machine. Keep `HEALTH_PORT=3001` in `.env` so the bot
+health server stays separate from the dashboard's `PORT=3000`. Use
+`./scripts/stop.sh` to stop the stack.
 
 ### VPS
 
@@ -66,7 +68,7 @@ incident specifically requires it and that change has separate approval.
    pnpm install --frozen-lockfile
    pnpm build
    ```
-4. Start the stack again:
+4. Confirm `.env` still sets `HEALTH_PORT=3001`, then start the stack again:
    ```bash
    ./scripts/start.sh
    ```
