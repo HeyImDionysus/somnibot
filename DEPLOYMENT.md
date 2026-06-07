@@ -27,6 +27,17 @@ experience.
 - Docker for Lavalink and Valkey
 - For production callbacks: one stable public HTTPS dashboard URL
 
+## Platform Defaults
+
+SomniBot's default launch targets are regular local and VPS. The root
+`vercel.json` is intentionally limited to disabling Vercel Git deployments; it
+does not define a dashboard build, install command, output directory, or launch
+target. The repository does not keep Railway config files because Railway is not
+the default operating model. If an operator intentionally maintains a
+compatibility deployment on either host, it must still follow the same
+environment, Valkey/Redis, public callback, PayPal webhook, and Supabase redirect
+rules in this guide.
+
 ---
 
 ## 1. Discord Setup
@@ -116,6 +127,7 @@ forwards to the dashboard.
 ```env
 DASHBOARD_URL=http://localhost:3000
 NEXT_PUBLIC_APP_URL=<public-callback-base>
+HEALTH_PORT=3001
 CSRF_SECRET=<openssl rand -hex 32>
 NEXTAUTH_SECRET=<openssl rand -hex 32>
 WEBHOOK_REPLAY_SECRET=<openssl rand -hex 32>
@@ -160,6 +172,7 @@ DOMAIN=somnibot.example.com
 DASHBOARD_URL=https://somnibot.example.com
 NEXT_PUBLIC_APP_URL=https://somnibot.example.com
 NODE_ENV=production
+HEALTH_PORT=3001
 
 CSRF_SECRET=<openssl rand -hex 32>
 NEXTAUTH_SECRET=<openssl rand -hex 32>

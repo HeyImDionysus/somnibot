@@ -17,36 +17,102 @@ Browser → Dashboard (Next.js 15) → Supabase (Postgres)
 
 ## Deployment
 
-### Bot
+### Regular Local
+
 ```bash
-git pull origin main && pnpm install --frozen-lockfile && pnpm build
-cd packages/bot && node dist/index.js  # Migrations auto-run on start
+git pull origin main
+pnpm install --frozen-lockfile
+pnpm build
+./scripts/start.sh
 ```
 
-### Dashboard
+This starts Docker-backed Lavalink and Valkey, then starts the built bot and
+dashboard on the same machine. Keep `HEALTH_PORT=3001` in `.env` so the bot
+health server stays separate from the dashboard's `PORT=3000`. Use
+`./scripts/stop.sh` to stop the stack.
+
+### VPS
+
 ```bash
-cd packages/dashboard && pnpm build
-node .next/standalone/packages/dashboard/server.js
+git pull origin main
+docker compose -f docker-compose.prod.yml up -d --build
 ```
+
+The VPS stack keeps the dashboard, bot, Lavalink, and Valkey together on the VPS
+or private network. Caddy serves the public HTTPS dashboard domain.
 
 ### CI (8 jobs — all must pass)
 install → typecheck → lint → build → test → integration-test → migration-lint → security
 
 ## Rollback
 
-### Railway (Bot)
-1. Open Railway dashboard → SomniBot service → **Deployments** tab
-2. Click the three-dot menu on the last known-good deployment → **Rollback**
-3. Railway will redeploy that exact image instantly
-4. Verify health: `curl http://localhost:3001/health` (or check Railway logs for `HealthServer: listening`)
+Rollback is a code/runtime operation for the supported regular-local and VPS
+stacks. Preserve `.env` and host secrets. Do not rotate credentials, change DNS,
+or alter provider callback settings as part of a code rollback unless the
+incident specifically requires it and that change has separate approval.
 
-### Vercel (Dashboard)
-1. Open Vercel dashboard → somnibot → **Deployments** tab
-2. Find the last green deployment → click three-dot menu → **Promote to Production**
-3. Vercel routes traffic to that build within seconds
-4. Verify: visit `https://<domain>/api/health` — should return HTTP 200 with JSON `status: "healthy"` or `status: "degraded"`
-   - Treat HTTP fetch failure as a dashboard rollback failure.
-   - Treat `status: "degraded"` as a dependency alert, not a failed dashboard process rollback by itself.
+### Regular Local
+
+1. Stop the stack:
+   ```bash
+   ./scripts/stop.sh
+   ```
+2. Choose the last known-good commit:
+   ```bash
+   git fetch origin
+   git log --oneline -10 origin/main
+   ```
+3. Check out and rebuild that commit:
+   ```bash
+   git checkout <last-good-commit>
+   pnpm install --frozen-lockfile
+   pnpm build
+   ```
+4. Confirm `.env` still sets `HEALTH_PORT=3001`, then start the stack again:
+   ```bash
+   ./scripts/start.sh
+   ```
+5. Verify:
+   ```bash
+   curl -fsS http://localhost:3000/api/health
+   curl -fsS http://localhost:3001/health
+   ```
+6. If a public callback tunnel is configured, also verify
+   `<public-callback-base>/api/health` from outside the machine.
+
+### VPS
+
+1. SSH to the VPS and enter the SomniBot checkout.
+2. Choose the last known-good commit:
+   ```bash
+   git fetch origin
+   git log --oneline -10 origin/main
+   ```
+3. Check out the known-good commit and rebuild containers:
+   ```bash
+   git checkout <last-good-commit>
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+4. Verify:
+   ```bash
+   docker compose -f docker-compose.prod.yml ps
+   curl -fsS https://your-domain.example/api/health
+   ```
+5. Check logs if health is not green:
+   ```bash
+   docker compose -f docker-compose.prod.yml logs --tail=100 dashboard bot caddy
+   ```
+6. Treat HTTP fetch failure as a dashboard rollback failure. Treat
+   `status: "degraded"` as a dependency alert, not a failed dashboard process
+   rollback by itself.
+
+### Optional Compatibility Hosts
+
+SomniBot's default launch path is regular local or VPS. If an operator has
+intentionally created a separate compatibility deployment on another host, use
+that host's rollback controls only after confirming the environment variables,
+public callback base, and PayPal/Supabase callback settings still match the
+current SomniBot deployment guide.
 
 ### Database Migrations
 Migrations are **forward-only**. To undo a migration:
@@ -144,4 +210,4 @@ SELECT purge_member_data('guild-id', 'user-id');  -- Covers 20+ tables
 
 ---
 
-*Last updated: 2026-05-24 · V5 Full Repository Audit*
+*Last updated: 2026-06-07*

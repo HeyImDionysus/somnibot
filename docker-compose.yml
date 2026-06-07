@@ -1,6 +1,6 @@
-# Standalone Docker services for cloud / self-hosted deploys.
-# The Electron launcher manages its own Lavalink + Valkey instances;
-# this file is for Railway / Docker Compose deployments only.
+# Regular-local Docker services for Lavalink and Valkey.
+# scripts/start.sh starts these services before launching the built bot and
+# dashboard on the same machine. Use docker-compose.prod.yml for VPS hosting.
 services:
   lavalink:
     image: ghcr.io/lavalink-devs/lavalink:4.0

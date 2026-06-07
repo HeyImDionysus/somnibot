@@ -434,6 +434,7 @@ somnibot/
 | Variable | Default | Notes |
 |---|---|---|
 | `DISCORD_GUILD_ID` | Auto-detected | Detected on first bot login |
+| `HEALTH_PORT` | `3001` | Bot health endpoint; keep separate from dashboard `PORT=3000` in regular-local mode |
 | `LAVALINK_HOST` | `localhost` | Use `lavalink` inside VPS Docker Compose |
 | `LAVALINK_PORT` | `2333` | — |
 | `LAVALINK_PASSWORD` | Required | Generate with `openssl rand -hex 16`; used by local Docker Compose and the bot |
