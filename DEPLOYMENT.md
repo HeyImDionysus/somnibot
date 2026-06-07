@@ -1,160 +1,226 @@
-# SomniBot — Deployment Guide
+# SomniBot - Deployment Guide
 
-> Production deployment checklist for SomniBot v53.
+> Production setup guide for running SomniBot as one system: Discord bot,
+> dashboard, Lavalink, and Valkey/Redis together on a regular local machine or
+> on a VPS/private network. Vercel is not required for launch.
 
 ---
 
-## Prerequisites
+## Supported Operating Modes
+
+| Mode | Use it for | Dashboard local URL | Public callback base | Valkey/Redis |
+|---|---|---|---|---|
+| Regular local | Running SomniBot on a normal user machine | `http://localhost:3000` | Stable HTTPS tunnel to local port 3000, preferably Tailscale Funnel | `redis://127.0.0.1:6379` |
+| WSL2 parity | Rehearsing Linux/VPS behavior before paying for or touching a VPS | WSL2-local URL | Optional tunnel for testing only | WSL2/Docker-local |
+| VPS | Always-on hosted Linux deployment | Private host/Docker URL | VPS domain, e.g. `https://somnibot.example.com` | Private Docker/service URL |
+
+WSL2 is a VPS-like test bed. It is not the same thing as the regular-local user
+experience.
+
+---
+
+## Shared Prerequisites
 
 - Discord bot application (Developer Portal)
-- Supabase project (free tier works)
-- Vercel account (for dashboard)
-- Railway/VPS (for bot + Lavalink + Valkey)
+- Supabase project
 - Node.js 22+, pnpm 9+
+- Docker for Lavalink and Valkey
+- For production callbacks: one stable public HTTPS dashboard URL
 
 ---
 
 ## 1. Discord Setup
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create an application → note the **Application ID** and **Client Secret** (OAuth2 tab)
-3. Go to the **Bot** tab → create bot → note the **Bot Token**
-4. Enable these **Privileged Gateway Intents**: `GUILD_MEMBERS`, `MESSAGE_CONTENT`, `GUILD_PRESENCES`
-5. OAuth2 → Add the Supabase Auth callback URL shown in your Supabase Discord provider settings (usually `https://<project-ref>.supabase.co/auth/v1/callback`)
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications).
+2. Create an application and note the **Application ID** and **Client Secret**.
+3. Go to the **Bot** tab, create the bot, and note the **Bot Token**.
+4. Enable these **Privileged Gateway Intents**: `GUILD_MEMBERS`, `MESSAGE_CONTENT`, `GUILD_PRESENCES`.
+5. OAuth2 -> add the Supabase Auth provider callback URL:
+   `https://<project-ref>.supabase.co/auth/v1/callback`.
+6. Leave **Interactions Endpoint URL** empty unless the bot is intentionally
+   changed from gateway mode to webhook-style interactions.
+
+Discord does not use the Tailscale/VPS dashboard URL for OAuth in the current
+architecture. Dashboard login goes through Supabase's Discord provider, so
+Discord needs Supabase's `/auth/v1/callback` URL. Supabase then needs the
+dashboard callback allow-list in the next section.
 
 ## 2. Supabase Setup
 
-1. Create a new project at [supabase.com](https://supabase.com)
-2. Go to **Settings → API** → note:
+1. Create a project at [supabase.com](https://supabase.com).
+2. Go to **Settings -> API** and note:
    - `SUPABASE_URL` (Project URL)
-   - `SUPABASE_SECRET_KEY` (service_role key — **keep secret**)
-   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (anon key)
-3. For automatic `/setup` Discord auth configuration, go to **Account → Access Tokens** and create a personal access token for `SUPABASE_ACCESS_TOKEN`. If you do not set it, complete steps 5 and 6 manually, then set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
-4. Run all migrations in order:
+   - `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` (keep secret)
+   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (publishable key)
+3. For automatic `/setup` Discord auth configuration, go to **Account -> Access Tokens** and create a personal access token for `SUPABASE_ACCESS_TOKEN`. If you do not set it, complete steps 5 and 6 manually, then set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
+4. Run migrations:
    ```bash
    cd packages/supabase
-   supabase db push    # or apply migrations manually via SQL editor
+   supabase db push
    ```
-5. Go to **Authentication → Providers → Discord** → enable with your Client ID and Secret
-6. Go to **Authentication → URL Configuration** and allow the dashboard callback URL: `https://your-dashboard.vercel.app/api/auth/callback`
-   - This must match the dashboard OAuth callback route used by the app and setup wizard.
+5. Go to **Authentication -> Providers -> Discord** and enable it with the Discord Client ID and Secret.
+6. Go to **Authentication -> URL Configuration** and allow the dashboard callback URL for your mode:
+   - Regular local first run: `http://localhost:3000/api/auth/callback`
+   - Regular local production callback: `<public-callback-base>/api/auth/callback`
+   - VPS: `https://your-domain.example/api/auth/callback`
 
-## 3. Dashboard (Vercel)
+## 3. Regular Local Setup
 
-1. Import the repo on [Vercel](https://vercel.com)
-2. Set **Root Directory** to `packages/dashboard`
-3. Add environment variables:
+Regular local keeps the bot, dashboard, Lavalink, and Valkey on the user's own
+machine.
 
-| Variable | Source |
+### Local Services
+
+| Component | Configuration |
 |---|---|
-| `NEXT_PUBLIC_APP_URL` | Public dashboard URL, e.g. `https://your-dashboard.vercel.app` |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase anon key |
-| `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service_role key |
-| `SUPABASE_ACCESS_TOKEN` | Supabase personal access token; required if `/setup` should auto-configure Discord auth |
-| `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED` | Manual fallback; set `true` only after Supabase Discord auth and callback URLs are configured manually |
-| `DISCORD_APPLICATION_ID` | Discord Developer Portal |
-| `DISCORD_CLIENT_SECRET` | Discord Developer Portal |
-| `CSRF_SECRET` | Generate with `openssl rand -hex 32` |
-| `NEXTAUTH_SECRET` | Generate with `openssl rand -hex 32` |
-| `WEBHOOK_REPLAY_SECRET` | Generate with `openssl rand -hex 32` |
-| `VALKEY_URL` or `REDIS_URL` | Redis/Valkey connection string for rate limiting (recommended in production) |
-| `DOWNLOAD_SIGNING_SECRET` | Generate with `openssl rand -hex 32` (recommended for signed download links) |
+| Bot | Started by `./scripts/start.sh` or `scripts\start.bat` |
+| Dashboard | `http://localhost:3000` |
+| Lavalink | Docker service on `localhost:2333` |
+| Valkey/Redis | Docker service on `redis://127.0.0.1:6379` |
+| Secrets | `.env` on the local machine, including Discord, Supabase, dashboard, replay, Lavalink, and optional PayPal values |
 
-4. Deploy → navigate to `/setup` to complete first-run configuration
+### Public Callback Strategy
 
-## 4. Bot (Railway / VPS)
+For external provider callbacks, expose the local dashboard with one stable HTTPS
+URL. Tailscale Funnel is the default candidate because it can forward a public
+HTTPS URL to the local dashboard port:
 
-### Environment Variables
+```bash
+tailscale funnel 3000
+```
 
-| Variable | Description |
+Use the printed HTTPS URL as `<public-callback-base>`. Cloudflare Tunnel, ngrok
+static domains, or a custom reverse proxy can also work if the URL is stable and
+forwards to the dashboard.
+
+### Regular Local Environment
+
+```env
+DASHBOARD_URL=http://localhost:3000
+NEXT_PUBLIC_APP_URL=<public-callback-base>
+CSRF_SECRET=<openssl rand -hex 32>
+NEXTAUTH_SECRET=<openssl rand -hex 32>
+WEBHOOK_REPLAY_SECRET=<openssl rand -hex 32>
+VALKEY_URL=redis://127.0.0.1:6379
+LAVALINK_HOST=localhost
+LAVALINK_PORT=2333
+LAVALINK_PASSWORD=<openssl rand -hex 16>
+PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
+```
+
+If you are doing a private first run without public callbacks yet, temporarily
+set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to the stable
+HTTPS callback base before configuring PayPal webhooks or production OAuth
+redirects.
+
+Keep both `http://localhost:3000/api/auth/callback` and
+`<public-callback-base>/api/auth/callback` in the Supabase redirect allow-list
+when operators log in through the local browser URL while external providers use
+the public callback base.
+
+## 4. VPS Setup
+
+VPS mode keeps SomniBot always-on behind a real domain. The dashboard, bot,
+Lavalink, and Valkey should share the VPS or a private network. Do not expose
+Valkey or Lavalink publicly.
+
+### VPS Services
+
+| Component | Configuration |
 |---|---|
-| `DISCORD_TOKEN` | Bot token from Developer Portal |
-| `DISCORD_APPLICATION_ID` | Application ID |
-| `DISCORD_CLIENT_SECRET` | OAuth2 client secret |
-| `DISCORD_GUILD_ID` | Comma-separated guild IDs (multi-guild) or single ID |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SECRET_KEY` | Supabase service_role key |
-| `VALKEY_URL` | Redis/Valkey connection string (default: `redis://127.0.0.1:6379`) |
-| `LAVALINK_HOST` | Lavalink server host (default: `localhost`) |
-| `LAVALINK_PORT` | Lavalink server port (default: `2333`) |
-| `LAVALINK_PASSWORD` | Required Lavalink password; generate with `openssl rand -hex 16` |
-| `NODE_ENV` | Set to `production` |
+| Bot | Docker Compose service or process manager |
+| Dashboard | Docker Compose service behind Caddy/reverse proxy |
+| Public HTTPS | Caddy using `DOMAIN` |
+| Lavalink | Private service `lavalink:2333` |
+| Valkey/Redis | Private service `valkey:6379` with a password |
+| Secrets | `.env` on the VPS or host-managed secret store, never public logs or docs |
 
-### Railway Deploy
+### VPS Environment
+
+```env
+DOMAIN=somnibot.example.com
+DASHBOARD_URL=https://somnibot.example.com
+NEXT_PUBLIC_APP_URL=https://somnibot.example.com
+NODE_ENV=production
+
+CSRF_SECRET=<openssl rand -hex 32>
+NEXTAUTH_SECRET=<openssl rand -hex 32>
+WEBHOOK_REPLAY_SECRET=<openssl rand -hex 32>
+
+VALKEY_PASSWORD=<openssl rand -hex 16>
+VALKEY_URL=redis://:<same-valkey-password>@valkey:6379
+
+LAVALINK_HOST=lavalink
+LAVALINK_PORT=2333
+LAVALINK_PASSWORD=<openssl rand -hex 16>
+
+PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
+```
+
+Start the production stack:
 
 ```bash
-# Bot service
-railway up --service bot
-
-# Lavalink service (use Lavalink Docker image)
-# Valkey service (use Valkey Docker image)
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Manual VPS Deploy
+## 5. PayPal Webhooks
 
-```bash
-git clone https://github.com/HeyImDionysus/somnibot.git
-cd somnibot
-pnpm install
-pnpm --filter bot build
-node packages/bot/dist/index.js
+PayPal webhook URL is always:
+
+```text
+<public-callback-base>/api/paypal/webhook
 ```
 
-## 5. Desktop Launcher
+Use sandbox credentials first. After creating the webhook in the PayPal Developer
+Dashboard, copy the webhook ID into `PAYPAL_WEBHOOK_ID` so SomniBot can verify
+incoming webhook signatures.
 
-The Electron launcher (`packages/launcher`) bundles everything for local/dev use:
+## 6. Smoke Checklist
 
-```bash
-pnpm --filter launcher build
-pnpm --filter launcher dist    # Creates installer
-```
+Run the applicable checklist before calling an environment ready.
 
-The launcher manages bot + dashboard + Lavalink processes with a GUI config form.
+### Regular Local
 
-## 6. Lavalink (Music)
+- [ ] `GET http://localhost:3000/api/health` responds.
+- [ ] Dashboard setup wizard completes.
+- [ ] Dashboard login/OAuth callback succeeds through the configured callback URL.
+- [ ] PayPal sandbox webhook reaches `/api/paypal/webhook`.
+- [ ] Store/order flow creates the expected sandbox order or subscription.
+- [ ] Bot is online in Discord and heartbeat appears in dashboard health.
+- [ ] Lavalink is reachable and music playback works.
+- [ ] Valkey-backed queue/cache behavior survives a bot restart.
 
-Lavalink requires Java 17+. Default config:
+### VPS
 
-```yaml
-server:
-  port: 2333
-  address: 0.0.0.0
-lavalink:
-  server:
-    password: "${LAVALINK_PASSWORD}"
-    sources:
-      youtube: true
-```
+- [ ] `GET https://your-domain.example/api/health` responds.
+- [ ] Caddy/reverse proxy serves valid HTTPS for the dashboard domain.
+- [ ] Dashboard setup wizard completes.
+- [ ] Dashboard login/OAuth callback succeeds through the VPS domain.
+- [ ] PayPal sandbox webhook reaches `/api/paypal/webhook`.
+- [ ] Store/order flow creates the expected sandbox order or subscription.
+- [ ] Bot is online in Discord and heartbeat appears in dashboard health.
+- [ ] Lavalink is reachable from the bot only on the private network.
+- [ ] Valkey is reachable from bot/dashboard only on the private network.
 
-## 7. Post-Deployment Checklist
+## 7. Monitoring
 
-- [ ] Bot is online in Discord (green status)
-- [ ] Dashboard loads and redirects to Discord OAuth login
-- [ ] Owner can log in and sees guild dashboard
-- [ ] Bot heartbeat visible in dashboard health metrics
-- [ ] Slash commands registered (auto-registers on boot)
-- [ ] Music playback works (requires Lavalink running)
-- [ ] Economy commands functional
-- [ ] Ticket system creates channels correctly
-- [ ] Automations fire on events
-- [ ] `/forgetme` command works (privacy compliance)
+- **Dashboard health**: `GET /api/health` returns JSON. Alert on JSON
+  `status: "degraded"` even though the route intentionally returns HTTP 200
+  when it can respond.
+- **Bot health**: `GET /health` returns HTTP 503 when Discord gateway or Valkey
+  connectivity is unhealthy.
+- **Alerts**: `alerts` table in Supabase tracks config sync failures,
+  automation errors, stale queues, and operational issues.
+- **DLQ**: Dashboard dead-letter queue for failed actions with retry/purge.
+- **Audit log**: `audit_log` table tracks admin actions and bot errors.
 
-## 8. Monitoring
-
-- **Bot Health**: Dashboard → Health page shows heartbeat, event throughput, queue depth
-- **Alerts**: `alerts` table in Supabase — config sync failures, automation errors, stale queues
-- **DLQ**: Dashboard → Dead Letter Queue for failed actions with retry/purge
-- **Audit Log**: `audit_log` table tracks all admin actions and bot errors
-
-## 9. Updating
+## 8. Updating
 
 ```bash
 git pull origin main
 pnpm install
 pnpm -r build
-# Restart bot process
-# Vercel auto-deploys dashboard on push to main
+# Restart bot/dashboard services
 # Run any new migrations: supabase db push
 ```
 
@@ -164,8 +230,9 @@ pnpm -r build
 
 | Issue | Fix |
 |---|---|
-| Bot not responding | Check `DISCORD_TOKEN` is valid, intents are enabled |
-| "Unauthorized" on dashboard | Verify Supabase auth provider config + redirect URL |
-| Music not playing | Ensure Lavalink is running, check `LAVALINK_*` env vars |
-| Slash commands not showing | Bot needs `applications.commands` scope in invite URL |
-| Migration fails | Run `supabase db reset` for fresh install, or check for timestamp collisions |
+| Bot not responding | Check `DISCORD_TOKEN`, privileged intents, and bot invite scopes |
+| Dashboard login loops | Verify Supabase Discord provider config and redirect allow-list |
+| PayPal webhooks fail | Verify `PAYPAL_WEBHOOK_URL`, `PAYPAL_WEBHOOK_ID`, and sandbox/live mode |
+| Music not playing | Ensure Lavalink is running and `LAVALINK_*` vars match the mode |
+| Valkey connection fails | Check `VALKEY_URL`; on VPS include the password and private service hostname |
+| Migration fails | Check `SUPABASE_ACCESS_TOKEN`/`SUPABASE_DB_URL`, or apply migrations manually |

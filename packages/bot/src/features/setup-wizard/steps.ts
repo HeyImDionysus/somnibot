@@ -3,7 +3,7 @@
  *
  * Three steps covering external infrastructure the user must configure:
  *  1. PayPal  — credentials for commerce features
- *  2. Deployment — local vs remote (Vercel walkthrough for remote)
+ *  2. Deployment — regular local, WSL2 parity, or VPS callbacks
  *  3. Supabase Management — optional auto-migration credentials
  *
  * Self-managing services (Lavalink, Valkey, YouTube OAuth) are NOT
@@ -86,9 +86,11 @@ const paypalStep: WizardStep = {
     '3. Go to **Apps & Credentials**',
     '4. Create a new app (or use an existing one)',
     '5. Copy the **Client ID** and **Secret**',
-    '6. Note your **Webhook ID** if you have webhooks configured',
-    '7. Click "I have my credentials" and paste them in',
+    '6. Create a webhook that points to `<public-callback-base>/api/paypal/webhook`',
+    '7. Copy the **Webhook ID** after PayPal creates it',
+    '8. Click "I have my credentials" and paste them in',
     '',
+    '> Regular local and VPS modes both need a stable public HTTPS callback base before webhooks can reach the dashboard.',
     '> Set sandbox to `true` for testing, `false` for live payments.',
     '> Without PayPal, all commerce/store features are disabled.',
   ].join('\n'),
@@ -120,8 +122,15 @@ const paypalStep: WizardStep = {
     },
     {
       customId: 'paypal_webhook_id',
-      label: 'Webhook ID (leave blank if none yet)',
+      label: 'Webhook ID',
       placeholder: 'WH-1AB23456CD789012E-3FG45678HI901234J',
+      style: 'short',
+      required: true,
+    },
+    {
+      customId: 'paypal_webhook_url',
+      label: 'Webhook URL (optional)',
+      placeholder: 'https://your-domain.example/api/paypal/webhook',
       style: 'short',
       required: false,
     },
@@ -131,18 +140,39 @@ const paypalStep: WizardStep = {
     paypal_client_secret: 'paypal_client_secret',
     paypal_sandbox: 'paypal_sandbox',
     paypal_webhook_id: 'paypal_webhook_id',
+    paypal_webhook_url: 'paypal_webhook_url',
   },
   verify: async (values) => {
     const clientId = values.paypal_client_id?.trim();
     const clientSecret = values.paypal_client_secret?.trim();
     const sandbox = values.paypal_sandbox?.trim().toLowerCase();
+    const webhookId = values.paypal_webhook_id?.trim();
+    const webhookUrl = values.paypal_webhook_url?.trim();
 
     if (!clientId || !clientSecret) {
       return 'Client ID and Client Secret are both required.';
     }
 
+    if (!webhookId) {
+      return 'PayPal Webhook ID is required so SomniBot can verify webhook signatures.';
+    }
+
     if (sandbox !== 'true' && sandbox !== 'false') {
       return 'Sandbox must be "true" or "false".';
+    }
+
+    if (webhookUrl) {
+      try {
+        const parsed = new URL(webhookUrl);
+        if (parsed.protocol !== 'https:') {
+          return 'PayPal webhook URL must use HTTPS.';
+        }
+        if (parsed.pathname !== '/api/paypal/webhook') {
+          return 'PayPal webhook URL must end with `/api/paypal/webhook`.';
+        }
+      } catch {
+        return 'Invalid PayPal webhook URL. Expected `<public-callback-base>/api/paypal/webhook`.';
+      }
     }
 
     const apiBase = sandbox === 'true'
@@ -179,42 +209,42 @@ const paypalStep: WizardStep = {
 
 const deploymentStep: WizardStep = {
   id: 'deployment',
-  title: 'Deployment',
+  title: 'Hosting and Callbacks',
   emoji: '🚀',
-  description: 'Choose how you run the dashboard — locally or remotely via Vercel.',
+  description: 'Choose regular local, WSL2 parity, or VPS hosting and set the dashboard callback URL.',
   instructions: [
-    '**Option A — Local (Electron Launcher)**',
-    'Dashboard runs on `http://localhost:3456`. Already configured if you\'re',
-    'using the desktop app. Just click "Configure" and accept the default.',
+    '**Option A — Regular local**',
+    'Run the bot, dashboard, Lavalink, and Valkey on your own computer.',
+    'Use `http://localhost:3000` as the script-started local dashboard URL.',
+    'If you are using the desktop launcher, enter the launcher dashboard URL instead, usually `http://localhost:3456`.',
+    'For production callbacks, expose port 3000 with a stable HTTPS URL, preferably Tailscale Funnel.',
     '',
-    '**Option B — Remote (Vercel)**',
-    'Deploy the dashboard to Vercel so it\'s accessible from anywhere.',
-    'You\'ll need to:',
-    '1. Create a Vercel account and import the GitHub repo',
-    '2. Set the **Root Directory** to `packages/dashboard`',
-    '3. Add these env vars in Vercel → Settings → Environment Variables:',
-    '   • `NEXT_PUBLIC_SUPABASE_URL` — your Supabase project URL',
-    '   • `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — your Supabase anon/publishable key',
-    '   • `SUPABASE_SECRET_KEY` — your Supabase service role / secret key',
-    '   • `DISCORD_APPLICATION_ID` — your Discord app ID',
-    '   • `DISCORD_CLIENT_SECRET` — your Discord OAuth client secret',
-    '   • `DISCORD_GUILD_ID` — your server ID',
-    '   • `NEXT_PUBLIC_APP_URL` — your Vercel deployment URL (e.g. `https://somnibot.vercel.app`)',
-    '4. Deploy and grab the live URL',
+    '**Option B — VPS**',
+    'Run the bot, dashboard, Lavalink, and Valkey on a hosted Linux machine or private network.',
+    'Use your VPS domain as the public dashboard/callback base.',
     '',
-    'Click "Open Vercel" to get started, then "Configure" to enter your dashboard URL.',
+    '**WSL2 parity**',
+    'Use WSL2 only to rehearse Linux/VPS setup behavior. It is not the regular-local user experience.',
+    '',
+    'Provider callback URLs:',
+    '• PayPal webhook: `<public-callback-base>/api/paypal/webhook`',
+    '• Supabase redirect allow-list: for regular local, include both `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback`; for VPS, include `https://your-domain.example/api/auth/callback`',
+    '• Discord OAuth provider callback: `https://<project-ref>.supabase.co/auth/v1/callback`',
+    'Discord uses the Supabase callback because login goes through Supabase; leave Discord\'s Interactions Endpoint URL empty for this gateway-based bot.',
+    '',
+    'Click "Configure" and enter the dashboard URL operators should use.',
   ].join('\n'),
-  url: 'https://vercel.com/new',
-  urlLabel: 'Open Vercel',
+  url: null,
+  urlLabel: '',
   credentialsLabel: 'Configure',
   modalFields: [
     {
       customId: 'dashboard_url',
       label: 'Dashboard URL',
-      placeholder: 'http://localhost:3456',
+      placeholder: 'http://localhost:3000 or https://your-domain.example',
       style: 'short',
       required: true,
-      value: 'http://localhost:3456',
+      value: 'http://localhost:3000',
     },
   ],
   fieldToSettingsKey: {
@@ -230,7 +260,7 @@ const deploymentStep: WizardStep = {
         return `Invalid protocol "${parsed.protocol}". Expected "http:" or "https:".`;
       }
     } catch {
-      return 'Invalid URL format. Expected something like `http://localhost:3456` or `https://your-app.vercel.app`.';
+      return 'Invalid URL format. Expected something like `http://localhost:3000` or `https://your-domain.example`.';
     }
 
     // If it's a remote URL, try to reach it
@@ -242,10 +272,10 @@ const deploymentStep: WizardStep = {
         });
         // Any response means the server is reachable — even redirects/auth pages are fine
         if (!res.ok && res.status !== 307 && res.status !== 302 && res.status !== 301) {
-          return `Got HTTP ${res.status} from ${url}. Make sure the Vercel deployment is live and the URL is correct.`;
+          return `Got HTTP ${res.status} from ${url}. Make sure the dashboard is live and the URL is correct.`;
         }
       } catch {
-        return `Could not reach ${url}. Make sure the Vercel deployment is live. If you haven't deployed yet, open Vercel (button above), deploy first, then come back.`;
+        return `Could not reach ${url}. Make sure the dashboard is running and the public callback URL forwards to it.`;
       }
     }
 

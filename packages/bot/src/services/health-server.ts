@@ -6,7 +6,7 @@
  * Replaces the no-op `bun -e "process.exit(0)"` health check with a real
  * endpoint that verifies Discord gateway connectivity and Valkey reachability.
  *
- * Port priority: HEALTH_PORT → PORT (Railway/cloud) → 3001 (default).
+ * Port priority: HEALTH_PORT → PORT (hosted platform) → 3001 (default).
  * GET /health → 200 if healthy, 503 if unhealthy.
  */
 import { createServer, type Server } from 'node:http';
@@ -25,7 +25,7 @@ let server: Server | null = null;
  * 2. Valkey is reachable (PING → PONG)
  */
 export function startHealthServer(client: SomniClient): void {
-  // HEALTH_PORT takes priority (explicit override), then PORT (Railway/cloud
+  // HEALTH_PORT takes priority (explicit override), then PORT (some hosted
   // platforms inject this), then 3001 as a safe local default.
   const port = parseInt(process.env.HEALTH_PORT ?? process.env.PORT ?? '3001', 10);
 

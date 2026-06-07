@@ -347,7 +347,7 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
 
     expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Aborting: cloud deploy requires all env vars'),
+      expect.stringContaining('Aborting: hosted deploy requires all env vars'),
     );
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
@@ -380,7 +380,7 @@ describe('Instrumentation — SESSION_TOKEN_FILE (V10 §12)', () => {
 
     expect(process.env.DASHBOARD_ENV_VALID).toBe('false');
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Aborting: cloud deploy requires all env vars'),
+      expect.stringContaining('Aborting: hosted deploy requires all env vars'),
     );
     expect(exitSpy).toHaveBeenCalledWith(1);
   });

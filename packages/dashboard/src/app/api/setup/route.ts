@@ -369,6 +369,7 @@ export async function POST(request: NextRequest) {
       'paypal_client_id',
       'paypal_client_secret',
       'paypal_webhook_id',
+      'paypal_webhook_url',
       'paypal_sandbox',
       'lavalink_host',
       'lavalink_port',

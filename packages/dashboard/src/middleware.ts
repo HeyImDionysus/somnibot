@@ -78,7 +78,7 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
   if (!isLocalMode()) return null;
 
   // I-2: Only allow local-mode auth for actual localhost requests.
-  // Prevents accidental auto-auth if SESSION_TOKEN is set in a cloud deployment.
+  // Prevents accidental auto-auth if SESSION_TOKEN is set in a hosted deployment.
   const host = request.headers.get('host') ?? '';
   const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
   if (!isLocalhost) {

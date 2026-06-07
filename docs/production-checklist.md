@@ -30,5 +30,5 @@ SHOW max_connections;
   gateway or Valkey connectivity is unhealthy; use this for bot container
   health checks.
 - Monitor dashboard degraded status with JSON-aware checks. Do not configure
-  Railway/Vercel/dashboard restarts from `/api/health` HTTP 503, because the
+  hosted-platform or dashboard restarts from `/api/health` HTTP 503, because the
   dashboard intentionally does not use 503 for dependency degradation.

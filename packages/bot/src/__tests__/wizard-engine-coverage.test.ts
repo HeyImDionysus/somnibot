@@ -21,16 +21,36 @@ vi.mock('../features/setup-wizard/steps.js', () => ({
     {
       id: 'discord',
       name: 'Discord Bot',
+      modalFields: [
+        { customId: 'token', required: true },
+        { customId: 'appId', required: true },
+      ],
       fieldToSettingsKey: { token: 'discord_bot_token', appId: 'discord_app_id' },
     },
     {
       id: 'paypal',
       name: 'PayPal',
-      fieldToSettingsKey: { clientId: 'paypal_client_id', secret: 'paypal_client_secret' },
+      modalFields: [
+        { customId: 'clientId', required: true },
+        { customId: 'secret', required: true },
+        { customId: 'sandbox', required: true },
+        { customId: 'webhookId', required: true },
+        { customId: 'webhookUrl', required: false },
+      ],
+      fieldToSettingsKey: {
+        clientId: 'paypal_client_id',
+        secret: 'paypal_client_secret',
+        sandbox: 'paypal_sandbox',
+        webhookId: 'paypal_webhook_id',
+        webhookUrl: 'paypal_webhook_url',
+      },
     },
     {
       id: 'lavalink',
       name: 'Lavalink',
+      modalFields: [
+        { customId: 'host', required: true },
+      ],
       fieldToSettingsKey: { host: 'lavalink_host' },
     },
   ],
@@ -189,6 +209,39 @@ describe('detectConfigured', () => {
     const result = await detectConfigured(supabase as any);
     expect(result.has('discord')).toBe(false);
   });
+
+  it('requires PayPal webhook ID to mark PayPal configured', async () => {
+    const supabase = makeSupabase({
+      instance_settings: {
+        data: [
+          { key: 'paypal_client_id', value: 'pid' },
+          { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_sandbox', value: 'true' },
+        ],
+        error: null,
+      },
+    });
+
+    const result = await detectConfigured(supabase as any);
+    expect(result.has('paypal')).toBe(false);
+  });
+
+  it('does not require optional PayPal webhook URL to mark PayPal configured', async () => {
+    const supabase = makeSupabase({
+      instance_settings: {
+        data: [
+          { key: 'paypal_client_id', value: 'pid' },
+          { key: 'paypal_client_secret', value: 'secret' },
+          { key: 'paypal_sandbox', value: 'true' },
+          { key: 'paypal_webhook_id', value: 'WH-123' },
+        ],
+        error: null,
+      },
+    });
+
+    const result = await detectConfigured(supabase as any);
+    expect(result.has('paypal')).toBe(true);
+  });
 });
 
 describe('storeCredentials', () => {
@@ -203,14 +256,20 @@ describe('storeCredentials', () => {
     const paypalStep = {
       id: 'paypal',
       name: 'PayPal',
-      fieldToSettingsKey: { clientId: 'paypal_client_id', secret: 'paypal_client_secret' },
+      fieldToSettingsKey: {
+        clientId: 'paypal_client_id',
+        secret: 'paypal_client_secret',
+        webhookUrl: 'paypal_webhook_url',
+      },
     };
     await storeCredentials(supabase as any, paypalStep as any, {
       clientId: 'my-client-id',
       secret: 'my-secret',
+      webhookUrl: 'https://example.com/api/paypal/webhook',
     });
     expect(supabase.from).toHaveBeenCalledWith('instance_settings');
     expect(process.env.PAYPAL_CLIENT_ID).toBe('my-client-id');
+    expect(process.env.PAYPAL_WEBHOOK_URL).toBe('https://example.com/api/paypal/webhook');
   });
 
   it('skips empty values', async () => {

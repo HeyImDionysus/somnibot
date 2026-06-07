@@ -11,7 +11,7 @@
  * import { SomniLicense } from '@somnibot/license-sdk';
  *
  * const license = new SomniLicense({
- *   apiBase: 'https://your-dashboard.vercel.app/api',
+ *   apiBase: 'https://your-domain.example/api',
  *   licenseKey: 'SMNI-XXXX-XXXX-XXXX-XXXX',
  *   productId: 'your-product-uuid',
  * });

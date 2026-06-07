@@ -75,6 +75,12 @@ const SECTIONS: ConnectionSection[] = [
       { key: 'paypal_client_id', label: 'Client ID', placeholder: 'AfDP...' },
       { key: 'paypal_client_secret', label: 'Client Secret', placeholder: 'EIAf...', secret: true },
       { key: 'paypal_webhook_id', label: 'Webhook ID', placeholder: 'YOUR_PAYPAL_WEBHOOK_ID' },
+      {
+        key: 'paypal_webhook_url',
+        label: 'Webhook URL',
+        placeholder: 'https://your-domain.example/api/paypal/webhook',
+        helpText: 'Use <public-callback-base>/api/paypal/webhook.',
+      },
       { key: 'paypal_sandbox', label: 'Sandbox Mode', placeholder: 'true or false', helpText: 'Set to "true" for testing, "false" for live payments.' },
     ],
   },

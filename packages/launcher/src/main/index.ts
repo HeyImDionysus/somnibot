@@ -255,7 +255,7 @@ function registerIpcHandlers(): void {
   // ── Dashboard ──
   // V5C-9: This URL is intentionally http://localhost:3456 (not https).
   // The launcher only runs locally — the Next.js dev/standalone server
-  // binds to localhost without TLS. Cloud deployments (Railway/Vercel)
+  // binds to localhost without TLS. Hosted deployments and VPS domains
   // do NOT use the launcher; they have their own HTTPS termination.
   // Do NOT make this URL configurable without also adding URL validation.
   ipcMain.handle('open-dashboard', () => {

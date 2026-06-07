@@ -30,6 +30,7 @@ const SETTINGS_TO_ENV: Record<string, string> = {
   paypal_client_id: 'PAYPAL_CLIENT_ID',
   paypal_client_secret: 'PAYPAL_CLIENT_SECRET',
   paypal_webhook_id: 'PAYPAL_WEBHOOK_ID',
+  paypal_webhook_url: 'PAYPAL_WEBHOOK_URL',
   paypal_sandbox: 'PAYPAL_SANDBOX',
   // Lavalink (defaults — self-managing)
   lavalink_host: 'LAVALINK_HOST',
@@ -151,6 +152,7 @@ const KEY_TO_SECTION: Record<string, string> = {
   paypal_client_id: 'paypal',
   paypal_client_secret: 'paypal',
   paypal_webhook_id: 'paypal',
+  paypal_webhook_url: 'paypal',
   paypal_sandbox: 'paypal',
   lavalink_host: 'lavalink',
   lavalink_port: 'lavalink',

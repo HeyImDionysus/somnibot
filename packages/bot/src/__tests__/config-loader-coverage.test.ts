@@ -47,6 +47,7 @@ describe('loadConfigFromDatabase', () => {
     delete process.env.DISCORD_CLIENT_SECRET;
     delete process.env.DISCORD_GUILD_ID;
     delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_WEBHOOK_URL;
     delete process.env.LAVALINK_HOST;
     delete process.env.VALKEY_URL;
     delete process.env.DASHBOARD_URL;
@@ -72,6 +73,7 @@ describe('loadConfigFromDatabase', () => {
     process.env.PAYPAL_CLIENT_ID = 'set';
     process.env.PAYPAL_CLIENT_SECRET = '_test_';
     process.env.PAYPAL_WEBHOOK_ID = 'set';
+    process.env.PAYPAL_WEBHOOK_URL = 'set';
     process.env.PAYPAL_SANDBOX = 'set';
     process.env.LAVALINK_HOST = 'set';
     process.env.LAVALINK_PORT = 'set';
@@ -198,6 +200,7 @@ describe('syncConfigToDatabase', () => {
     delete process.env.PAYPAL_CLIENT_ID;
     delete process.env.PAYPAL_CLIENT_SECRET;
     delete process.env.PAYPAL_WEBHOOK_ID;
+    delete process.env.PAYPAL_WEBHOOK_URL;
     delete process.env.PAYPAL_SANDBOX;
     delete process.env.LAVALINK_HOST;
     delete process.env.LAVALINK_PORT;

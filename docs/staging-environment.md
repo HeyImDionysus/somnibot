@@ -10,7 +10,7 @@ SomniBot uses a separate staging environment to validate changes before deployin
 | Discord Server | Dedicated test server | Live server(s) |
 | Supabase | Separate project or branch | Primary project |
 | Valkey/Redis | Separate instance or DB index | Primary instance |
-| Railway | Preview environment | Production deployment |
+| Hosted stack | Separate VPS, WSL2 parity host, or preview environment | VPS/private network deployment |
 | Dashboard URL | `staging.yourdomain.com` | `yourdomain.com` |
 
 ## Setup
@@ -34,18 +34,24 @@ Option B — **Branching** (if using Supabase branching):
 - Create a branch from the production database
 - Migrations are applied automatically on branch creation
 
-### 3. Railway
+### 3. Hosted Stack
 
-Railway supports [preview environments](https://docs.railway.app/guides/preview-environments) that spin up from PR branches:
+Use a separate VPS, a disposable preview host, or WSL2 as a VPS-parity test bed.
+The staging stack should mirror production: dashboard, bot, Lavalink, and
+Valkey/Redis together on the same host or private network. If you use a managed
+preview provider such as Railway, treat it as an optional compatibility path, not
+the default launch architecture.
 
-1. Enable preview environments in your Railway project settings
-2. Configure staging env vars in the preview template:
+1. Point `staging.yourdomain.com` or a stable staging tunnel at the dashboard.
+2. Configure staging env vars:
    - `DISCORD_TOKEN` → staging bot token
    - `DISCORD_GUILD_ID` → staging server ID
    - `SUPABASE_URL` → staging Supabase URL
    - `SUPABASE_SECRET_KEY` → staging Supabase key
+   - `NEXT_PUBLIC_APP_URL` and `DASHBOARD_URL` → staging dashboard URL
    - `CSRF_SECRET` → unique secret for staging
    - `NEXTAUTH_SECRET` → unique secret for staging
+   - `WEBHOOK_REPLAY_SECRET` → unique secret for staging
    - `NODE_ENV=production` (so staging matches prod behavior)
 
 ### 4. Environment Variables
@@ -65,11 +71,13 @@ SUPABASE_SECRET_KEY=staging_secret_key
 SUPABASE_PUBLISHABLE_KEY=staging_anon_key
 
 # Dashboard
+DASHBOARD_URL=https://staging.yourdomain.com
 NEXT_PUBLIC_APP_URL=https://staging.yourdomain.com
 NEXT_PUBLIC_SUPABASE_URL=https://staging-xxx.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=staging_anon_key
 CSRF_SECRET=generate_with_openssl_rand_hex_32
 NEXTAUTH_SECRET=generate_with_openssl_rand_hex_32
+WEBHOOK_REPLAY_SECRET=generate_with_openssl_rand_hex_32
 
 # Valkey
 VALKEY_URL=redis://staging-valkey:6379
@@ -78,13 +86,14 @@ VALKEY_URL=redis://staging-valkey:6379
 PAYPAL_SANDBOX=true
 PAYPAL_CLIENT_ID=sandbox_client_id
 PAYPAL_CLIENT_SECRET=sandbox_client_secret
+PAYPAL_WEBHOOK_URL=https://staging.yourdomain.com/api/paypal/webhook
 ```
 
 ## Deployment Flow
 
 ```
 feature branch → PR → CI checks pass
-                     → Railway preview environment spins up
+                     → Staging VPS/preview stack starts
                      → Manual QA on staging Discord server
                      → Merge to main
                      → Production deploy
@@ -115,4 +124,4 @@ To reset the staging database to a clean state:
 pnpm --filter @somnibot/supabase db:reset
 ```
 
-Or if using Railway, delete and recreate the preview environment.
+Or delete and recreate the staging host/preview environment.
