@@ -317,7 +317,25 @@ jobs:
           tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
           supabase --version
       - name: Start Supabase local
-        run: cd packages && supabase start
+        run: |
+          cd packages
+          for attempt in 1 2 3; do
+            if supabase start; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "supabase start failed after ${attempt} attempts (exit ${status})"
+              exit "$status"
+            fi
+
+            delay_seconds=$((attempt * 30))
+            echo "supabase start failed (attempt ${attempt}/3, exit ${status}); cleaning up and retrying in ${delay_seconds}s..."
+            supabase stop 2>/dev/null || true
+            sleep "$delay_seconds"
+          done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       - name: Wait for Supabase REST API
@@ -436,7 +454,25 @@ jobs:
             "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_amd64.tar.gz"
           tar -xzf /tmp/supabase.tar.gz -C /usr/local/bin
       - name: Start Supabase and apply migrations
-        run: cd packages && supabase start
+        run: |
+          cd packages
+          for attempt in 1 2 3; do
+            if supabase start; then
+              exit 0
+            else
+              status=$?
+            fi
+
+            if [ "$attempt" -eq 3 ]; then
+              echo "supabase start failed after ${attempt} attempts (exit ${status})"
+              exit "$status"
+            fi
+
+            delay_seconds=$((attempt * 30))
+            echo "supabase start failed (attempt ${attempt}/3, exit ${status}); cleaning up and retrying in ${delay_seconds}s..."
+            supabase stop 2>/dev/null || true
+            sleep "$delay_seconds"
+          done
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       - name: Wait for database
