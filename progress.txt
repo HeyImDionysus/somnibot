@@ -724,3 +724,26 @@ Proof:
 Notes:
 - No commit, push, PR, merge, deploy, live host, DNS, Tailscale, PayPal, Discord, Supabase, credential, or production config changes were made.
 - Public callback smoke tests were not run because they require real public callback values and provider credentials.
+
+2026-06-07 - workspace-1jm PR integration - Opened PR and captured CI blocker
+
+Moved the reconciled workspace-1jm changes onto branch
+`fix/regular-local-vps-callbacks`, committed them as
+`43c8430 Support local and VPS callback setup`, pushed the branch, and opened
+PR #215. Local verification before the commit passed: `git diff --check`,
+`git diff --cached --check`, `bash -n scripts/setup.sh`, focused bot tests
+(32 passed), focused dashboard tests (27 passed), root lint, root type-check,
+and root build.
+
+GitHub CI on PR #215 then passed all jobs except integration tests. The
+integration job failed before SomniBot tests ran because `supabase start`
+hit an external public ECR pull limit for
+`public.ecr.aws/supabase/storage-api:v1.54.1` (`toomanyrequests: Rate exceeded`).
+I prepared a bounded retry/backoff patch around `supabase start` in both the
+integration test job and DB security audit job, but GitHub rejected the push
+because the current OAuth token cannot update `.github/workflows/ci.yml`
+without `workflow` scope. The CI-hardening change needs a workflow-scoped
+push/apply path or manual owner application.
+
+No live provider config, credentials, Tailscale, PayPal, Discord, Supabase,
+DNS, deployment, or production data were touched.
