@@ -25,7 +25,7 @@ bun add @somnibot/license-sdk
 import { SomniLicense } from '@somnibot/license-sdk';
 
 const license = new SomniLicense({
-  apiBase: 'https://your-dashboard.vercel.app/api',
+  apiBase: 'https://your-domain.example/api',
   licenseKey: 'SMNI-ABCD-EFGH-JKLM-NPQR',
   productId: 'your-product-uuid',
   deviceFingerprint: 'unique-device-id', // Optional but recommended

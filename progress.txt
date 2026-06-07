@@ -562,3 +562,165 @@ Proof:
 - Root build passed: `env NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm build`, with log scan clean.
 - Dashboard production start smoke passed: `corepack pnpm --filter @somnibot/dashboard start` served `/api/health` as HTTP 200 JSON `status:"degraded"` with `services.config:"valid"`, served `/setup` as HTTP 200, and pre-shutdown startup log scan was clean.
 - `git diff --check` passed.
+
+2026-06-06 - workspace-1jm - Regular local, WSL2 parity, and VPS callback setup
+
+dionysus clarified that regular local, WSL2 parity, and VPS are separate operating modes. Updated SomniBot setup/deployment guidance and setup-flow text so regular local and VPS are first-class modes, WSL2 is only a VPS-like rehearsal environment, and PayPal/Supabase/Discord callbacks use one stable public HTTPS dashboard base without requiring Vercel.
+
+Changed:
+- README.md
+- DEPLOYMENT.md
+- .env.example
+- scripts/setup.sh
+- scripts/setup.bat
+- packages/bot/src/features/setup-wizard/steps.ts
+- packages/bot/src/features/setup-wizard/wizard-engine.ts
+- packages/bot/src/services/config-loader.ts
+- packages/bot/src/__tests__/wizard-engine-coverage.test.ts
+- packages/bot/src/__tests__/config-loader-coverage.test.ts
+- packages/dashboard/src/app/(dashboard)/settings/page.tsx
+- packages/dashboard/src/app/api/settings/route.ts
+- packages/dashboard/src/app/api/setup/route.ts
+- packages/dashboard/src/instrumentation.ts
+
+Proof:
+- `git diff --check` passed.
+- `bash -n scripts/setup.sh` passed.
+- Focused bot tests passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot test -- src/__tests__/wizard-engine-coverage.test.ts src/__tests__/config-loader-coverage.test.ts` -> 2 files passed, 32 tests passed.
+- Bot type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot type-check`.
+- Dashboard type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard settings route test passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/settings-route.test.ts` -> 1 file passed, 10 tests passed.
+- Tailscale Funnel command shape was checked against official Tailscale documentation before documenting `tailscale funnel 3000`.
+
+Notes:
+- No live host, Vercel, VPS, DNS, Tailscale, PayPal, Discord, Supabase, or credential changes were made.
+- Public callback smoke tests were not run because they require a real reachable public callback host and provider credentials.
+
+2026-06-07 - workspace-1jm follow-up - Discord callback clarification
+
+Clarified the callback documentation so setup users can distinguish the PayPal
+webhook URL, Supabase dashboard callback allow-list, and Discord OAuth callback.
+README.md now states that Discord OAuth uses the Supabase callback
+`https://<project-ref>.supabase.co/auth/v1/callback`, not the Tailscale/VPS
+dashboard URL, and that Discord's Interactions Endpoint URL should stay empty
+for the current gateway-based bot. DEPLOYMENT.md and the setup wizard copy now
+state the same distinction.
+
+Changed:
+- README.md
+- DEPLOYMENT.md
+- packages/bot/src/features/setup-wizard/steps.ts
+
+Proof:
+- `git diff --check` passed.
+- `/opt/node-v24.16.0-linux-x64/bin/corepack pnpm --filter @somnibot/bot test src/__tests__/wizard-engine-coverage.test.ts` passed: 1 file passed, 17 tests passed.
+- `/opt/node-v24.16.0-linux-x64/bin/corepack pnpm --filter @somnibot/bot type-check` passed.
+
+2026-06-07 - workspace-1jm integration - Reconciled against origin/main
+
+Corrected the workflow mistake where the local implementation pass was treated
+as complete while the branch was behind `origin/main`. Reconciled the
+regular-local/Tailscale/VPS callback updates onto current `origin/main`, resolved
+the docs/script merge state, and included the rest of the repo-wide wording
+sweep for old Railway/Vercel/default-cloud assumptions.
+
+Changed:
+- README.md
+- DEPLOYMENT.md
+- .env.example
+- docs/production-checklist.md
+- docs/staging-environment.md
+- scripts/setup.sh
+- scripts/setup.bat
+- packages/bot/Dockerfile
+- packages/bot/src/features/setup-wizard/steps.ts
+- packages/bot/src/features/setup-wizard/wizard-engine.ts
+- packages/bot/src/services/config-loader.ts
+- packages/bot/src/services/health-server.ts
+- packages/dashboard/src/app/(dashboard)/settings/page.tsx
+- packages/dashboard/src/app/api/settings/route.ts
+- packages/dashboard/src/app/api/setup/route.ts
+- packages/dashboard/src/instrumentation.ts
+- packages/dashboard/src/lib/api/rate-limit.ts
+- packages/dashboard/src/middleware.ts
+- packages/launcher/src/main/index.ts
+- packages/license-sdk/docs/README.md
+- packages/license-sdk/src/index.ts
+- packages/shared/src/validators/env.ts
+- focused bot/dashboard tests listed below
+
+Proof:
+- Repository head reconciled to `origin/main`: `git rev-list --left-right --count HEAD...origin/main` returned `0 0` before checks.
+- No conflict markers remained: `rg -n "^(<<<<<<<|=======|>>>>>>>)" ...` returned no matches.
+- `git diff --cached --check` passed.
+- `git diff --check` passed.
+- `bash -n scripts/setup.sh` passed.
+- Focused bot tests passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot test -- src/__tests__/wizard-engine-coverage.test.ts src/__tests__/config-loader-coverage.test.ts` -> 2 files passed, 32 tests passed.
+- Focused dashboard tests passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/v10-audit-coverage.test.ts src/__tests__/settings-route.test.ts` -> 2 files passed, 27 tests passed.
+- Bot type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot type-check`.
+- Dashboard type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard lint passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard lint`.
+- Root lint passed: `NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm lint`.
+- Root type-check passed: `NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm type-check`.
+- Clean dashboard build passed after stopping a hung orphaned build process: `NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm --filter @somnibot/dashboard build`.
+- Root build passed after memory recovered from transient `openclaw-hooks` pressure: `NODE_NO_WARNINGS=1 TURBO_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1 corepack pnpm build`.
+
+Notes:
+- An earlier root build attempt failed at dashboard page-data collection because
+  an orphaned/concurrent dashboard build was still touching `.next`. After
+  stopping the hung process, cleaning the dashboard output, and rerunning, the
+  dashboard build and root build passed.
+- A later root build attempt was terminated by SIGTERM while the VPS had about
+  4 MiB available memory and several `openclaw-hooks` processes were consuming
+  CPU/RAM. After those hooks settled and memory recovered to about 4.6 GiB
+  available, root build passed.
+- No live host, DNS, Tailscale, PayPal, Discord, Supabase, credential, or
+  production environment changes were made.
+
+2026-06-07 - workspace-1jm reconciliation - Current-main callback/setup alignment
+
+Rebased the local workspace-1jm work onto current `origin/main`, skipped the obsolete local Node 24 workflow commit after confirming main already had the newer workflow state, and reapplied the existing regular-local/WSL2/VPS callback changes. Resolved conflicts in the main setup docs/scripts and expanded stale launch-target cleanup so docs, setup prompts, comments, and SDK examples no longer imply Vercel/Railway is the default launch path. Vercel/serverless compatibility code remains where the app still supports it.
+
+Changed:
+- README.md
+- DEPLOYMENT.md
+- .env.example
+- docs/production-checklist.md
+- docs/staging-environment.md
+- scripts/setup.sh
+- scripts/setup.bat
+- packages/bot/Dockerfile
+- packages/bot/src/features/setup-wizard/steps.ts
+- packages/bot/src/features/setup-wizard/wizard-engine.ts
+- packages/bot/src/services/config-loader.ts
+- packages/bot/src/services/health-server.ts
+- packages/bot/src/__tests__/wizard-engine-coverage.test.ts
+- packages/bot/src/__tests__/config-loader-coverage.test.ts
+- packages/dashboard/src/app/(dashboard)/settings/page.tsx
+- packages/dashboard/src/app/api/settings/route.ts
+- packages/dashboard/src/app/api/setup/route.ts
+- packages/dashboard/src/instrumentation.ts
+- packages/dashboard/src/middleware.ts
+- packages/dashboard/src/lib/api/rate-limit.ts
+- packages/dashboard/src/__tests__/v10-audit-coverage.test.ts
+- packages/license-sdk/docs/README.md
+- packages/license-sdk/src/index.ts
+- packages/launcher/src/main/index.ts
+- packages/shared/src/validators/env.ts
+- progress.txt
+
+Proof:
+- Conflict-marker scan passed: `rg -n "^(<<<<<<<|=======|>>>>>>>)" .` found no matches.
+- `git diff --check` passed.
+- `bash -n scripts/setup.sh` passed.
+- Focused bot tests passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot test -- src/__tests__/wizard-engine-coverage.test.ts src/__tests__/config-loader-coverage.test.ts` -> 2 files passed, 32 tests passed.
+- Bot type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/bot type-check`.
+- Focused dashboard tests passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard test -- src/__tests__/settings-route.test.ts src/__tests__/v10-audit-coverage.test.ts` -> 2 files passed, 27 tests passed.
+- Dashboard lint passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard lint`.
+- Dashboard type-check passed: `NODE_NO_WARNINGS=1 corepack pnpm --filter @somnibot/dashboard type-check`.
+- Dashboard standalone build verification was unstable locally: two captured attempts failed/terminated around Next standalone trace/page manifest work. A later lingering build produced `.next/standalone/packages/dashboard/server.js` plus routes/pages/build manifests, but no clean exit code was captured. Follow-up `workspace-blv.17` tracks that investigation.
+
+Notes:
+- No commit, push, PR, merge, deploy, live host, DNS, Tailscale, PayPal, Discord, Supabase, credential, or production config changes were made.
+- Public callback smoke tests were not run because they require real public callback values and provider credentials.

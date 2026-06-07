@@ -114,9 +114,14 @@ export async function detectConfigured(supabase: SupabaseClient): Promise<Set<st
     data.filter((row) => row.value && row.value.trim().length > 0).map((row) => row.key),
   );
 
-  // A step is configured if ALL its required keys have values
+  // A step is configured if ALL required modal fields have stored values.
+  // Optional fields such as PayPal webhook ID/URL should not keep a step
+  // permanently unconfigured after the operator submitted valid credentials.
   for (const step of WIZARD_STEPS) {
-    const required = Object.values(step.fieldToSettingsKey);
+    const required = step.modalFields
+      .filter((field) => field.required)
+      .map((field) => step.fieldToSettingsKey[field.customId])
+      .filter((key): key is string => Boolean(key));
     if (required.length > 0 && required.every((k) => filledKeys.has(k))) {
       configured.add(step.id);
     }
@@ -165,6 +170,7 @@ export async function storeCredentials(
     paypal_client_secret: 'PAYPAL_CLIENT_SECRET',
     paypal_sandbox: 'PAYPAL_SANDBOX',
     paypal_webhook_id: 'PAYPAL_WEBHOOK_ID',
+    paypal_webhook_url: 'PAYPAL_WEBHOOK_URL',
     // Supabase Management
     supabase_access_token: 'SUPABASE_ACCESS_TOKEN',
     supabase_db_url: 'SUPABASE_DB_URL',

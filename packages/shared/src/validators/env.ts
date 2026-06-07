@@ -35,7 +35,7 @@ export const BotEnvSchema = z.object({
   // V5-Audit §6.1: Pooled connection URL for multi-replica deployments (pgbouncer)
   SUPABASE_DB_URL_POOLED: z.string().optional().default(''),
 
-  // ─── Lavalink (auto-configured for Railway) ───
+  // ─── Lavalink (local/VPS stack) ───
   LAVALINK_HOST: z.string().default('localhost'),
   LAVALINK_PORT: z.coerce.number().default(2333),
   // V5 Audit §9.P3c: When Lavalink is enabled, a strong password should be set.
@@ -43,7 +43,7 @@ export const BotEnvSchema = z.object({
   // the Lavalink client will fail to connect but other features still work.
   LAVALINK_PASSWORD: z.string().default(''),
 
-  // ─── Valkey (auto-configured for Railway) ───
+  // ─── Valkey (local/VPS stack) ───
   VALKEY_URL: z.string().default('redis://127.0.0.1:6379'),
 
   // ─── PayPal (optional — only needed if commerce is enabled) ───

@@ -20,7 +20,7 @@ const settingsUpdate = z.object({
  * not just whether a row exists. The settings page shows the real state.
  *
  * Values come from two sources:
- * 1. Environment variables (set at deploy time — Vercel, .env, etc.)
+ * 1. Environment variables (set at deploy time — host env, .env, etc.)
  * 2. instance_settings table (set via the Settings page at runtime)
  *
  * Env vars take priority. The Settings page shows which are already configured
@@ -51,6 +51,7 @@ const ENV_MAP: Record<string, string[]> = {
   paypal_client_id: ['PAYPAL_CLIENT_ID'],
   paypal_client_secret: ['PAYPAL_CLIENT_SECRET'],
   paypal_webhook_id: ['PAYPAL_WEBHOOK_ID'],
+  paypal_webhook_url: ['PAYPAL_WEBHOOK_URL'],
   paypal_sandbox: ['PAYPAL_SANDBOX'],
   lavalink_host: ['LAVALINK_HOST'],
   lavalink_port: ['LAVALINK_PORT'],
@@ -150,7 +151,7 @@ export async function GET() {
       statuses.paypal = 'connected';
     }
 
-    // Lavalink & Valkey: these run on the bot server (Docker), not on Vercel.
+    // Lavalink & Valkey: these run on the bot server/private network.
     // If the dashboard has env vars, show connected. If the bot has connected
     // (meaning the bot server is running with Docker), show "bot-side".
     if (values.lavalink_host && values.lavalink_port) {

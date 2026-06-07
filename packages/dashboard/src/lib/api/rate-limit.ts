@@ -295,8 +295,9 @@ export async function checkRateLimit(
     }
   }
 
-  // V5 Audit [14.1]: In multi-instance deployments (Vercel, multiple Railway
-  // replicas), in-memory fallback means each instance has its own counter —
+  // V5 Audit [14.1]: In multi-instance deployments (serverless, hosted, or
+  // multiple VPS replicas), in-memory fallback means each instance has its
+  // own counter —
   // an attacker can bypass limits by distributing requests. Log a critical
   // warning and use a stricter in-memory budget (halved) to partially
   // compensate. For truly critical endpoints (license, portal auth), the
