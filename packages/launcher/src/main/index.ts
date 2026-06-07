@@ -11,6 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
+import { getLauncherLocalStartBlocker } from './runtime-profile.js';
 import { validateAllCredentials } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { pushToSupabase } from './supabase-sync.js';
@@ -163,6 +164,12 @@ function registerIpcHandlers(): void {
       supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
       supabasePublishableKey: config.supabasePublishableKey,
       supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
+      runtimeMode: config.runtimeMode,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+      vpsDomain: config.vpsDomain,
+      vpsSshHost: config.vpsSshHost,
+      vpsSshUser: config.vpsSshUser,
+      vpsDeployPath: config.vpsDeployPath,
     };
   });
 
@@ -192,6 +199,11 @@ function registerIpcHandlers(): void {
     // Validate that required fields are filled
     if (!config.discordToken || !config.supabaseUrl || !config.supabaseSecretKey) {
       return { ok: false, error: 'Fill in all required fields first.' };
+    }
+
+    const runtimeBlocker = getLauncherLocalStartBlocker(config);
+    if (runtimeBlocker) {
+      return { ok: false, error: runtimeBlocker };
     }
 
     // Phase 6: Check port availability before starting
