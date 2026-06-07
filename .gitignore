@@ -2,6 +2,12 @@
 node_modules/
 .pnpm-store/
 
+# pnpm is the workspace package manager; pnpm-lock.yaml is the committed lockfile.
+package-lock.json
+yarn.lock
+bun.lock
+bun.lockb
+
 # Build outputs
 dist/
 .next/

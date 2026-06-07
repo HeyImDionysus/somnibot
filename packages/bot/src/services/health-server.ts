@@ -3,8 +3,8 @@
  *
  * V5 Deep Dive Audit Remediation (Finding 9.1 — P2)
  *
- * Replaces the no-op `bun -e "process.exit(0)"` health check with a real
- * endpoint that verifies Discord gateway connectivity and Valkey reachability.
+ * Replaces the old no-op container health check with a real endpoint that
+ * verifies Discord gateway connectivity and Valkey reachability.
  *
  * Port priority: HEALTH_PORT → PORT (hosted platform) → 3001 (default).
  * GET /health → 200 if healthy, 503 if unhealthy.

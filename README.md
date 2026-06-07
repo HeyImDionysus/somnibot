@@ -83,6 +83,10 @@ Before starting, make sure you have these installed on your computer:
 | **Docker Desktop** | Runs Lavalink (music) and Valkey (cache) | [docker.com/get-started](https://docker.com/get-started) — install and make sure the whale icon appears in your menu bar |
 | **Git** | Clones the code | [git-scm.com](https://git-scm.com) (you probably already have this) |
 
+SomniBot uses pnpm only for workspace installs, scripts, and CI. Keep
+`pnpm-lock.yaml` as the only committed package-manager lockfile; do not commit
+`package-lock.json`, `yarn.lock`, or Bun lockfiles.
+
 ### Step 1: Create a Discord Bot
 
 1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and log in.
@@ -490,15 +494,16 @@ The Supabase Discord auth provider needs to be configured. Run the setup wizard 
 
 ### Type Checking
 ```bash
-pnpm --filter shared exec tsc --noEmit
-pnpm --filter bot exec tsc --noEmit
-pnpm --filter dashboard exec tsc --noEmit
+pnpm --filter @somnibot/shared build
+pnpm --filter @somnibot/bot type-check
+pnpm --filter @somnibot/dashboard type-check
 ```
 
 ### Testing
 ```bash
-pnpm --filter bot test          # 82 unit tests
-pnpm --filter bot test:watch    # Watch mode
+pnpm --filter @somnibot/shared build
+pnpm --filter @somnibot/bot test
+pnpm --filter @somnibot/bot test:watch
 ```
 
 ### Build Order

@@ -12,7 +12,7 @@ const SERVICE_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERV
 
 if (!DISCORD_TOKEN || !DISCORD_GUILD_ID || !SUPABASE_URL || !SERVICE_KEY) {
   console.error('❌ Missing required env vars: DISCORD_TOKEN, DISCORD_GUILD_ID, SUPABASE_URL, SUPABASE_SECRET_KEY');
-  console.error('   Make sure your .env file is loaded (run from repo root with: source .env && bun run packages/bot/tests/test-deploy-e2e.ts)');
+  console.error('   This legacy live E2E file is not part of the normal pnpm test suite. Run only through a guarded pnpm E2E command in a disposable test environment.');
   process.exit(1);
 }
 

@@ -21,8 +21,12 @@ packages/
 ```bash
 pnpm install          # Install all workspace dependencies
 pnpm -r build         # Build all packages
-pnpm --filter bot dev # Run the bot in dev mode
+pnpm --filter @somnibot/bot dev # Run the bot in dev mode
 ```
+
+Use the pnpm version pinned by `packageManager` in the root `package.json`.
+`pnpm-lock.yaml` is the only committed package-manager lockfile; do not commit
+npm, Yarn, or Bun lockfiles.
 
 ## Key Patterns
 
@@ -110,11 +114,13 @@ if (limited) return limited;
 
 ## Testing
 
-Tests live in `packages/<pkg>/src/__tests__/`. Run with:
+Tests live in `packages/<pkg>/src/__tests__/`. Build shared first, then run
+the package tests:
 
 ```bash
-pnpm --filter bot test       # Bot tests
-pnpm --filter bot test:watch  # Watch mode
+pnpm --filter @somnibot/shared build
+pnpm --filter @somnibot/bot test       # Bot tests
+pnpm --filter @somnibot/bot test:watch # Watch mode
 ```
 
 ### Test Requirements
