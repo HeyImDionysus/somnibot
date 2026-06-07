@@ -28,6 +28,25 @@ Thumbs.db
 npm-debug.log*
 pnpm-debug.log*
 
+# Agent/workflow scratch artifacts stay in the VPS/agent workspace, not product source.
+/progress.txt
+/progress-*.txt
+/*-progress.txt
+/scratchpad*.md
+/scratchpad*.txt
+/worker-notes*.md
+/worker-notes*.txt
+/handoff*.md
+/handoff*.txt
+/proof-bundle*.md
+/proof-bundle*.txt
+/proof-bundle*.json
+/audit-dump*.md
+/audit-dump*.txt
+/audit-dump*.json
+/run-log*.md
+/run-log*.txt
+
 # TypeScript build info
 *.tsbuildinfo
 
