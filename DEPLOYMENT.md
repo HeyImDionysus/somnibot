@@ -74,10 +74,28 @@ machine.
 | Component | Configuration |
 |---|---|
 | Bot | Started by `./scripts/start.sh` or `scripts\start.bat` |
-| Dashboard | `http://localhost:3000` |
+| Dashboard | Built standalone production server started by `./scripts/start.sh` or `scripts\start.bat` at `http://localhost:3000` |
 | Lavalink | Docker service on `localhost:2333` |
 | Valkey/Redis | Docker service on `redis://127.0.0.1:6379` |
 | Secrets | `.env` on the local machine, including Discord, Supabase, dashboard, replay, Lavalink, and optional PayPal values |
+
+Start the production regular-local stack with:
+
+```bash
+./scripts/start.sh
+```
+
+On Windows, use:
+
+```bat
+scripts\start.bat
+```
+
+Those scripts run the built bot and the dashboard standalone production server.
+Use `./scripts/start-dashboard.sh` only for dashboard development. Rebuild after
+changing `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` because those values are part of the
+dashboard build output.
 
 ### Public Callback Strategy
 
@@ -181,6 +199,7 @@ Run the applicable checklist before calling an environment ready.
 
 ### Regular Local
 
+- [ ] `./scripts/start.sh` or `scripts\start.bat` starts Docker, the built bot, and the standalone dashboard production server.
 - [ ] `GET http://localhost:3000/api/health` responds.
 - [ ] Dashboard setup wizard completes.
 - [ ] Dashboard login/OAuth callback succeeds through the configured callback URL.

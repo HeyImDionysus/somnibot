@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "start": "node .next/standalone/packages/dashboard/server.js",
+    "start": "node ../../scripts/prepare-dashboard-standalone.mjs && node .next/standalone/packages/dashboard/server.js",
     "lint": "eslint src/",
     "type-check": "tsc --noEmit",
     "test": "vitest run",

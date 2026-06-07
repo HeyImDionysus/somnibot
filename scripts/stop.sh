@@ -26,7 +26,7 @@ else
 fi
 
 # Kill any running dashboard processes
-DASH_PIDS=$(pgrep -f "next dev.*--port 3000" 2>/dev/null || true)
+DASH_PIDS=$(pgrep -f "next dev.*--port 3000|packages/dashboard/.next/standalone/packages/dashboard/server.js|packages/dashboard/server.js" 2>/dev/null || true)
 if [[ -n "$DASH_PIDS" ]]; then
   echo "  → Stopping dashboard (PID: $DASH_PIDS)..."
   echo "$DASH_PIDS" | xargs kill 2>/dev/null || true
