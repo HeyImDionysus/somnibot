@@ -35,6 +35,8 @@ describe('setup wizard page wiring', () => {
     expect(source).toContain("action: 'finalize'");
     expect(source).toContain('onClick={finalizeSetup}');
     expect(source).toContain('if (data.setupCompleted)');
+    expect(source).toContain('const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent)');
+    expect(source).toContain('data.supabaseConnected && data.databaseInitialized && discordReady');
     expect(source).toContain('setCurrentStep(3)');
     expect(source).not.toContain('onClick={() => setCurrentStep(5)}');
   });

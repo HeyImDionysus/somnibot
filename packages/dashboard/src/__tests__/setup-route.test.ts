@@ -165,11 +165,11 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('saves submitted PayPal config and applies it to runtime env before locking setup', async () => {
-    delete process.env.PAYPAL_CLIENT_ID;
-    delete process.env.PAYPAL_CLIENT_SECRET;
-    delete process.env.PAYPAL_WEBHOOK_ID;
-    delete process.env.PAYPAL_WEBHOOK_URL;
-    delete process.env.PAYPAL_SANDBOX;
+    process.env.PAYPAL_CLIENT_ID = 'old-paypal-client-id';
+    process.env.PAYPAL_CLIENT_SECRET = 'old-paypal-client-secret';
+    process.env.PAYPAL_WEBHOOK_ID = 'OLD-WH';
+    process.env.PAYPAL_WEBHOOK_URL = 'https://old.example.com/api/paypal/webhook';
+    process.env.PAYPAL_SANDBOX = 'true';
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -288,7 +288,9 @@ describe('POST /api/setup verify-supabase', () => {
     mock = createMockSupabase();
     (createClient as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
     vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -331,5 +333,37 @@ describe('POST /api/setup verify-supabase', () => {
     );
     expect(process.env.SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_test');
     expect(process.env.SUPABASE_SECRET_KEY).toBe('sb_secret_test');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://abcdefghijklmnopqrst.supabase.co/auth/v1/settings',
+      expect.objectContaining({
+        headers: {
+          apikey: 'sb_publishable_test',
+          Authorization: 'Bearer sb_publishable_test',
+        },
+      }),
+    );
+  });
+
+  it('rejects invalid publishable keys before saving credentials', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: false } as Response);
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'verify-supabase',
+        url: 'https://abcdefghijklmnopqrst.supabase.co',
+        publishableKey: 'bad-publishable-key',
+        serviceRoleKey: 'sb_secret_test',
+      },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      valid: false,
+      error: 'Could not validate Supabase publishable key — check your credentials',
+    });
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+    expect(process.env.SUPABASE_PUBLISHABLE_KEY).toBeUndefined();
+    expect(process.env.SUPABASE_SECRET_KEY).toBeUndefined();
   });
 });

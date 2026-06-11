@@ -35,6 +35,23 @@ function createSetupSupabase(url?: string, key?: string) {
   return createClient(supabaseUrl, serviceKey);
 }
 
+async function verifySupabasePublishableKey(url: string, publishableKey: string) {
+  try {
+    const response = await fetch(`${url.replace(/\/$/, '')}/auth/v1/settings`, {
+      headers: {
+        apikey: publishableKey,
+        Authorization: `Bearer ${publishableKey}`,
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    return response.ok;
+  } catch (err) {
+    console.error('[setup/validate-supabase] Publishable key check failed:', err);
+    return false;
+  }
+}
+
 /**
  * Check whether setup has been completed (setup_completed_at exists).
  */
@@ -310,10 +327,15 @@ export async function POST(request: NextRequest) {
       const { error } = await supabase.from('guild').select('id').limit(0);
 
       if (!error || error.code === '42P01') {
+        const trimmedPublishableKey = publishableKey.trim();
+        if (!await verifySupabasePublishableKey(url, trimmedPublishableKey)) {
+          return NextResponse.json({ valid: false, error: 'Could not validate Supabase publishable key — check your credentials' });
+        }
+
         applyRuntimeSupabaseEnv({
           url,
           secretKey: serviceRoleKey,
-          publishableKey: publishableKey?.trim(),
+          publishableKey: trimmedPublishableKey,
         });
 
         // Save Supabase credentials to instance_settings (if tables exist)
@@ -322,9 +344,7 @@ export async function POST(request: NextRequest) {
             supabase_url: { value: url, section: 'supabase' },
             supabase_secret_key: { value: serviceRoleKey, section: 'supabase' },
           };
-          if (publishableKey?.trim()) {
-            creds.supabase_anon_key = { value: publishableKey.trim(), section: 'supabase' };
-          }
+          creds.supabase_anon_key = { value: trimmedPublishableKey, section: 'supabase' };
 
           for (const [key, { value, section }] of Object.entries(creds)) {
             await supabase

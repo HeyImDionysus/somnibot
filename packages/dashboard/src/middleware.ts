@@ -140,6 +140,7 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
 function isSessionlessPublicRoute(pathname: string): boolean {
   return (
     pathname.startsWith('/api/auth') ||
+    pathname === '/api/csrf' ||
     pathname === '/setup' ||
     pathname.startsWith('/api/setup') ||
     pathname.startsWith('/api/paypal/webhook') ||

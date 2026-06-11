@@ -11,6 +11,7 @@
  */
 import { NextResponse } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { SupabaseRuntimeConfigError } from '@/lib/supabase/runtime-config';
 import { generateCsrfToken, generateRandomHex, CSRF_COOKIE_NAME } from '@/lib/api/csrf';
 
 export async function GET() {
@@ -23,9 +24,20 @@ export async function GET() {
   if (process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1' && process.env.SESSION_TOKEN) {
     sessionId = 'local-session';
   } else {
-    const supabase = await createServerSupabase();
-    const { data: { user } } = await supabase.auth.getUser();
-    sessionId = user?.id?.slice(-16) ?? generateRandomHex(8);
+    try {
+      const supabase = await createServerSupabase();
+      const { data: { user } } = await supabase.auth.getUser();
+      sessionId = user?.id?.slice(-16) ?? generateRandomHex(8);
+    } catch (err) {
+      if (
+        err instanceof SupabaseRuntimeConfigError &&
+        err.code === 'MISSING_PUBLIC_SUPABASE_CONFIG'
+      ) {
+        sessionId = generateRandomHex(8);
+      } else {
+        throw err;
+      }
+    }
   }
 
   const { token, nonce } = await generateCsrfToken(sessionId);

@@ -42,6 +42,7 @@ interface SetupStatus {
   guildName: string | null;
   dashboardUrl: string | null;
   discordClientId: string | null;
+  discordCredentialsPresent?: boolean;
   setupCompleted?: boolean;
 }
 
@@ -109,6 +110,7 @@ export default function SetupWizardPage() {
         setStatus(data);
 
         // Auto-advance if things are already configured
+        const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent);
         if (data.supabaseConnected && data.databaseInitialized) {
           setSupabaseVerified(true);
           setSupabaseInitialized(true);
@@ -123,9 +125,9 @@ export default function SetupWizardPage() {
         // If setup has already been finalized, jump to done.
         if (data.setupCompleted) {
           setCurrentStep(5);
-        } else if (data.supabaseConnected && data.databaseInitialized && data.guildDetected) {
+        } else if (data.supabaseConnected && data.databaseInitialized && discordReady && data.guildDetected) {
           setCurrentStep(4);
-        } else if (data.supabaseConnected && data.databaseInitialized) {
+        } else if (data.supabaseConnected && data.databaseInitialized && discordReady) {
           setCurrentStep(3);
         }
       }

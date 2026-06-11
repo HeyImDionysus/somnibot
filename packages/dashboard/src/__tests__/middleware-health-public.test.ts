@@ -78,6 +78,14 @@ describe('middleware health access', () => {
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 
+  it('allows first-run CSRF token reads without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/api/csrf');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
   it('keeps setup writes fail-closed on CSRF without public Supabase env', async () => {
     const res = await runWithoutPublicSupabaseEnv('/api/setup', { method: 'POST' });
 

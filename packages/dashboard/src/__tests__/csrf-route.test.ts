@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { SupabaseRuntimeConfigError } from '@/lib/supabase/runtime-config';
 import { GET } from '@/app/api/csrf/route';
 
 vi.mock('@/lib/supabase/server', () => ({
@@ -41,5 +42,21 @@ describe('GET /api/csrf', () => {
 
     expect(mockCreateServerSupabase).not.toHaveBeenCalled();
     expect(response.headers.get('set-cookie')).toContain('local-session');
+  });
+
+  it('issues a setup token without Supabase public runtime config', async () => {
+    mockCreateServerSupabase.mockRejectedValueOnce(
+      new SupabaseRuntimeConfigError(
+        'MISSING_PUBLIC_SUPABASE_CONFIG',
+        'public config missing during first-run setup',
+      ),
+    );
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(body.token).toEqual(expect.any(String));
+    expect(mockCreateServerSupabase).toHaveBeenCalled();
+    expect(response.headers.get('set-cookie')).toContain('somnibot-csrf-token=');
   });
 });

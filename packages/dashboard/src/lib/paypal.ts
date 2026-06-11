@@ -130,12 +130,12 @@ export function applyRuntimePayPalEnv(config: {
   sandbox?: string;
   apiBase?: string;
 }) {
-  if (config.clientId) process.env.PAYPAL_CLIENT_ID ||= config.clientId;
-  if (config.clientSecret) process.env.PAYPAL_CLIENT_SECRET ||= config.clientSecret;
-  if (config.webhookId) process.env.PAYPAL_WEBHOOK_ID ||= config.webhookId;
-  if (config.webhookUrl) process.env.PAYPAL_WEBHOOK_URL ||= config.webhookUrl;
-  if (config.sandbox) process.env.PAYPAL_SANDBOX ||= config.sandbox;
-  if (config.apiBase) process.env.PAYPAL_API_BASE ||= config.apiBase;
+  if (config.clientId) process.env.PAYPAL_CLIENT_ID = config.clientId;
+  if (config.clientSecret) process.env.PAYPAL_CLIENT_SECRET = config.clientSecret;
+  if (config.webhookId) process.env.PAYPAL_WEBHOOK_ID = config.webhookId;
+  if (config.webhookUrl) process.env.PAYPAL_WEBHOOK_URL = config.webhookUrl;
+  if (config.sandbox) process.env.PAYPAL_SANDBOX = config.sandbox;
+  if (config.apiBase) process.env.PAYPAL_API_BASE = config.apiBase;
 }
 
 async function readSavedPayPalSettings(): Promise<SavedPayPalSetting[]> {
