@@ -183,6 +183,192 @@ main::-webkit-scrollbar-thumb:hover {
   letter-spacing: 0.5px;
 }
 
+/* ─── Runtime Setup ─── */
+#runtime-section {
+  margin-bottom: 24px;
+}
+
+.runtime-mode-label {
+  font-size: 12px;
+  color: var(--cyan);
+  font-weight: 600;
+}
+
+.runtime-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.runtime-choice {
+  min-height: 88px;
+  text-align: left;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.runtime-choice:hover {
+  background: var(--bg-hover);
+}
+
+.runtime-choice.active {
+  border-color: var(--hot-pink);
+  background: var(--hot-pink-glow);
+}
+
+.runtime-choice strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.runtime-choice p {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.runtime-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.runtime-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.runtime-summary {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.summary-row strong {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}
+
+.runtime-diagnostics {
+  padding: 10px 14px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.runtime-diagnostics summary {
+  cursor: pointer;
+}
+
+.diagnostic-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.diagnostic-row span:first-child {
+  color: var(--text-muted);
+}
+
+.diagnostic-row span:last-child {
+  color: var(--text-secondary);
+  user-select: text;
+  word-break: break-all;
+}
+
+.runtime-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.runtime-step {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
+}
+
+.runtime-step-status {
+  align-self: start;
+  border-radius: 999px;
+  padding: 4px 8px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+}
+
+.runtime-step.success .runtime-step-status {
+  color: var(--text-success);
+  background: rgba(35, 165, 89, 0.1);
+}
+
+.runtime-step.loading .runtime-step-status {
+  color: var(--cyan);
+  background: rgba(0, 212, 255, 0.08);
+}
+
+.runtime-step.blocked .runtime-step-status {
+  color: var(--orange);
+  background: rgba(255, 107, 0, 0.08);
+}
+
+.runtime-step.recoverable-error .runtime-step-status {
+  color: var(--text-danger);
+  background: rgba(237, 66, 69, 0.1);
+}
+
+.runtime-step h3 {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.runtime-step p {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.runtime-step .manual-action {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .link-btn {
   background: none;
   border: none;

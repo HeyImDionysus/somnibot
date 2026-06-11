@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { getLauncherLocalStartBlocker } from './runtime-profile.js';
+import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
 import { validateAllCredentials } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { pushToSupabase } from './supabase-sync.js';
@@ -187,6 +188,29 @@ function registerIpcHandlers(): void {
     saveConfig(sanitized);
   });
 
+  ipcMain.handle('get-setup-status', (_event, input: Partial<SetupFlowInput> = {}) => {
+    const config = getConfig();
+    const currentStatus = getStatus();
+    return buildSetupStatus({
+      runtimeMode: input.runtimeMode ?? config.runtimeMode,
+      publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
+      vpsDomain: input.vpsDomain ?? config.vpsDomain,
+      vpsSshHost: input.vpsSshHost ?? config.vpsSshHost,
+      vpsSshUser: input.vpsSshUser ?? config.vpsSshUser,
+      vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath,
+      credentialReady: input.credentialReady ?? Boolean(
+        config.discordToken
+        && config.discordApplicationId
+        && config.discordClientSecret
+        && config.supabaseUrl
+        && config.supabaseSecretKey
+        && config.supabasePublishableKey
+      ),
+      dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',
+      checking: input.checking ?? false,
+    });
+  });
+
   // ── Validation ──
   ipcMain.handle('validate-credentials', async (_event, config) => {
     return validateAllCredentials(config);
@@ -211,7 +235,7 @@ function registerIpcHandlers(): void {
     if (!portFree) {
       return {
         ok: false,
-        error: 'Port 3456 is already in use. Close the application using that port, or restart your computer and try again.',
+        error: 'The local dashboard port is already in use. Close the application using that port, or restart your computer and try again. See diagnostics for implementation details.',
       };
     }
 

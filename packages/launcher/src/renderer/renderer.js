@@ -22,6 +22,14 @@ const fields = {
   supabaseDbPassword: $('supabaseDbPassword'),
 };
 
+const runtimeFields = {
+  publicCallbackBaseUrl: $('publicCallbackBaseUrl'),
+  vpsDomain: $('vpsDomain'),
+  vpsSshHost: $('vpsSshHost'),
+  vpsSshUser: $('vpsSshUser'),
+  vpsDeployPath: $('vpsDeployPath'),
+};
+
 const btnStart = $('btn-start');
 const btnStop = $('btn-stop');
 const btnOpenDashboard = $('btn-open-dashboard');
@@ -46,9 +54,19 @@ const logContent = $('log-content');
 const versionEl = $('version');
 const updateBanner = $('update-banner');
 const offlineBanner = $('offline-banner');
+const runtimeModeLabel = $('runtime-mode-label');
+const regularRuntimeFields = $('regular-runtime-fields');
+const vpsRuntimeFields = $('vps-runtime-fields');
+const runtimeSteps = $('runtime-steps');
+const summaryLocalDashboard = $('summary-local-dashboard');
+const summaryPublicCallback = $('summary-public-callback');
+const runtimeDiagnosticsList = $('runtime-diagnostics-list');
 
 // Onboarding
 const onboardingOverlay = $('onboarding-overlay');
+const onboardingRuntimeTitle = $('onboarding-runtime-title');
+const onboardingRuntimeDesc = $('onboarding-runtime-desc');
+const onboardingRuntimeList = $('onboarding-runtime-list');
 
 // Lavalink
 const lavalinkToggle = $('lavalink-toggle');
@@ -66,6 +84,10 @@ const btnLavalinkHelp = $('btn-lavalink-help');
 
 let isRunning = false;
 let isValidating = false;
+let runtimeMode = 'regular-local';
+let setupStatus = null;
+let setupStatusSeq = 0;
+let latestProcessStatus = null;
 
 /* ================================================================== */
 /*  Init                                                               */
@@ -88,6 +110,12 @@ async function init() {
         input.value = config[key];
       }
     }
+    for (const [key, input] of Object.entries(runtimeFields)) {
+      if (config[key]) {
+        input.value = config[key];
+      }
+    }
+    setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
   } catch (err) {
     console.error('Failed to load config:', err);
   }
@@ -108,11 +136,28 @@ async function init() {
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
       updateRestoreBanner();
+      refreshSetupStatus();
     });
   }
 
+  for (const input of Object.values(runtimeFields)) {
+    input.addEventListener('input', () => {
+      clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(saveConfig, 500);
+      input.classList.remove('error', 'valid');
+      refreshSetupStatus();
+    });
+  }
+
+  document.querySelectorAll('[data-runtime]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      setRuntimeMode(btn.dataset.runtime === 'vps' ? 'vps' : 'regular-local');
+    });
+  });
+
   // Show restore banner if appropriate
   updateRestoreBanner();
+  await refreshSetupStatus();
 
   // Phase 6: Network status
   initNetworkMonitor();
@@ -129,15 +174,168 @@ async function init() {
 /* ================================================================== */
 
 async function saveConfig() {
-  const config = {};
-  for (const [key, input] of Object.entries(fields)) {
-    config[key] = input.value;
-  }
+  const config = collectConfig();
   try {
     await window.somnibot.saveConfig(config);
   } catch (err) {
     console.error('Failed to save config:', err);
   }
+}
+
+function collectCredentialConfig() {
+  const config = {};
+  for (const [key, input] of Object.entries(fields)) {
+    config[key] = input.value;
+  }
+  return config;
+}
+
+function collectRuntimeConfig() {
+  const config = { runtimeMode };
+  for (const [key, input] of Object.entries(runtimeFields)) {
+    config[key] = input.value;
+  }
+  return config;
+}
+
+function collectConfig() {
+  return {
+    ...collectCredentialConfig(),
+    ...collectRuntimeConfig(),
+  };
+}
+
+function isCredentialFormComplete() {
+  return [
+    'discordToken',
+    'discordApplicationId',
+    'discordClientSecret',
+    'supabaseUrl',
+    'supabaseSecretKey',
+    'supabasePublishableKey',
+  ].every((key) => fields[key].value.trim().length > 0);
+}
+
+function setRuntimeMode(mode, options = {}) {
+  runtimeMode = mode === 'vps' ? 'vps' : 'regular-local';
+  const isVps = runtimeMode === 'vps';
+
+  runtimeModeLabel.textContent = isVps ? 'VPS' : 'Regular local';
+  regularRuntimeFields.classList.toggle('hidden', isVps);
+  vpsRuntimeFields.classList.toggle('hidden', !isVps);
+
+  document.querySelectorAll('[data-runtime]').forEach((btn) => {
+    const active = btn.dataset.runtime === runtimeMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+
+  renderOnboardingRuntimeStep();
+
+  if (options.save !== false) {
+    saveConfig();
+    refreshSetupStatus();
+  }
+}
+
+async function refreshSetupStatus(options = {}) {
+  const seq = ++setupStatusSeq;
+  const input = {
+    ...collectRuntimeConfig(),
+    credentialReady: isCredentialFormComplete(),
+    dashboardOnline: latestProcessStatus?.dashboard === 'online',
+    checking: Boolean(options.checking),
+  };
+
+  if (options.checking) {
+    renderSetupStatus({
+      runtimeMode,
+      summary: setupStatus?.summary ?? {
+        runtimeMode,
+        runtimeLabel: runtimeMode === 'vps' ? 'VPS' : 'Regular local',
+        localDashboardUrl: 'Checking...',
+        publicCallbackUrl: 'Checking...',
+        diagnostics: {},
+      },
+      steps: [{
+        id: 'checking',
+        label: 'Setup',
+        status: 'loading',
+        summary: 'Checking setup gates.',
+        detail: 'The launcher is checking runtime readiness.',
+      }],
+      primaryAction: { label: 'Checking...', enabled: false, status: 'loading' },
+      firstBlockingStepId: null,
+    });
+  }
+
+  try {
+    const status = await window.somnibot.getSetupStatus(input);
+    if (seq !== setupStatusSeq) return setupStatus;
+    setupStatus = status;
+    renderSetupStatus(status);
+    return status;
+  } catch (err) {
+    console.error('Failed to refresh setup status:', err);
+    return setupStatus;
+  }
+}
+
+function renderSetupStatus(status) {
+  if (!status) return;
+
+  summaryLocalDashboard.textContent = status.summary.localDashboardUrl;
+  summaryPublicCallback.textContent = status.summary.publicCallbackUrl;
+
+  runtimeDiagnosticsList.innerHTML = Object.entries(status.summary.diagnostics)
+    .map(([label, value]) => (
+      `<div class="diagnostic-row"><span>${escapeHtml(formatDiagnosticLabel(label))}</span><span>${escapeHtml(value)}</span></div>`
+    ))
+    .join('');
+
+  runtimeSteps.innerHTML = status.steps.map((step) => {
+    const statusLabel = formatStepStatus(step.status);
+    const manual = step.manualAction && step.actionLabel
+      ? `<span class="manual-action">${escapeHtml(step.actionLabel)}</span>`
+      : '';
+    return (
+      `<div class="runtime-step ${escapeHtml(step.status)}">` +
+        `<div class="runtime-step-status">${escapeHtml(statusLabel)}</div>` +
+        '<div>' +
+          `<h3>${escapeHtml(step.label)}</h3>` +
+          `<p><strong>${escapeHtml(step.summary)}</strong></p>` +
+          `<p>${escapeHtml(step.detail)}</p>` +
+          manual +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+
+  if (!isValidating) {
+    btnStart.textContent = status.primaryAction.label;
+  }
+  btnStart.disabled = !status.primaryAction.enabled || isValidating || isRunning;
+}
+
+function formatDiagnosticLabel(label) {
+  const labels = {
+    operatorDashboardUrl: 'Dashboard URL',
+    publicCallbackBaseUrl: 'Callback base',
+    authCallbackUrl: 'Auth callback',
+    paypalWebhookUrl: 'PayPal webhook',
+  };
+  return labels[label] || label;
+}
+
+function formatStepStatus(status) {
+  const labels = {
+    pending: 'Waiting',
+    loading: 'Checking',
+    success: 'Ready',
+    blocked: 'Manual',
+    'recoverable-error': 'Fix',
+  };
+  return labels[status] || status;
 }
 
 /* ================================================================== */
@@ -147,29 +345,48 @@ async function saveConfig() {
 btnStart.addEventListener('click', async () => {
   if (isValidating || isRunning) return;
 
-  const config = {};
-  for (const [key, input] of Object.entries(fields)) {
-    config[key] = input.value.trim();
+  const config = collectConfig();
+  for (const key of Object.keys(config)) {
+    if (typeof config[key] === 'string') {
+      config[key] = config[key].trim();
+    }
   }
+
+  hideMessage();
+  hideMeta();
+
+  const currentSetup = await refreshSetupStatus({ checking: true });
 
   // Quick local check for required fields
   const required = ['discordToken', 'discordApplicationId', 'discordClientSecret', 'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey'];
   const missing = required.filter((k) => !config[k]);
+  if (!currentSetup?.primaryAction.enabled) {
+    const blockedReason = currentSetup?.primaryAction.blockedReason || '';
+    if (missing.length > 0 && /credential/i.test(blockedReason)) {
+      for (const k of missing) fields[k].classList.add('error');
+      showMessage('error', `Fill in all required fields: ${missing.map(fieldLabel).join(', ')}`);
+    } else {
+      showMessage('error', blockedReason || 'Finish the runtime setup steps before validation.');
+    }
+    await refreshSetupStatus();
+    return;
+  }
+
   if (missing.length > 0) {
     for (const k of missing) fields[k].classList.add('error');
     showMessage('error', `Fill in all required fields: ${missing.map(fieldLabel).join(', ')}`);
+    await refreshSetupStatus();
     return;
   }
 
   // Check network before validating (Phase 6)
   if (!navigator.onLine) {
     showMessage('error', 'No internet connection. Credential validation requires network access.');
+    await refreshSetupStatus();
     return;
   }
 
   for (const input of Object.values(fields)) input.classList.remove('error', 'valid');
-  hideMessage();
-  hideMeta();
 
   isValidating = true;
   btnStart.innerHTML = '<span class="spinner"></span>Validating...';
@@ -181,10 +398,10 @@ btnStart.addEventListener('click', async () => {
 
     if (!result.valid) {
       showMessage('error', result.errors.join('\n\n'));
-      btnStart.innerHTML = 'Validate &amp; Start';
       btnStart.classList.remove('loading');
       setFieldsDisabled(false);
       isValidating = false;
+      await refreshSetupStatus();
       return;
     }
 
@@ -201,10 +418,10 @@ btnStart.addEventListener('click', async () => {
     const startResult = await window.somnibot.startBot();
     if (!startResult.ok) {
       showMessage('error', startResult.error || 'Failed to start.');
-      btnStart.innerHTML = 'Validate &amp; Start';
       btnStart.classList.remove('loading');
       setFieldsDisabled(false);
       isValidating = false;
+      await refreshSetupStatus();
       return;
     }
 
@@ -213,14 +430,18 @@ btnStart.addEventListener('click', async () => {
     btnStart.classList.add('hidden');
     btnStop.classList.remove('hidden');
     btnOpenDashboard.disabled = false;
-    showMessage('success', 'Bot started! Dashboard will be available at localhost:3456 in a moment.');
+    await refreshSetupStatus();
+    const summary = setupStatus?.summary;
+    const dashboardText = summary?.localDashboardUrl || 'the local dashboard';
+    const callbackText = summary?.publicCallbackUrl || 'the public callback URL';
+    showMessage('success', `Bot started. Local dashboard URL: ${dashboardText}. Public callback URL: ${callbackText}.`);
 
   } catch (err) {
     showMessage('error', `Unexpected error: ${err.message || err}`);
-    btnStart.innerHTML = 'Validate &amp; Start';
     btnStart.classList.remove('loading');
     setFieldsDisabled(false);
     isValidating = false;
+    await refreshSetupStatus();
   }
 });
 
@@ -238,11 +459,12 @@ btnStop.addEventListener('click', async () => {
   isRunning = false;
   btnStop.classList.add('hidden');
   btnStart.classList.remove('hidden');
-  btnStart.innerHTML = 'Validate &amp; Start';
+  btnStart.textContent = setupStatus?.primaryAction?.label || 'Validate & Start';
   btnStart.classList.remove('loading');
   btnOpenDashboard.disabled = true;
   setFieldsDisabled(false);
   hideMessage();
+  refreshSetupStatus();
 });
 
 /* ================================================================== */
@@ -339,6 +561,8 @@ window.somnibot.onLavalinkLog((log) => {
 });
 
 function updateStatusUI(status) {
+  latestProcessStatus = status;
+
   // Bot status dot
   botDot.className = 'status-dot';
   if (status.bot) botDot.classList.add(status.bot);
@@ -369,11 +593,13 @@ function updateStatusUI(status) {
     isRunning = false;
     btnStop.classList.add('hidden');
     btnStart.classList.remove('hidden');
-    btnStart.innerHTML = 'Validate &amp; Start';
+    btnStart.textContent = setupStatus?.primaryAction?.label || 'Validate & Start';
     btnStart.classList.remove('loading');
     btnOpenDashboard.disabled = true;
     setFieldsDisabled(false);
   }
+
+  refreshSetupStatus();
 }
 
 /* ================================================================== */
@@ -386,11 +612,10 @@ async function initOnboarding() {
     if (!isFirstRun) return;
 
     onboardingOverlay.classList.remove('hidden');
+    renderOnboardingRuntimeStep();
 
     // Step navigation
-    let currentStep = 1;
     const showStep = (n) => {
-      currentStep = n;
       document.querySelectorAll('.onboarding-step').forEach((el) => {
         el.classList.toggle('hidden', parseInt(el.dataset.step) !== n);
       });
@@ -399,7 +624,12 @@ async function initOnboarding() {
       });
     };
 
-    $('onboarding-next-1').addEventListener('click', () => showStep(2));
+    $('onboarding-next-1').addEventListener('click', async () => {
+      await saveConfig();
+      await refreshSetupStatus();
+      renderOnboardingRuntimeStep();
+      showStep(2);
+    });
     $('onboarding-next-2').addEventListener('click', () => showStep(3));
 
     $('onboarding-open-discord').addEventListener('click', () => {
@@ -427,8 +657,40 @@ async function initOnboarding() {
 function dismissOnboarding() {
   onboardingOverlay.classList.add('hidden');
   window.somnibot.completeFirstRun();
-  // Focus the first field
-  fields.discordToken.focus();
+  const firstRuntimeField = runtimeMode === 'vps' ? runtimeFields.vpsDomain : runtimeFields.publicCallbackBaseUrl;
+  firstRuntimeField.focus();
+}
+
+function renderOnboardingRuntimeStep() {
+  if (!onboardingRuntimeTitle || !onboardingRuntimeDesc || !onboardingRuntimeList) return;
+
+  const isVps = runtimeMode === 'vps';
+  onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Public Callbacks';
+  onboardingRuntimeDesc.textContent = isVps
+    ? 'VPS mode needs a domain, SSH target, and manual deployment readiness before credentials can be validated.'
+    : 'Regular local mode needs Tailscale Funnel readiness before credentials can be validated.';
+
+  const items = isVps
+    ? [
+      ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
+      ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
+      ['Manual deploy', 'The launcher records readiness details but does not run SSH or deploy commands in this build.'],
+    ]
+    : [
+      ['Tailscale Funnel', 'Enable Funnel for this machine so providers can reach the dashboard over HTTPS.'],
+      ['Public callback URL', 'Paste the Funnel URL into the setup screen before credential validation.'],
+      ['Local dashboard', 'The launcher keeps the dashboard local while public callbacks use the Funnel URL.'],
+    ];
+
+  onboardingRuntimeList.innerHTML = items.map(([title, body], index) => (
+    '<div class="onboarding-check-item">' +
+      `<span class="check-num">${index + 1}</span>` +
+      '<div>' +
+        `<strong>${escapeHtml(title)}</strong>` +
+        `<p>${escapeHtml(body)}</p>` +
+      '</div>' +
+    '</div>'
+  )).join('');
 }
 
 /* ================================================================== */
@@ -589,6 +851,12 @@ function setFieldsDisabled(disabled) {
   for (const input of Object.values(fields)) {
     input.disabled = disabled;
   }
+  for (const input of Object.values(runtimeFields)) {
+    input.disabled = disabled;
+  }
+  document.querySelectorAll('[data-runtime]').forEach((btn) => {
+    btn.disabled = disabled;
+  });
 }
 
 function fieldLabel(key) {
