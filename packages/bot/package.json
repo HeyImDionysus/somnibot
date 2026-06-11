@@ -9,7 +9,9 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "type-check": "tsc --noEmit",
+    "type-check:e2e": "tsc --noEmit -p tsconfig.e2e.json",
     "test": "vitest run",
+    "test:e2e:deploy": "tsx e2e/deploy-live.e2e.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
     "clean": "node ../../scripts/clean.mjs dist"

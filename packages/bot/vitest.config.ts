@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/__tests__/**/*.test.ts'],
     exclude: ['src/__tests__/integration/**'],
     testTimeout: 10_000,
     // V5 Audit §13.3: Removed retry:1. Masking flaky tests prevents root-cause
