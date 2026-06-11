@@ -112,6 +112,31 @@ export function validatePublicCallbackBaseUrl(
   return errors;
 }
 
+export function validateVpsDomain(value: string | undefined): string[] {
+  const raw = value?.trim() ?? '';
+  if (!raw) {
+    return ['VPS mode needs a public HTTPS domain before setup can finalize.'];
+  }
+
+  const normalized = normalizeVpsDomain(raw);
+  if (!normalized) {
+    return ['VPS public domain must be a valid HTTP or HTTPS URL or bare domain.'];
+  }
+
+  const errors: string[] = [];
+  const parsed = new URL(normalized);
+  if (parsed.protocol !== 'https:') {
+    errors.push('VPS public domain must use HTTPS.');
+  }
+  if (parsed.pathname && parsed.pathname !== '/') {
+    errors.push('VPS public domain must be the dashboard base domain, not a nested path.');
+  }
+  if (isLocalHostname(parsed.hostname)) {
+    errors.push('VPS mode cannot use a localhost callback URL.');
+  }
+  return errors;
+}
+
 export function validateRuntimeNetworkingConfig(
   config: RuntimeNetworkingConfig,
   options: RuntimeValidationOptions = {},
@@ -128,18 +153,7 @@ export function validateRuntimeNetworkingConfig(
     return errors;
   }
 
-  const vpsBase = normalizeVpsDomain(config.vpsDomain || config.publicCallbackBaseUrl);
-  if (!vpsBase) {
-    errors.push('VPS mode needs a public HTTPS domain before setup can finalize.');
-    return errors;
-  }
-
-  errors.push(...validatePublicCallbackBaseUrl(vpsBase, { allowLocalTesting: false }));
-  const parsed = new URL(vpsBase);
-  if (isLocalHostname(parsed.hostname)) {
-    errors.push('VPS mode cannot use a localhost callback URL.');
-  }
-  return errors;
+  return validateVpsDomain(config.vpsDomain);
 }
 
 export function resolveRuntimeProfile(config: RuntimeNetworkingConfig): RuntimeProfile {
@@ -150,8 +164,7 @@ export function resolveRuntimeProfile(config: RuntimeNetworkingConfig): RuntimeP
   }
 
   if (runtimeMode === 'vps') {
-    const publicCallbackBaseUrl = normalizeVpsDomain(config.vpsDomain || config.publicCallbackBaseUrl)
-      || '';
+    const publicCallbackBaseUrl = normalizeVpsDomain(config.vpsDomain) || '';
     const callbacks = getProviderCallbackUrls(publicCallbackBaseUrl);
 
     return {
