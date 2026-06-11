@@ -42,7 +42,7 @@ function createListenerManager() {
 // ── SomniBotAPI shape verification ──
 
 const EXPECTED_API_METHODS = [
-  'getConfig', 'saveConfig', 'validateCredentials',
+  'getConfig', 'saveConfig', 'getSetupStatus', 'validateCredentials',
   'startBot', 'stopBot', 'getStatus',
   'pullFromSupabase', 'openDashboard', 'openExternal',
   'onStatusUpdate', 'onBotLog', 'onDashboardLog',

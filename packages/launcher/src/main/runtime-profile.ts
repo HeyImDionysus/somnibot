@@ -128,7 +128,7 @@ export function validateRuntimeNetworkingConfig(
     return errors;
   }
 
-  const vpsBase = normalizeVpsDomain(config.publicCallbackBaseUrl || config.vpsDomain);
+  const vpsBase = normalizeVpsDomain(config.vpsDomain || config.publicCallbackBaseUrl);
   if (!vpsBase) {
     errors.push('VPS mode needs a public HTTPS domain before setup can finalize.');
     return errors;
@@ -150,7 +150,7 @@ export function resolveRuntimeProfile(config: RuntimeNetworkingConfig): RuntimeP
   }
 
   if (runtimeMode === 'vps') {
-    const publicCallbackBaseUrl = normalizeVpsDomain(config.publicCallbackBaseUrl || config.vpsDomain)
+    const publicCallbackBaseUrl = normalizeVpsDomain(config.vpsDomain || config.publicCallbackBaseUrl)
       || '';
     const callbacks = getProviderCallbackUrls(publicCallbackBaseUrl);
 

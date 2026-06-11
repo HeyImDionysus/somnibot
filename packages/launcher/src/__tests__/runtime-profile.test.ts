@@ -57,6 +57,18 @@ describe('runtime profile model', () => {
     expect(env.LAVALINK_HOST).toBe('lavalink');
   });
 
+  it('prefers the VPS domain over a stale regular-local callback URL', () => {
+    const env = buildRuntimeEnvVars({
+      runtimeMode: 'vps',
+      publicCallbackBaseUrl: 'https://old-laptop.tailnet.ts.net',
+      vpsDomain: 'somnibot.example.com',
+    });
+
+    expect(env.DASHBOARD_URL).toBe('https://somnibot.example.com');
+    expect(env.NEXT_PUBLIC_APP_URL).toBe('https://somnibot.example.com');
+    expect(env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.example.com/api/paypal/webhook');
+  });
+
   it('normalizes callback base URLs without query strings, hashes, or trailing slashes', () => {
     expect(normalizeBaseUrl(' https://example.com/?from=test#frag ')).toBe('https://example.com');
     expect(normalizeVpsDomain('somnibot.example.com/')).toBe('https://somnibot.example.com');

@@ -29,6 +29,7 @@ export interface SomniBotAPI {
   // Config
   getConfig: () => Promise<Record<string, string>>;
   saveConfig: (config: Record<string, string>) => Promise<void>;
+  getSetupStatus: (input?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
   // Validation
   validateCredentials: (config: Record<string, string>) => Promise<{
@@ -114,6 +115,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config: Record<string, string>) => ipcRenderer.invoke('save-config', config),
+  getSetupStatus: (input?: Record<string, unknown>) => ipcRenderer.invoke('get-setup-status', input),
 
   // Validation
   validateCredentials: (config: Record<string, string>) =>

@@ -12,72 +12,59 @@
   <!-- ─── First-Run Onboarding Overlay ─── -->
   <div id="onboarding-overlay" class="onboarding-overlay hidden">
     <div class="onboarding-card">
-      <!-- Step 1: Welcome -->
+      <!-- Step 1: Runtime choice -->
       <div class="onboarding-step" data-step="1">
         <div class="onboarding-icon">🌙</div>
-        <h1 class="onboarding-title">Welcome to <span class="accent">SomniBot</span></h1>
+        <h1 class="onboarding-title">Choose How <span class="accent">SomniBot</span> Runs</h1>
         <p class="onboarding-desc">
-          Let's get your bot online. You'll need two things:
+          Start with the runtime. The setup steps change depending on where the bot and dashboard will live.
         </p>
-        <div class="onboarding-checklist">
-          <div class="onboarding-check-item">
-            <span class="check-num">1</span>
+        <div class="runtime-choice-grid onboarding-runtime-grid">
+          <button class="runtime-choice active" id="onboarding-runtime-local" data-runtime="regular-local" type="button">
             <div>
-              <strong>Discord Bot Credentials</strong>
-              <p>A bot token, application ID, and client secret from the Discord Developer Portal.</p>
+              <strong>Regular local</strong>
+              <p>Run SomniBot on this computer with a Tailscale Funnel URL for public callbacks.</p>
             </div>
-          </div>
-          <div class="onboarding-check-item">
-            <span class="check-num">2</span>
+          </button>
+          <button class="runtime-choice" id="onboarding-runtime-vps" data-runtime="vps" type="button">
             <div>
-              <strong>Supabase Project</strong>
-              <p>A Supabase project URL, secret key, and publishable key for your database.</p>
+              <strong>VPS</strong>
+              <p>Run SomniBot on a server with a public HTTPS domain and deploy target.</p>
             </div>
-          </div>
+          </button>
         </div>
         <div class="onboarding-actions">
-          <button class="btn btn-primary" id="onboarding-next-1">Let's Go →</button>
+          <button class="btn btn-primary" id="onboarding-next-1">Use This Runtime →</button>
         </div>
       </div>
 
-      <!-- Step 2: Discord Setup -->
+      <!-- Step 2: Runtime readiness -->
       <div class="onboarding-step hidden" data-step="2">
-        <div class="onboarding-icon">🤖</div>
-        <h1 class="onboarding-title">Create a Discord Bot</h1>
-        <p class="onboarding-desc">
-          If you don't have a bot yet, create one in the Developer Portal:
+        <div class="onboarding-icon">🌐</div>
+        <h1 class="onboarding-title" id="onboarding-runtime-title">Prepare Public Callbacks</h1>
+        <p class="onboarding-desc" id="onboarding-runtime-desc">
+          Regular local mode needs a Tailscale Funnel URL before provider callbacks can work.
         </p>
-        <ol class="onboarding-steps-list">
-          <li>Go to <strong>discord.com/developers/applications</strong></li>
-          <li>Click <strong>New Application</strong> → name it → Create</li>
-          <li>Go to <strong>Bot</strong> tab → <strong>Reset Token</strong> → copy the token</li>
-          <li>Scroll down and enable all <strong>Privileged Gateway Intents</strong></li>
-          <li>Go to <strong>OAuth2</strong> → copy the <strong>Client Secret</strong></li>
-          <li>Copy the <strong>Application ID</strong> from the General tab</li>
-        </ol>
+        <div class="onboarding-checklist" id="onboarding-runtime-list"></div>
         <div class="onboarding-actions">
-          <button class="btn btn-secondary" id="onboarding-open-discord">Open Developer Portal ↗</button>
           <button class="btn btn-primary" id="onboarding-next-2">Next →</button>
         </div>
       </div>
 
-      <!-- Step 3: Supabase Setup -->
+      <!-- Step 3: Credential setup -->
       <div class="onboarding-step hidden" data-step="3">
-        <div class="onboarding-icon">🗄️</div>
-        <h1 class="onboarding-title">Set Up Supabase</h1>
+        <div class="onboarding-icon">🤖</div>
+        <h1 class="onboarding-title">Add Credentials</h1>
         <p class="onboarding-desc">
-          Create a free Supabase project for your bot's database:
+          After runtime readiness, enter credentials for Discord and Supabase.
         </p>
         <ol class="onboarding-steps-list">
-          <li>Go to <strong>supabase.com/dashboard</strong></li>
-          <li>Create a new project (any region)</li>
-          <li>Go to <strong>Settings → API</strong></li>
-          <li>Copy the <strong>Project URL</strong></li>
-          <li>Copy the <strong>anon/public key</strong> (publishable key)</li>
-          <li>Copy the <strong>service_role key</strong> (secret key)</li>
-          <li>Go to <strong>Settings → Database</strong> and note your <strong>database password</strong></li>
+          <li>Create a Discord application and bot, then copy the token, application ID, and client secret.</li>
+          <li>Create a Supabase project, then copy the project URL, publishable key, and secret key.</li>
+          <li>Use the database password only for local migrations.</li>
         </ol>
         <div class="onboarding-actions">
+          <button class="btn btn-secondary" id="onboarding-open-discord">Open Discord ↗</button>
           <button class="btn btn-secondary" id="onboarding-open-supabase">Open Supabase ↗</button>
           <button class="btn btn-primary" id="onboarding-next-3">I'm Ready →</button>
         </div>
@@ -130,6 +117,76 @@
 
     <!-- ─── Main Content ─── -->
     <main id="main">
+      <!-- Runtime setup -->
+      <section id="runtime-section">
+        <div class="section-header">
+          <h2>Runtime</h2>
+          <span class="runtime-mode-label" id="runtime-mode-label">Regular local</span>
+        </div>
+
+        <div class="runtime-choice-grid">
+          <button class="runtime-choice active" id="runtime-regular" data-runtime="regular-local" type="button" aria-pressed="true">
+            <div>
+              <strong>Regular local</strong>
+              <p>Run on this computer. Tailscale Funnel handles public callbacks.</p>
+            </div>
+          </button>
+          <button class="runtime-choice" id="runtime-vps" data-runtime="vps" type="button" aria-pressed="false">
+            <div>
+              <strong>VPS</strong>
+              <p>Run on a server. Domain, SSH target, and deploy readiness come first.</p>
+            </div>
+          </button>
+        </div>
+
+        <div id="regular-runtime-fields" class="runtime-fields">
+          <div class="field">
+            <label for="publicCallbackBaseUrl">Public Callback URL <span class="req">*</span></label>
+            <input type="url" id="publicCallbackBaseUrl" placeholder="https://your-machine.tailnet.ts.net" />
+          </div>
+          <p class="runtime-hint">Regular local mode needs a Tailscale Funnel HTTPS URL before Discord auth or PayPal callbacks can reach this machine.</p>
+        </div>
+
+        <div id="vps-runtime-fields" class="runtime-fields hidden">
+          <div class="field">
+            <label for="vpsDomain">VPS Domain <span class="req">*</span></label>
+            <input type="url" id="vpsDomain" placeholder="https://bot.example.com" />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="vpsSshHost">SSH Host <span class="req">*</span></label>
+              <input type="text" id="vpsSshHost" placeholder="bot.example.com" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="vpsSshUser">SSH User <span class="req">*</span></label>
+              <input type="text" id="vpsSshUser" placeholder="deploy" autocomplete="off" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="vpsDeployPath">Deploy Path <span class="req">*</span></label>
+            <input type="text" id="vpsDeployPath" placeholder="/opt/somnibot" autocomplete="off" />
+          </div>
+          <p class="runtime-hint">The launcher records non-secret readiness details only. SSH automation is not run from this setup screen.</p>
+        </div>
+
+        <div class="runtime-summary" id="runtime-summary">
+          <div class="summary-row">
+            <span>Local dashboard URL</span>
+            <strong id="summary-local-dashboard">Not set yet</strong>
+          </div>
+          <div class="summary-row">
+            <span>Public callback URL</span>
+            <strong id="summary-public-callback">Not set yet</strong>
+          </div>
+          <details class="runtime-diagnostics">
+            <summary>Diagnostics</summary>
+            <div id="runtime-diagnostics-list"></div>
+          </details>
+        </div>
+
+        <div class="runtime-steps" id="runtime-steps"></div>
+      </section>
+
       <!-- Config Form -->
       <section id="config-section">
         <div class="section-header">
