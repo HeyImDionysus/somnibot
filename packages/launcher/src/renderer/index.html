@@ -253,6 +253,29 @@
           </div>
         </div>
 
+        <!-- ─── Public Callback (Tailscale) ─── -->
+        <div class="section-header" id="tailscale-section-header" style="margin-top: 24px;">
+          <h2>Public Callback</h2>
+          <button class="link-btn small" id="btn-tailscale-check">Check Tailscale</button>
+        </div>
+
+        <div class="tailscale-section" id="tailscale-section">
+          <div class="tailscale-summary">
+            <span class="status-dot" id="tailscale-dot"></span>
+            <span id="tailscale-status-text">Tailscale not checked yet.</span>
+          </div>
+          <div class="tailscale-url hidden" id="tailscale-url"></div>
+          <div class="tailscale-actions">
+            <button class="btn btn-small btn-accent hidden" id="btn-tailscale-enable">Enable Funnel</button>
+            <button class="btn btn-small btn-secondary hidden" id="btn-tailscale-probe">Verify Callback</button>
+          </div>
+          <div class="tailscale-note hidden" id="tailscale-note"></div>
+          <details class="tailscale-details hidden" id="tailscale-details">
+            <summary>Diagnostics</summary>
+            <code id="tailscale-command"></code>
+          </details>
+        </div>
+
         <!-- ─── Phase 6: Lavalink (Music) Section ─── -->
         <div class="section-header" style="margin-top: 24px;">
           <h2>Music (Lavalink)</h2>

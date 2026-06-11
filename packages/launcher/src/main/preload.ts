@@ -59,6 +59,16 @@ export interface SomniBotAPI {
     error?: string;
   }>;
 
+  // Tailscale / public callback readiness
+  getTailscaleReadiness: () => Promise<Record<string, unknown>>;
+  enableTailscaleFunnel: () => Promise<Record<string, unknown>>;
+  probeTailscaleCallback: (publicCallbackBaseUrl?: string) => Promise<{
+    ok: boolean;
+    url: string;
+    status?: number;
+    error?: string;
+  }>;
+
   // Dashboard
   openDashboard: () => Promise<void>;
 
@@ -129,6 +139,12 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Cloud sync
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
+
+  // Tailscale / public callback readiness
+  getTailscaleReadiness: () => ipcRenderer.invoke('tailscale:get-readiness'),
+  enableTailscaleFunnel: () => ipcRenderer.invoke('tailscale:enable-funnel'),
+  probeTailscaleCallback: (publicCallbackBaseUrl?: string) =>
+    ipcRenderer.invoke('tailscale:probe-callback', publicCallbackBaseUrl),
 
   // Dashboard
   openDashboard: () => ipcRenderer.invoke('open-dashboard'),

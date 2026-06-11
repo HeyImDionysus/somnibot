@@ -530,6 +530,83 @@ main::-webkit-scrollbar-thumb:hover {
   cursor: not-allowed;
 }
 
+/* ─── Tailscale Public Callback ─── */
+.tailscale-section {
+  margin-top: 4px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tailscale-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.tailscale-summary .status-dot.ready,
+.tailscale-summary .status-dot.online {
+  background: var(--text-success);
+  box-shadow: 0 0 6px var(--text-success);
+}
+
+.tailscale-summary .status-dot.waiting,
+.tailscale-summary .status-dot.blocked {
+  background: var(--orange);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+.tailscale-summary .status-dot.offline,
+.tailscale-summary .status-dot.error {
+  background: var(--text-danger);
+  box-shadow: 0 0 6px var(--text-danger);
+}
+
+.tailscale-url {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+  color: var(--cyan);
+  overflow-wrap: anywhere;
+}
+
+.tailscale-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tailscale-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.tailscale-details {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.tailscale-details summary {
+  cursor: pointer;
+  margin-bottom: 6px;
+}
+
+.tailscale-details code {
+  display: block;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  overflow-x: auto;
+  user-select: text;
+}
+
 /* ─── Messages ─── */
 .message-area {
   margin-top: 16px;
