@@ -45,6 +45,7 @@ const EXPECTED_API_METHODS = [
   'getConfig', 'saveConfig', 'getSetupStatus', 'validateCredentials',
   'startBot', 'stopBot', 'getStatus',
   'pullFromSupabase', 'openDashboard', 'openExternal',
+  'getTailscaleReadiness', 'enableTailscaleFunnel', 'probeTailscaleCallback',
   'onStatusUpdate', 'onBotLog', 'onDashboardLog',
   'checkForUpdates', 'downloadUpdate', 'installUpdate',
   'onUpdaterChecking', 'onUpdateAvailable', 'onUpdateNotAvailable',

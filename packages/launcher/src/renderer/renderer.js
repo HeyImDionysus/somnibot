@@ -78,6 +78,19 @@ const btnDownloadLavalink = $('btn-download-lavalink');
 const lavalinkDownloadProgress = $('lavalink-download-progress');
 const btnLavalinkHelp = $('btn-lavalink-help');
 
+// Tailscale public callback
+const tailscaleSectionHeader = $('tailscale-section-header');
+const tailscaleSection = $('tailscale-section');
+const btnTailscaleCheck = $('btn-tailscale-check');
+const btnTailscaleEnable = $('btn-tailscale-enable');
+const btnTailscaleProbe = $('btn-tailscale-probe');
+const tailscaleDot = $('tailscale-dot');
+const tailscaleStatusText = $('tailscale-status-text');
+const tailscaleUrl = $('tailscale-url');
+const tailscaleNote = $('tailscale-note');
+const tailscaleDetails = $('tailscale-details');
+const tailscaleCommand = $('tailscale-command');
+
 /* ================================================================== */
 /*  State                                                              */
 /* ================================================================== */
@@ -88,6 +101,7 @@ let runtimeMode = 'regular-local';
 let setupStatus = null;
 let setupStatusSeq = 0;
 let latestProcessStatus = null;
+let tailscalePublicCallbackBaseUrl = '';
 
 /* ================================================================== */
 /*  Init                                                               */
@@ -115,6 +129,7 @@ async function init() {
         input.value = config[key];
       }
     }
+    tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
     setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
   } catch (err) {
     console.error('Failed to load config:', err);
@@ -167,6 +182,11 @@ async function init() {
 
   // Phase 6: Lavalink
   await initLavalink();
+
+  // Public callback readiness
+  if (runtimeMode === 'regular-local') {
+    await refreshTailscaleReadiness({ quiet: true });
+  }
 }
 
 /* ================================================================== */
@@ -226,6 +246,8 @@ function setRuntimeMode(mode, options = {}) {
   runtimeModeLabel.textContent = isVps ? 'VPS' : 'Regular local';
   regularRuntimeFields.classList.toggle('hidden', isVps);
   vpsRuntimeFields.classList.toggle('hidden', !isVps);
+  tailscaleSectionHeader.classList.toggle('hidden', isVps);
+  tailscaleSection.classList.toggle('hidden', isVps);
 
   document.querySelectorAll('[data-runtime]').forEach((btn) => {
     const active = btn.dataset.runtime === runtimeMode;
@@ -694,6 +716,167 @@ function renderOnboardingRuntimeStep() {
       '</div>' +
     '</div>'
   )).join('');
+}
+
+/* ================================================================== */
+/*  Tailscale Public Callback                                          */
+/* ================================================================== */
+
+btnTailscaleCheck.addEventListener('click', async () => {
+  if (runtimeMode !== 'regular-local') return;
+  await refreshTailscaleReadiness({ quiet: false });
+});
+
+btnTailscaleEnable.addEventListener('click', async () => {
+  if (runtimeMode !== 'regular-local') return;
+  btnTailscaleEnable.disabled = true;
+  btnTailscaleEnable.textContent = 'Enabling...';
+  renderTailscaleBusy('Requesting Funnel approval...');
+
+  try {
+    const readiness = await window.somnibot.enableTailscaleFunnel();
+    renderTailscaleReadiness(readiness);
+    if (readiness.publicCallbackBaseUrl) {
+      applyTailscalePublicCallbackBaseUrl(readiness.publicCallbackBaseUrl);
+      showMessage('info', 'Tailscale Funnel is configured. Public DNS can take a few minutes before verification succeeds.');
+    }
+  } catch (err) {
+    renderTailscaleError(`Tailscale Funnel failed: ${err.message || err}`);
+  } finally {
+    btnTailscaleEnable.disabled = false;
+    btnTailscaleEnable.textContent = 'Enable Funnel';
+  }
+});
+
+btnTailscaleProbe.addEventListener('click', async () => {
+  if (runtimeMode !== 'regular-local') return;
+  const url = tailscalePublicCallbackBaseUrl || tailscaleUrl.textContent.trim();
+  if (!url) {
+    showMessage('error', 'No public callback URL is available yet.');
+    return;
+  }
+
+  btnTailscaleProbe.disabled = true;
+  btnTailscaleProbe.textContent = 'Verifying...';
+
+  try {
+    const result = await window.somnibot.probeTailscaleCallback(url);
+    if (result.ok) {
+      tailscaleDot.className = 'status-dot ready';
+      tailscaleStatusText.textContent = 'Public callback verified.';
+      showMessage('success', 'Public callback is reachable.');
+    } else {
+      tailscaleDot.className = 'status-dot waiting';
+      showMessage('error', result.error || 'Public callback verification failed.');
+    }
+  } catch (err) {
+    renderTailscaleError(`Callback verification failed: ${err.message || err}`);
+  } finally {
+    btnTailscaleProbe.disabled = false;
+    btnTailscaleProbe.textContent = 'Verify Callback';
+  }
+});
+
+async function refreshTailscaleReadiness({ quiet }) {
+  renderTailscaleBusy('Checking Tailscale...');
+
+  try {
+    const readiness = await window.somnibot.getTailscaleReadiness();
+    renderTailscaleReadiness(readiness);
+    if (!quiet && readiness.message) {
+      showMessage(readiness.state === 'error' ? 'error' : 'info', readiness.message);
+    }
+  } catch (err) {
+    renderTailscaleError(`Tailscale check failed: ${err.message || err}`);
+  }
+}
+
+function renderTailscaleBusy(text) {
+  tailscaleDot.className = 'status-dot starting';
+  tailscaleStatusText.textContent = text;
+  btnTailscaleEnable.classList.add('hidden');
+  btnTailscaleProbe.classList.add('hidden');
+  tailscaleNote.classList.add('hidden');
+}
+
+function renderTailscaleError(text) {
+  tailscaleDot.className = 'status-dot error';
+  tailscaleStatusText.textContent = text;
+  btnTailscaleEnable.classList.add('hidden');
+  btnTailscaleProbe.classList.add('hidden');
+  tailscaleNote.classList.add('hidden');
+  showMessage('error', text);
+}
+
+function renderTailscaleReadiness(readiness) {
+  const publicUrl = readiness.publicCallbackBaseUrl || tailscalePublicCallbackBaseUrl || '';
+  if (publicUrl) {
+    applyTailscalePublicCallbackBaseUrl(publicUrl);
+  }
+
+  tailscaleStatusText.textContent = readiness.message || 'Tailscale status checked.';
+  tailscaleDot.className = `status-dot ${tailscaleDotClass(readiness.state)}`;
+  tailscaleCommand.textContent = Array.isArray(readiness.commandPreview)
+    ? readiness.commandPreview.join(' ')
+    : '';
+
+  tailscaleDetails.classList.toggle('hidden', !tailscaleCommand.textContent);
+  tailscaleUrl.classList.toggle('hidden', !publicUrl);
+  tailscaleUrl.textContent = publicUrl;
+
+  btnTailscaleEnable.classList.toggle('hidden', readiness.state !== 'not-configured');
+  btnTailscaleProbe.classList.toggle('hidden', !publicUrl);
+
+  const note = tailscaleReadinessNote(readiness);
+  tailscaleNote.classList.toggle('hidden', !note);
+  tailscaleNote.textContent = note;
+}
+
+function applyTailscalePublicCallbackBaseUrl(publicUrl) {
+  tailscalePublicCallbackBaseUrl = publicUrl;
+  const callbackField = document.getElementById('publicCallbackBaseUrl');
+  if (callbackField && callbackField.value !== publicUrl) {
+    callbackField.value = publicUrl;
+    callbackField.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+function tailscaleDotClass(state) {
+  switch (state) {
+    case 'ready':
+      return 'ready';
+    case 'not-configured':
+    case 'needs-dashboard':
+      return 'waiting';
+    case 'not-installed':
+    case 'not-logged-in':
+    case 'needs-policy':
+    case 'unsupported-platform':
+      return 'blocked';
+    default:
+      return 'error';
+  }
+}
+
+function tailscaleReadinessNote(readiness) {
+  switch (readiness.state) {
+    case 'not-configured':
+      return 'Enabling Funnel may require browser or tailnet policy approval.';
+    case 'needs-dashboard':
+      return 'Start SomniBot, then verify the callback. Public DNS can take up to 10 minutes after Funnel changes.';
+    case 'not-installed':
+      return 'Install Tailscale, sign in, then check again.';
+    case 'not-logged-in':
+      return 'Sign in through the Tailscale app or CLI, then check again.';
+    case 'needs-policy':
+      return 'Tailnet policy must allow Funnel before SomniBot can automate this step.';
+    case 'unsupported-platform':
+      return 'Use a Tailscale install that supports the CLI Funnel feature.';
+    case 'error':
+      return readiness.detail || '';
+    default:
+      return '';
+  }
 }
 
 /* ================================================================== */
