@@ -195,6 +195,9 @@ function collectRuntimeConfig() {
   for (const [key, input] of Object.entries(runtimeFields)) {
     config[key] = input.value;
   }
+  if (runtimeMode === 'vps') {
+    config.publicCallbackBaseUrl = '';
+  }
   return config;
 }
 
@@ -355,7 +358,7 @@ btnStart.addEventListener('click', async () => {
   hideMessage();
   hideMeta();
 
-  const currentSetup = await refreshSetupStatus({ checking: true });
+  const currentSetup = await refreshSetupStatus();
 
   // Quick local check for required fields
   const required = ['discordToken', 'discordApplicationId', 'discordClientSecret', 'supabaseUrl', 'supabaseSecretKey', 'supabasePublishableKey'];
@@ -919,6 +922,7 @@ btnRestoreCloud.addEventListener('click', async () => {
         }
       }
       await saveConfig();
+      await refreshSetupStatus();
       showMessage('success', 'Credentials restored from Supabase! Review the values and hit "Validate & Start".');
       restoreBanner.classList.add('hidden');
     }
