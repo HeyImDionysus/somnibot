@@ -49,7 +49,24 @@ describe('launcher renderer Tailscale setup wiring', () => {
     expect(html).toContain('id="tailscale-section-header"');
     expect(renderer).toContain("tailscaleSectionHeader.classList.toggle('hidden', isVps)");
     expect(renderer).toContain("if (runtimeMode === 'regular-local')");
-    expect(renderer.match(/if \(runtimeMode !== 'regular-local'\) return;/g)?.length).toBe(3);
+    expect(renderer.match(/if \(runtimeMode !== 'regular-local' \|\| isValidating \|\| isRunning\) return;/g)?.length).toBe(3);
+  });
+
+  it('guards Tailscale refreshes and actions against stale UI updates', () => {
+    const renderer = readRendererFile('renderer.js');
+
+    expect(renderer).toContain('let tailscaleReadinessSeq = 0;');
+    expect(renderer).toContain('const seq = ++tailscaleReadinessSeq;');
+    expect(renderer).toContain('if (seq !== tailscaleReadinessSeq) return;');
+    expect(renderer).toContain('setTailscaleActionsDisabled(disabled)');
+  });
+
+  it('preserves manual callback edits when a readiness check has no public URL', () => {
+    const renderer = readRendererFile('renderer.js');
+
+    expect(renderer).toContain('const currentFieldUrl = runtimeFields.publicCallbackBaseUrl.value.trim();');
+    expect(renderer).toContain('const publicUrl = readiness.publicCallbackBaseUrl || currentFieldUrl;');
+    expect(renderer).toContain('if (readiness.publicCallbackBaseUrl)');
   });
 
   it('does not force the selected runtime mode when saving Tailscale callback state', () => {
@@ -58,5 +75,15 @@ describe('launcher renderer Tailscale setup wiring', () => {
 
     expect(enableHandler).toContain("cfg.runtimeMode === 'regular-local'");
     expect(enableHandler).not.toContain("runtimeMode: 'regular-local'");
+  });
+
+  it('rejects Funnel enablement in the main process before running Tailscale in VPS mode', () => {
+    const main = readFileSync(path.join(rendererDir, '..', 'main', 'index.ts'), 'utf8');
+    const enableHandler = main.match(/ipcMain\.handle\('tailscale:enable-funnel'[\s\S]*?return readiness;/)?.[0] ?? '';
+
+    expect(enableHandler).toContain("if (cfg.runtimeMode !== 'regular-local')");
+    expect(enableHandler.indexOf("cfg.runtimeMode !== 'regular-local'")).toBeLessThan(
+      enableHandler.indexOf('enableSomniBotFunnel()'),
+    );
   });
 });

@@ -113,11 +113,57 @@ describe('tailscale-service', () => {
           },
         },
       },
+      AllowFunnel: {
+        'somnibot.dionysus.ts.net:443': true,
+      },
     }));
 
     expect(status.enabled).toBe(true);
+    expect(status.allowFunnel).toBe(true);
     expect(status.publicUrl).toBe('https://somnibot.dionysus.ts.net');
     expect(status.target).toBe('http://127.0.0.1:3456');
+  });
+
+  it('does not treat tailnet-only Serve JSON as public Funnel readiness', () => {
+    const status = parseFunnelStatusJson(JSON.stringify({
+      Web: {
+        'somnibot.dionysus.ts.net:443': {
+          Handlers: {
+            '/': {
+              Proxy: 'http://127.0.0.1:3456',
+            },
+          },
+        },
+      },
+      AllowFunnel: {
+        'somnibot.dionysus.ts.net:443': false,
+      },
+    }));
+
+    expect(status.enabled).toBe(false);
+    expect(status.allowFunnel).toBe(false);
+    expect(status.publicUrl).toBe('');
+    expect(status.target).toBe('http://127.0.0.1:3456');
+  });
+
+  it('preserves non-443 public Funnel ports from status JSON', () => {
+    const status = parseFunnelStatusJson(JSON.stringify({
+      Web: {
+        'somnibot.dionysus.ts.net:8443': {
+          Handlers: {
+            '/': {
+              Proxy: 'http://127.0.0.1:3456',
+            },
+          },
+        },
+      },
+      AllowFunnel: {
+        'somnibot.dionysus.ts.net:8443': true,
+      },
+    }));
+
+    expect(status.enabled).toBe(true);
+    expect(status.publicUrl).toBe('https://somnibot.dionysus.ts.net:8443');
   });
 
   it('does not combine unrelated JSON hosts and local targets into a false Funnel match', () => {
@@ -207,6 +253,9 @@ Available on the internet:
               'somnibot.dionysus.ts.net:443': {
                 Handlers: { '/': { Proxy: 'http://127.0.0.1:3456' } },
               },
+            },
+            AllowFunnel: {
+              'somnibot.dionysus.ts.net:443': true,
             },
           }),
         },

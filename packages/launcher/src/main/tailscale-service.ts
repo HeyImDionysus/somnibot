@@ -48,6 +48,7 @@ export interface FunnelStatusInfo {
   publicUrl: string;
   target: string;
   enabled: boolean;
+  allowFunnel: boolean;
   raw: string;
 }
 
@@ -186,9 +187,25 @@ export function parseTailscaleStatusJson(stdout: string): TailscaleStatusInfo {
   };
 }
 
-function extractTsNetHost(value: string): string {
+interface TsNetEndpoint {
+  host: string;
+  port: number;
+  hostPort: string;
+  publicUrl: string;
+}
+
+function extractTsNetEndpoint(value: string): TsNetEndpoint | null {
   const match = value.match(TS_NET_HOST_RE);
-  return match?.[1]?.toLowerCase() ?? '';
+  const host = match?.[1]?.toLowerCase() ?? '';
+  if (!host) return null;
+  const port = Number(match?.[2] ?? TAILSCALE_FUNNEL_HTTPS_PORT);
+
+  return {
+    host,
+    port,
+    hostPort: `${host}:${port}`,
+    publicUrl: port === 443 ? `https://${host}` : `https://${host}:${port}`,
+  };
 }
 
 function extractDashboardTarget(value: string): string {
@@ -197,20 +214,20 @@ function extractDashboardTarget(value: string): string {
 }
 
 interface FunnelMatch {
-  host: string;
+  endpoint: TsNetEndpoint;
   target: string;
 }
 
-function findFunnelMatch(value: unknown, scopedHost = ''): FunnelMatch | null {
+function findFunnelMatch(value: unknown, scopedEndpoint: TsNetEndpoint | null = null): FunnelMatch | null {
   if (typeof value === 'string') {
-    const host = extractTsNetHost(value) || scopedHost;
+    const endpoint = extractTsNetEndpoint(value) ?? scopedEndpoint;
     const target = extractDashboardTarget(value);
-    return host && target ? { host, target } : null;
+    return endpoint && target ? { endpoint, target } : null;
   }
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      const match = findFunnelMatch(item, scopedHost);
+      const match = findFunnelMatch(item, scopedEndpoint);
       if (match) return match;
     }
     return null;
@@ -218,8 +235,8 @@ function findFunnelMatch(value: unknown, scopedHost = ''): FunnelMatch | null {
 
   if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      const childScopedHost = extractTsNetHost(key) || scopedHost;
-      const directMatch = findFunnelMatch(child, childScopedHost);
+      const childScopedEndpoint = extractTsNetEndpoint(key) ?? scopedEndpoint;
+      const directMatch = findFunnelMatch(child, childScopedEndpoint);
       if (directMatch) return directMatch;
     }
   }
@@ -227,39 +244,49 @@ function findFunnelMatch(value: unknown, scopedHost = ''): FunnelMatch | null {
   return null;
 }
 
+function hasAllowFunnel(parsed: unknown, endpoint: TsNetEndpoint | null): boolean {
+  if (!endpoint) return false;
+  const allowFunnel = objectValue(objectValue(parsed).AllowFunnel);
+  return allowFunnel[endpoint.hostPort] === true;
+}
+
 export function parseFunnelStatusJson(stdout: string): FunnelStatusInfo {
   const parsed = parseJson(stdout);
   const match = findFunnelMatch(parsed);
-  const publicHost = match?.host ?? '';
+  const allowFunnel = hasAllowFunnel(parsed, match?.endpoint ?? null);
   const target = match?.target ?? '';
+  const enabled = Boolean(match?.endpoint && target && allowFunnel);
 
   return {
-    publicUrl: publicHost ? `https://${publicHost}` : '',
+    publicUrl: enabled ? match?.endpoint.publicUrl ?? '' : '',
     target,
-    enabled: Boolean(publicHost && target),
+    enabled,
+    allowFunnel,
     raw: redactTailscaleOutput(stdout),
   };
 }
 
 export function parseFunnelStatusText(stdout: string): FunnelStatusInfo {
-  let publicHost = '';
+  let endpoint: TsNetEndpoint | null = null;
   let target = '';
 
   for (const line of stdout.split(/\r?\n/)) {
-    const host = extractTsNetHost(line);
-    if (host) publicHost = host;
+    const lineEndpoint = extractTsNetEndpoint(line);
+    if (lineEndpoint) endpoint = lineEndpoint;
 
     const lineTarget = extractDashboardTarget(line);
-    if (publicHost && lineTarget) {
+    if (endpoint && lineTarget) {
       target = lineTarget;
       break;
     }
   }
+  const enabled = Boolean(endpoint && target);
 
   return {
-    publicUrl: publicHost ? `https://${publicHost}` : '',
+    publicUrl: endpoint ? endpoint.publicUrl : '',
     target,
-    enabled: Boolean(publicHost && target),
+    enabled,
+    allowFunnel: enabled,
     raw: redactTailscaleOutput(stdout),
   };
 }

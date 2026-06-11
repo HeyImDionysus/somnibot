@@ -13,7 +13,13 @@ import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { getLauncherLocalStartBlocker } from './runtime-profile.js';
 import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
-import { enableSomniBotFunnel, getTailscaleReadiness, probePublicCallbackHealth } from './tailscale-service.js';
+import {
+  SOMNIBOT_FUNNEL_TARGET,
+  TAILSCALE_DNS_PROPAGATION_WAIT_MS,
+  enableSomniBotFunnel,
+  getTailscaleReadiness,
+  probePublicCallbackHealth,
+} from './tailscale-service.js';
 import { validateAllCredentials } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { pushToSupabase } from './supabase-sync.js';
@@ -326,8 +332,22 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('tailscale:enable-funnel', async () => {
-    const readiness = await enableSomniBotFunnel();
     const cfg = getConfig();
+    if (cfg.runtimeMode !== 'regular-local') {
+      return {
+        state: 'error',
+        installed: false,
+        loggedIn: false,
+        funnelEnabled: false,
+        publicCallbackBaseUrl: '',
+        dashboardTarget: SOMNIBOT_FUNNEL_TARGET,
+        commandPreview: [],
+        dnsPropagationWaitMs: TAILSCALE_DNS_PROPAGATION_WAIT_MS,
+        message: 'Tailscale Funnel is only available in Regular local mode.',
+      };
+    }
+
+    const readiness = await enableSomniBotFunnel();
     if (readiness.publicCallbackBaseUrl && cfg.runtimeMode === 'regular-local') {
       saveConfig({
         publicCallbackBaseUrl: readiness.publicCallbackBaseUrl,

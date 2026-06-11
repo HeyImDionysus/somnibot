@@ -102,6 +102,7 @@ let setupStatus = null;
 let setupStatusSeq = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
+let tailscaleReadinessSeq = 0;
 
 /* ================================================================== */
 /*  Init                                                               */
@@ -160,6 +161,9 @@ async function init() {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
+      if (input === runtimeFields.publicCallbackBaseUrl) {
+        tailscalePublicCallbackBaseUrl = input.value.trim();
+      }
       refreshSetupStatus();
     });
   }
@@ -723,12 +727,13 @@ function renderOnboardingRuntimeStep() {
 /* ================================================================== */
 
 btnTailscaleCheck.addEventListener('click', async () => {
-  if (runtimeMode !== 'regular-local') return;
+  if (runtimeMode !== 'regular-local' || isValidating || isRunning) return;
   await refreshTailscaleReadiness({ quiet: false });
 });
 
 btnTailscaleEnable.addEventListener('click', async () => {
-  if (runtimeMode !== 'regular-local') return;
+  if (runtimeMode !== 'regular-local' || isValidating || isRunning) return;
+  tailscaleReadinessSeq += 1;
   btnTailscaleEnable.disabled = true;
   btnTailscaleEnable.textContent = 'Enabling...';
   renderTailscaleBusy('Requesting Funnel approval...');
@@ -749,8 +754,9 @@ btnTailscaleEnable.addEventListener('click', async () => {
 });
 
 btnTailscaleProbe.addEventListener('click', async () => {
-  if (runtimeMode !== 'regular-local') return;
-  const url = tailscalePublicCallbackBaseUrl || tailscaleUrl.textContent.trim();
+  if (runtimeMode !== 'regular-local' || isValidating || isRunning) return;
+  tailscaleReadinessSeq += 1;
+  const url = runtimeFields.publicCallbackBaseUrl.value.trim() || tailscalePublicCallbackBaseUrl || tailscaleUrl.textContent.trim();
   if (!url) {
     showMessage('error', 'No public callback URL is available yet.');
     return;
@@ -778,15 +784,18 @@ btnTailscaleProbe.addEventListener('click', async () => {
 });
 
 async function refreshTailscaleReadiness({ quiet }) {
+  const seq = ++tailscaleReadinessSeq;
   renderTailscaleBusy('Checking Tailscale...');
 
   try {
     const readiness = await window.somnibot.getTailscaleReadiness();
+    if (seq !== tailscaleReadinessSeq) return;
     renderTailscaleReadiness(readiness);
     if (!quiet && readiness.message) {
       showMessage(readiness.state === 'error' ? 'error' : 'info', readiness.message);
     }
   } catch (err) {
+    if (seq !== tailscaleReadinessSeq) return;
     renderTailscaleError(`Tailscale check failed: ${err.message || err}`);
   }
 }
@@ -809,9 +818,12 @@ function renderTailscaleError(text) {
 }
 
 function renderTailscaleReadiness(readiness) {
-  const publicUrl = readiness.publicCallbackBaseUrl || tailscalePublicCallbackBaseUrl || '';
-  if (publicUrl) {
-    applyTailscalePublicCallbackBaseUrl(publicUrl);
+  const currentFieldUrl = runtimeFields.publicCallbackBaseUrl.value.trim();
+  const publicUrl = readiness.publicCallbackBaseUrl || currentFieldUrl;
+  if (readiness.publicCallbackBaseUrl) {
+    applyTailscalePublicCallbackBaseUrl(readiness.publicCallbackBaseUrl);
+  } else {
+    tailscalePublicCallbackBaseUrl = currentFieldUrl;
   }
 
   tailscaleStatusText.textContent = readiness.message || 'Tailscale status checked.';
@@ -1043,6 +1055,13 @@ function setFieldsDisabled(disabled) {
   document.querySelectorAll('[data-runtime]').forEach((btn) => {
     btn.disabled = disabled;
   });
+  setTailscaleActionsDisabled(disabled);
+}
+
+function setTailscaleActionsDisabled(disabled) {
+  btnTailscaleCheck.disabled = disabled;
+  btnTailscaleEnable.disabled = disabled;
+  btnTailscaleProbe.disabled = disabled;
 }
 
 function fieldLabel(key) {
