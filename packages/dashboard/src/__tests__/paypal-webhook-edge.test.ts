@@ -16,6 +16,10 @@ const { replaySecret } = vi.hoisted(() => {
 
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/paypal', () => ({
+  getPayPalRuntimeConfig: vi.fn().mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));

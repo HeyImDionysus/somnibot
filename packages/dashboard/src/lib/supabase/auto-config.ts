@@ -17,6 +17,15 @@ interface AutoConfigResult {
   alreadyConfigured?: boolean;
 }
 
+interface DiscordAuthProviderStatus {
+  ready: boolean;
+  providerEnabled: boolean;
+  callbackAllowListReady: boolean;
+  missingCallbackUrls: string[];
+  manualConfigured: boolean;
+  error?: string;
+}
+
 interface DashboardUrlEnv {
   NEXT_PUBLIC_APP_URL?: string;
   DASHBOARD_URL?: string;
@@ -46,6 +55,10 @@ function getAccessToken(options?: AutoConfigOptions): string | null {
 
 function isManualDiscordAuthProviderConfigured(): boolean {
   return process.env.SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED?.toLowerCase() === 'true';
+}
+
+function getAuthConfigUrl(projectRef: string) {
+  return `https://api.supabase.com/v1/projects/${projectRef}/config/auth`;
 }
 
 /**
@@ -90,6 +103,123 @@ export function getDashboardCallbackUrls(env?: DashboardUrlEnv): string[] {
   return [...new Set(bases)].map((base) => `${base}/api/auth/callback`);
 }
 
+async function fetchAuthConfig(projectRef: string, accessToken: string): Promise<{
+  ok: true;
+  config: Record<string, unknown>;
+} | {
+  ok: false;
+  error: string;
+}> {
+  const res = await fetch(
+    getAuthConfigUrl(projectRef),
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '');
+    return { ok: false, error: `Supabase Management API error (${res.status}): ${errBody}` };
+  }
+
+  return { ok: true, config: await res.json() };
+}
+
+function getAllowListEntries(config: Record<string, unknown>): string[] {
+  const allowList = typeof config.URI_ALLOW_LIST === 'string' ? config.URI_ALLOW_LIST : '';
+  return allowList
+    ? allowList.split(',').map((entry) => entry.trim()).filter(Boolean)
+    : [];
+}
+
+function getMissingCallbackUrls(config: Record<string, unknown>): string[] {
+  const allowListEntries = getAllowListEntries(config);
+  return getDashboardCallbackUrls().filter((callbackUrl) => !allowListEntries.includes(callbackUrl));
+}
+
+function buildAllowList(config: Record<string, unknown>) {
+  const allowListEntries = getAllowListEntries(config);
+  for (const callbackUrl of getMissingCallbackUrls(config)) {
+    allowListEntries.push(callbackUrl);
+  }
+
+  return allowListEntries.join(',');
+}
+
+export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions): Promise<DiscordAuthProviderStatus> {
+  if (isManualDiscordAuthProviderConfigured()) {
+    return {
+      ready: true,
+      providerEnabled: true,
+      callbackAllowListReady: true,
+      missingCallbackUrls: [],
+      manualConfigured: true,
+    };
+  }
+
+  const projectRef = getProjectRef();
+  if (!projectRef) {
+    return {
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: getDashboardCallbackUrls(),
+      manualConfigured: false,
+      error: 'Could not extract Supabase project ref from URL',
+    };
+  }
+
+  const accessToken = getAccessToken(options);
+  if (!accessToken) {
+    return {
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: getDashboardCallbackUrls(),
+      manualConfigured: false,
+      error: 'SUPABASE_ACCESS_TOKEN not set',
+    };
+  }
+
+  try {
+    const current = await fetchAuthConfig(projectRef, accessToken);
+    if (!current.ok) {
+      return {
+        ready: false,
+        providerEnabled: false,
+        callbackAllowListReady: false,
+        missingCallbackUrls: getDashboardCallbackUrls(),
+        manualConfigured: false,
+        error: current.error,
+      };
+    }
+
+    const providerEnabled = current.config.EXTERNAL_DISCORD_ENABLED === true;
+    const missingCallbackUrls = getMissingCallbackUrls(current.config);
+    const callbackAllowListReady = missingCallbackUrls.length === 0;
+
+    return {
+      ready: providerEnabled && callbackAllowListReady,
+      providerEnabled,
+      callbackAllowListReady,
+      missingCallbackUrls,
+      manualConfigured: false,
+    };
+  } catch (err) {
+    return {
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: getDashboardCallbackUrls(),
+      manualConfigured: false,
+      error: `Failed to check Discord auth provider: ${err}`,
+    };
+  }
+}
+
 /**
  * Read Discord credentials from env vars, falling back to instance_settings.
  */
@@ -131,33 +261,6 @@ async function getDiscordCredentials(): Promise<{
 }
 
 /**
- * Check if Discord auth provider is already enabled in Supabase.
- */
-async function isDiscordProviderEnabled(
-  projectRef: string,
-  accessToken: string,
-): Promise<boolean> {
-  try {
-    const res = await fetch(
-      `https://api.supabase.com/v1/projects/${projectRef}/config/auth`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      },
-    );
-
-    if (!res.ok) return false;
-
-    const config = await res.json();
-    return config.EXTERNAL_DISCORD_ENABLED === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Enable Discord as an OAuth provider in Supabase.
  * Also adds the dashboard callback URL to the redirect allow list.
  */
@@ -179,68 +282,43 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     };
   }
 
-  // Check if already configured
-  const alreadyEnabled = await isDiscordProviderEnabled(projectRef, accessToken);
-  if (alreadyEnabled) {
-    return { success: true, alreadyConfigured: true };
-  }
-
-  // Get Discord credentials
-  const { clientId, clientSecret } = await getDiscordCredentials();
-  if (!clientId || !clientSecret) {
-    return {
-      success: false,
-      error: 'Discord Client ID and Client Secret are required. Set DISCORD_APPLICATION_ID and DISCORD_CLIENT_SECRET in env vars.',
-    };
-  }
-
-  // Build the callback/redirect URLs. Regular-local mode may use a local
-  // browser URL and a separate public HTTPS callback base.
-  const dashboardCallbackUrls = getDashboardCallbackUrls();
-
-  const supabaseCallbackUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL}/auth/v1/callback`;
-
   try {
-    // First, get current auth config to preserve existing settings
-    const currentRes = await fetch(
-      `https://api.supabase.com/v1/projects/${projectRef}/config/auth`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      },
-    );
+    const current = await fetchAuthConfig(projectRef, accessToken);
+    const currentConfig = current.ok ? current.config : {};
+    const providerEnabled = current.ok && currentConfig.EXTERNAL_DISCORD_ENABLED === true;
+    const allowListReady = current.ok && getMissingCallbackUrls(currentConfig).length === 0;
 
-    let currentAllowList = '';
-    if (currentRes.ok) {
-      const currentConfig = await currentRes.json();
-      currentAllowList = currentConfig.URI_ALLOW_LIST || '';
+    if (providerEnabled && allowListReady) {
+      return { success: true, alreadyConfigured: true };
     }
 
-    // Append dashboard callback URLs to allow list if not already there
-    const allowListEntries = currentAllowList ? currentAllowList.split(',').map((s: string) => s.trim()) : [];
-    for (const callbackPath of dashboardCallbackUrls) {
-      if (!allowListEntries.includes(callbackPath)) {
-        allowListEntries.push(callbackPath);
+    const patchBody: Record<string, string | boolean> = {
+      URI_ALLOW_LIST: buildAllowList(currentConfig),
+    };
+
+    if (!providerEnabled) {
+      const { clientId, clientSecret } = await getDiscordCredentials();
+      if (!clientId || !clientSecret) {
+        return {
+          success: false,
+          error: 'Discord Client ID and Client Secret are required. Set DISCORD_APPLICATION_ID and DISCORD_CLIENT_SECRET in env vars.',
+        };
       }
+
+      patchBody.EXTERNAL_DISCORD_ENABLED = true;
+      patchBody.EXTERNAL_DISCORD_CLIENT_ID = clientId;
+      patchBody.EXTERNAL_DISCORD_SECRET = clientSecret;
     }
 
-    // Enable Discord provider
     const res = await fetch(
-      `https://api.supabase.com/v1/projects/${projectRef}/config/auth`,
+      getAuthConfigUrl(projectRef),
       {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          EXTERNAL_DISCORD_ENABLED: true,
-          EXTERNAL_DISCORD_CLIENT_ID: clientId,
-          EXTERNAL_DISCORD_SECRET: clientSecret,
-          URI_ALLOW_LIST: allowListEntries.filter(Boolean).join(','),
-        }),
+        body: JSON.stringify(patchBody),
       },
     );
 
@@ -249,7 +327,11 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
       return { success: false, error: `Supabase Management API error (${res.status}): ${errBody}` };
     }
 
-    console.log('[AutoConfig] ✅ Discord OAuth provider enabled in Supabase');
+    console.log(
+      providerEnabled
+        ? '[AutoConfig] ✅ Discord OAuth callback allow-list updated in Supabase'
+        : '[AutoConfig] ✅ Discord OAuth provider enabled in Supabase',
+    );
     return { success: true, alreadyConfigured: false };
   } catch (err) {
     return { success: false, error: `Failed to configure Discord auth: ${err}` };

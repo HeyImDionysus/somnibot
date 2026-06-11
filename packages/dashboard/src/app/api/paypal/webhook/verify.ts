@@ -6,9 +6,7 @@
 
 import { type NextRequest } from 'next/server';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
-
-const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
+import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 
 // V5 Audit §2.P2a: Startup-time warning when WEBHOOK_REPLAY_SECRET isn't set.
 // Fires at module-load so the operator sees it in logs immediately, not on first request.
@@ -73,17 +71,18 @@ export async function verifyWebhookSignature(
   req: NextRequest,
   rawBody: string,
 ): Promise<boolean> {
-  if (!PAYPAL_WEBHOOK_ID) {
+  const paypalConfig = await getPayPalRuntimeConfig();
+  if (!paypalConfig.webhookId) {
     console.error('[Webhook] PAYPAL_WEBHOOK_ID is not configured — refusing to process');
     return false;
   }
 
-  const token = await getPayPalToken();
+  const token = await getPayPalToken(paypalConfig);
   if (!token) return false;
 
   try {
     const res = await fetch(
-      `${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`,
+      `${paypalConfig.apiBase}/v1/notifications/verify-webhook-signature`,
       {
         method: 'POST',
         headers: {
@@ -96,7 +95,7 @@ export async function verifyWebhookSignature(
           transmission_id: req.headers.get('paypal-transmission-id'),
           transmission_sig: req.headers.get('paypal-transmission-sig'),
           transmission_time: req.headers.get('paypal-transmission-time'),
-          webhook_id: PAYPAL_WEBHOOK_ID,
+          webhook_id: paypalConfig.webhookId,
           webhook_event: JSON.parse(rawBody),
         }),
         signal: AbortSignal.timeout(10_000),

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /**
  * Discord OAuth callback handler.
@@ -25,9 +26,10 @@ export async function GET(request: Request) {
 
   if (code) {
     const cookieStore = await cookies();
+    const { url, publishableKey } = requireBrowserSupabaseConfig();
     const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+      url,
+      publishableKey,
       {
         cookies: {
           getAll() {

@@ -8,7 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 
-import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 export async function POST(
@@ -49,11 +49,12 @@ export async function POST(
   // Attempt PayPal refund if we have a payment
   const payment = order.payments?.[0];
   if (payment?.paypal_payment_id) {
-    const token = await getPayPalToken();
+    const paypalConfig = await getPayPalRuntimeConfig();
+    const token = await getPayPalToken(paypalConfig);
     if (token) {
       try {
         const refundRes = await fetch(
-          `${PAYPAL_API_BASE}/v2/payments/captures/${payment.paypal_payment_id}/refund`,
+          `${paypalConfig.apiBase}/v2/payments/captures/${payment.paypal_payment_id}/refund`,
           {
             method: 'POST',
             headers: {

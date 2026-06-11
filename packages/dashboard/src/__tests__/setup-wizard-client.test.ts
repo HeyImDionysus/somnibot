@@ -36,6 +36,6 @@ describe('setup wizard page wiring', () => {
     expect(source).toContain('onClick={finalizeSetup}');
     expect(source).toContain('if (data.setupCompleted)');
     expect(source).toContain('setCurrentStep(3)');
-    expect(source).not.toContain('onClick={() => setCurrentStep(4)}');
+    expect(source).not.toContain('onClick={() => setCurrentStep(5)}');
   });
 });
