@@ -3,7 +3,7 @@
  *
  * Tests the pure filter functions from automod-engine.
  * Since the functions are not exported, we replicate the logic inline
- * (same pattern as validators.test.ts).
+ * (same pattern as validators-schema.test.ts).
  */
 import { describe, it, expect } from 'vitest';
 
