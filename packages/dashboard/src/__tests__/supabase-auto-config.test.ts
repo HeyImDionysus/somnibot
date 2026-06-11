@@ -28,6 +28,13 @@ describe('Supabase Discord auth auto-config', () => {
     })).toBe('https://dashboard.example.com');
   });
 
+  it('prefers the launcher public callback base over public app URL', () => {
+    expect(getDashboardBaseUrl({
+      SOMNIBOT_PUBLIC_CALLBACK_BASE_URL: 'https://somnibot.tailnet.ts.net/',
+      NEXT_PUBLIC_APP_URL: 'https://stale-public.example.com/',
+    })).toBe('https://somnibot.tailnet.ts.net');
+  });
+
   it('falls back to VERCEL_URL with https when no app URL is configured', () => {
     expect(getDashboardBaseUrl({
       NEXT_PUBLIC_APP_URL: '',
@@ -46,6 +53,16 @@ describe('Supabase Discord auth auto-config', () => {
     })).toEqual([
       'https://public-callback.example/api/auth/callback',
       'http://localhost:3000/api/auth/callback',
+    ]);
+  });
+
+  it('allow-lists the launcher public callback and local operator callback', () => {
+    expect(getDashboardCallbackUrls({
+      NEXT_PUBLIC_APP_URL: 'https://somnibot.tailnet.ts.net/',
+      DASHBOARD_URL: 'http://localhost:3456/',
+    })).toEqual([
+      'https://somnibot.tailnet.ts.net/api/auth/callback',
+      'http://localhost:3456/api/auth/callback',
     ]);
   });
 
