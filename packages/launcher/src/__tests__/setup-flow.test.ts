@@ -105,6 +105,52 @@ describe('setup flow status', () => {
     expect(status.summary.publicCallbackUrl).toBe('Not set yet');
   });
 
+  it('uses the VPS domain, not a stale regular-local callback, for VPS diagnostics', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'vps',
+      publicCallbackBaseUrl: 'https://old-tailnet.tailnet.ts.net',
+      vpsDomain: 'somnibot.example.com',
+      vpsSshHost: 'somnibot.example.com',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      ...completeCredentials,
+    });
+
+    expect(status.steps.find(step => step.id === 'vps-domain')?.status).toBe('success');
+    expect(status.summary.publicCallbackUrl).toBe('https://somnibot.example.com');
+    expect(status.summary.diagnostics.publicCallbackBaseUrl).toBe('https://somnibot.example.com');
+    expect(status.summary.diagnostics.authCallbackUrl).toBe('https://somnibot.example.com/api/auth/callback');
+    expect(status.summary.diagnostics.paypalWebhookUrl).toBe('https://somnibot.example.com/api/paypal/webhook');
+    expect(status.summary.diagnostics.publicCallbackBaseUrl).not.toContain('old-tailnet');
+  });
+
+  it('surfaces recoverable VPS domain errors for local and non-HTTPS URLs', () => {
+    const malformedStatus = buildSetupStatus({
+      runtimeMode: 'vps',
+      vpsDomain: 'not a domain',
+      ...completeCredentials,
+    });
+    const malformedDomainStep = malformedStatus.steps.find(step => step.id === 'vps-domain');
+    expect(malformedDomainStep?.status).toBe('recoverable-error');
+    expect(malformedDomainStep?.detail).toContain('VPS public domain must be a valid HTTP or HTTPS URL or bare domain.');
+
+    const status = buildSetupStatus({
+      runtimeMode: 'vps',
+      vpsDomain: 'http://localhost:3000',
+      vpsSshHost: 'somnibot.example.com',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      ...completeCredentials,
+    });
+
+    const domainStep = status.steps.find(step => step.id === 'vps-domain');
+    expect(domainStep?.status).toBe('recoverable-error');
+    expect(domainStep?.detail).toContain('VPS public domain must use HTTPS.');
+    expect(domainStep?.detail).toContain('VPS mode cannot use a localhost callback URL.');
+    expect(status.firstBlockingStepId).toBe('vps-domain');
+    expect(status.primaryAction.enabled).toBe(false);
+  });
+
   it('hides implementation ports from normal summary copy but keeps them in diagnostics', () => {
     const status = buildSetupStatus({
       runtimeMode: 'vps',

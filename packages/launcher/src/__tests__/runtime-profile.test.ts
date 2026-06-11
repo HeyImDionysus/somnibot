@@ -87,6 +87,21 @@ describe('runtime profile model', () => {
     expect(env.DASHBOARD_URL).toBe('https://somnibot.example.com');
     expect(env.NEXT_PUBLIC_APP_URL).toBe('https://somnibot.example.com');
     expect(env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.example.com/api/paypal/webhook');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot.example.com');
+  });
+
+  it('does not let a stale regular-local callback URL satisfy VPS mode', () => {
+    const config = {
+      runtimeMode: 'vps' as const,
+      publicCallbackBaseUrl: 'https://old-laptop.tailnet.ts.net',
+    };
+
+    expect(validateRuntimeNetworkingConfig(config)).toContain(
+      'VPS mode needs a public HTTPS domain before setup can finalize.',
+    );
+    expect(() => buildRuntimeEnvVars(config)).toThrow(
+      'VPS mode needs a public HTTPS domain before setup can finalize.',
+    );
   });
 
   it('normalizes callback base URLs without query strings, hashes, or trailing slashes', () => {
@@ -131,8 +146,20 @@ describe('runtime profile model', () => {
     );
     expect(validateRuntimeNetworkingConfig({
       runtimeMode: 'vps',
-      publicCallbackBaseUrl: 'http://localhost:3000',
+      vpsDomain: 'not a domain',
+    })).toContain('VPS public domain must be a valid HTTP or HTTPS URL or bare domain.');
+    expect(validateRuntimeNetworkingConfig({
+      runtimeMode: 'vps',
+      vpsDomain: 'http://localhost:3000',
     })).toContain('VPS mode cannot use a localhost callback URL.');
+    expect(validateRuntimeNetworkingConfig({
+      runtimeMode: 'vps',
+      vpsDomain: 'http://somnibot.example.com',
+    })).toContain('VPS public domain must use HTTPS.');
+    expect(validateRuntimeNetworkingConfig({
+      runtimeMode: 'vps',
+      vpsDomain: 'https://somnibot.example.com/app',
+    })).toContain('VPS public domain must be the dashboard base domain, not a nested path.');
   });
 
   it('blocks local launcher startup for invalid callback config or VPS mode', () => {
