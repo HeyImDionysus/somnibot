@@ -11,7 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
-import { getPayPalToken, PAYPAL_API_BASE } from '@/lib/paypal';
+import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
@@ -26,12 +26,13 @@ async function createPayPalCatalogProduct(
   description: string | null,
   type: 'one_time' | 'subscription',
 ): Promise<string | null> {
-  const token = await getPayPalToken();
+  const paypalConfig = await getPayPalRuntimeConfig();
+  const token = await getPayPalToken(paypalConfig);
   if (!token) return null;
 
   try {
     const paypalType = type === 'subscription' ? 'SERVICE' : 'DIGITAL';
-    const res = await fetch(`${PAYPAL_API_BASE}/v1/catalogs/products`, {
+    const res = await fetch(`${paypalConfig.apiBase}/v1/catalogs/products`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -71,11 +72,12 @@ async function createPayPalBillingPlan(
   intervalUnit: string,
   intervalCount: number,
 ): Promise<string | null> {
-  const token = await getPayPalToken();
+  const paypalConfig = await getPayPalRuntimeConfig();
+  const token = await getPayPalToken(paypalConfig);
   if (!token) return null;
 
   try {
-    const res = await fetch(`${PAYPAL_API_BASE}/v1/billing/plans`, {
+    const res = await fetch(`${paypalConfig.apiBase}/v1/billing/plans`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

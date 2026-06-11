@@ -24,6 +24,21 @@ describe('middleware health access', () => {
     } as unknown as ReturnType<typeof createServerClient>);
   });
 
+  async function runWithoutPublicSupabaseEnv(path: string, init?: RequestInit) {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SUPABASE_ANON_KEY;
+
+    mockCreateServerClient.mockImplementation(() => {
+      throw new Error('public setup routes must not depend on Supabase auth');
+    });
+
+    const { middleware } = await import('../middleware');
+    return middleware(new NextRequest(`http://localhost:3000${path}`, init));
+  }
+
   it('allows unauthenticated platform monitors to reach /api/health', async () => {
     const { middleware } = await import('../middleware');
     const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
@@ -44,6 +59,46 @@ describe('middleware health access', () => {
     expect(res.headers.get('location')).toBeNull();
     expect(res.headers.get('content-security-policy')).toContain("default-src 'self'");
     expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('allows first-run setup page without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/setup');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('allows setup status reads without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/api/setup');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('allows first-run CSRF token reads without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/api/csrf');
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('keeps setup writes fail-closed on CSRF without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/api/setup', { method: 'POST' });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Missing CSRF token' });
+    expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('allows PayPal webhooks without public Supabase env', async () => {
+    const res = await runWithoutPublicSupabaseEnv('/api/paypal/webhook', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
     expect(mockCreateServerClient).not.toHaveBeenCalled();
   });
 

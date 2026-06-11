@@ -7,6 +7,9 @@ vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/paypal', () => ({
+  getPayPalRuntimeConfig: vi.fn().mockResolvedValue({
+    apiBase: 'https://api.sandbox.paypal.com',
+  }),
   getPayPalToken: vi.fn(),
   PAYPAL_API_BASE: 'https://api.sandbox.paypal.com',
 }));

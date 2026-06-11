@@ -6,7 +6,7 @@
  */
 
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { getPayPalToken, getSubscriptionAmount, PAYPAL_API_BASE } from '@/lib/paypal';
+import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
 import {
   paypalCaptureResourceSchema,
   paypalSaleResourceSchema,
@@ -24,13 +24,14 @@ export async function handleOrderApproved(
   const paypalOrderId = resource.id as string;
   if (!paypalOrderId) return;
 
-  const token = await getPayPalToken();
+  const paypalConfig = await getPayPalRuntimeConfig();
+  const token = await getPayPalToken(paypalConfig);
   if (!token) {
     throw new Error('Could not get PayPal token to capture order');
   }
 
   const captureRes = await fetch(
-    `${PAYPAL_API_BASE}/v2/checkout/orders/${paypalOrderId}/capture`,
+    `${paypalConfig.apiBase}/v2/checkout/orders/${paypalOrderId}/capture`,
     {
       method: 'POST',
       headers: {

@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { requireBrowserSupabaseConfig } from './runtime-config';
 
 /**
  * Supabase client for server-side usage (Server Components, Route Handlers).
@@ -7,10 +8,11 @@ import { cookies } from 'next/headers';
  */
 export async function createServerSupabase() {
   const cookieStore = await cookies();
+  const { url, publishableKey } = requireBrowserSupabaseConfig();
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+    url,
+    publishableKey,
     {
       cookies: {
         getAll() {
@@ -30,4 +32,3 @@ export async function createServerSupabase() {
     },
   );
 }
-

@@ -13,6 +13,7 @@ import {
   Database,
   UserPlus,
   Rocket,
+  CreditCard,
   AlertCircle,
   ChevronRight,
 } from 'lucide-react';
@@ -23,7 +24,7 @@ import { buildSetupRequestHeaders, SETUP_CSRF_UNAVAILABLE_MESSAGE } from '@/lib/
 // Types
 // ============================================================
 
-type WizardStep = 1 | 2 | 3 | 4;
+type WizardStep = 1 | 2 | 3 | 4 | 5;
 
 interface StepConfig {
   number: WizardStep;
@@ -41,14 +42,16 @@ interface SetupStatus {
   guildName: string | null;
   dashboardUrl: string | null;
   discordClientId: string | null;
+  discordCredentialsPresent?: boolean;
   setupCompleted?: boolean;
 }
 
 const STEPS: StepConfig[] = [
   { number: 1, title: 'Discord Bot', description: 'Create and verify your Discord bot', icon: Bot },
   { number: 2, title: 'Database', description: 'Connect your Supabase project', icon: Database },
-  { number: 3, title: 'Invite Bot', description: 'Add the bot to your Discord server', icon: UserPlus },
-  { number: 4, title: 'Ready!', description: 'Your SomniBot is live', icon: Rocket },
+  { number: 3, title: 'PayPal', description: 'Connect commerce payments', icon: CreditCard },
+  { number: 4, title: 'Invite Bot', description: 'Add the bot to your Discord server', icon: UserPlus },
+  { number: 5, title: 'Ready!', description: 'Your SomniBot is live', icon: Rocket },
 ];
 
 // ============================================================
@@ -74,12 +77,20 @@ export default function SetupWizardPage() {
   // Step 2 state
   const [supabaseUrl, setSupabaseUrl] = useState('');
   const [supabaseKey, setSupabaseKey] = useState('');
+  const [supabasePublishableKey, setSupabasePublishableKey] = useState('');
   const [supabaseVerified, setSupabaseVerified] = useState(false);
   const [supabaseInitialized, setSupabaseInitialized] = useState(false);
   const [supabaseVerifying, setSupabaseVerifying] = useState(false);
   const [supabaseError, setSupabaseError] = useState('');
 
   // Step 3 state
+  const [paypalClientId, setPaypalClientId] = useState('');
+  const [paypalClientSecret, setPaypalClientSecret] = useState('');
+  const [paypalWebhookId, setPaypalWebhookId] = useState('');
+  const [paypalWebhookUrl, setPaypalWebhookUrl] = useState('');
+  const [paypalSandbox, setPaypalSandbox] = useState<'true' | 'false'>('true');
+
+  // Step 4 state
   const [inviteUrl, setInviteUrl] = useState('');
   const [pollingForGuild, setPollingForGuild] = useState(false);
   const [guildDetected, setGuildDetected] = useState(false);
@@ -99,6 +110,7 @@ export default function SetupWizardPage() {
         setStatus(data);
 
         // Auto-advance if things are already configured
+        const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent);
         if (data.supabaseConnected && data.databaseInitialized) {
           setSupabaseVerified(true);
           setSupabaseInitialized(true);
@@ -112,8 +124,10 @@ export default function SetupWizardPage() {
         }
         // If setup has already been finalized, jump to done.
         if (data.setupCompleted) {
+          setCurrentStep(5);
+        } else if (data.supabaseConnected && data.databaseInitialized && discordReady && data.guildDetected) {
           setCurrentStep(4);
-        } else if (data.supabaseConnected && data.databaseInitialized && data.guildDetected) {
+        } else if (data.supabaseConnected && data.databaseInitialized && discordReady) {
           setCurrentStep(3);
         }
       }
@@ -188,6 +202,7 @@ export default function SetupWizardPage() {
         action: 'verify-supabase',
         url: supabaseUrl,
         serviceRoleKey: supabaseKey,
+        publishableKey: supabasePublishableKey,
       });
       const data = await res.json();
       if (data.valid) {
@@ -230,7 +245,15 @@ export default function SetupWizardPage() {
     setFinalizeError('');
 
     try {
-      const res = await postSetup({ action: 'finalize' });
+      const credentials: Record<string, string> = {
+        paypal_sandbox: paypalSandbox,
+      };
+      if (paypalClientId.trim()) credentials.paypal_client_id = paypalClientId.trim();
+      if (paypalClientSecret.trim()) credentials.paypal_client_secret = paypalClientSecret.trim();
+      if (paypalWebhookId.trim()) credentials.paypal_webhook_id = paypalWebhookId.trim();
+      if (paypalWebhookUrl.trim()) credentials.paypal_webhook_url = paypalWebhookUrl.trim();
+
+      const res = await postSetup({ action: 'finalize', credentials });
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data.ok) {
@@ -239,7 +262,7 @@ export default function SetupWizardPage() {
       }
 
       setStatus((prev) => prev ? { ...prev, setupCompleted: true } : prev);
-      setCurrentStep(4);
+      setCurrentStep(5);
     } catch (err) {
       setFinalizeError(err instanceof Error ? err.message : SETUP_CSRF_UNAVAILABLE_MESSAGE);
     } finally {
@@ -553,7 +576,7 @@ export default function SetupWizardPage() {
                   <li className="flex gap-2">
                     <span className="font-mono text-discord-accent">4.</span>
                     <span>
-                      Under &quot;Project API keys&quot;, copy the <strong>secret</strong> key (starts with <code>sb_secret_</code>)
+                      Under &quot;Project API keys&quot;, copy the <strong>publishable</strong> key and the <strong>secret</strong> key
                     </span>
                   </li>
                 </ol>
@@ -570,6 +593,19 @@ export default function SetupWizardPage() {
                     value={supabaseUrl}
                     onChange={(e) => setSupabaseUrl(e.target.value)}
                     placeholder="https://abcdefg.supabase.co"
+                    className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
+                    disabled={supabaseVerified}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
+                    Publishable Key
+                  </label>
+                  <input
+                    type="password"
+                    value={supabasePublishableKey}
+                    onChange={(e) => setSupabasePublishableKey(e.target.value)}
+                    placeholder="sb_publishable_..."
                     className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
                     disabled={supabaseVerified}
                   />
@@ -624,7 +660,7 @@ export default function SetupWizardPage() {
                   {!supabaseVerified ? (
                     <button
                       onClick={verifySupabase}
-                      disabled={supabaseVerifying || !supabaseUrl || !supabaseKey}
+                      disabled={supabaseVerifying || !supabaseUrl || !supabasePublishableKey || !supabaseKey}
                       className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {supabaseVerifying ? (
@@ -648,8 +684,134 @@ export default function SetupWizardPage() {
             </div>
           )}
 
-          {/* ─── Step 3: Invite Bot ─── */}
+          {/* ─── Step 3: PayPal ─── */}
           {currentStep === 3 && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl font-bold text-discord-text-primary">Connect PayPal</h2>
+                <p className="mt-1 text-discord-text-secondary">
+                  Use sandbox mode for testing, then switch to live mode when real purchases are approved.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-5">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-md bg-discord-accent/20">
+                    <CreditCard className="h-5 w-5 text-discord-accent" />
+                  </div>
+                  <div>
+                    <h3 className="font-medium text-discord-text-primary">PayPal Developer App</h3>
+                    <a
+                      href="https://developer.paypal.com/dashboard/applications/sandbox"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-sm text-discord-accent hover:underline"
+                    >
+                      Open PayPal Developer Dashboard
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+
+                <div className="mb-4 grid gap-3 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => setPaypalSandbox('true')}
+                    className={`rounded-md border px-4 py-3 text-left text-sm transition-colors ${
+                      paypalSandbox === 'true'
+                        ? 'border-discord-accent bg-discord-accent/10 text-discord-text-primary'
+                        : 'border-discord-border-subtle bg-discord-bg-tertiary text-discord-text-secondary hover:text-discord-text-primary'
+                    }`}
+                  >
+                    <span className="block font-medium">Sandbox</span>
+                    <span className="text-xs text-discord-text-muted">Test payments</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaypalSandbox('false')}
+                    className={`rounded-md border px-4 py-3 text-left text-sm transition-colors ${
+                      paypalSandbox === 'false'
+                        ? 'border-discord-accent bg-discord-accent/10 text-discord-text-primary'
+                        : 'border-discord-border-subtle bg-discord-bg-tertiary text-discord-text-secondary hover:text-discord-text-primary'
+                    }`}
+                  >
+                    <span className="block font-medium">Live</span>
+                    <span className="text-xs text-discord-text-muted">Real payments</span>
+                  </button>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
+                      Client ID
+                    </label>
+                    <input
+                      type="text"
+                      value={paypalClientId}
+                      onChange={(e) => setPaypalClientId(e.target.value)}
+                      placeholder="AfDP..."
+                      className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
+                      Client Secret
+                    </label>
+                    <input
+                      type="password"
+                      value={paypalClientSecret}
+                      onChange={(e) => setPaypalClientSecret(e.target.value)}
+                      placeholder="EIAf..."
+                      className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
+                      Webhook ID
+                    </label>
+                    <input
+                      type="text"
+                      value={paypalWebhookId}
+                      onChange={(e) => setPaypalWebhookId(e.target.value)}
+                      placeholder="WH-..."
+                      className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-discord-text-secondary mb-1.5">
+                      Webhook URL
+                    </label>
+                    <input
+                      type="url"
+                      value={paypalWebhookUrl}
+                      onChange={(e) => setPaypalWebhookUrl(e.target.value)}
+                      placeholder={`${status?.dashboardUrl || 'https://your-domain.example'}/api/paypal/webhook`}
+                      className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-between">
+                <button
+                  onClick={() => setCurrentStep(2)}
+                  className="inline-flex items-center gap-2 rounded-md border border-discord-border-subtle bg-discord-bg-secondary px-4 py-2 text-sm font-medium text-discord-text-secondary hover:text-discord-text-primary transition-colors"
+                >
+                  Back
+                </button>
+                <button
+                  onClick={() => setCurrentStep(4)}
+                  className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 transition-colors"
+                >
+                  Continue
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ─── Step 4: Invite Bot ─── */}
+          {currentStep === 4 && (
             <div className="space-y-6">
               <div>
                 <h2 className="text-xl font-bold text-discord-text-primary">Invite Bot to Your Server</h2>
@@ -726,7 +888,7 @@ export default function SetupWizardPage() {
               {/* Actions */}
               <div className="flex justify-between">
                 <button
-                  onClick={() => setCurrentStep(2)}
+                  onClick={() => setCurrentStep(3)}
                   className="inline-flex items-center gap-2 rounded-md border border-discord-border-subtle bg-discord-bg-secondary px-4 py-2 text-sm font-medium text-discord-text-secondary hover:text-discord-text-primary transition-colors"
                 >
                   Back
@@ -747,8 +909,8 @@ export default function SetupWizardPage() {
             </div>
           )}
 
-          {/* ─── Step 4: Done ─── */}
-          {currentStep === 4 && (
+          {/* ─── Step 5: Done ─── */}
+          {currentStep === 5 && (
             <div className="space-y-6 text-center">
               <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-green-500/20">
                 <Rocket className="h-10 w-10 text-green-400" />

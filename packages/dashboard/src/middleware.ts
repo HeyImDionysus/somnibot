@@ -1,6 +1,7 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { checkCsrf, shouldRotateCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, generateCsrfToken } from '@/lib/api/csrf';
+import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /* ------------------------------------------------------------------ */
 /*  CSP Nonce — generated per request for strict script-src            */
@@ -136,6 +137,24 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
 /*  Remote-mode auth (existing Supabase / Discord OAuth)               */
 /* ------------------------------------------------------------------ */
 
+function isSessionlessPublicRoute(pathname: string): boolean {
+  return (
+    pathname.startsWith('/api/auth') ||
+    pathname === '/api/csrf' ||
+    pathname === '/setup' ||
+    pathname.startsWith('/api/setup') ||
+    pathname.startsWith('/api/paypal/webhook') ||
+    pathname.startsWith('/api/license/validate') ||
+    pathname.startsWith('/api/license/heartbeat') ||
+    pathname.startsWith('/api/license/deactivate') ||
+    // Portal routes use x-portal-token auth (Discord identity), not Supabase session
+    pathname.startsWith('/portal') ||
+    pathname.startsWith('/api/portal/') ||
+    // Downloads use portal token auth internally
+    pathname.startsWith('/api/downloads/')
+  );
+}
+
 /**
  * Middleware — refresh Supabase auth session on every request.
  * Redirects unauthenticated users away from protected routes.
@@ -163,14 +182,27 @@ export async function middleware(request: NextRequest) {
     return healthResponse;
   }
 
+  if (isSessionlessPublicRoute(request.nextUrl.pathname)) {
+    const csrfError = await checkCsrf(request);
+    if (csrfError) {
+      applyCspHeaders(csrfError, nonce);
+      return csrfError;
+    }
+
+    const publicResponse = NextResponse.next({ request });
+    applyCspHeaders(publicResponse, nonce);
+    return publicResponse;
+  }
+
   // ── Remote mode: Supabase session refresh + Discord OAuth ──
   let supabaseResponse = NextResponse.next({
     request,
   });
 
+  const { url, publishableKey } = requireBrowserSupabaseConfig();
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+    url,
+    publishableKey,
     {
       cookies: {
         getAll() {
@@ -199,18 +231,7 @@ export async function middleware(request: NextRequest) {
   // Redirect unauthenticated users to login (except for auth & setup routes)
   const isPublicRoute =
     request.nextUrl.pathname.startsWith('/login') ||
-    request.nextUrl.pathname.startsWith('/api/auth') ||
-    request.nextUrl.pathname === '/setup' ||
-    request.nextUrl.pathname.startsWith('/api/setup') ||
-    request.nextUrl.pathname.startsWith('/api/paypal/webhook') ||
-    request.nextUrl.pathname.startsWith('/api/license/validate') ||
-    request.nextUrl.pathname.startsWith('/api/license/heartbeat') ||
-    request.nextUrl.pathname.startsWith('/api/license/deactivate') ||
-    // Portal routes use x-portal-token auth (Discord identity), not Supabase session
-    request.nextUrl.pathname.startsWith('/portal') ||
-    request.nextUrl.pathname.startsWith('/api/portal/') ||
-    // Downloads use portal token auth internally
-    request.nextUrl.pathname.startsWith('/api/downloads/');
+    isSessionlessPublicRoute(request.nextUrl.pathname);
 
   if (!user && !isPublicRoute) {
     const url = request.nextUrl.clone();

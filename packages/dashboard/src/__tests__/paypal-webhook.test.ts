@@ -15,7 +15,12 @@ const { replaySecret } = vi.hoisted(() => {
 // Mock dependencies before importing route
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 vi.mock('@/lib/paypal', () => ({
+  getPayPalRuntimeConfig: vi.fn().mockResolvedValue({
+    apiBase: 'https://api-m.sandbox.paypal.com',
+    webhookId: 'test-webhook-id',
+  }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
+  getPayPalWebhookId: vi.fn().mockResolvedValue('test-webhook-id'),
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
 vi.mock('@/lib/api/rate-limit', () => ({

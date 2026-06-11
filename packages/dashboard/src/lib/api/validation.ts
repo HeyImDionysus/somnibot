@@ -478,6 +478,7 @@ const setupAction = z.discriminatedUnion('action', [
     action: z.literal('verify-supabase'),
     url: z.string().url(),
     serviceRoleKey: z.string().min(1),
+    publishableKey: z.string().min(1),
   }),
   z.object({
     action: z.literal('generate-invite'),

@@ -72,6 +72,7 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           EXTERNAL_DISCORD_ENABLED: true,
+          URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
         }),
       });
 
@@ -90,6 +91,46 @@ describe('Supabase Discord auth auto-config', () => {
     );
   });
 
+  it('patches a missing dashboard callback when Discord provider is already enabled', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_ACCESS_TOKEN = 'supabase-management-token';
+    process.env.NEXT_PUBLIC_APP_URL = 'https://dashboard.example.com/';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          EXTERNAL_DISCORD_ENABLED: true,
+          URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => '',
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider();
+
+    expect(result).toEqual({ success: true, alreadyConfigured: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const patchRequest = fetchMock.mock.calls[1];
+    expect(patchRequest[0]).toBe(
+      'https://api.supabase.com/v1/projects/abcdefghijklmnopqrst/config/auth',
+    );
+    expect(patchRequest[1]?.method).toBe('PATCH');
+
+    const body = JSON.parse(String(patchRequest[1]?.body));
+    expect(body).toEqual({
+      URI_ALLOW_LIST: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
+    });
+    expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
+    expect(body.EXTERNAL_DISCORD_CLIENT_ID).toBeUndefined();
+    expect(body.EXTERNAL_DISCORD_SECRET).toBeUndefined();
+  });
+
   it('patches Supabase auth config with the configured dashboard callback URL', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
     process.env.SUPABASE_ACCESS_TOKEN = 'supabase-management-token';
@@ -104,11 +145,6 @@ describe('Supabase Discord auth auto-config', () => {
         ok: true,
         json: async () => ({
           EXTERNAL_DISCORD_ENABLED: false,
-        }),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
           URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
         }),
       })
@@ -122,9 +158,9 @@ describe('Supabase Discord auth auto-config', () => {
     const result = await ensureDiscordAuthProvider();
 
     expect(result).toEqual({ success: true, alreadyConfigured: false });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    const patchRequest = fetchMock.mock.calls[2];
+    const patchRequest = fetchMock.mock.calls[1];
     expect(patchRequest[0]).toBe(
       'https://api.supabase.com/v1/projects/abcdefghijklmnopqrst/config/auth',
     );

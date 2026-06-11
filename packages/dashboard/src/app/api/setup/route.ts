@@ -13,10 +13,12 @@
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { ensureDiscordAuthProvider } from '@/lib/supabase/auto-config';
+import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { applyRuntimePayPalEnv } from '@/lib/paypal';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -25,11 +27,29 @@ const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * Used during setup when env vars may not be fully configured yet.
  */
 function createSetupSupabase(url?: string, key?: string) {
-  const supabaseUrl = url || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
-  const serviceKey = key || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const envConfig = readEnvSupabaseConfig();
+  const supabaseUrl = url || envConfig.url;
+  const serviceKey = key || envConfig.secretKey;
 
   if (!supabaseUrl || !serviceKey) return null;
   return createClient(supabaseUrl, serviceKey);
+}
+
+async function verifySupabasePublishableKey(url: string, publishableKey: string) {
+  try {
+    const response = await fetch(`${url.replace(/\/$/, '')}/auth/v1/settings`, {
+      headers: {
+        apikey: publishableKey,
+        Authorization: `Bearer ${publishableKey}`,
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    return response.ok;
+  } catch (err) {
+    console.error('[setup/validate-supabase] Publishable key check failed:', err);
+    return false;
+  }
 }
 
 /**
@@ -74,6 +94,8 @@ export async function GET(req: NextRequest) {
     guildName: null as string | null,
     dashboardUrl: process.env.NEXT_PUBLIC_APP_URL || null,
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
+    discordCredentialsPresent: Boolean(process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET),
+    discordAuthProviderReady: false,
     discordAuthConfigured: false,
     setupCompleted: false,
   };
@@ -95,11 +117,6 @@ export async function GET(req: NextRequest) {
     }
   } catch {
     status.supabaseConnected = false;
-  }
-
-  // Check Discord auth provider status
-  if (process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET) {
-    status.discordAuthConfigured = true;
   }
 
   // Check if bot is online and guild is detected
@@ -141,18 +158,29 @@ export async function GET(req: NextRequest) {
     }
 
     // Check if Discord creds exist in instance_settings (for display purposes)
-    if (!status.discordAuthConfigured) {
+    if (!status.discordCredentialsPresent) {
       const { data: settings } = await supabase
         .from('instance_settings')
-        .select('key')
+        .select('key, value')
         .in('key', ['discord_application_id', 'discord_client_secret'])
         .limit(1000);
 
-      if (settings && settings.length >= 2) {
-        status.discordAuthConfigured = true;
+      const savedSettings = new Map(
+        (settings ?? [])
+          .filter((row): row is { key: string; value: string } => typeof row.value === 'string' && row.value.length > 0)
+          .map((row) => [row.key, row.value]),
+      );
+
+      if (savedSettings.has('discord_application_id') && savedSettings.has('discord_client_secret')) {
+        status.discordCredentialsPresent = true;
+        status.discordClientId ||= savedSettings.get('discord_application_id') ?? null;
       }
     }
   }
+
+  const authProviderStatus = await getDiscordAuthProviderStatus();
+  status.discordAuthProviderReady = authProviderStatus.ready;
+  status.discordAuthConfigured = authProviderStatus.ready;
 
   return NextResponse.json(status);
 }
@@ -288,9 +316,9 @@ export async function POST(request: NextRequest) {
 
   // Step 2: Verify Supabase credentials
   if (action === 'verify-supabase') {
-    const { url, serviceRoleKey } = body;
-    if (!url || !serviceRoleKey) {
-      return NextResponse.json({ error: 'Missing url or serviceRoleKey' }, { status: 400 });
+    const { url, serviceRoleKey, publishableKey } = body;
+    if (!url || !serviceRoleKey || !publishableKey) {
+      return NextResponse.json({ error: 'Missing url, publishableKey, or serviceRoleKey' }, { status: 400 });
     }
 
     try {
@@ -299,12 +327,24 @@ export async function POST(request: NextRequest) {
       const { error } = await supabase.from('guild').select('id').limit(0);
 
       if (!error || error.code === '42P01') {
+        const trimmedPublishableKey = publishableKey.trim();
+        if (!await verifySupabasePublishableKey(url, trimmedPublishableKey)) {
+          return NextResponse.json({ valid: false, error: 'Could not validate Supabase publishable key — check your credentials' });
+        }
+
+        applyRuntimeSupabaseEnv({
+          url,
+          secretKey: serviceRoleKey,
+          publishableKey: trimmedPublishableKey,
+        });
+
         // Save Supabase credentials to instance_settings (if tables exist)
         if (!error) {
           const creds: Record<string, { value: string; section: string }> = {
             supabase_url: { value: url, section: 'supabase' },
             supabase_secret_key: { value: serviceRoleKey, section: 'supabase' },
           };
+          creds.supabase_anon_key = { value: trimmedPublishableKey, section: 'supabase' };
 
           for (const [key, { value, section }] of Object.entries(creds)) {
             await supabase
@@ -375,6 +415,10 @@ export async function POST(request: NextRequest) {
       'lavalink_port',
       'lavalink_password',
       'valkey_url',
+      'supabase_url',
+      'supabase_anon_key',
+      'supabase_publishable_key',
+      'supabase_secret_key',
       'supabase_access_token',
       'supabase_db_url',
       'dashboard_url',
@@ -393,8 +437,18 @@ export async function POST(request: NextRequest) {
     const credentials = (body as Record<string, unknown>).credentials as Record<string, string> | undefined;
     let submittedSupabaseAccessToken: string | undefined;
     if (credentials) {
+      const submittedRuntimeConfig: { url?: string; publishableKey?: string; secretKey?: string } = {};
+      const submittedPayPalConfig: {
+        clientId?: string;
+        clientSecret?: string;
+        webhookId?: string;
+        webhookUrl?: string;
+        sandbox?: string;
+      } = {};
+
       for (const [key, value] of Object.entries(credentials)) {
         if (!value?.trim()) continue;
+        const trimmedValue = value.trim();
 
         // Reject unknown keys
         if (!ALLOWED_CREDENTIAL_KEYS.has(key)) {
@@ -403,7 +457,23 @@ export async function POST(request: NextRequest) {
         }
 
         if (key === 'supabase_access_token') {
-          submittedSupabaseAccessToken = value.trim();
+          submittedSupabaseAccessToken = trimmedValue;
+        } else if (key === 'supabase_url') {
+          submittedRuntimeConfig.url = trimmedValue;
+        } else if (key === 'supabase_anon_key' || key === 'supabase_publishable_key') {
+          submittedRuntimeConfig.publishableKey = trimmedValue;
+        } else if (key === 'supabase_secret_key') {
+          submittedRuntimeConfig.secretKey = trimmedValue;
+        } else if (key === 'paypal_client_id') {
+          submittedPayPalConfig.clientId = trimmedValue;
+        } else if (key === 'paypal_client_secret') {
+          submittedPayPalConfig.clientSecret = trimmedValue;
+        } else if (key === 'paypal_webhook_id') {
+          submittedPayPalConfig.webhookId = trimmedValue;
+        } else if (key === 'paypal_webhook_url') {
+          submittedPayPalConfig.webhookUrl = trimmedValue;
+        } else if (key === 'paypal_sandbox') {
+          submittedPayPalConfig.sandbox = trimmedValue;
         }
 
         // Determine section from key prefix
@@ -414,10 +484,13 @@ export async function POST(request: NextRequest) {
         await supabase
           .from('instance_settings')
           .upsert(
-            { key, value, section, updated_at: new Date().toISOString() },
+            { key, value: trimmedValue, section, updated_at: new Date().toISOString() },
             { onConflict: 'key' },
           );
       }
+
+      applyRuntimeSupabaseEnv(submittedRuntimeConfig);
+      applyRuntimePayPalEnv(submittedPayPalConfig);
     }
 
     // Ensure Discord auth provider is configured
