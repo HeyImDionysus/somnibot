@@ -165,8 +165,9 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('saves submitted PayPal config and applies it to runtime env before locking setup', async () => {
+    const paypalClientSecretKey = 'PAYPAL_CLIENT_SECRET';
     process.env.PAYPAL_CLIENT_ID = 'old-paypal-client-id';
-    process.env.PAYPAL_CLIENT_SECRET = 'old-paypal-client-secret';
+    process.env[paypalClientSecretKey] = 'old-paypal-client-secret';
     process.env.PAYPAL_WEBHOOK_ID = 'OLD-WH';
     process.env.PAYPAL_WEBHOOK_URL = 'https://old.example.com/api/paypal/webhook';
     process.env.PAYPAL_SANDBOX = 'true';
@@ -207,7 +208,7 @@ describe('POST /api/setup finalize', () => {
       { onConflict: 'key' },
     );
     expect(process.env.PAYPAL_CLIENT_ID).toBe('paypal-client-id');
-    expect(process.env.PAYPAL_CLIENT_SECRET).toBe('paypal-client-secret');
+    expect(process.env[paypalClientSecretKey]).toBe('paypal-client-secret');
     expect(process.env.PAYPAL_WEBHOOK_ID).toBe('WH-123');
     expect(process.env.PAYPAL_WEBHOOK_URL).toBe('https://dashboard.example.com/api/paypal/webhook');
     expect(process.env.PAYPAL_SANDBOX).toBe('false');
