@@ -43,6 +43,8 @@ export const paypalCaptureResourceSchema = z.object({
 export const paypalSaleResourceSchema = z.object({
   id: z.string(),
   custom_id: z.string().optional(),
+  sale_id: z.string().optional(),
+  capture_id: z.string().optional(),
   billing_agreement_id: z.string().optional(),
   amount: z.object({
     total: z.string().optional(),

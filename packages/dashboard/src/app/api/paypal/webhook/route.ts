@@ -29,6 +29,7 @@ import {
   handleSubscriptionSuspended,
   handleSubscriptionPayment,
   handleCaptureRefunded,
+  handleSaleRefunded,
 } from './handlers';
 
 // ── Main handler ────────────────────────────────────
@@ -113,12 +114,19 @@ export async function POST(req: NextRequest) {
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
         await handleSubscriptionSuspended(supabase, event.resource);
         break;
+      case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED':
+        await handleSubscriptionSuspended(supabase, event.resource);
+        break;
       case 'PAYMENT.SALE.COMPLETED':
         await handleSubscriptionPayment(supabase, event.resource);
         break;
       case 'PAYMENT.CAPTURE.REFUNDED':
       case 'PAYMENT.CAPTURE.REVERSED':
         await handleCaptureRefunded(supabase, event.resource, event.event_type);
+        break;
+      case 'PAYMENT.SALE.REFUNDED':
+      case 'PAYMENT.SALE.REVERSED':
+        await handleSaleRefunded(supabase, event.resource, event.event_type);
         break;
       default:
         console.log(`[Webhook] Unhandled event: ${event.event_type}`);

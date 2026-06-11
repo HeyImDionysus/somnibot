@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useCsrf } from '@/hooks/use-csrf';
 import { buildSetupRequestHeaders, SETUP_CSRF_UNAVAILABLE_MESSAGE } from '@/lib/setup-wizard-client';
+import { PAYPAL_HANDLED_WEBHOOK_EVENTS } from '@/lib/paypal-webhook-events';
 
 // ============================================================
 // Types
@@ -788,6 +789,18 @@ export default function SetupWizardPage() {
                       placeholder={`${status?.dashboardUrl || 'https://your-domain.example'}/api/paypal/webhook`}
                       className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
                     />
+                  </div>
+                </div>
+
+                <div className="mt-5 rounded-md border border-discord-border-subtle bg-discord-bg-tertiary p-4">
+                  <h4 className="text-sm font-medium text-discord-text-primary">Webhook events</h4>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {PAYPAL_HANDLED_WEBHOOK_EVENTS.map((event) => (
+                      <div key={event.eventType} className="rounded border border-discord-border-subtle bg-discord-bg-secondary px-3 py-2">
+                        <code className="break-all text-xs text-discord-text-primary">{event.eventType}</code>
+                        <p className="mt-1 text-xs text-discord-text-muted">{event.purpose}</p>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>

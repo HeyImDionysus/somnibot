@@ -74,6 +74,64 @@ function makeMockSupabase() {
   return { from: fromFn, rpc };
 }
 
+function makeResolvedChain(
+  resolvedValue: { data: unknown; error: unknown },
+  onInsert?: (payload: unknown) => void,
+  onEq?: (column: string, value: unknown) => void,
+) {
+  const chain: Record<string, unknown> = {};
+  const chainMethods = [
+    'select',
+    'eq',
+    'order',
+    'limit',
+    'single',
+    'maybeSingle',
+    'in',
+    'neq',
+  ];
+
+  for (const method of chainMethods) {
+    chain[method] = vi.fn(() => chain);
+  }
+
+  chain.eq = vi.fn((column: string, value: unknown) => {
+    onEq?.(column, value);
+    return chain;
+  });
+
+  chain.insert = vi.fn((payload: unknown) => {
+    onInsert?.(payload);
+    return chain;
+  });
+  chain.update = vi.fn(() => chain);
+  chain.upsert = vi.fn(() => chain);
+  chain.then = (
+    resolve: (v: unknown) => void,
+    reject?: (reason: unknown) => void,
+  ) => Promise.resolve(resolvedValue).then(resolve, reject);
+
+  return chain;
+}
+
+function useWebhookRows(rows: Record<string, { data: unknown; error: unknown }>) {
+  const inserts: Array<{ table: string; payload: unknown }> = [];
+  const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
+  mockSb.from.mockImplementation((table: string) =>
+    makeResolvedChain(
+      rows[table] ?? { data: null, error: null },
+      (payload) => {
+        inserts.push({ table, payload });
+      },
+      (column, value) => {
+        eqCalls.push({ table, column, value });
+      },
+    ),
+  );
+
+  return { inserts, eqCalls };
+}
+
 let mockSb: ReturnType<typeof makeMockSupabase>;
 
 beforeEach(() => {
@@ -134,6 +192,44 @@ describe('PayPal webhook — edge cases', () => {
     expect(res.status).toBe(200);
   });
 
+  it('subscription payment failure queues grace-period suspension fulfillment', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-payment-failed',
+          order_number: 'ORD-PAYMENT-FAILED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+        },
+        error: null,
+      },
+      products: { data: { name: 'Subscription' }, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+      resource: { id: 'SUB-FAILED-PAYMENT' },
+      id: 'EVT-PAYMENT-FAILED',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'fulfill_suspension',
+        payload: expect.objectContaining({
+          fulfillment_type: 'subscription_suspended',
+          discord_id: 'discord-1',
+          order_id: 'order-payment-failed',
+        }),
+        status: 'pending',
+      }),
+    });
+  });
+
   it('refund event without recoverable capture_id returns 200 (logged, not retried)', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const req = makeReplay({
@@ -149,6 +245,88 @@ describe('PayPal webhook — edge cases', () => {
       expect.stringContaining('"REFUND-1"'),
     );
     errorSpy.mockRestore();
+  });
+
+  it('subscription sale refund revokes access through the external refund path', async () => {
+    const { inserts, eqCalls } = useWebhookRows({
+      payments: {
+        data: {
+          id: 'payment-row-1',
+          order_id: 'order-subscription-1',
+          customer_id: 'customer-1',
+          guild_id: 'guild-1',
+          status: 'completed',
+        },
+        error: null,
+      },
+      entitlements: {
+        data: [
+          {
+            id: 'entitlement-1',
+            customer_id: 'customer-1',
+            granted_role_ids: ['role-1', 'role-2'],
+          },
+        ],
+        error: null,
+      },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: { id: 'REFUND-1', sale_id: 'SALE-SUBSCRIPTION-1' },
+      id: 'EVT-SALE-REFUND',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(eqCalls).toContainEqual({
+      table: 'payments',
+      column: 'paypal_payment_id',
+      value: 'SALE-SUBSCRIPTION-1',
+    });
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'revoke_roles',
+        payload: expect.objectContaining({
+          discord_id: 'discord-1',
+          role_ids: ['role-1', 'role-2'],
+          reason: 'refunded',
+          order_id: 'order-subscription-1',
+        }),
+        status: 'pending',
+      }),
+    });
+  });
+
+  it('subscription sale reversal uses the sale id as the local payment id', async () => {
+    const { eqCalls } = useWebhookRows({
+      payments: {
+        data: {
+          id: 'payment-row-2',
+          order_id: 'order-subscription-2',
+          customer_id: 'customer-2',
+          guild_id: 'guild-1',
+          status: 'completed',
+        },
+        error: null,
+      },
+      entitlements: { data: [], error: null },
+    });
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REVERSED',
+      resource: { id: 'SALE-SUBSCRIPTION-2' },
+      id: 'EVT-SALE-REVERSAL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(eqCalls).toContainEqual({
+      table: 'payments',
+      column: 'paypal_payment_id',
+      value: 'SALE-SUBSCRIPTION-2',
+    });
   });
 
   it('CHECKOUT.ORDER.APPROVED calls PayPal capture API', async () => {

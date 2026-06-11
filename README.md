@@ -260,6 +260,25 @@ Provider callback settings:
 | Discord app OAuth2 redirect for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
 
+PayPal webhook subscriptions should include:
+
+- `CHECKOUT.ORDER.APPROVED`
+- `PAYMENT.CAPTURE.COMPLETED`
+- `PAYMENT.CAPTURE.REFUNDED`
+- `PAYMENT.CAPTURE.REVERSED`
+- `BILLING.SUBSCRIPTION.ACTIVATED`
+- `BILLING.SUBSCRIPTION.CANCELLED`
+- `BILLING.SUBSCRIPTION.SUSPENDED`
+- `BILLING.SUBSCRIPTION.PAYMENT.FAILED`
+- `PAYMENT.SALE.COMPLETED`
+- `PAYMENT.SALE.REFUNDED`
+- `PAYMENT.SALE.REVERSED`
+
+Do not subscribe `BILLING.SUBSCRIPTION.EXPIRED` by default yet. SomniBot
+currently removes access through cancellation, suspension, failed payment,
+refund, reversal, and reconciliation paths; fixed-term subscription expiry
+needs an explicit product policy before it should revoke customer access.
+
 Discord needs the Supabase callback above because dashboard login uses Supabase's
 Discord OAuth provider. Do not put the Tailscale/VPS dashboard URL in Discord
 unless SomniBot is later changed to handle Discord OAuth directly. The Discord
