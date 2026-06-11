@@ -187,6 +187,9 @@ export function resolveRuntimeProfile(config: RuntimeNetworkingConfig): RuntimeP
 export function buildRuntimeEnvVars(config: RuntimeNetworkingConfig): Record<string, string> {
   const profile = resolveRuntimeProfile(config);
   return {
+    SOMNIBOT_RUNTIME_MODE: profile.runtimeMode,
+    SOMNIBOT_PUBLIC_CALLBACK_REQUIRED: 'true',
+    SOMNIBOT_PUBLIC_CALLBACK_BASE_URL: profile.publicCallbackBaseUrl,
     DASHBOARD_URL: profile.operatorDashboardUrl,
     NEXT_PUBLIC_APP_URL: profile.publicCallbackBaseUrl,
     PAYPAL_WEBHOOK_URL: profile.paypalWebhookUrl,

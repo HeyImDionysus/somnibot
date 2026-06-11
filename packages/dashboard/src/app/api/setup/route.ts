@@ -22,6 +22,15 @@ import { applyRuntimePayPalEnv } from '@/lib/paypal';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+interface RuntimeCallbackConfig {
+  operatorDashboardUrl: string | null;
+  publicCallbackBaseUrl: string | null;
+  paypalWebhookUrl: string | null;
+  publicCallbackRequired: boolean;
+  publicCallbackReady: boolean;
+  publicCallbackError: string | null;
+}
+
 /**
  * Create a Supabase client from provided credentials (not from env vars).
  * Used during setup when env vars may not be fully configured yet.
@@ -80,11 +89,65 @@ async function getSetupLock(supabase: SupabaseClient) {
   return { isCompleted, maintenanceActive };
 }
 
+function isTruthyEnv(value: string | undefined): boolean {
+  return ['1', 'true', 'yes', 'required'].includes(value?.trim().toLowerCase() ?? '');
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return ['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(hostname);
+}
+
+function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    if (parsed.pathname && parsed.pathname !== '/') return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): RuntimeCallbackConfig {
+  const operatorDashboardUrl = normalizeRuntimeBaseUrl(env['DASHBOARD_URL']);
+  const publicCallbackBaseUrl = normalizeRuntimeBaseUrl(
+    env['SOMNIBOT_PUBLIC_CALLBACK_BASE_URL'] || env['NEXT_PUBLIC_APP_URL'],
+  );
+  const publicCallbackRequired = isTruthyEnv(env['SOMNIBOT_PUBLIC_CALLBACK_REQUIRED']);
+  let publicCallbackError: string | null = null;
+
+  if (publicCallbackRequired) {
+    if (!publicCallbackBaseUrl) {
+      publicCallbackError = 'Public callback URL is required before setup can finalize.';
+    } else {
+      const parsed = new URL(publicCallbackBaseUrl);
+      if (parsed.protocol !== 'https:') {
+        publicCallbackError = 'Public callback URL must use HTTPS before setup can finalize.';
+      } else if (isLocalHostname(parsed.hostname)) {
+        publicCallbackError = 'Public callback URL cannot point at localhost before setup can finalize.';
+      }
+    }
+  }
+
+  return {
+    operatorDashboardUrl,
+    publicCallbackBaseUrl,
+    paypalWebhookUrl: publicCallbackBaseUrl ? `${publicCallbackBaseUrl}/api/paypal/webhook` : null,
+    publicCallbackRequired,
+    publicCallbackReady: !publicCallbackRequired || publicCallbackError === null,
+    publicCallbackError,
+  };
+}
+
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
   if (rateLimited) return rateLimited;
 
   const supabase = createSetupSupabase();
+  const runtimeCallbacks = resolveRuntimeCallbackConfig();
   const status = {
     supabaseConnected: false,
     databaseInitialized: false,
@@ -92,7 +155,13 @@ export async function GET(req: NextRequest) {
     guildDetected: false,
     guildId: null as string | null,
     guildName: null as string | null,
-    dashboardUrl: process.env.NEXT_PUBLIC_APP_URL || null,
+    dashboardUrl: runtimeCallbacks.publicCallbackBaseUrl || runtimeCallbacks.operatorDashboardUrl || null,
+    operatorDashboardUrl: runtimeCallbacks.operatorDashboardUrl,
+    publicCallbackBaseUrl: runtimeCallbacks.publicCallbackBaseUrl,
+    paypalWebhookUrl: process.env['PAYPAL_WEBHOOK_URL'] || runtimeCallbacks.paypalWebhookUrl,
+    publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
+    publicCallbackReady: runtimeCallbacks.publicCallbackReady,
+    publicCallbackError: runtimeCallbacks.publicCallbackError,
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
     discordCredentialsPresent: Boolean(process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET),
     discordAuthProviderReady: false,
@@ -398,6 +467,18 @@ export async function POST(request: NextRequest) {
     if (!supabase) {
       return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
     }
+    const runtimeCallbacks = resolveRuntimeCallbackConfig();
+    if (!runtimeCallbacks.publicCallbackReady) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: runtimeCallbacks.publicCallbackError,
+          publicCallbackReady: false,
+          setupLocked: false,
+        },
+        { status: 400 },
+      );
+    }
 
     // V11 Re-Audit L-1: Whitelist of credential keys accepted during finalize.
     // Previously any key was accepted, allowing arbitrary writes to instance_settings.
@@ -430,13 +511,22 @@ export async function POST(request: NextRequest) {
       paypal_: 'paypal',
       lavalink_: 'lavalink',
       valkey_: 'valkey',
-      dashboard_: 'general',
+      dashboard_: 'deployment',
     };
 
     // Save any additional credentials passed in
-    const credentials = (body as Record<string, unknown>).credentials as Record<string, string> | undefined;
+    const credentials = {
+      ...(((body as Record<string, unknown>).credentials as Record<string, string> | undefined) ?? {}),
+    };
+    if (runtimeCallbacks.publicCallbackBaseUrl && !credentials.dashboard_url?.trim()) {
+      credentials.dashboard_url = runtimeCallbacks.publicCallbackBaseUrl;
+    }
+    if (runtimeCallbacks.paypalWebhookUrl && !credentials.paypal_webhook_url?.trim()) {
+      credentials.paypal_webhook_url = runtimeCallbacks.paypalWebhookUrl;
+    }
+
     let submittedSupabaseAccessToken: string | undefined;
-    if (credentials) {
+    if (Object.keys(credentials).length > 0) {
       const submittedRuntimeConfig: { url?: string; publishableKey?: string; secretKey?: string } = {};
       const submittedPayPalConfig: {
         clientId?: string;

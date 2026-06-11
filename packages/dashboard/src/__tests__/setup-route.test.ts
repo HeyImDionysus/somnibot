@@ -34,6 +34,11 @@ describe('POST /api/setup finalize', () => {
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
       SUPABASE_SECRET_KEY: 'sb_secret_test',
     };
+    delete process.env.DASHBOARD_URL;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.PAYPAL_WEBHOOK_URL;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     mock = createMockSupabase();
     (createClient as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     (getDiscordAuthProviderStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -49,6 +54,7 @@ describe('POST /api/setup finalize', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     process.env = { ...originalEnv };
     vi.restoreAllMocks();
   });
@@ -213,6 +219,75 @@ describe('POST /api/setup finalize', () => {
     expect(process.env.PAYPAL_WEBHOOK_URL).toBe('https://dashboard.example.com/api/paypal/webhook');
     expect(process.env.PAYPAL_SANDBOX).toBe('false');
   });
+
+  it('stores launcher-derived public callback and PayPal webhook values before locking setup', async () => {
+    vi.stubEnv('DASHBOARD_URL', 'http://localhost:3456');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'dashboard_url',
+        value: 'https://somnibot.tailnet.ts.net',
+        section: 'deployment',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'paypal_webhook_url',
+        value: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+        section: 'paypal',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(process.env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('does not lock setup when a required public callback URL is still local', async () => {
+    vi.stubEnv('DASHBOARD_URL', 'http://localhost:3456');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'http://localhost:3456');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'http://localhost:3456');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Public callback URL must use HTTPS before setup can finalize.',
+      publicCallbackReady: false,
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/setup status', () => {
@@ -226,6 +301,11 @@ describe('GET /api/setup status', () => {
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
       SUPABASE_SECRET_KEY: 'sb_secret_test',
     };
+    delete process.env.DASHBOARD_URL;
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.PAYPAL_WEBHOOK_URL;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     delete process.env.DISCORD_APPLICATION_ID;
     delete process.env.DISCORD_CLIENT_SECRET;
 
@@ -242,6 +322,7 @@ describe('GET /api/setup status', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     process.env = { ...originalEnv };
     vi.restoreAllMocks();
   });
@@ -269,6 +350,25 @@ describe('GET /api/setup status', () => {
     expect(body.discordClientId).toBe('123456789012345678');
     expect(body.discordAuthProviderReady).toBe(false);
     expect(body.discordAuthConfigured).toBe(false);
+  });
+
+  it('reports launcher-derived callback and webhook URLs for the setup wizard', async () => {
+    vi.stubEnv('DASHBOARD_URL', 'http://localhost:3456/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.dashboardUrl).toBe('https://somnibot.tailnet.ts.net');
+    expect(body.operatorDashboardUrl).toBe('http://localhost:3456');
+    expect(body.publicCallbackBaseUrl).toBe('https://somnibot.tailnet.ts.net');
+    expect(body.paypalWebhookUrl).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(body.publicCallbackRequired).toBe(true);
+    expect(body.publicCallbackReady).toBe(true);
+    expect(body.publicCallbackError).toBeNull();
   });
 });
 

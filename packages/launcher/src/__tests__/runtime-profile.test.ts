@@ -40,6 +40,23 @@ describe('runtime profile model', () => {
     expect(env.DASHBOARD_URL).toBe('http://localhost:3456');
     expect(env.NEXT_PUBLIC_APP_URL).toBe('http://localhost:3456');
     expect(env.PAYPAL_WEBHOOK_URL).toBe('http://localhost:3456/api/paypal/webhook');
+    expect(env.SOMNIBOT_RUNTIME_MODE).toBe('regular-local');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('http://localhost:3456');
+  });
+
+  it('emits the launcher public callback contract for regular-local setup finalization', () => {
+    const env = buildRuntimeEnvVars({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net/',
+    });
+
+    expect(env.DASHBOARD_URL).toBe('http://localhost:3456');
+    expect(env.NEXT_PUBLIC_APP_URL).toBe('https://somnibot.tailnet.ts.net');
+    expect(env.SOMNIBOT_RUNTIME_MODE).toBe('regular-local');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot.tailnet.ts.net');
+    expect(env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
   });
 
   it('derives VPS callback and service values from a bare domain', () => {
@@ -51,6 +68,9 @@ describe('runtime profile model', () => {
     expect(env.DASHBOARD_URL).toBe('https://somnibot.example.com');
     expect(env.NEXT_PUBLIC_APP_URL).toBe('https://somnibot.example.com');
     expect(env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.example.com/api/paypal/webhook');
+    expect(env.SOMNIBOT_RUNTIME_MODE).toBe('vps');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED).toBe('true');
+    expect(env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL).toBe('https://somnibot.example.com');
     expect(env.PORT).toBe('3000');
     expect(env.HOSTNAME).toBe('0.0.0.0');
     expect(env.VALKEY_URL).toBe('redis://valkey:6379');

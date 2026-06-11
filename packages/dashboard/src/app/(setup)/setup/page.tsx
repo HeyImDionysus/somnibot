@@ -42,6 +42,12 @@ interface SetupStatus {
   guildId: string | null;
   guildName: string | null;
   dashboardUrl: string | null;
+  operatorDashboardUrl?: string | null;
+  publicCallbackBaseUrl?: string | null;
+  paypalWebhookUrl?: string | null;
+  publicCallbackRequired?: boolean;
+  publicCallbackReady?: boolean;
+  publicCallbackError?: string | null;
   discordClientId: string | null;
   discordCredentialsPresent?: boolean;
   setupCompleted?: boolean;
@@ -109,6 +115,9 @@ export default function SetupWizardPage() {
       if (res.ok) {
         const data: SetupStatus = await res.json();
         setStatus(data);
+        if (data.paypalWebhookUrl) {
+          setPaypalWebhookUrl((current) => current.trim() ? current : data.paypalWebhookUrl ?? '');
+        }
 
         // Auto-advance if things are already configured
         const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent);
@@ -786,7 +795,7 @@ export default function SetupWizardPage() {
                       type="url"
                       value={paypalWebhookUrl}
                       onChange={(e) => setPaypalWebhookUrl(e.target.value)}
-                      placeholder={`${status?.dashboardUrl || 'https://your-domain.example'}/api/paypal/webhook`}
+                      placeholder={status?.paypalWebhookUrl || `${status?.dashboardUrl || 'https://your-domain.example'}/api/paypal/webhook`}
                       className="w-full rounded-md border border-discord-border-subtle bg-discord-bg-tertiary px-3 py-2 text-sm text-discord-text-primary placeholder-discord-text-muted focus:border-discord-accent focus:outline-none focus:ring-1 focus:ring-discord-accent"
                     />
                   </div>
