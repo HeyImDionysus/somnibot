@@ -142,6 +142,18 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   };
 }
 
+function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {
+  return NextResponse.json(
+    {
+      ok: false,
+      error: runtimeCallbacks.publicCallbackError,
+      publicCallbackReady: false,
+      setupLocked: false,
+    },
+    { status: 400 },
+  );
+}
+
 export async function GET(req: NextRequest) {
   const rateLimited = await checkAdminRateLimit(req, 'standard');
   if (rateLimited) return rateLimited;
@@ -310,6 +322,16 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  let authProviderRuntimeCallbacks: RuntimeCallbackConfig | null = null;
+  const verifyDiscordWithClientSecret = action === 'verify-discord' && Boolean(body.clientSecret?.trim());
+  const mutatesAuthProvider = action === 'configure-auth' || action === 'finalize' || verifyDiscordWithClientSecret;
+  if (mutatesAuthProvider) {
+    authProviderRuntimeCallbacks = resolveRuntimeCallbackConfig();
+    if (!authProviderRuntimeCallbacks.publicCallbackReady) {
+      return publicCallbackNotReadyResponse(authProviderRuntimeCallbacks);
+    }
+  }
+
   // Step 1: Verify Discord credentials
   if (action === 'verify-discord') {
     const { token, clientId, clientSecret } = body;
@@ -467,18 +489,7 @@ export async function POST(request: NextRequest) {
     if (!supabase) {
       return NextResponse.json({ error: 'No Supabase connection' }, { status: 500 });
     }
-    const runtimeCallbacks = resolveRuntimeCallbackConfig();
-    if (!runtimeCallbacks.publicCallbackReady) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: runtimeCallbacks.publicCallbackError,
-          publicCallbackReady: false,
-          setupLocked: false,
-        },
-        { status: 400 },
-      );
-    }
+    const runtimeCallbacks = authProviderRuntimeCallbacks ?? resolveRuntimeCallbackConfig();
 
     // V11 Re-Audit L-1: Whitelist of credential keys accepted during finalize.
     // Previously any key was accepted, allowing arbitrary writes to instance_settings.

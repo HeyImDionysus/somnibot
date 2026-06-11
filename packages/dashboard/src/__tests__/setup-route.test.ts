@@ -55,6 +55,7 @@ describe('POST /api/setup finalize', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     process.env = { ...originalEnv };
     vi.restoreAllMocks();
   });
@@ -288,6 +289,63 @@ describe('POST /api/setup finalize', () => {
     expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
     expect(mock._query.upsert).not.toHaveBeenCalled();
   });
+
+  it('blocks configure-auth before provider mutation when a required public callback is not ready', async () => {
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'http://localhost:3456');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'configure-auth' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Public callback URL must use HTTPS before setup can finalize.',
+      publicCallbackReady: false,
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('blocks verify-discord auth auto-config before Discord or Supabase provider calls when callback is not ready', async () => {
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'http://localhost:3456');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'verify-discord',
+        token: 'discord-bot-token',
+        clientId: '123456789012345678',
+        clientSecret: 'discord-client-secret',
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Public callback URL must use HTTPS before setup can finalize.',
+      publicCallbackReady: false,
+      setupLocked: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/setup status', () => {
@@ -323,6 +381,7 @@ describe('GET /api/setup status', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     process.env = { ...originalEnv };
     vi.restoreAllMocks();
   });
