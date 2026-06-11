@@ -524,15 +524,64 @@ export async function handleCaptureRefunded(
     return;
   }
 
+  await handleExternalPaymentRefunded(supabase, captureId, eventType, 'capture_id');
+}
+
+// ── Subscription Sale Refunded / Reversed ───────────
+
+export async function handleSaleRefunded(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  resource: Record<string, unknown>,
+  eventType: string,
+) {
+  const parsed = paypalSaleResourceSchema.safeParse(resource);
+  const sale: PayPalSaleResource = parsed.success
+    ? parsed.data
+    : { id: String(resource.id ?? '') };
+
+  let saleId = sale.sale_id ?? sale.capture_id;
+
+  if (!saleId) {
+    const links = sale.links ?? [];
+    const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
+    if (saleLink?.href) {
+      const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
+      if (m?.[1]) saleId = m[1];
+    }
+  }
+
+  if (!saleId && eventType === 'PAYMENT.SALE.REVERSED') {
+    saleId = sale.id;
+  }
+
+  if (!saleId) {
+    console.error(
+      `[Webhook] ${eventType} arrived without a recoverable sale_id — payload:`,
+      JSON.stringify(resource).slice(0, 500),
+    );
+    return;
+  }
+
+  await handleExternalPaymentRefunded(supabase, saleId, eventType, 'sale_id');
+}
+
+async function handleExternalPaymentRefunded(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  paymentId: string,
+  eventType: string,
+  identifierField: 'capture_id' | 'sale_id',
+) {
   const { data: payment } = await supabase
     .from('payments')
     .select('id, order_id, customer_id, guild_id, status')
-    .eq('paypal_payment_id', captureId)
+    .eq('paypal_payment_id', paymentId)
     .maybeSingle();
+
+  const identifierName = identifierField === 'capture_id' ? 'capture' : 'sale';
 
   if (!payment?.order_id) {
     console.warn(
-      `[Webhook] ${eventType} for capture ${captureId} — no matching payment row, ignoring`,
+      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — no matching payment row, ignoring`,
     );
     return;
   }
@@ -541,14 +590,13 @@ export async function handleCaptureRefunded(
   // duplicate processing noise and redundant role-revocation queue entries.
   if (payment.status === 'refunded' || payment.status === 'reversed') {
     console.info(
-      `[Webhook] ${eventType} for capture ${captureId} — payment already ${payment.status}, skipping`,
+      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — payment already ${payment.status}, skipping`,
     );
     return;
   }
 
   const orderId = payment.order_id;
-  const refundStatus =
-    eventType === 'PAYMENT.CAPTURE.REVERSED' ? 'reversed' : 'refunded';
+  const refundStatus = eventType.endsWith('.REVERSED') ? 'reversed' : 'refunded';
 
   const { data: activeEntitlements } = await supabase
     .from('entitlements')
@@ -617,12 +665,12 @@ export async function handleCaptureRefunded(
       actor_type: 'system',
       actor_id: 'paypal_webhook',
       action:
-        eventType === 'PAYMENT.CAPTURE.REVERSED'
+        eventType.endsWith('.REVERSED')
           ? 'order.reversed'
           : 'order.refunded_external',
       target_type: 'order',
       target_id: orderId,
-      details: { event_type: eventType, capture_id: captureId },
+      details: { event_type: eventType, [identifierField]: paymentId },
     })
     .then(
       () => {},
@@ -632,6 +680,6 @@ export async function handleCaptureRefunded(
     );
 
   console.log(
-    `[Webhook] ${eventType} processed for order ${orderId} (capture ${captureId})`,
+    `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId})`,
   );
 }
