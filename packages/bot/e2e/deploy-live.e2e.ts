@@ -99,7 +99,6 @@ type SnapshotState = {
   desiredState: Record<string, unknown> | null;
   guild: Record<string, unknown> | null;
   discordIdMap: Record<string, unknown>[];
-  auditLogs: Record<string, unknown>[];
 };
 
 function assert(condition: boolean, label: string) {
@@ -115,15 +114,11 @@ async function captureSnapshot(supabase: SupabaseClient): Promise<SnapshotState>
     .maybeSingle();
   const { data: guild } = await supabase
     .from('guild')
-    .select('setup_completed, setup_confirmed_at')
+    .select('setup_completed, setup_confirmed_at, bot_role_id, bot_role_position, total_roles')
     .eq('id', DISCORD_GUILD_ID)
     .maybeSingle();
   const { data: discordIdMap } = await supabase
     .from('discord_id_map')
-    .select('*')
-    .eq('guild_id', DISCORD_GUILD_ID);
-  const { data: auditLogs } = await supabase
-    .from('audit_logs')
     .select('*')
     .eq('guild_id', DISCORD_GUILD_ID);
 
@@ -131,7 +126,6 @@ async function captureSnapshot(supabase: SupabaseClient): Promise<SnapshotState>
     desiredState: desiredState ?? null,
     guild: guild ?? null,
     discordIdMap: discordIdMap ?? [],
-    auditLogs: auditLogs ?? [],
   };
 }
 
@@ -148,7 +142,12 @@ function getTestEntityIds(guild: Guild) {
   ]);
 }
 
-async function cleanupDiscord(guild: Guild | null, mappings: DeployResultMapping[], preExistingTestEntityIds: Set<string>) {
+async function cleanupDiscord(
+  guild: Guild | null,
+  mappings: DeployResultMapping[],
+  preExistingTestEntityIds: Set<string>,
+  originalEveryonePermissions: bigint | null,
+) {
   if (!guild) {
     return;
   }
@@ -160,56 +159,63 @@ async function cleanupDiscord(guild: Guild | null, mappings: DeployResultMapping
     ...TEST_DESIRED_STATE.channels.map((channel) => channel.name),
   ]);
 
-  for (const mapping of mappings.filter((mapping) => mapping.entityType === 'role')) {
-    const role = guild.roles.cache.get(mapping.discordId);
-    if (role && !role.managed) {
+  try {
+    for (const mapping of mappings.filter((mapping) => mapping.entityType === 'role')) {
+      const role = guild.roles.cache.get(mapping.discordId);
+      if (role && !role.managed) {
+        try {
+          await role.delete(cleanupReason);
+          console.log(`  Deleted role: ${role.name}`);
+        } catch (err) {
+          console.log(`  Failed to delete role ${mapping.key}: ${err}`);
+        }
+      }
+    }
+
+    for (const mapping of mappings.filter((mapping) => mapping.entityType === 'channel' || mapping.entityType === 'category')) {
+      const channel = guild.channels.cache.get(mapping.discordId);
+      if (channel) {
+        try {
+          await channel.delete(cleanupReason);
+          console.log(`  Deleted channel: ${channel.name}`);
+        } catch (err) {
+          console.log(`  Failed to delete channel ${mapping.key}: ${err}`);
+        }
+      }
+    }
+
+    await guild.roles.fetch();
+    const remainingTestRoles = guild.roles.cache.filter((role) => (
+      roleNames.has(role.name)
+      && !role.managed
+      && !preExistingTestEntityIds.has(role.id)
+    ));
+    for (const role of remainingTestRoles.values()) {
       try {
         await role.delete(cleanupReason);
-        console.log(`  Deleted role: ${role.name}`);
+        console.log(`  Deleted role by name: ${role.name}`);
       } catch (err) {
-        console.log(`  Failed to delete role ${mapping.key}: ${err}`);
+        console.log(`  Failed to delete role by name ${role.name}: ${err}`);
       }
     }
-  }
 
-  for (const mapping of mappings.filter((mapping) => mapping.entityType === 'channel' || mapping.entityType === 'category')) {
-    const channel = guild.channels.cache.get(mapping.discordId);
-    if (channel) {
+    await guild.channels.fetch();
+    const remainingTestChannels = guild.channels.cache.filter((channel) => (
+      channelNames.has(channel.name)
+      && !preExistingTestEntityIds.has(channel.id)
+    ));
+    for (const channel of remainingTestChannels.values()) {
       try {
         await channel.delete(cleanupReason);
-        console.log(`  Deleted channel: ${channel.name}`);
+        console.log(`  Deleted channel by name: ${channel.name}`);
       } catch (err) {
-        console.log(`  Failed to delete channel ${mapping.key}: ${err}`);
+        console.log(`  Failed to delete channel by name ${channel.name}: ${err}`);
       }
     }
-  }
-
-  await guild.roles.fetch();
-  const remainingTestRoles = guild.roles.cache.filter((role) => (
-    roleNames.has(role.name)
-    && !role.managed
-    && !preExistingTestEntityIds.has(role.id)
-  ));
-  for (const role of remainingTestRoles.values()) {
-    try {
-      await role.delete(cleanupReason);
-      console.log(`  Deleted role by name: ${role.name}`);
-    } catch (err) {
-      console.log(`  Failed to delete role by name ${role.name}: ${err}`);
-    }
-  }
-
-  await guild.channels.fetch();
-  const remainingTestChannels = guild.channels.cache.filter((channel) => (
-    channelNames.has(channel.name)
-    && !preExistingTestEntityIds.has(channel.id)
-  ));
-  for (const channel of remainingTestChannels.values()) {
-    try {
-      await channel.delete(cleanupReason);
-      console.log(`  Deleted channel by name: ${channel.name}`);
-    } catch (err) {
-      console.log(`  Failed to delete channel by name ${channel.name}: ${err}`);
+  } finally {
+    if (originalEveryonePermissions !== null) {
+      await guild.roles.everyone.setPermissions(originalEveryonePermissions, `${cleanupReason} - restore @everyone`);
+      console.log('  Restored @everyone permissions');
     }
   }
 }
@@ -224,10 +230,7 @@ async function cleanupDatabase(supabase: SupabaseClient, snapshot: SnapshotState
     await supabase.from('discord_id_map').upsert(snapshot.discordIdMap);
   }
 
-  await supabase.from('audit_logs').delete().eq('guild_id', DISCORD_GUILD_ID);
-  if (snapshot.auditLogs.length > 0) {
-    await supabase.from('audit_logs').insert(snapshot.auditLogs);
-  }
+  // audit_logs is append-only in migrated databases, so cleanup must not delete or replay entries.
 
   if (snapshot.desiredState) {
     await supabase.from('guild_desired_state').upsert(snapshot.desiredState);
@@ -253,6 +256,7 @@ async function main() {
   let snapshot: SnapshotState | null = null;
   let idMappings: DeployResultMapping[] = [];
   let preExistingTestEntityIds = new Set<string>();
+  let originalEveryonePermissions: bigint | null = null;
   let exitCode = 0;
 
   try {
@@ -264,6 +268,7 @@ async function main() {
     if (!guild) {
       throw new Error(`Guild ${DISCORD_GUILD_ID} is not available to the logged-in bot`);
     }
+    originalEveryonePermissions = guild.roles.everyone.permissions.bitfield;
     preExistingTestEntityIds = getTestEntityIds(guild);
     console.log(`Connected: ${client.user?.tag} in ${guild.name}\n`);
 
@@ -394,14 +399,26 @@ async function main() {
     exitCode = 1;
   } finally {
     console.log('\nCleanup: Restoring live E2E state...');
+    let cleanupFailed = false;
 
     try {
-      await cleanupDiscord(guild, idMappings, preExistingTestEntityIds);
-      await cleanupDatabase(supabase, snapshot);
-      console.log('  Cleanup complete');
+      await cleanupDiscord(guild, idMappings, preExistingTestEntityIds, originalEveryonePermissions);
     } catch (err) {
-      console.error('  Cleanup failed:', err);
+      console.error('  Discord cleanup failed:', err);
+      cleanupFailed = true;
+    }
+
+    try {
+      await cleanupDatabase(supabase, snapshot);
+    } catch (err) {
+      console.error('  Database cleanup failed:', err);
+      cleanupFailed = true;
+    }
+
+    if (cleanupFailed) {
       exitCode = 1;
+    } else {
+      console.log('  Cleanup complete');
     }
 
     client.destroy();
