@@ -48,13 +48,11 @@ export function applyRuntimeSupabaseEnv(config: {
 }) {
   if (config.url) {
     process.env.SUPABASE_URL ||= config.url;
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||= config.url;
   }
 
   if (config.publishableKey) {
     process.env.SUPABASE_ANON_KEY ||= config.publishableKey;
     process.env.SUPABASE_PUBLISHABLE_KEY ||= config.publishableKey;
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||= config.publishableKey;
   }
 
   if (config.secretKey) {

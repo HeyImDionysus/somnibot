@@ -329,7 +329,7 @@ describe('POST /api/setup verify-supabase', () => {
       }),
       { onConflict: 'key' },
     );
-    expect(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_test');
+    expect(process.env.SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_test');
     expect(process.env.SUPABASE_SECRET_KEY).toBe('sb_secret_test');
   });
 });
