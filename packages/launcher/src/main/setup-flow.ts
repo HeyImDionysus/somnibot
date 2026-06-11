@@ -32,6 +32,8 @@ export interface SetupSummary {
   runtimeLabel: string;
   localDashboardUrl: string;
   publicCallbackUrl: string;
+  authCallbackUrl: string;
+  paypalWebhookUrl: string;
   diagnostics: Record<string, string>;
 }
 
@@ -85,6 +87,8 @@ function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSum
     runtimeLabel: runtimeMode === 'vps' ? 'VPS' : 'Regular local',
     localDashboardUrl: displayUrlWithoutPort(operatorDashboardUrl),
     publicCallbackUrl: displayUrlWithoutPort(publicCallbackBaseUrl),
+    authCallbackUrl: displayUrlWithoutPort(callbacks.authCallbackUrl),
+    paypalWebhookUrl: displayUrlWithoutPort(callbacks.paypalWebhookUrl),
     diagnostics: {
       operatorDashboardUrl: operatorDashboardUrl || UNSET_DISPLAY,
       publicCallbackBaseUrl: publicCallbackBaseUrl || UNSET_DISPLAY,

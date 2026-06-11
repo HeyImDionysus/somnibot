@@ -55,11 +55,16 @@ const versionEl = $('version');
 const updateBanner = $('update-banner');
 const offlineBanner = $('offline-banner');
 const runtimeModeLabel = $('runtime-mode-label');
+const runtimeSection = $('runtime-section');
 const regularRuntimeFields = $('regular-runtime-fields');
 const vpsRuntimeFields = $('vps-runtime-fields');
 const runtimeSteps = $('runtime-steps');
+const summaryDashboardLabel = $('summary-dashboard-label');
+const summaryPublicCallbackLabel = $('summary-public-callback-label');
 const summaryLocalDashboard = $('summary-local-dashboard');
 const summaryPublicCallback = $('summary-public-callback');
+const summaryAuthCallback = $('summary-auth-callback');
+const summaryPayPalWebhook = $('summary-paypal-webhook');
 const runtimeDiagnosticsList = $('runtime-diagnostics-list');
 
 // Onboarding
@@ -284,6 +289,8 @@ async function refreshSetupStatus(options = {}) {
         runtimeLabel: runtimeMode === 'vps' ? 'VPS' : 'Regular local',
         localDashboardUrl: 'Checking...',
         publicCallbackUrl: 'Checking...',
+        authCallbackUrl: 'Checking...',
+        paypalWebhookUrl: 'Checking...',
         diagnostics: {},
       },
       steps: [{
@@ -313,10 +320,18 @@ async function refreshSetupStatus(options = {}) {
 function renderSetupStatus(status) {
   if (!status) return;
 
+  const isVpsStatus = status.runtimeMode === 'vps';
+  const diagnostics = status.summary.diagnostics || {};
+
+  runtimeSection.dataset.runtimeMode = status.runtimeMode;
+  summaryDashboardLabel.textContent = isVpsStatus ? 'Dashboard URL' : 'Local dashboard URL';
+  summaryPublicCallbackLabel.textContent = isVpsStatus ? 'Public callback base' : 'Public callback URL';
   summaryLocalDashboard.textContent = status.summary.localDashboardUrl;
   summaryPublicCallback.textContent = status.summary.publicCallbackUrl;
+  summaryAuthCallback.textContent = status.summary.authCallbackUrl;
+  summaryPayPalWebhook.textContent = status.summary.paypalWebhookUrl;
 
-  runtimeDiagnosticsList.innerHTML = Object.entries(status.summary.diagnostics)
+  runtimeDiagnosticsList.innerHTML = Object.entries(diagnostics)
     .map(([label, value]) => (
       `<div class="diagnostic-row"><span>${escapeHtml(formatDiagnosticLabel(label))}</span><span>${escapeHtml(value)}</span></div>`
     ))
@@ -350,7 +365,7 @@ function formatDiagnosticLabel(label) {
   const labels = {
     operatorDashboardUrl: 'Dashboard URL',
     publicCallbackBaseUrl: 'Callback base',
-    authCallbackUrl: 'Auth callback',
+    authCallbackUrl: 'Discord/Supabase callback',
     paypalWebhookUrl: 'PayPal webhook',
   };
   return labels[label] || label;

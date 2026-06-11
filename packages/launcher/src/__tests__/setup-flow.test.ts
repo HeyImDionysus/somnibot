@@ -162,8 +162,13 @@ describe('setup flow status', () => {
 
     expect(status.summary.localDashboardUrl).toBe('https://somnibot.example.com');
     expect(status.summary.publicCallbackUrl).toBe('https://somnibot.example.com');
+    expect(status.summary.authCallbackUrl).toBe('https://somnibot.example.com/api/auth/callback');
+    expect(status.summary.paypalWebhookUrl).toBe('https://somnibot.example.com/api/paypal/webhook');
     expect(status.summary.localDashboardUrl).not.toContain(':3000');
     expect(status.summary.publicCallbackUrl).not.toContain(':3000');
+    expect(status.summary.authCallbackUrl).not.toContain(':3000');
+    expect(status.summary.paypalWebhookUrl).not.toContain(':3000');
     expect(status.summary.diagnostics.operatorDashboardUrl).toBe('https://somnibot.example.com:3000');
+    expect(status.summary.diagnostics.authCallbackUrl).toBe('https://somnibot.example.com:3000/api/auth/callback');
   });
 });

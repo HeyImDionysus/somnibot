@@ -150,7 +150,7 @@
         <div id="vps-runtime-fields" class="runtime-fields hidden">
           <div class="field">
             <label for="vpsDomain">VPS Domain <span class="req">*</span></label>
-            <input type="url" id="vpsDomain" placeholder="https://bot.example.com" />
+            <input type="text" id="vpsDomain" placeholder="somnibot.example.com" autocomplete="off" inputmode="url" />
           </div>
           <div class="field-row">
             <div class="field">
@@ -169,14 +169,22 @@
           <p class="runtime-hint">The launcher records non-secret readiness details only. SSH automation is not run from this setup screen.</p>
         </div>
 
-        <div class="runtime-summary" id="runtime-summary">
+        <div class="runtime-summary" id="runtime-summary" aria-live="polite">
           <div class="summary-row">
-            <span>Local dashboard URL</span>
+            <span id="summary-dashboard-label">Local dashboard URL</span>
             <strong id="summary-local-dashboard">Not set yet</strong>
           </div>
           <div class="summary-row">
-            <span>Public callback URL</span>
+            <span id="summary-public-callback-label">Public callback URL</span>
             <strong id="summary-public-callback">Not set yet</strong>
+          </div>
+          <div class="summary-row summary-derived">
+            <span>Discord/Supabase callback</span>
+            <strong id="summary-auth-callback">Not set yet</strong>
+          </div>
+          <div class="summary-row summary-derived">
+            <span>PayPal webhook</span>
+            <strong id="summary-paypal-webhook">Not set yet</strong>
           </div>
           <details class="runtime-diagnostics">
             <summary>Diagnostics</summary>
@@ -184,7 +192,7 @@
           </details>
         </div>
 
-        <div class="runtime-steps" id="runtime-steps"></div>
+        <div class="runtime-steps" id="runtime-steps" aria-live="polite"></div>
       </section>
 
       <!-- Config Form -->
