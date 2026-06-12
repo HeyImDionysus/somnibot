@@ -53,6 +53,8 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
+    expect(renderer).toContain('The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.');
+    expect(renderer).not.toContain('does not run SSH or deploy commands in this build');
     expect(renderer).toContain('Review the plan, run a read-only SSH preflight, then use native approval before remote changes.');
     expect(renderer).toContain('data-vps-deploy-action="preflight"');
     expect(renderer).toContain('data-vps-deploy-action="dry-run"');

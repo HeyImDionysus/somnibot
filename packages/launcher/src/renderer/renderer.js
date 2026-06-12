@@ -1004,14 +1004,14 @@ function renderOnboardingRuntimeStep() {
   const isVps = runtimeMode === 'vps';
   onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Public Callbacks';
   onboardingRuntimeDesc.textContent = isVps
-    ? 'VPS mode needs a domain, SSH target, and manual deployment readiness before credentials can be validated.'
+    ? 'VPS mode needs a domain, SSH target, and guided deployment readiness before credentials can be validated.'
     : 'Regular local mode needs Tailscale Funnel readiness before credentials can be validated.';
 
   const items = isVps
     ? [
       ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
       ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
-      ['Manual deploy', 'The launcher records readiness details but does not run SSH or deploy commands in this build.'],
+      ['Guided deploy', 'The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.'],
     ]
     : [
       ['Tailscale Funnel', 'Enable Funnel for this machine so providers can reach the dashboard over HTTPS.'],
