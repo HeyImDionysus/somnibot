@@ -115,6 +115,7 @@ describe('VPS deployment plan generator', () => {
         args: ['-fsS', 'https://somnibot.example.com/api/health'],
         changesRemote: false,
         approvalRequired: false,
+        expectedHealthStatus: 'healthy',
       }),
     ]));
     expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
@@ -136,6 +137,7 @@ describe('VPS deployment plan generator', () => {
         executable: 'curl',
         args: ['-fsS', 'https://somnibot.example.com/api/health'],
         approvalRequired: false,
+        expectedHealthStatus: 'healthy',
       }),
     ]));
   });

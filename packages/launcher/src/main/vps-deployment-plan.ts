@@ -33,6 +33,7 @@ export interface VpsDeploymentCommand {
   approvalRequired: boolean;
   commandCategory: 'env' | 'service' | 'probe' | 'rollback';
   executionTimeoutMs?: number;
+  expectedHealthStatus?: 'healthy';
 }
 
 export interface VpsDeploymentApprovalGate {
@@ -180,6 +181,7 @@ function buildCommand(
   args: string[],
   options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'> & {
     executionTimeoutMs?: number;
+    expectedHealthStatus?: 'healthy';
   },
 ): VpsDeploymentCommand {
   const redactedArgs = args.map((arg) => arg);
@@ -194,6 +196,7 @@ function buildCommand(
     approvalRequired: options.approvalRequired,
     commandCategory: options.commandCategory,
     ...(options.executionTimeoutMs ? { executionTimeoutMs: options.executionTimeoutMs } : {}),
+    ...(options.expectedHealthStatus ? { expectedHealthStatus: options.expectedHealthStatus } : {}),
   };
 }
 
@@ -248,6 +251,7 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'probe',
+      expectedHealthStatus: 'healthy',
     }),
   ];
 }
@@ -284,6 +288,7 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         changesRemote: false,
         approvalRequired: false,
         commandCategory: 'probe',
+        expectedHealthStatus: 'healthy',
       }),
     ],
     notes: [

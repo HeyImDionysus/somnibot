@@ -91,6 +91,23 @@ function createLogs(state: VpsDeploymentExecutionState, detail: string): VpsDepl
   return [{ level, code, message: `VPS deployment execution state: ${state}`, detail: redactText(detail) }];
 }
 
+function validateExpectedHealthStatus(command: VpsDeploymentCommand, output: string | undefined): string | null {
+  if (!command.expectedHealthStatus) return null;
+  if (!output) {
+    return `Command ${command.id} did not return health JSON.`;
+  }
+
+  try {
+    const parsed = JSON.parse(output);
+    if (parsed?.status === command.expectedHealthStatus) {
+      return null;
+    }
+    return `Command ${command.id} returned health status ${String(parsed?.status ?? 'missing')}; expected ${command.expectedHealthStatus}.`;
+  } catch {
+    return `Command ${command.id} did not return parseable health JSON.`;
+  }
+}
+
 export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Promise<VpsDeploymentExecutionResult> {
   const approvedCommandIds = new Set(input.approvedCommandIds);
   const commandStates: VpsDeploymentCommandExecutionState[] = input.plan.commands.map(commandExecutionState);
@@ -217,6 +234,28 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
 
     state.status = 'success';
     state.detail = result.output ? redactText(result.output) : 'Command completed.';
+    const healthStatusError = validateExpectedHealthStatus(command, result.output);
+    if (healthStatusError) {
+      state.status = 'failed';
+      state.detail = healthStatusError;
+      return {
+        state: 'retry',
+        planStatus: input.plan.status,
+        canRetry: true,
+        commandStates,
+        logs: [
+          ...logs,
+          {
+            level: 'error',
+            code: 'vps-deployment-health-retry',
+            message: `Command ${command.id} did not prove healthy deployment status.`,
+            detail: healthStatusError,
+          },
+        ],
+        manualBlockReasons: [],
+        redactedOutput: result.output ? [redactText(result.output)] : undefined,
+      };
+    }
   }
 
   return {

@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -85,17 +86,38 @@ describe('VPS command runner', () => {
     });
   });
 
-  it('reports command timeouts as retriable failures', async () => {
-    const runner = createVpsCommandRunner({ timeoutMs: 50 });
+  it('reports command timeouts as retriable failures even when SIGTERM is ignored', async () => {
+    const runner = createVpsCommandRunner({ timeoutMs: 50, timeoutKillGraceMs: 50 });
 
     const result = await runner(command(process.execPath, [
       '-e',
-      'setTimeout(() => process.stdout.write("too-late"), 1_000)',
+      'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000)',
     ]), { index: 0, total: 1 });
 
     expect(result.ok).toBe(false);
     expect(result.retriable).toBe(true);
     expect(result.error).toContain('Command timed out after 50ms.');
+  });
+
+  it('marks SSH transport exit code 255 as retriable', async () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-runner-'));
+    const sshPath = path.join(tempDir, 'ssh');
+    try {
+      writeFileSync(sshPath, `#!${process.execPath}\nprocess.stderr.write("ssh transport failed"); process.exit(255);\n`);
+      chmodSync(sshPath, 0o700);
+
+      const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
+      const result = await runner(command(sshPath, ['example.com', 'true']), { index: 0, total: 1 });
+
+      expect(result).toMatchObject({
+        ok: false,
+        exitCode: 255,
+        retriable: true,
+      });
+      expect(result.error).toContain('ssh transport failed');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('keeps the IPC live path wired to the structured runner only when dryRun is false and VPS mode is selected', () => {

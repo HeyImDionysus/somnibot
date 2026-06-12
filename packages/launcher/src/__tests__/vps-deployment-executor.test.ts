@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { runVpsDeployment } from '../main/vps-deployment-executor';
-import { buildVpsDeploymentPlan } from '../main/vps-deployment-plan';
+import { type VpsCommandRunResult, runVpsDeployment } from '../main/vps-deployment-executor';
+import { buildVpsDeploymentPlan, type VpsDeploymentCommand } from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -23,6 +23,13 @@ function buildRequestOverrides(plan = buildVpsDeploymentPlan(completeVpsInput)) 
     operatorApproved: true,
     approvedCommandIds: plan.commands.filter((command) => command.approvalRequired).map((command) => command.id),
   };
+}
+
+function successfulCommandResult(command: VpsDeploymentCommand): VpsCommandRunResult {
+  if (command.expectedHealthStatus) {
+    return { ok: true, output: JSON.stringify({ status: command.expectedHealthStatus }) };
+  }
+  return { ok: true };
 }
 
 describe('VPS deployment execution bridge', () => {
@@ -92,7 +99,7 @@ describe('VPS deployment execution bridge', () => {
           };
         }
 
-        return { ok: true };
+        return successfulCommandResult(command);
       },
     });
 
@@ -111,7 +118,7 @@ describe('VPS deployment execution bridge', () => {
       dryRun: false,
       commandRunner: async (command) => {
         executedCommands.push({ id: command.id, executable: command.executable, args: command.args });
-        return { ok: true };
+        return successfulCommandResult(command);
       },
     });
 
@@ -123,6 +130,29 @@ describe('VPS deployment execution bridge', () => {
     expect(executedCommands.find(command => command.id === 'start-stack')).toMatchObject({
       executable: 'ssh',
       args: expect.arrayContaining(['deploy@somnibot.example.com', 'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml']),
+    });
+  });
+
+  it('returns retry when the public health endpoint reports degraded JSON', async () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const result = await runVpsDeployment({
+      ...buildRequestOverrides(plan),
+      dryRun: false,
+      commandRunner: async (command) => {
+        if (command.id === 'check-health') {
+          return { ok: true, output: JSON.stringify({ status: 'degraded' }) };
+        }
+
+        return successfulCommandResult(command);
+      },
+    });
+
+    expect(result.state).toBe('retry');
+    expect(result.canRetry).toBe(true);
+    expect(result.logs.some((log) => log.code === 'vps-deployment-health-retry')).toBe(true);
+    expect(result.commandStates.find((command) => command.commandId === 'check-health')).toMatchObject({
+      status: 'failed',
+      detail: 'Command check-health returned health status degraded; expected healthy.',
     });
   });
 
