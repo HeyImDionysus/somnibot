@@ -73,8 +73,13 @@ describe('setup flow status', () => {
     expect(status.steps.find(step => step.id === 'vps-ssh')?.status).toBe('success');
     expect(status.steps.find(step => step.id === 'vps-deploy')?.status).toBe('blocked');
     expect(status.steps.find(step => step.id === 'vps-deploy')?.manualAction).toBe(true);
+    expect(status.steps.find(step => step.id === 'vps-deploy')?.summary).toContain('deployment plan is ready');
     expect(status.primaryAction.enabled).toBe(false);
     expect(status.primaryAction.label).toBe('Manual VPS Deploy');
+    expect(status.deploymentPlan?.status).toBe('ready');
+    expect(status.deploymentPlan?.target?.envFilePath).toBe('/opt/somnibot/.env');
+    expect(status.deploymentPlan?.environment?.redactedEnvFile).toContain('DISCORD_TOKEN=<DISCORD_TOKEN>');
+    expect(status.deploymentPlan?.reverseProxy?.upstream).toBe('dashboard:3000');
   });
 
   it('blocks VPS setup when SSH/deploy details are missing', () => {
@@ -88,6 +93,9 @@ describe('setup flow status', () => {
     expect(sshStep?.status).toBe('blocked');
     expect(sshStep?.manualAction).toBe(true);
     expect(status.firstBlockingStepId).toBe('vps-ssh');
+    expect(status.deploymentPlan?.status).toBe('blocked');
+    expect(status.deploymentPlan?.blockedReasons).toContain('SSH host is required before preflight can be planned.');
+    expect(status.deploymentPlan?.target).toBeNull();
   });
 
   it('does not let a regular-local callback URL satisfy the VPS domain step', () => {
@@ -170,5 +178,23 @@ describe('setup flow status', () => {
     expect(status.summary.paypalWebhookUrl).not.toContain(':3000');
     expect(status.summary.diagnostics.operatorDashboardUrl).toBe('https://somnibot.example.com:3000');
     expect(status.summary.diagnostics.authCallbackUrl).toBe('https://somnibot.example.com:3000/api/auth/callback');
+  });
+
+  it('surfaces deployment plan errors when SSH details are present but unsafe', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'vps',
+      vpsDomain: 'somnibot.example.com',
+      vpsSshHost: 'somnibot.example.com;touch',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      ...completeCredentials,
+    });
+
+    const deployStep = status.steps.find(step => step.id === 'vps-deploy');
+    expect(status.steps.find(step => step.id === 'vps-ssh')?.status).toBe('success');
+    expect(deployStep?.status).toBe('recoverable-error');
+    expect(deployStep?.detail).toContain('SSH host must be a hostname or IPv4 address');
+    expect(status.deploymentPlan?.status).toBe('blocked');
+    expect(status.deploymentPlan?.commands).toEqual([]);
   });
 });

@@ -66,6 +66,7 @@ const summaryPublicCallback = $('summary-public-callback');
 const summaryAuthCallback = $('summary-auth-callback');
 const summaryPayPalWebhook = $('summary-paypal-webhook');
 const runtimeDiagnosticsList = $('runtime-diagnostics-list');
+const vpsDeploymentPlan = $('vps-deployment-plan');
 
 // Onboarding
 const onboardingOverlay = $('onboarding-overlay');
@@ -337,6 +338,8 @@ function renderSetupStatus(status) {
     ))
     .join('');
 
+  renderDeploymentPlan(status.deploymentPlan, isVpsStatus);
+
   runtimeSteps.innerHTML = status.steps.map((step) => {
     const statusLabel = formatStepStatus(step.status);
     const manual = step.manualAction && step.actionLabel
@@ -359,6 +362,130 @@ function renderSetupStatus(status) {
     btnStart.textContent = status.primaryAction.label;
   }
   btnStart.disabled = !status.primaryAction.enabled || isValidating || isRunning;
+}
+
+function renderDeploymentPlan(plan, isVpsStatus) {
+  if (!vpsDeploymentPlan) return;
+
+  if (!isVpsStatus || !plan) {
+    vpsDeploymentPlan.classList.add('hidden');
+    vpsDeploymentPlan.innerHTML = '';
+    return;
+  }
+
+  vpsDeploymentPlan.classList.remove('hidden');
+
+  if (plan.status === 'blocked') {
+    const reasons = plan.blockedReasons.length > 0
+      ? renderList(plan.blockedReasons)
+      : '<p>Finish the VPS readiness fields before reviewing the deployment plan.</p>';
+    vpsDeploymentPlan.innerHTML = (
+      '<div class="deployment-plan-header">' +
+        '<div>' +
+          '<h3>VPS deployment plan</h3>' +
+          '<p>Dry-run only. No SSH, Docker, DNS, or provider changes are run from this screen.</p>' +
+        '</div>' +
+        '<span class="deployment-plan-badge blocked">Blocked</span>' +
+      '</div>' +
+      `<div class="deployment-plan-section"><h4>Blocked by</h4>${reasons}</div>`
+    );
+    return;
+  }
+
+  const target = plan.target || {};
+  const environment = plan.environment || { variables: [], redactedEnvFile: '' };
+  const reverseProxy = plan.reverseProxy;
+  const rollback = plan.rollback;
+  const warnings = plan.warnings.length > 0
+    ? `<div class="deployment-plan-section warning"><h4>Warnings</h4>${renderList(plan.warnings)}</div>`
+    : '';
+
+  vpsDeploymentPlan.innerHTML = (
+    '<div class="deployment-plan-header">' +
+      '<div>' +
+        '<h3>VPS deployment plan</h3>' +
+        '<p>Review-only plan for the selected domain. Manual approval is required before any remote change.</p>' +
+      '</div>' +
+      '<span class="deployment-plan-badge ready">Ready</span>' +
+    '</div>' +
+    warnings +
+    '<div class="deployment-plan-grid">' +
+      `<div><span>SSH target</span><strong>${escapeHtml(target.sshTarget || '')}</strong></div>` +
+      `<div><span>Deploy path</span><strong>${escapeHtml(target.deployPath || '')}</strong></div>` +
+      `<div><span>Env file</span><strong>${escapeHtml(target.envFilePath || '')}</strong></div>` +
+      `<div><span>Permissions</span><strong>${escapeHtml(target.envFilePermissions || '')}</strong></div>` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Environment shape</h4>' +
+      `<div class="deployment-env-vars">${environment.variables.map(renderEnvVar).join('')}</div>` +
+      `<pre>${escapeHtml(environment.redactedEnvFile)}</pre>` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Service layout</h4>' +
+      `${renderPlanRows(plan.serviceLayout.map(service => [service.name, `${service.role} (${service.exposure}; ${service.endpoint})`]))}` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Caddy/reverse proxy</h4>' +
+      `${reverseProxy ? renderPlanRows([
+        ['Caddyfile', reverseProxy.filePath],
+        ['Public ports', reverseProxy.publicPorts.join(', ')],
+        ['Upstream', reverseProxy.upstream],
+      ]) + renderList(reverseProxy.outline) : ''}` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Service commands</h4>' +
+      `${renderCommands(plan.commands)}` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Approval gates</h4>' +
+      `${renderPlanRows(plan.approvalGates.map(gate => [gate.label, `${gate.detail} Required before: ${gate.requiredBefore}`]))}` +
+    '</div>' +
+    '<div class="deployment-plan-section">' +
+      '<h4>Rollback</h4>' +
+      `<p>${escapeHtml(rollback?.summary || '')}</p>` +
+      `${rollback ? renderCommands(rollback.commands) + renderList(rollback.notes) : ''}` +
+    '</div>'
+  );
+}
+
+function renderList(items) {
+  return `<ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+}
+
+function renderPlanRows(rows) {
+  return rows.map(([label, value]) => (
+    '<div class="deployment-plan-row">' +
+      `<span>${escapeHtml(label)}</span>` +
+      `<strong>${escapeHtml(value)}</strong>` +
+    '</div>'
+  )).join('');
+}
+
+function renderEnvVar(variable) {
+  const secret = variable.secret ? '<span class="deployment-secret">secret</span>' : '';
+  const required = variable.required ? '<span class="deployment-required">required</span>' : '';
+  return (
+    '<div class="deployment-env-var">' +
+      `<span>${escapeHtml(variable.name)}</span>` +
+      `<strong>${escapeHtml(variable.value)}</strong>` +
+      `<em>${secret}${required}</em>` +
+    '</div>'
+  );
+}
+
+function renderCommands(commands) {
+  return commands.map((command) => {
+    const approval = command.approvalRequired ? 'approval required' : 'read-only';
+    return (
+      '<div class="deployment-command">' +
+        '<div>' +
+          `<strong>${escapeHtml(command.label)}</strong>` +
+          `<span>${escapeHtml(approval)}</span>` +
+        '</div>' +
+        `<code>${escapeHtml(command.command)}</code>` +
+      '</div>'
+    );
+  }).join('');
 }
 
 function formatDiagnosticLabel(label) {

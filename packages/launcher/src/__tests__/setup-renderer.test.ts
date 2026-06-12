@@ -18,6 +18,7 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="summary-public-callback-label"');
     expect(html).toContain('id="summary-auth-callback"');
     expect(html).toContain('id="summary-paypal-webhook"');
+    expect(html).toContain('id="vps-deployment-plan"');
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
@@ -43,6 +44,22 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('summaryPayPalWebhook.textContent = status.summary.paypalWebhookUrl;');
     expect(renderer).toContain("authCallbackUrl: 'Discord/Supabase callback'");
     expect(renderer).toContain("paypalWebhookUrl: 'PayPal webhook'");
+  });
+
+  it('renders the review-only VPS deployment plan from setup status', () => {
+    const renderer = readSourceFile('renderer/renderer.js');
+    const styles = readSourceFile('renderer/styles.css');
+
+    expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
+    expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
+    expect(renderer).toContain('Dry-run only. No SSH, Docker, DNS, or provider changes are run from this screen.');
+    expect(renderer).toContain('Review-only plan for the selected domain. Manual approval is required before any remote change.');
+    expect(renderer).toContain('<h4>Environment shape</h4>');
+    expect(renderer).toContain('<h4>Caddy/reverse proxy</h4>');
+    expect(renderer).toContain('<h4>Approval gates</h4>');
+    expect(renderer).toContain('<h4>Rollback</h4>');
+    expect(styles).toContain('.deployment-plan');
+    expect(styles).toContain('.deployment-command');
   });
 
   it('keeps setup status IPC wired through preload and main process VPS fields', () => {
