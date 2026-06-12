@@ -80,6 +80,15 @@ describe('setup flow status', () => {
     expect(status.deploymentPlan?.target?.envFilePath).toBe('/opt/somnibot/.env');
     expect(status.deploymentPlan?.environment?.redactedEnvFile).toContain('DISCORD_TOKEN=<DISCORD_TOKEN>');
     expect(status.deploymentPlan?.reverseProxy?.upstream).toBe('dashboard:3000');
+    expect(status.healthVerification?.status).toBe('pending');
+    expect(status.healthVerification?.checks.map(check => check.id)).toEqual([
+      'https-dashboard',
+      'api-health',
+      'supabase-callback-allow-list',
+      'bot-diagnostics',
+      'valkey-private-url',
+      'lavalink-private-url',
+    ]);
   });
 
   it('blocks VPS setup when SSH/deploy details are missing', () => {
@@ -96,6 +105,8 @@ describe('setup flow status', () => {
     expect(status.deploymentPlan?.status).toBe('blocked');
     expect(status.deploymentPlan?.blockedReasons).toContain('SSH host is required before preflight can be planned.');
     expect(status.deploymentPlan?.target).toBeNull();
+    expect(status.healthVerification?.status).toBe('blocked');
+    expect(status.healthVerification?.blockedReasons).toContain('SSH host is required before preflight can be planned.');
   });
 
   it('does not let a regular-local callback URL satisfy the VPS domain step', () => {
