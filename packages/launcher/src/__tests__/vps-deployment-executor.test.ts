@@ -6,6 +6,7 @@ import {
   type VpsCommandRunResult,
   type VpsDeploymentExecutionResult,
   VpsDeploymentRunGate,
+  redactVpsDeploymentText,
   runVpsDeployment,
 } from '../main/vps-deployment-executor';
 import { buildVpsDeploymentPlan, type VpsDeploymentCommand } from '../main/vps-deployment-plan';
@@ -50,6 +51,14 @@ function executionResult(state: VpsDeploymentExecutionResult['state']): VpsDeplo
 }
 
 describe('VPS deployment execution bridge', () => {
+  it('redacts shared deployment/preflight text surfaces', () => {
+    const secret = 'sb_secret_XXXXXXXXXXXXXXXXX';
+    const redacted = redactVpsDeploymentText(`token=${secret} header Bearer ${secret}`);
+
+    expect(redacted).not.toContain(secret);
+    expect(redacted).toContain('[redacted]');
+  });
+
   it('defaults to dry-run when no command runner is supplied', async () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const result = await runVpsDeployment(buildRequestOverrides(plan));

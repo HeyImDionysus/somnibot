@@ -390,6 +390,67 @@ main::-webkit-scrollbar-thumb:hover {
   border-top: 1px solid var(--border);
 }
 
+.deployment-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.deployment-run-result {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.deployment-run-result.success {
+  background: rgba(35, 165, 89, 0.05);
+}
+
+.deployment-run-result.blocked {
+  background: rgba(255, 107, 0, 0.05);
+}
+
+.deployment-run-result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.deployment-run-result-header h4 {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.deployment-run-result-header span {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.deployment-run-result code {
+  display: block;
+  margin-bottom: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  overflow-x: auto;
+  user-select: text;
+}
+
 .deployment-plan-section.warning {
   background: rgba(255, 107, 0, 0.05);
 }

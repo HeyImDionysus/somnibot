@@ -109,6 +109,10 @@ let setupStatusSeq = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
 let tailscaleReadinessSeq = 0;
+let vpsPreflightResult = null;
+let vpsDeploymentResult = null;
+let vpsActionResultPlanKey = '';
+let isVpsDeploymentActionRunning = false;
 
 /* ================================================================== */
 /*  Init                                                               */
@@ -310,11 +314,39 @@ async function refreshSetupStatus(options = {}) {
     const status = await window.somnibot.getSetupStatus(input);
     if (seq !== setupStatusSeq) return setupStatus;
     setupStatus = status;
+    clearStaleVpsActionResults(status);
     renderSetupStatus(status);
     return status;
   } catch (err) {
     console.error('Failed to refresh setup status:', err);
     return setupStatus;
+  }
+}
+
+function getVpsDeploymentPlanKey(plan) {
+  const target = plan?.target;
+  if (!target) return '';
+  return [
+    target.publicBaseUrl,
+    target.sshTarget,
+    target.deployPath,
+    target.envFilePath,
+  ].join('|');
+}
+
+function clearStaleVpsActionResults(status) {
+  const planKey = getVpsDeploymentPlanKey(status?.deploymentPlan);
+  if (!planKey) {
+    vpsPreflightResult = null;
+    vpsDeploymentResult = null;
+    vpsActionResultPlanKey = '';
+    return;
+  }
+
+  if (vpsActionResultPlanKey && vpsActionResultPlanKey !== planKey) {
+    vpsPreflightResult = null;
+    vpsDeploymentResult = null;
+    vpsActionResultPlanKey = '';
   }
 }
 
@@ -383,7 +415,7 @@ function renderDeploymentPlan(plan, isVpsStatus) {
       '<div class="deployment-plan-header">' +
         '<div>' +
           '<h3>VPS deployment plan</h3>' +
-          '<p>Dry-run only. No SSH, Docker, DNS, or provider changes are run from this screen.</p>' +
+          '<p>Finish VPS readiness fields before SSH preflight or deployment actions are available.</p>' +
         '</div>' +
         '<span class="deployment-plan-badge blocked">Blocked</span>' +
       '</div>' +
@@ -404,10 +436,13 @@ function renderDeploymentPlan(plan, isVpsStatus) {
     '<div class="deployment-plan-header">' +
       '<div>' +
         '<h3>VPS deployment plan</h3>' +
-        '<p>Review-only plan for the selected domain. Manual approval is required before any remote change.</p>' +
+        '<p>Review the plan, run a read-only SSH preflight, then use native approval before remote changes.</p>' +
       '</div>' +
       '<span class="deployment-plan-badge ready">Ready</span>' +
     '</div>' +
+    renderDeploymentActions(plan) +
+    renderPreflightResult(vpsPreflightResult) +
+    renderDeploymentRunResult(vpsDeploymentResult) +
     warnings +
     '<div class="deployment-plan-grid">' +
       `<div><span>SSH target</span><strong>${escapeHtml(target.sshTarget || '')}</strong></div>` +
@@ -446,6 +481,78 @@ function renderDeploymentPlan(plan, isVpsStatus) {
       `${rollback ? renderCommands(rollback.commands) + renderList(rollback.notes) : ''}` +
     '</div>'
   );
+}
+
+function renderDeploymentActions(plan) {
+  const disabled = isVpsDeploymentActionRunning || !plan.canApprove;
+  const disabledAttr = disabled ? ' disabled' : '';
+  const preflightLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run SSH Preflight';
+  const dryRunLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Dry Run';
+  const liveLabel = isVpsDeploymentActionRunning ? 'Running...' : 'Run Deployment';
+
+  return (
+    '<div class="deployment-plan-actions">' +
+      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="preflight"${disabledAttr}>${escapeHtml(preflightLabel)}</button>` +
+      `<button class="btn btn-small btn-secondary" type="button" data-vps-deploy-action="dry-run"${disabledAttr}>${escapeHtml(dryRunLabel)}</button>` +
+      `<button class="btn btn-small btn-danger" type="button" data-vps-deploy-action="run-live"${disabledAttr}>${escapeHtml(liveLabel)}</button>` +
+    '</div>'
+  );
+}
+
+function renderPreflightResult(result) {
+  if (!result) return '';
+  const lines = [
+    ...((result.blockedReasons || []).map(reason => ['Blocked', reason])),
+    ...((result.warnings || []).map(warning => ['Warning', warning])),
+    ...((result.logs || []).map(log => [log.message, log.detail || log.code])),
+  ];
+
+  return renderRunResultPanel('SSH preflight', result.state, lines, result.command?.redactedDisplay);
+}
+
+function renderDeploymentRunResult(result) {
+  if (!result) return '';
+  const commandLines = (result.commandStates || []).map(command => [
+    command.commandId,
+    `${command.status}${command.detail ? ` — ${command.detail}` : ''}`,
+  ]);
+  const logLines = (result.logs || []).map(log => [log.message, log.detail || log.code]);
+  const blockedLines = (result.manualBlockReasons || []).map(reason => ['Manual block', reason]);
+
+  return renderRunResultPanel('Deployment run', result.state, [
+    ...blockedLines,
+    ...commandLines,
+    ...logLines,
+  ]);
+}
+
+function renderRunResultPanel(title, state, rows, commandDisplay) {
+  const stateClass = ['success', 'dry-run'].includes(state) ? 'success'
+    : ['blocked', 'manual-blocked', 'failure'].includes(state) ? 'blocked'
+      : 'ready';
+  const command = commandDisplay
+    ? `<code>${escapeHtml(commandDisplay)}</code>`
+    : '';
+  const contentRows = rows.length > 0
+    ? renderPlanRows(rows)
+    : '<p>No result details returned.</p>';
+
+  return (
+    `<div class="deployment-run-result ${escapeHtml(stateClass)}">` +
+      '<div class="deployment-run-result-header">' +
+        `<h4>${escapeHtml(title)}</h4>` +
+        `<span>${escapeHtml(state)}</span>` +
+      '</div>' +
+      command +
+      contentRows +
+    '</div>'
+  );
+}
+
+function getApprovedDeploymentCommandIds(plan) {
+  return (plan?.commands || [])
+    .filter(command => command.approvalRequired)
+    .map(command => command.id);
 }
 
 function renderList(items) {
@@ -613,6 +720,64 @@ btnStart.addEventListener('click', async () => {
     btnStart.classList.remove('loading');
     setFieldsDisabled(false);
     isValidating = false;
+    await refreshSetupStatus();
+  }
+});
+
+vpsDeploymentPlan?.addEventListener('click', async (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest('[data-vps-deploy-action]');
+  if (!button || isVpsDeploymentActionRunning) return;
+
+  const action = button.dataset.vpsDeployAction;
+  isVpsDeploymentActionRunning = true;
+  setFieldsDisabled(true);
+  hideMessage();
+
+  try {
+    await saveConfig();
+    const currentSetup = await refreshSetupStatus();
+    const plan = currentSetup?.deploymentPlan;
+    if (!plan || plan.status !== 'ready') {
+      showMessage('error', 'Finish the VPS deployment plan before running preflight or deployment actions.');
+      return;
+    }
+    const actionPlanKey = getVpsDeploymentPlanKey(plan);
+    renderDeploymentPlan(plan, true);
+
+    if (action === 'preflight') {
+      vpsPreflightResult = await window.somnibot.runVpsPreflight();
+      vpsActionResultPlanKey = actionPlanKey;
+      showMessage(
+        vpsPreflightResult.state === 'success' ? 'success' : 'error',
+        vpsPreflightResult.state === 'success'
+          ? 'Read-only SSH preflight passed.'
+          : 'Read-only SSH preflight needs attention.',
+      );
+      return;
+    }
+
+    const dryRun = action !== 'run-live';
+    vpsDeploymentResult = await window.somnibot.runVpsDeployment({
+      operatorApproved: true,
+      approvedCommandIds: getApprovedDeploymentCommandIds(plan),
+      dryRun,
+    });
+    vpsActionResultPlanKey = actionPlanKey;
+    const ok = ['success', 'dry-run'].includes(vpsDeploymentResult.state);
+    showMessage(
+      ok ? 'success' : 'error',
+      dryRun
+        ? 'Deployment dry run completed. No live SSH or remote changes were made.'
+        : ok
+          ? 'VPS deployment completed.'
+          : 'VPS deployment did not complete.',
+    );
+  } catch (err) {
+    showMessage('error', `VPS action failed: ${err.message || err}`);
+  } finally {
+    isVpsDeploymentActionRunning = false;
+    setFieldsDisabled(false);
     await refreshSetupStatus();
   }
 });
@@ -839,14 +1004,14 @@ function renderOnboardingRuntimeStep() {
   const isVps = runtimeMode === 'vps';
   onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Public Callbacks';
   onboardingRuntimeDesc.textContent = isVps
-    ? 'VPS mode needs a domain, SSH target, and manual deployment readiness before credentials can be validated.'
+    ? 'VPS mode needs a domain, SSH target, and guided deployment readiness before credentials can be validated.'
     : 'Regular local mode needs Tailscale Funnel readiness before credentials can be validated.';
 
   const items = isVps
     ? [
       ['Domain', 'Use the HTTPS domain that will serve the dashboard and receive provider callbacks.'],
       ['SSH target', 'Enter host, user, and deploy path on the setup screen. Do not enter private keys or passwords.'],
-      ['Manual deploy', 'The launcher records readiness details but does not run SSH or deploy commands in this build.'],
+      ['Guided deploy', 'The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.'],
     ]
     : [
       ['Tailscale Funnel', 'Enable Funnel for this machine so providers can reach the dashboard over HTTPS.'],
