@@ -41,6 +41,7 @@ import {
   getValkeyError,
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
+import { createVpsCommandRunner } from './vps-command-runner.js';
 import { runVpsDeployment } from './vps-deployment-executor.js';
 import { buildVpsDeploymentPlan } from './vps-deployment-plan.js';
 
@@ -398,6 +399,7 @@ function registerIpcHandlers(): void {
       approvedCommandIds: Array.isArray(request?.approvedCommandIds) ? request.approvedCommandIds : [],
       dryRun: request?.dryRun !== false,
       cancelRequested: Boolean(request?.cancelRequested),
+      ...(request?.dryRun === false ? { commandRunner: createVpsCommandRunner() } : {}),
     });
   });
 
