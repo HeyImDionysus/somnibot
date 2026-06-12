@@ -6,7 +6,7 @@
  * to the updater module.
  */
 
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -42,8 +42,9 @@ import {
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
 import { createVpsCommandRunner } from './vps-command-runner.js';
-import { runVpsDeployment } from './vps-deployment-executor.js';
-import { buildVpsDeploymentPlan } from './vps-deployment-plan.js';
+import { VpsDeploymentRunGate } from './vps-deployment-executor.js';
+import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
+import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -59,6 +60,7 @@ if (!gotLock) {
 
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
+const activeVpsDeployment = new VpsDeploymentRunGate();
 
 async function createWindow(): Promise<void> {
   const config = getConfig();
@@ -370,39 +372,14 @@ function registerIpcHandlers(): void {
   // ── App info ──
   ipcMain.handle('get-version', () => app.getVersion());
 
-  ipcMain.handle('vps:run-deployment', async (_event, request: {
-    operatorApproved: boolean;
-    approvedCommandIds: string[];
-    dryRun?: boolean;
-    cancelRequested?: boolean;
-  }) => {
+  ipcMain.handle('vps:run-deployment', async (_event, request: VpsDeploymentRunRequest) => {
     const cfg = getConfig();
-    const commandRunner = request?.dryRun === false && cfg.runtimeMode === 'vps'
-      ? createVpsCommandRunner()
-      : undefined;
-    const plan = buildVpsDeploymentPlan({
-      runtimeMode: cfg.runtimeMode,
-      vpsDomain: cfg.vpsDomain,
-      vpsSshHost: cfg.vpsSshHost,
-      vpsSshUser: cfg.vpsSshUser,
-      vpsDeployPath: cfg.vpsDeployPath,
-      credentialReady: Boolean(
-        cfg.discordToken
-        && cfg.discordApplicationId
-        && cfg.discordClientSecret
-        && cfg.supabaseUrl
-        && cfg.supabaseSecretKey
-        && cfg.supabasePublishableKey,
-      ),
-    });
-
-    return runVpsDeployment({
-      plan,
-      operatorApproved: Boolean(request?.operatorApproved),
-      approvedCommandIds: Array.isArray(request?.approvedCommandIds) ? request.approvedCommandIds : [],
-      dryRun: request?.dryRun !== false,
-      cancelRequested: Boolean(request?.cancelRequested),
-      ...(commandRunner ? { commandRunner } : {}),
+    return handleVpsDeploymentRunRequest(cfg, request, {
+      confirmApproval: (plan) => confirmVpsDeploymentApproval(plan, {
+        showMessageBox: (options) => dialog.showMessageBox(options),
+      }),
+      createCommandRunner: createVpsCommandRunner,
+      runGate: activeVpsDeployment,
     });
   });
 

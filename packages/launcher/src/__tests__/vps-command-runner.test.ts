@@ -123,13 +123,19 @@ describe('VPS command runner', () => {
   it('keeps the IPC live path wired to the structured runner only when dryRun is false and VPS mode is selected', () => {
     const runnerSource = readFileSync(path.join(srcDir, 'main', 'vps-command-runner.ts'), 'utf8');
     const mainSource = readFileSync(path.join(srcDir, 'main', 'index.ts'), 'utf8');
+    const requestSource = readFileSync(path.join(srcDir, 'main', 'vps-deployment-request.ts'), 'utf8');
 
     expect(runnerSource).toContain('spawn(command.executable, command.args');
     expect(runnerSource).toContain('shell: false');
     expect(runnerSource).not.toContain('exec(');
     expect(runnerSource).not.toContain('execFile');
-    expect(mainSource).toContain("request?.dryRun === false && cfg.runtimeMode === 'vps'");
-    expect(mainSource).toContain('runtimeMode: cfg.runtimeMode');
-    expect(mainSource).not.toContain("runtimeMode: 'vps'");
+    expect(mainSource).toContain('handleVpsDeploymentRunRequest');
+    expect(mainSource).toContain('dialog.showMessageBox');
+    expect(mainSource).toContain('activeVpsDeployment');
+    expect(requestSource).toContain("request?.dryRun === false && config.runtimeMode === 'vps'");
+    expect(requestSource).toContain('runtimeMode: config.runtimeMode');
+    expect(requestSource).toContain('runtime.confirmApproval(plan)');
+    expect(requestSource).toContain('runtime.runGate.run(execute)');
+    expect(requestSource).not.toContain("runtimeMode: 'vps'");
   });
 });

@@ -19,14 +19,67 @@ let valkeyFailed = false;
 // V5 Audit §14.P2a: Ensure degradation warning logs once, not on every request.
 let _degradedWarningLogged = false;
 let pendingCallbacks: Array<(reply: string | number | null) => void> = [];
+let connectionWaiters: Array<(ready: boolean) => void> = [];
 
-function parseRedisUrl(url: string): { host: string; port: number } {
+function parseRedisUrl(url: string): { host: string; port: number; username: string; password: string } {
   try {
     const u = new URL(url);
-    return { host: u.hostname || '127.0.0.1', port: Number(u.port) || 6379 };
+    return {
+      host: u.hostname || '127.0.0.1',
+      port: Number(u.port) || 6379,
+      username: decodeURIComponent(u.username || ''),
+      password: decodeURIComponent(u.password || ''),
+    };
   } catch {
-    return { host: '127.0.0.1', port: 6379 };
+    return { host: '127.0.0.1', port: 6379, username: '', password: '' };
   }
+}
+
+function encodeCommand(...args: (string | number)[]): string {
+  let cmd = `*${args.length}\r\n`;
+  for (const arg of args) {
+    const s = String(arg);
+    cmd += `$${Buffer.byteLength(s)}\r\n${s}\r\n`;
+  }
+  return cmd;
+}
+
+function resolveConnectionWaiters(ready: boolean): void {
+  for (const waiter of connectionWaiters) waiter(ready);
+  connectionWaiters = [];
+}
+
+function rejectPendingCallbacks(): void {
+  for (const cb of pendingCallbacks) cb(null);
+  pendingCallbacks = [];
+}
+
+function waitForValkeyReady(timeoutMs = 1000): Promise<boolean> {
+  if (valkeyReady) return Promise.resolve(true);
+  if (!valkeySocket || valkeyFailed) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const waiter = (ready: boolean) => {
+      clearTimeout(timeout);
+      resolve(ready);
+    };
+    timeout = setTimeout(() => {
+      const idx = connectionWaiters.indexOf(waiter);
+      if (idx !== -1) connectionWaiters.splice(idx, 1);
+      resolve(false);
+    }, timeoutMs);
+
+    connectionWaiters.push(waiter);
+  });
+}
+
+async function ensureValkeyReady(): Promise<boolean> {
+  if (ensureValkey() && valkeyReady) return true;
+  if (valkeySocket && !valkeyReady) {
+    return waitForValkeyReady();
+  }
+  return false;
 }
 
 function ensureValkey(): boolean {
@@ -40,7 +93,7 @@ function ensureValkey(): boolean {
     return false;
   }
 
-  const { host, port } = parseRedisUrl(url);
+  const { host, port, username, password } = parseRedisUrl(url);
 
   try {
     const sock = createConnection({ host, port, timeout: 2000 });
@@ -49,7 +102,25 @@ function ensureValkey(): boolean {
     let buffer = '';
 
     sock.on('connect', () => {
-      valkeyReady = true;
+      if (!password) {
+        valkeyReady = true;
+        resolveConnectionWaiters(true);
+        return;
+      }
+
+      pendingCallbacks.push((reply) => {
+        if (reply === 'OK') {
+          valkeyReady = true;
+          resolveConnectionWaiters(true);
+          return;
+        }
+
+        valkeyFailed = true;
+        valkeyReady = false;
+        resolveConnectionWaiters(false);
+        sock.destroy();
+      });
+      sock.write(username ? encodeCommand('AUTH', username, password) : encodeCommand('AUTH', password));
     });
 
     sock.on('data', (data) => {
@@ -100,22 +171,27 @@ function ensureValkey(): boolean {
       valkeyFailed = true;
       valkeyReady = false;
       valkeySocket = null;
-      // Reject all pending
-      for (const cb of pendingCallbacks) cb(null);
-      pendingCallbacks = [];
+      resolveConnectionWaiters(false);
+      rejectPendingCallbacks();
     });
 
     sock.on('close', () => {
       valkeyReady = false;
       valkeySocket = null;
+      resolveConnectionWaiters(false);
+      rejectPendingCallbacks();
     });
 
     sock.on('timeout', () => {
       valkeyFailed = true;
+      resolveConnectionWaiters(false);
+      rejectPendingCallbacks();
       sock.destroy();
     });
   } catch {
     valkeyFailed = true;
+    resolveConnectionWaiters(false);
+    rejectPendingCallbacks();
   }
 
   return false;
@@ -128,15 +204,8 @@ function sendCommand(...args: (string | number)[]): Promise<string | number | nu
       return;
     }
 
-    // Build RESP array
-    let cmd = `*${args.length}\r\n`;
-    for (const arg of args) {
-      const s = String(arg);
-      cmd += `$${Buffer.byteLength(s)}\r\n${s}\r\n`;
-    }
-
     pendingCallbacks.push(resolve);
-    valkeySocket.write(cmd);
+    valkeySocket.write(encodeCommand(...args));
 
     // Safety timeout per command
     setTimeout(() => {
@@ -324,7 +393,7 @@ export async function checkRateLimit(
  * Returns true if Valkey is connected and responds to PING.
  */
 export async function checkValkeyHealth(): Promise<boolean> {
-  if (!ensureValkey() || !valkeyReady) return false;
+  if (!await ensureValkeyReady()) return false;
   try {
     const reply = await sendCommand('PING');
     return reply === 'PONG';
@@ -338,7 +407,7 @@ export async function checkValkeyHealth(): Promise<boolean> {
  * to check bot heartbeat without exposing the internal sendCommand.
  */
 export async function readValkeyKey(key: string): Promise<string | null> {
-  if (!ensureValkey() || !valkeyReady) return null;
+  if (!await ensureValkeyReady()) return null;
   try {
     const reply = await sendCommand('GET', key);
     return typeof reply === 'string' ? reply : null;

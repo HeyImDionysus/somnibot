@@ -60,6 +60,34 @@ export interface VpsDeploymentExecutionResult {
   redactedOutput?: string[];
 }
 
+export class VpsDeploymentRunGate {
+  private active: Promise<VpsDeploymentExecutionResult> | null = null;
+
+  run(execute: () => Promise<VpsDeploymentExecutionResult>): Promise<VpsDeploymentExecutionResult> {
+    if (this.active) return this.active;
+
+    let active: Promise<VpsDeploymentExecutionResult> | null = null;
+    const clearActive = (): void => {
+      if (active && this.active === active) {
+        this.active = null;
+      }
+    };
+
+    active = execute().then(
+      (result) => {
+        clearActive();
+        return result;
+      },
+      (error: unknown) => {
+        clearActive();
+        throw error;
+      },
+    );
+    this.active = active;
+    return active;
+  }
+}
+
 const REDACTED_PATTERNS = [
   /(DISCORD_TOKEN|DISCORD_CLIENT_SECRET|SUPABASE_SECRET_KEY|PAYPAL_CLIENT_SECRET|PAYPAL_WEBHOOK_ID|VALKEY_PASSWORD|LAVALINK_PASSWORD|NEXTAUTH_SECRET|CSRF_SECRET|WEBHOOK_REPLAY_SECRET)=[^\s,;]+/g,
   /(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi,

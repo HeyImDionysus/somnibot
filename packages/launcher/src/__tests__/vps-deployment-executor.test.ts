@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { type VpsCommandRunResult, runVpsDeployment } from '../main/vps-deployment-executor';
+import {
+  type VpsCommandRunResult,
+  type VpsDeploymentExecutionResult,
+  VpsDeploymentRunGate,
+  runVpsDeployment,
+} from '../main/vps-deployment-executor';
 import { buildVpsDeploymentPlan, type VpsDeploymentCommand } from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +35,18 @@ function successfulCommandResult(command: VpsDeploymentCommand): VpsCommandRunRe
     return { ok: true, output: JSON.stringify({ status: command.expectedHealthStatus }) };
   }
   return { ok: true };
+}
+
+function executionResult(state: VpsDeploymentExecutionResult['state']): VpsDeploymentExecutionResult {
+  return {
+    state,
+    planStatus: 'ready',
+    canRetry: false,
+    commandStates: [],
+    logs: [],
+    manualBlockReasons: [],
+    redactedOutput: [],
+  };
 }
 
 describe('VPS deployment execution bridge', () => {
@@ -217,6 +234,37 @@ describe('VPS deployment execution bridge', () => {
     expect(result.state).toBe('retry');
     expect(result.canRetry).toBe(true);
     expect(result.logs.some((log) => log.code === 'vps-deployment-retry')).toBe(true);
+  });
+
+  it('coalesces concurrent live invocations and resets after completion', async () => {
+    const gate = new VpsDeploymentRunGate();
+    const firstResult = executionResult('success');
+    const secondResult = executionResult('dry-run');
+    let runnerCalls = 0;
+    let releaseFirst: ((result: VpsDeploymentExecutionResult) => void) | undefined;
+
+    const first = gate.run(() => {
+      runnerCalls += 1;
+      return new Promise<VpsDeploymentExecutionResult>((resolve) => {
+        releaseFirst = resolve;
+      });
+    });
+    const concurrent = gate.run(async () => {
+      runnerCalls += 1;
+      return secondResult;
+    });
+
+    expect(concurrent).toBe(first);
+    expect(runnerCalls).toBe(1);
+    expect(releaseFirst).toBeDefined();
+    releaseFirst?.(firstResult);
+    await expect(concurrent).resolves.toBe(firstResult);
+
+    await expect(gate.run(async () => {
+      runnerCalls += 1;
+      return secondResult;
+    })).resolves.toBe(secondResult);
+    expect(runnerCalls).toBe(2);
   });
 
   it('contains no shell-string command execution primitives by default', () => {
