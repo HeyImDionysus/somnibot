@@ -60,7 +60,11 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('window.somnibot.runVpsPreflight()');
     expect(renderer).toContain('window.somnibot.runVpsDeployment({');
     expect(renderer).toContain("const dryRun = action !== 'run-live';");
+    expect(renderer).toContain('await saveConfig();');
+    expect(renderer).toContain('const currentSetup = await refreshSetupStatus();');
     expect(renderer).toContain('approvedCommandIds: getApprovedDeploymentCommandIds(plan)');
+    expect(renderer).toContain('clearStaleVpsActionResults(status);');
+    expect(renderer).toContain('vpsActionResultPlanKey = actionPlanKey;');
     expect(renderer).toContain('<h4>Environment shape</h4>');
     expect(renderer).toContain('<h4>Caddy/reverse proxy</h4>');
     expect(renderer).toContain('<h4>Approval gates</h4>');
@@ -83,6 +87,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain("ipcMain.handle('vps:run-preflight'");
     expect(main).toContain('planVpsSshPreflight({');
     expect(main).toContain('createVpsCommandRunner()');
+    expect(main).toContain('redactVpsDeploymentText(result.error)');
     expect(main).toContain("ipcMain.handle('vps:run-deployment'");
     expect(main).toContain('runtimeMode: input.runtimeMode ?? config.runtimeMode');
     expect(main).toContain('publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl');

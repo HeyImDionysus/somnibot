@@ -111,6 +111,7 @@ let tailscalePublicCallbackBaseUrl = '';
 let tailscaleReadinessSeq = 0;
 let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
+let vpsActionResultPlanKey = '';
 let isVpsDeploymentActionRunning = false;
 
 /* ================================================================== */
@@ -313,11 +314,39 @@ async function refreshSetupStatus(options = {}) {
     const status = await window.somnibot.getSetupStatus(input);
     if (seq !== setupStatusSeq) return setupStatus;
     setupStatus = status;
+    clearStaleVpsActionResults(status);
     renderSetupStatus(status);
     return status;
   } catch (err) {
     console.error('Failed to refresh setup status:', err);
     return setupStatus;
+  }
+}
+
+function getVpsDeploymentPlanKey(plan) {
+  const target = plan?.target;
+  if (!target) return '';
+  return [
+    target.publicBaseUrl,
+    target.sshTarget,
+    target.deployPath,
+    target.envFilePath,
+  ].join('|');
+}
+
+function clearStaleVpsActionResults(status) {
+  const planKey = getVpsDeploymentPlanKey(status?.deploymentPlan);
+  if (!planKey) {
+    vpsPreflightResult = null;
+    vpsDeploymentResult = null;
+    vpsActionResultPlanKey = '';
+    return;
+  }
+
+  if (vpsActionResultPlanKey && vpsActionResultPlanKey !== planKey) {
+    vpsPreflightResult = null;
+    vpsDeploymentResult = null;
+    vpsActionResultPlanKey = '';
   }
 }
 
@@ -701,20 +730,24 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
   if (!button || isVpsDeploymentActionRunning) return;
 
   const action = button.dataset.vpsDeployAction;
-  const plan = setupStatus?.deploymentPlan;
-  if (!plan || plan.status !== 'ready') {
-    showMessage('error', 'Finish the VPS deployment plan before running preflight or deployment actions.');
-    return;
-  }
-
   isVpsDeploymentActionRunning = true;
-  renderDeploymentPlan(plan, true);
   setFieldsDisabled(true);
   hideMessage();
 
   try {
+    await saveConfig();
+    const currentSetup = await refreshSetupStatus();
+    const plan = currentSetup?.deploymentPlan;
+    if (!plan || plan.status !== 'ready') {
+      showMessage('error', 'Finish the VPS deployment plan before running preflight or deployment actions.');
+      return;
+    }
+    const actionPlanKey = getVpsDeploymentPlanKey(plan);
+    renderDeploymentPlan(plan, true);
+
     if (action === 'preflight') {
       vpsPreflightResult = await window.somnibot.runVpsPreflight();
+      vpsActionResultPlanKey = actionPlanKey;
       showMessage(
         vpsPreflightResult.state === 'success' ? 'success' : 'error',
         vpsPreflightResult.state === 'success'
@@ -730,6 +763,7 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
       approvedCommandIds: getApprovedDeploymentCommandIds(plan),
       dryRun,
     });
+    vpsActionResultPlanKey = actionPlanKey;
     const ok = ['success', 'dry-run'].includes(vpsDeploymentResult.state);
     showMessage(
       ok ? 'success' : 'error',

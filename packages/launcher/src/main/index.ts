@@ -42,7 +42,7 @@ import {
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
 import { createVpsCommandRunner } from './vps-command-runner.js';
-import { VpsDeploymentRunGate } from './vps-deployment-executor.js';
+import { VpsDeploymentRunGate, redactVpsDeploymentText } from './vps-deployment-executor.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
 import { planVpsSshPreflight } from './vps-preflight.js';
@@ -433,6 +433,7 @@ function registerIpcHandlers(): void {
     };
     const result = await runner(command, { index: 0, total: 1 });
     const state = result.ok ? 'success' : result.retriable ? 'retry' : 'failure';
+    const redactedError = result.error ? redactVpsDeploymentText(result.error) : undefined;
 
     return {
       state,
@@ -448,7 +449,7 @@ function registerIpcHandlers(): void {
           level: result.ok ? 'info' : 'error',
           code: result.ok ? 'vps-preflight-success' : 'vps-preflight-failure',
           message: result.ok ? 'Read-only SSH preflight passed.' : 'Read-only SSH preflight failed.',
-          detail: result.ok ? 'The deployment directory exists and SSH returned success.' : result.error,
+          detail: result.ok ? 'The deployment directory exists and SSH returned success.' : redactedError,
         },
       ],
     };

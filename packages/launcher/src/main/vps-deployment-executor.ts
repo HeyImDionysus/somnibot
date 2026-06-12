@@ -96,8 +96,12 @@ const REDACTED_PATTERNS = [
   /(redis:\/\/):[^@]+(@valkey:6379)/g,
 ];
 
-function redactText(value: string): string {
+export function redactVpsDeploymentText(value: string): string {
   return REDACTED_PATTERNS.reduce((next, pattern) => next.replace(pattern, '$1[redacted]'), value);
+}
+
+function redactText(value: string): string {
+  return redactVpsDeploymentText(value);
 }
 
 function commandRequiresApproval(command: VpsDeploymentCommand, approvedCommandIds: Set<string>): boolean {
