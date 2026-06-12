@@ -266,6 +266,10 @@ main::-webkit-scrollbar-thumb:hover {
   color: var(--text-muted);
 }
 
+.summary-row.summary-derived {
+  background: rgba(0, 212, 255, 0.03);
+}
+
 .summary-row strong {
   color: var(--text-primary);
   font-weight: 600;
