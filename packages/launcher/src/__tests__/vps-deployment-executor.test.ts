@@ -102,6 +102,30 @@ describe('VPS deployment execution bridge', () => {
     expect(result.commandStates.find((command) => command.commandId === 'check-stack')?.detail).not.toContain(secret);
   });
 
+  it('hands live runners SSH-wrapped remote commands instead of local docker or chmod commands', async () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const executedCommands: Array<{ id: string; executable: string; args: string[] }> = [];
+
+    const result = await runVpsDeployment({
+      ...buildRequestOverrides(plan),
+      dryRun: false,
+      commandRunner: async (command) => {
+        executedCommands.push({ id: command.id, executable: command.executable, args: command.args });
+        return { ok: true };
+      },
+    });
+
+    expect(result.state).toBe('success');
+    expect(executedCommands.find(command => command.id === 'protect-env-file')).toMatchObject({
+      executable: 'ssh',
+      args: expect.arrayContaining(['deploy@somnibot.example.com', 'chmod', '0600', '/opt/somnibot/.env']),
+    });
+    expect(executedCommands.find(command => command.id === 'start-stack')).toMatchObject({
+      executable: 'ssh',
+      args: expect.arrayContaining(['deploy@somnibot.example.com', 'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml']),
+    });
+  });
+
   it('returns cancellation state without changing command output when user cancels before run', async () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const result = await runVpsDeployment({

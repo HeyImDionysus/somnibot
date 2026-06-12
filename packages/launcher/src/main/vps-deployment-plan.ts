@@ -84,6 +84,14 @@ export interface VpsDeploymentPlan {
 }
 
 export const ENV_FILE_PERMISSIONS = '0600' as const;
+const SSH_BASE_ARGS = [
+  '-o',
+  'BatchMode=yes',
+  '-o',
+  'ConnectTimeout=10',
+  '-o',
+  'StrictHostKeyChecking=accept-new',
+] as const;
 const COMPOSE_FILE = 'docker-compose.prod.yml';
 const CADDY_FILE = 'services/caddy/Caddyfile';
 
@@ -180,33 +188,42 @@ function buildCommand(executable: string, args: string[], options: Pick<VpsDeplo
   };
 }
 
-function buildCommands(deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
+function buildRemoteCommand(
+  sshTarget: string,
+  remoteExecutable: string,
+  remoteArgs: string[],
+  options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'>,
+): VpsDeploymentCommand {
+  return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
+}
+
+function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
 
   return [
-    buildCommand('test', ['-d', deployPath], {
+    buildRemoteCommand(sshTarget, 'test', ['-d', deployPath], {
       id: 'enter-deploy-path',
-      label: 'Open deployment directory',
+      label: 'Verify deployment directory',
       changesRemote: false,
       approvalRequired: false,
       commandCategory: 'service',
     }),
-    buildCommand('chmod', [ENV_FILE_PERMISSIONS, envFilePath], {
+    buildRemoteCommand(sshTarget, 'chmod', [ENV_FILE_PERMISSIONS, envFilePath], {
       id: 'protect-env-file',
       label: 'Protect VPS env file',
       changesRemote: true,
       approvalRequired: true,
       commandCategory: 'env',
     }),
-    buildCommand('docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
       id: 'start-stack',
       label: 'Build and start production stack',
       changesRemote: true,
       approvalRequired: true,
       commandCategory: 'service',
     }),
-    buildCommand('docker', ['compose', '-f', composeFilePath, 'ps'], {
+    buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'ps'], {
       id: 'check-stack',
       label: 'Check container status',
       changesRemote: false,
@@ -223,25 +240,25 @@ function buildCommands(deployPath: string, publicBaseUrl: string): VpsDeployment
   ];
 }
 
-function buildRollback(composeFilePath: string, publicBaseUrl: string): VpsDeploymentPlan['rollback'] {
+function buildRollback(sshTarget: string, deployPath: string, composeFilePath: string, publicBaseUrl: string): VpsDeploymentPlan['rollback'] {
   return {
     summary: 'Return the VPS checkout to a last known-good commit, rebuild containers, and verify dashboard health before calling rollback complete.',
     commands: [
-      buildCommand('git', ['fetch', 'origin'], {
+      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'fetch', 'origin'], {
         id: 'rollback-fetch',
         label: 'Refresh remote refs',
         changesRemote: false,
         approvalRequired: false,
         commandCategory: 'service',
       }),
-      buildCommand('git', ['checkout', '<last-good-commit>'], {
+      buildRemoteCommand(sshTarget, 'git', ['-C', deployPath, 'checkout', '<last-good-commit>'], {
         id: 'rollback-checkout',
         label: 'Checkout approved known-good commit',
         changesRemote: true,
         approvalRequired: true,
         commandCategory: 'service',
       }),
-      buildCommand('docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
+      buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'up', '-d', '--build'], {
         id: 'rollback-rebuild',
         label: 'Rebuild containers from known-good commit',
         changesRemote: true,
@@ -389,7 +406,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         'Valkey and Lavalink stay on the private Docker network and are never exposed publicly.',
       ],
     },
-    commands: buildCommands(deployPath, profile.publicCallbackBaseUrl),
+    commands: buildCommands(`${sshUser}@${sshHost}`, deployPath, profile.publicCallbackBaseUrl),
     approvalGates: [
       {
         id: 'dns-domain',
@@ -416,6 +433,6 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         requiredBefore: 'Any remote process change.',
       },
     ],
-    rollback: buildRollback(composeFilePath, profile.publicCallbackBaseUrl),
+    rollback: buildRollback(`${sshUser}@${sshHost}`, deployPath, composeFilePath, profile.publicCallbackBaseUrl),
   };
 }

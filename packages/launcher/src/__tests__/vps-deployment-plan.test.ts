@@ -87,8 +87,24 @@ describe('VPS deployment plan generator', () => {
     expect(plan.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'start-stack',
-        executable: 'docker',
-        args: ['compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build'],
+        executable: 'ssh',
+        args: [
+          '-o',
+          'BatchMode=yes',
+          '-o',
+          'ConnectTimeout=10',
+          '-o',
+          'StrictHostKeyChecking=accept-new',
+          '--',
+          'deploy@somnibot.example.com',
+          'docker',
+          'compose',
+          '-f',
+          '/opt/somnibot/docker-compose.prod.yml',
+          'up',
+          '-d',
+          '--build',
+        ],
         changesRemote: true,
         approvalRequired: true,
       }),
@@ -103,14 +119,14 @@ describe('VPS deployment plan generator', () => {
     expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'rollback-checkout',
-        executable: 'git',
-        args: ['checkout', '<last-good-commit>'],
+        executable: 'ssh',
+        args: expect.arrayContaining(['deploy@somnibot.example.com', 'git', '-C', '/opt/somnibot', 'checkout', '<last-good-commit>']),
         approvalRequired: true,
       }),
       expect.objectContaining({
         id: 'rollback-rebuild',
-        executable: 'docker',
-        args: ['compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build'],
+        executable: 'ssh',
+        args: expect.arrayContaining(['deploy@somnibot.example.com', 'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build']),
         approvalRequired: true,
       }),
       expect.objectContaining({
@@ -129,11 +145,27 @@ describe('VPS deployment plan generator', () => {
     expect(plan.environment?.permissions).toBe('0600');
     expect(plan.commands).toContainEqual(expect.objectContaining({
       id: 'protect-env-file',
-      executable: 'chmod',
-      args: ['0600', '/opt/somnibot/.env'],
+      executable: 'ssh',
+      args: expect.arrayContaining(['deploy@somnibot.example.com', 'chmod', '0600', '/opt/somnibot/.env']),
       changesRemote: true,
       approvalRequired: true,
     }));
+  });
+
+  it('routes remote VPS commands through SSH so live runners cannot execute them locally', () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+    const remoteCommands = [
+      ...plan.commands.filter(command => command.id !== 'check-health'),
+      ...(plan.rollback?.commands.filter(command => command.id !== 'rollback-health') ?? []),
+    ];
+
+    expect(remoteCommands).not.toHaveLength(0);
+    expect(remoteCommands.every(command => command.executable === 'ssh')).toBe(true);
+    for (const command of remoteCommands) {
+      expect(command.args).toEqual(expect.arrayContaining(['--', 'deploy@somnibot.example.com']));
+      expect(command.redactedDisplay).toContain('ssh ');
+      expect(command.redactedDisplay).toContain('deploy@somnibot.example.com');
+    }
   });
 
   it('blocks non-VPS mode and missing readiness fields without producing command plans', () => {
