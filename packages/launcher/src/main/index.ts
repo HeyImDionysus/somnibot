@@ -6,7 +6,7 @@
  * to the updater module.
  */
 
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,10 @@ import {
   getValkeyError,
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
+import { createVpsCommandRunner } from './vps-command-runner.js';
+import { VpsDeploymentRunGate } from './vps-deployment-executor.js';
+import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
+import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -56,6 +60,7 @@ if (!gotLock) {
 
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
+const activeVpsDeployment = new VpsDeploymentRunGate();
 
 async function createWindow(): Promise<void> {
   const config = getConfig();
@@ -366,6 +371,17 @@ function registerIpcHandlers(): void {
 
   // ── App info ──
   ipcMain.handle('get-version', () => app.getVersion());
+
+  ipcMain.handle('vps:run-deployment', async (_event, request: VpsDeploymentRunRequest) => {
+    const cfg = getConfig();
+    return handleVpsDeploymentRunRequest(cfg, request, {
+      confirmApproval: (plan) => confirmVpsDeploymentApproval(plan, {
+        showMessageBox: (options) => dialog.showMessageBox(options),
+      }),
+      createCommandRunner: createVpsCommandRunner,
+      runGate: activeVpsDeployment,
+    });
+  });
 
   // ── Phase 6: First-run onboarding ──
   ipcMain.handle('is-first-run', () => {

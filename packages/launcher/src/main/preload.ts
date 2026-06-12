@@ -58,6 +58,27 @@ export interface SomniBotAPI {
     credentials?: Record<string, string>;
     error?: string;
   }>;
+  runVpsDeployment: (payload: {
+    operatorApproved: boolean;
+    approvedCommandIds: string[];
+    dryRun?: boolean;
+    cancelRequested?: boolean;
+  }) => Promise<{
+    state: string;
+    planStatus: string;
+    canRetry: boolean;
+    commandStates: Array<{
+      commandId: string;
+      executable: string;
+      redactedDisplay: string;
+      status: 'pending' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
+      detail?: string;
+    }>;
+    logs: Array<{ level: string; code: string; message: string; detail?: string }>;
+    manualBlockReasons: string[];
+    blockedReason?: string;
+    redactedOutput?: string[];
+  }>;
 
   // Tailscale / public callback readiness
   getTailscaleReadiness: () => Promise<Record<string, unknown>>;
@@ -139,6 +160,7 @@ contextBridge.exposeInMainWorld('somnibot', {
   // Cloud sync
   // V5 Audit §10.P3a: Secret stays in main process
   pullFromSupabase: () => ipcRenderer.invoke('pull-from-supabase'),
+  runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload),
 
   // Tailscale / public callback readiness
   getTailscaleReadiness: () => ipcRenderer.invoke('tailscale:get-readiness'),
