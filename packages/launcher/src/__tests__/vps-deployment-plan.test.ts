@@ -87,21 +87,53 @@ describe('VPS deployment plan generator', () => {
     expect(plan.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'start-stack',
-        command: 'docker compose -f docker-compose.prod.yml up -d --build',
+        executable: 'docker',
+        args: ['compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build'],
         changesRemote: true,
         approvalRequired: true,
       }),
       expect.objectContaining({
         id: 'check-health',
-        command: 'curl -fsS https://somnibot.example.com/api/health',
+        executable: 'curl',
+        args: ['-fsS', 'https://somnibot.example.com/api/health'],
         changesRemote: false,
         approvalRequired: false,
       }),
     ]));
     expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'rollback-checkout', command: 'git checkout <last-good-commit>', approvalRequired: true }),
-      expect.objectContaining({ id: 'rollback-rebuild', command: 'docker compose -f docker-compose.prod.yml up -d --build', approvalRequired: true }),
+      expect.objectContaining({
+        id: 'rollback-checkout',
+        executable: 'git',
+        args: ['checkout', '<last-good-commit>'],
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'rollback-rebuild',
+        executable: 'docker',
+        args: ['compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build'],
+        approvalRequired: true,
+      }),
+      expect.objectContaining({
+        id: 'rollback-health',
+        executable: 'curl',
+        args: ['-fsS', 'https://somnibot.example.com/api/health'],
+        approvalRequired: false,
+      }),
     ]));
+  });
+
+  it('uses restrictive file permissions for env file steps', () => {
+    const plan = buildVpsDeploymentPlan(completeVpsInput);
+
+    expect(plan.target?.envFilePermissions).toBe('0600');
+    expect(plan.environment?.permissions).toBe('0600');
+    expect(plan.commands).toContainEqual(expect.objectContaining({
+      id: 'protect-env-file',
+      executable: 'chmod',
+      args: ['0600', '/opt/somnibot/.env'],
+      changesRemote: true,
+      approvalRequired: true,
+    }));
   });
 
   it('blocks non-VPS mode and missing readiness fields without producing command plans', () => {

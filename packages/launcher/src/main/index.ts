@@ -41,6 +41,8 @@ import {
   getValkeyError,
   isValkeyBinaryPresent,
 } from './valkey-manager.js';
+import { runVpsDeployment } from './vps-deployment-executor.js';
+import { buildVpsDeploymentPlan } from './vps-deployment-plan.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -366,6 +368,38 @@ function registerIpcHandlers(): void {
 
   // ── App info ──
   ipcMain.handle('get-version', () => app.getVersion());
+
+  ipcMain.handle('vps:run-deployment', async (_event, request: {
+    operatorApproved: boolean;
+    approvedCommandIds: string[];
+    dryRun?: boolean;
+    cancelRequested?: boolean;
+  }) => {
+    const cfg = getConfig();
+    const plan = buildVpsDeploymentPlan({
+      runtimeMode: 'vps',
+      vpsDomain: cfg.vpsDomain,
+      vpsSshHost: cfg.vpsSshHost,
+      vpsSshUser: cfg.vpsSshUser,
+      vpsDeployPath: cfg.vpsDeployPath,
+      credentialReady: Boolean(
+        cfg.discordToken
+        && cfg.discordApplicationId
+        && cfg.discordClientSecret
+        && cfg.supabaseUrl
+        && cfg.supabaseSecretKey
+        && cfg.supabasePublishableKey,
+      ),
+    });
+
+    return runVpsDeployment({
+      plan,
+      operatorApproved: Boolean(request?.operatorApproved),
+      approvedCommandIds: Array.isArray(request?.approvedCommandIds) ? request.approvedCommandIds : [],
+      dryRun: request?.dryRun !== false,
+      cancelRequested: Boolean(request?.cancelRequested),
+    });
+  });
 
   // ── Phase 6: First-run onboarding ──
   ipcMain.handle('is-first-run', () => {

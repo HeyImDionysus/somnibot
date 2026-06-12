@@ -476,13 +476,14 @@ function renderEnvVar(variable) {
 function renderCommands(commands) {
   return commands.map((command) => {
     const approval = command.approvalRequired ? 'approval required' : 'read-only';
+    const display = command.redactedDisplay || command.redactedArgs?.join(' ') || command.command;
     return (
       '<div class="deployment-command">' +
         '<div>' +
           `<strong>${escapeHtml(command.label)}</strong>` +
           `<span>${escapeHtml(approval)}</span>` +
         '</div>' +
-        `<code>${escapeHtml(command.command)}</code>` +
+        `<code>${escapeHtml(display)}</code>` +
       '</div>'
     );
   }).join('');
