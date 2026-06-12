@@ -17,6 +17,11 @@ Browser → Dashboard (Next.js 15) → Supabase (Postgres)
 
 ## Deployment
 
+Use the launcher/setup GUI first for regular-local and VPS setup. It is the
+owner-facing control surface for first-run values, public callback readiness,
+and VPS deployment planning. The commands below are manual fallback and
+operations reference, not the normal handoff path for a non-technical owner.
+
 ### Regular Local
 
 ```bash

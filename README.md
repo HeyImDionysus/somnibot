@@ -61,7 +61,7 @@ A full-featured Discord bot with a web dashboard. Moderation, levels, music, tic
 - **Incident Management** — Track and manage operational incidents
 
 ### Infrastructure
-- **Electron Launcher** — Desktop launcher for local deployment with auto-update
+- **Electron Launcher** — Primary setup/control surface for regular-local and VPS operation with auto-update
 - **License SDK** — `@somnibot/license-sdk` for third-party app integration
 
 ---
@@ -86,6 +86,12 @@ Before starting, make sure you have these installed on your computer:
 SomniBot uses pnpm only for workspace installs, scripts, and CI. Keep
 `pnpm-lock.yaml` as the only committed package-manager lockfile; do not commit
 `package-lock.json`, `yarn.lock`, or Bun lockfiles.
+
+The Electron launcher/setup GUI is the primary owner setup surface for both
+regular-local and VPS operation. It owns first-run runtime mode selection,
+non-secret public callback values, Tailscale readiness, VPS deployment planning,
+and the local dashboard URL operators use after setup. The scripts below remain
+manual fallback and development paths.
 
 ### Step 1: Create a Discord Bot
 
@@ -190,7 +196,14 @@ Save the file.
 4. Copy the generated URL at the bottom and open it in your browser.
 5. Select your Discord server from the dropdown → **Authorize**.
 
-### Step 6: Start Everything
+### Step 6: Start With the Launcher
+
+Use the SomniBot Launcher setup GUI for the normal owner path. The launcher
+checks your environment, records non-secret setup values, starts the local bot
+and dashboard, and keeps regular-local public callbacks tied to the dashboard
+port it owns.
+
+Manual fallback:
 
 **Mac / Linux:**
 ```bash
@@ -221,33 +234,45 @@ If you change `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, rebuild before starting again because
 those values are baked into the production dashboard build.
 
-### Step 7: First-Time Dashboard Setup
+### Step 7: First-Time Setup
 
-1. Go to [http://localhost:3000/setup](http://localhost:3000/setup).
-2. Follow the 4-step wizard — it verifies your Discord and Supabase connections and configures authentication.
-3. Once complete, go to [http://localhost:3000/login](http://localhost:3000/login) and click "Continue with Discord."
-4. You're in! Configure features from the sidebar.
+1. In the launcher setup GUI, choose regular-local mode.
+2. Follow the setup flow. It verifies Discord and Supabase values, records the
+   local dashboard URL, and guides public callback readiness when needed.
+3. If you are using the script fallback, go to
+   [http://localhost:3000/setup](http://localhost:3000/setup) and complete the
+   dashboard setup wizard.
+4. Once complete, open the launcher-provided dashboard URL or
+   [http://localhost:3000/login](http://localhost:3000/login) for the script
+   fallback, then click "Continue with Discord."
 
 ### Regular Local Public Callbacks
 
-For everyday local testing, `http://localhost:3000` is enough. For production
-regular-local operation, external providers need one stable public HTTPS callback
-base that forwards to the dashboard running on your machine.
+For everyday local testing, the launcher-provided local dashboard URL is enough.
+For production regular-local operation, external providers need one stable
+public HTTPS callback base that forwards to the dashboard running on your
+machine.
 
-Recommended default: use Tailscale Funnel to expose the local dashboard port:
+Normal path: use the launcher setup GUI. It checks whether Tailscale is ready,
+keeps the regular-local dashboard on its local operator port, and records the
+stable Funnel URL for public callbacks without turning secrets into documentation
+or logs.
+
+Manual fallback:
 
 ```bash
-tailscale funnel 3000
+tailscale funnel <dashboard-port>
 ```
 
 The command prints a public HTTPS URL like
 `https://your-machine.your-tailnet.ts.net`. Use that value as your
-`<public-callback-base>`.
+`<public-callback-base>`. The launcher-owned dashboard commonly uses
+`http://localhost:3456`; the script fallback uses `http://localhost:3000`.
 
 Set these values when you turn on public callbacks:
 
 ```env
-DASHBOARD_URL=http://localhost:3000
+DASHBOARD_URL=<local-operator-dashboard-url>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
@@ -256,7 +281,7 @@ Provider callback settings:
 
 | Provider | Value |
 |---|---|
-| Supabase Auth redirect allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` |
+| Supabase Auth redirect allow-list | `<local-operator-dashboard-url>/api/auth/callback`, `http://localhost:3000/api/auth/callback` for script fallback, and `<public-callback-base>/api/auth/callback` |
 | Discord app OAuth2 redirect for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
 
@@ -343,23 +368,30 @@ Use this when SomniBot runs on your own computer.
 
 | Piece | Regular local value |
 |---|---|
-| Bot | Started by `./scripts/start.sh` or `scripts\start.bat` |
-| Dashboard | Built standalone production server started by `./scripts/start.sh` or `scripts\start.bat` |
-| Dashboard local URL | `http://localhost:3000` |
-| Dashboard public callback URL | Stable HTTPS tunnel to local port 3000, preferably Tailscale Funnel |
+| Bot | Started by the launcher, or by `./scripts/start.sh` / `scripts\start.bat` as manual fallback |
+| Dashboard | Launcher-owned local dashboard, or standalone production server from the start scripts as manual fallback |
+| Dashboard local URL | Launcher-provided local URL, commonly `http://localhost:3456`; script fallback uses `http://localhost:3000` |
+| Dashboard public callback URL | Launcher-guided stable HTTPS tunnel to the dashboard port, preferably Tailscale Funnel |
 | Lavalink | Docker on `localhost:2333` |
 | Valkey/Redis | Docker on `redis://127.0.0.1:6379` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
-| Supabase dashboard callback allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` |
+| Supabase dashboard callback allow-list | `<local-operator-dashboard-url>/api/auth/callback`, `http://localhost:3000/api/auth/callback` for script fallback, and `<public-callback-base>/api/auth/callback` |
 | Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for automatic setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
 
-Set `DASHBOARD_URL=http://localhost:3000` so bot messages point to the local
-operator dashboard, and set `NEXT_PUBLIC_APP_URL=<public-callback-base>` when
-providers and customer-facing PayPal return links must use the public HTTPS URL.
+Set `DASHBOARD_URL` to the local operator dashboard URL shown by the launcher
+so bot messages point to the owner control surface. Set
+`NEXT_PUBLIC_APP_URL=<public-callback-base>` when providers and customer-facing
+PayPal return links must use the public HTTPS URL.
 
 ### VPS
 
 Use this when SomniBot should run 24/7 on a hosted Linux machine.
+
+The launcher/setup GUI is the primary VPS setup surface. It records the
+non-secret domain and SSH target details, builds a redacted deployment plan, and
+offers read-only preflight, dry-run deployment, and approval-gated deployment
+actions. Manual Docker commands remain a fallback path for operators who choose
+to run them directly.
 
 | Piece | VPS value |
 |---|---|
