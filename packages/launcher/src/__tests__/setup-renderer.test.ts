@@ -46,19 +46,28 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain("paypalWebhookUrl: 'PayPal webhook'");
   });
 
-  it('renders the review-only VPS deployment plan from setup status', () => {
+  it('renders the VPS deployment plan and approval-gated action controls from setup status', () => {
     const renderer = readSourceFile('renderer/renderer.js');
     const styles = readSourceFile('renderer/styles.css');
 
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
-    expect(renderer).toContain('Dry-run only. No SSH, Docker, DNS, or provider changes are run from this screen.');
-    expect(renderer).toContain('Review-only plan for the selected domain. Manual approval is required before any remote change.');
+    expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
+    expect(renderer).toContain('Review the plan, run a read-only SSH preflight, then use native approval before remote changes.');
+    expect(renderer).toContain('data-vps-deploy-action="preflight"');
+    expect(renderer).toContain('data-vps-deploy-action="dry-run"');
+    expect(renderer).toContain('data-vps-deploy-action="run-live"');
+    expect(renderer).toContain('window.somnibot.runVpsPreflight()');
+    expect(renderer).toContain('window.somnibot.runVpsDeployment({');
+    expect(renderer).toContain("const dryRun = action !== 'run-live';");
+    expect(renderer).toContain('approvedCommandIds: getApprovedDeploymentCommandIds(plan)');
     expect(renderer).toContain('<h4>Environment shape</h4>');
     expect(renderer).toContain('<h4>Caddy/reverse proxy</h4>');
     expect(renderer).toContain('<h4>Approval gates</h4>');
     expect(renderer).toContain('<h4>Rollback</h4>');
     expect(styles).toContain('.deployment-plan');
+    expect(styles).toContain('.deployment-plan-actions');
+    expect(styles).toContain('.deployment-run-result');
     expect(styles).toContain('.deployment-command');
   });
 
@@ -68,7 +77,13 @@ describe('launcher setup renderer wiring', () => {
 
     expect(preload).toContain("getSetupStatus: (input?: Record<string, unknown>)");
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
+    expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
+    expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
     expect(main).toContain("ipcMain.handle('get-setup-status'");
+    expect(main).toContain("ipcMain.handle('vps:run-preflight'");
+    expect(main).toContain('planVpsSshPreflight({');
+    expect(main).toContain('createVpsCommandRunner()');
+    expect(main).toContain("ipcMain.handle('vps:run-deployment'");
     expect(main).toContain('runtimeMode: input.runtimeMode ?? config.runtimeMode');
     expect(main).toContain('publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl');
     expect(main).toContain('vpsDomain: input.vpsDomain ?? config.vpsDomain');

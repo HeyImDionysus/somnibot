@@ -45,6 +45,7 @@ import { createVpsCommandRunner } from './vps-command-runner.js';
 import { VpsDeploymentRunGate } from './vps-deployment-executor.js';
 import { confirmVpsDeploymentApproval } from './vps-deployment-approval.js';
 import { handleVpsDeploymentRunRequest, type VpsDeploymentRunRequest } from './vps-deployment-request.js';
+import { planVpsSshPreflight } from './vps-preflight.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -381,6 +382,76 @@ function registerIpcHandlers(): void {
       createCommandRunner: createVpsCommandRunner,
       runGate: activeVpsDeployment,
     });
+  });
+
+  ipcMain.handle('vps:run-preflight', async () => {
+    const cfg = getConfig();
+    if (cfg.runtimeMode !== 'vps') {
+      return {
+        state: 'blocked',
+        canRetry: false,
+        command: null,
+        blockedReasons: ['VPS SSH preflight is only available in VPS mode.'],
+        warnings: [],
+        logs: [{
+          level: 'error',
+          code: 'vps-preflight-blocked',
+          message: 'VPS SSH preflight is blocked.',
+          detail: 'Select VPS mode before running SSH preflight.',
+        }],
+      };
+    }
+
+    const plan = planVpsSshPreflight({
+      host: cfg.vpsSshHost,
+      user: cfg.vpsSshUser,
+      deployPath: cfg.vpsDeployPath,
+      explicitUserAction: true,
+    });
+    if (!plan.command) {
+      return {
+        state: 'blocked',
+        canRetry: false,
+        command: null,
+        blockedReasons: plan.blockedReasons,
+        warnings: plan.warnings,
+        logs: plan.logEvents,
+      };
+    }
+
+    const runner = createVpsCommandRunner();
+    const command = {
+      id: 'ssh-preflight',
+      label: 'Verify deployment directory',
+      executable: plan.command.executable,
+      args: plan.command.args,
+      redactedArgs: plan.command.redactedArgs,
+      redactedDisplay: plan.command.redactedDisplay,
+      changesRemote: false,
+      approvalRequired: false,
+      commandCategory: 'probe' as const,
+    };
+    const result = await runner(command, { index: 0, total: 1 });
+    const state = result.ok ? 'success' : result.retriable ? 'retry' : 'failure';
+
+    return {
+      state,
+      canRetry: !result.ok,
+      command: {
+        redactedDisplay: plan.command.redactedDisplay,
+      },
+      blockedReasons: [],
+      warnings: plan.warnings,
+      logs: [
+        ...plan.logEvents,
+        {
+          level: result.ok ? 'info' : 'error',
+          code: result.ok ? 'vps-preflight-success' : 'vps-preflight-failure',
+          message: result.ok ? 'Read-only SSH preflight passed.' : 'Read-only SSH preflight failed.',
+          detail: result.ok ? 'The deployment directory exists and SSH returned success.' : result.error,
+        },
+      ],
+    };
   });
 
   // ── Phase 6: First-run onboarding ──
