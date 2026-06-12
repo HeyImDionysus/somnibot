@@ -8,6 +8,7 @@ import {
 import { planVpsSshPreflight } from './vps-preflight.js';
 
 export type VpsDeploymentPlanStatus = 'blocked' | 'ready';
+export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
 
 export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
@@ -31,6 +32,7 @@ export interface VpsDeploymentCommand {
   changesRemote: boolean;
   approvalRequired: boolean;
   commandCategory: 'env' | 'service' | 'probe' | 'rollback';
+  executionTimeoutMs?: number;
 }
 
 export interface VpsDeploymentApprovalGate {
@@ -173,7 +175,13 @@ function buildRedactedEnvFile(variables: VpsDeploymentEnvVar[]): string {
     .join('\n');
 }
 
-function buildCommand(executable: string, args: string[], options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'>): VpsDeploymentCommand {
+function buildCommand(
+  executable: string,
+  args: string[],
+  options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'> & {
+    executionTimeoutMs?: number;
+  },
+): VpsDeploymentCommand {
   const redactedArgs = args.map((arg) => arg);
   return {
     id: options.id,
@@ -185,6 +193,7 @@ function buildCommand(executable: string, args: string[], options: Pick<VpsDeplo
     changesRemote: options.changesRemote,
     approvalRequired: options.approvalRequired,
     commandCategory: options.commandCategory,
+    ...(options.executionTimeoutMs ? { executionTimeoutMs: options.executionTimeoutMs } : {}),
   };
 }
 
@@ -192,7 +201,9 @@ function buildRemoteCommand(
   sshTarget: string,
   remoteExecutable: string,
   remoteArgs: string[],
-  options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'>,
+  options: Pick<VpsDeploymentCommand, 'id' | 'label' | 'changesRemote' | 'approvalRequired' | 'commandCategory'> & {
+    executionTimeoutMs?: number;
+  },
 ): VpsDeploymentCommand {
   return buildCommand('ssh', [...SSH_BASE_ARGS, '--', sshTarget, remoteExecutable, ...remoteArgs], options);
 }
@@ -222,6 +233,7 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       changesRemote: true,
       approvalRequired: true,
       commandCategory: 'service',
+      executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
     }),
     buildRemoteCommand(sshTarget, 'docker', ['compose', '-f', composeFilePath, 'ps'], {
       id: 'check-stack',
@@ -264,6 +276,7 @@ function buildRollback(sshTarget: string, deployPath: string, composeFilePath: s
         changesRemote: true,
         approvalRequired: true,
         commandCategory: 'service',
+        executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
       }),
       buildCommand('curl', ['-fsS', `${publicBaseUrl}/api/health`], {
         id: 'rollback-health',

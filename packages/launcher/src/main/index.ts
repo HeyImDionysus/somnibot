@@ -377,8 +377,11 @@ function registerIpcHandlers(): void {
     cancelRequested?: boolean;
   }) => {
     const cfg = getConfig();
+    const commandRunner = request?.dryRun === false && cfg.runtimeMode === 'vps'
+      ? createVpsCommandRunner()
+      : undefined;
     const plan = buildVpsDeploymentPlan({
-      runtimeMode: 'vps',
+      runtimeMode: cfg.runtimeMode,
       vpsDomain: cfg.vpsDomain,
       vpsSshHost: cfg.vpsSshHost,
       vpsSshUser: cfg.vpsSshUser,
@@ -399,7 +402,7 @@ function registerIpcHandlers(): void {
       approvedCommandIds: Array.isArray(request?.approvedCommandIds) ? request.approvedCommandIds : [],
       dryRun: request?.dryRun !== false,
       cancelRequested: Boolean(request?.cancelRequested),
-      ...(request?.dryRun === false ? { commandRunner: createVpsCommandRunner() } : {}),
+      ...(commandRunner ? { commandRunner } : {}),
     });
   });
 

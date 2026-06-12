@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { buildVpsDeploymentPlan } from '../main/vps-deployment-plan';
+import { buildVpsDeploymentPlan, VPS_DEPLOYMENT_BUILD_TIMEOUT_MS } from '../main/vps-deployment-plan';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
@@ -107,6 +107,7 @@ describe('VPS deployment plan generator', () => {
         ],
         changesRemote: true,
         approvalRequired: true,
+        executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
       }),
       expect.objectContaining({
         id: 'check-health',
@@ -128,6 +129,7 @@ describe('VPS deployment plan generator', () => {
         executable: 'ssh',
         args: expect.arrayContaining(['deploy@somnibot.example.com', 'docker', 'compose', '-f', '/opt/somnibot/docker-compose.prod.yml', 'up', '-d', '--build']),
         approvalRequired: true,
+        executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
       }),
       expect.objectContaining({
         id: 'rollback-health',
