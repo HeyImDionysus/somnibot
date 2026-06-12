@@ -9,6 +9,7 @@ import {
   type RuntimeNetworkingConfig,
 } from './runtime-profile.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
+import { buildVpsHealthVerification, type VpsHealthVerification } from './vps-health-verification.js';
 
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
 
@@ -52,6 +53,7 @@ export interface SetupStatus {
   primaryAction: SetupPrimaryAction;
   firstBlockingStepId: string | null;
   deploymentPlan?: VpsDeploymentPlan;
+  healthVerification?: VpsHealthVerification;
 }
 
 const UNSET_DISPLAY = 'Not set yet';
@@ -326,9 +328,11 @@ function findFirstBlockingStep(steps: SetupStep[]): SetupStep | undefined {
 export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
   let deploymentPlan: VpsDeploymentPlan | undefined;
+  let healthVerification: VpsHealthVerification | undefined;
   let steps: SetupStep[];
   if (runtimeMode === 'vps') {
     deploymentPlan = buildVpsDeploymentPlan({ ...input, runtimeMode: 'vps' });
+    healthVerification = buildVpsHealthVerification({ ...input, runtimeMode: 'vps' });
     steps = buildVpsSteps(input, deploymentPlan);
   } else {
     steps = buildRegularLocalSteps(input);
@@ -379,5 +383,6 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
     primaryAction,
     firstBlockingStepId: firstBlocking?.id ?? null,
     ...(deploymentPlan ? { deploymentPlan } : {}),
+    ...(healthVerification ? { healthVerification } : {}),
   };
 }
