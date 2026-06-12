@@ -8,6 +8,7 @@ import {
   type RuntimeMode,
   type RuntimeNetworkingConfig,
 } from './runtime-profile.js';
+import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
 
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
 
@@ -50,6 +51,7 @@ export interface SetupStatus {
   steps: SetupStep[];
   primaryAction: SetupPrimaryAction;
   firstBlockingStepId: string | null;
+  deploymentPlan?: VpsDeploymentPlan;
 }
 
 const UNSET_DISPLAY = 'Not set yet';
@@ -205,7 +207,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
   ];
 }
 
-function buildVpsSteps(input: SetupFlowInput): SetupStep[] {
+function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan): SetupStep[] {
   const domainRaw = input.vpsDomain?.trim() ?? '';
   const domainErrors = domainRaw
     ? validateRuntimeNetworkingConfig({
@@ -275,23 +277,32 @@ function buildVpsSteps(input: SetupFlowInput): SetupStep[] {
       detail: 'Fill in Discord and Supabase credentials after the VPS readiness steps.',
     };
 
-  const deployStep: SetupStep = domainStep.status === 'success' && sshStep.status === 'success'
+  const deployStep: SetupStep = deploymentPlan.status === 'ready'
     ? {
       id: 'vps-deploy',
       label: 'Deploy',
       status: 'blocked',
-      summary: 'VPS deployment is a manual action in this build.',
-      detail: 'The launcher does not run SSH commands or deploy to a VPS yet. Use these details for the separate deployment workflow.',
-      actionLabel: 'Use manual VPS deploy',
+      summary: 'Review-only VPS deployment plan is ready.',
+      detail: 'Review the redacted env shape, service layout, Caddy outline, approval gates, and rollback commands before any remote change.',
+      actionLabel: 'Review dry-run plan',
       manualAction: true,
     }
-    : {
+    : domainStep.status === 'success' && sshStep.status === 'success'
+      ? {
+        id: 'vps-deploy',
+        label: 'Deploy',
+        status: 'recoverable-error',
+        summary: 'The VPS deployment plan needs attention.',
+        detail: deploymentPlan.blockedReasons.join('\n'),
+        actionLabel: 'Fix deployment plan',
+      }
+      : {
       id: 'vps-deploy',
       label: 'Deploy',
       status: 'pending',
       summary: 'Waiting for VPS readiness.',
       detail: 'Finish the domain and SSH/deploy steps before the manual deployment workflow.',
-    };
+      };
 
   return [
     {
@@ -314,9 +325,14 @@ function findFirstBlockingStep(steps: SetupStep[]): SetupStep | undefined {
 
 export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
-  const steps = runtimeMode === 'vps'
-    ? buildVpsSteps(input)
-    : buildRegularLocalSteps(input);
+  let deploymentPlan: VpsDeploymentPlan | undefined;
+  let steps: SetupStep[];
+  if (runtimeMode === 'vps') {
+    deploymentPlan = buildVpsDeploymentPlan({ ...input, runtimeMode: 'vps' });
+    steps = buildVpsSteps(input, deploymentPlan);
+  } else {
+    steps = buildRegularLocalSteps(input);
+  }
   const firstBlocking = findFirstBlockingStep(steps);
   const summary = buildSummary(input, runtimeMode);
 
@@ -362,5 +378,6 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
     steps,
     primaryAction,
     firstBlockingStepId: firstBlocking?.id ?? null,
+    ...(deploymentPlan ? { deploymentPlan } : {}),
   };
 }

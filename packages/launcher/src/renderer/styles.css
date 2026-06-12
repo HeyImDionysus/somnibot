@@ -304,6 +304,194 @@ main::-webkit-scrollbar-thumb:hover {
   word-break: break-all;
 }
 
+.deployment-plan {
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.deployment-plan-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.deployment-plan-header h3 {
+  font-size: 13px;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+
+.deployment-plan-header p,
+.deployment-plan-section p {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.deployment-plan-badge {
+  align-self: flex-start;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.deployment-plan-badge.ready {
+  color: var(--text-success);
+  background: rgba(35, 165, 89, 0.1);
+}
+
+.deployment-plan-badge.blocked {
+  color: var(--orange);
+  background: rgba(255, 107, 0, 0.08);
+}
+
+.deployment-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+
+.deployment-plan-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+}
+
+.deployment-plan-grid span,
+.deployment-plan-row span,
+.deployment-command span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.deployment-plan-grid strong,
+.deployment-plan-row strong,
+.deployment-env-var strong,
+.deployment-command code {
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  word-break: break-word;
+  user-select: text;
+}
+
+.deployment-plan-section {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.deployment-plan-section.warning {
+  background: rgba(255, 107, 0, 0.05);
+}
+
+.deployment-plan-section h4 {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.deployment-plan-section ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.deployment-plan-section pre {
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  user-select: text;
+}
+
+.deployment-plan-row,
+.deployment-env-var {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.deployment-env-var {
+  grid-template-columns: 180px minmax(0, 1fr) auto;
+}
+
+.deployment-env-var em {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  font-style: normal;
+}
+
+.deployment-secret,
+.deployment-required {
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.deployment-secret {
+  color: var(--orange);
+  background: rgba(255, 107, 0, 0.08);
+}
+
+.deployment-required {
+  color: var(--cyan);
+  background: rgba(0, 212, 255, 0.08);
+}
+
+.deployment-command {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.deployment-command > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.deployment-command strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.deployment-command code {
+  display: block;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  overflow-x: auto;
+}
+
 .runtime-steps {
   display: flex;
   flex-direction: column;
