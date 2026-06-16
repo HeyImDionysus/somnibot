@@ -152,11 +152,11 @@ LAVALINK_PASSWORD=<openssl rand -hex 16>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
 
-If you are doing a private first run without public callbacks yet, let the
-launcher use its local dashboard URL as the temporary callback base. If you use
-the script fallback, temporarily set `NEXT_PUBLIC_APP_URL=http://localhost:3000`,
-then switch it to the stable HTTPS callback base before configuring PayPal
-webhooks or production OAuth redirects.
+The launcher setup flow requires the stable HTTPS public callback base before
+finalizing setup. If you use the script fallback for a private first run,
+temporarily set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to
+the stable HTTPS callback base before configuring PayPal webhooks or production
+OAuth redirects.
 
 Keep `<local-operator-dashboard-url>/api/auth/callback`,
 `http://localhost:3000/api/auth/callback` for script fallback, and

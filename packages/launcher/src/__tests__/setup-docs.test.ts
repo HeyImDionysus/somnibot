@@ -29,9 +29,10 @@ describe('setup documentation alignment', () => {
     ].join('\n');
 
     expect(docs).not.toContain('Recommended default: use Tailscale Funnel to expose the local dashboard port');
-    expect(docs).not.toContain('tailscale funnel 3000');
+    expect(docs).not.toContain('http://localhost:3000 for first local setup');
     expect(docs).toContain('Manual fallback');
     expect(docs).toContain('tailscale funnel <dashboard-port>');
+    expect(docs).toContain('script-fallback private setup');
     expect(docs).toContain('approval-gated deployment');
   });
 });

@@ -423,7 +423,7 @@ but do not treat it as the regular-local user experience.
 | Provider | Regular local | VPS |
 |---|---|---|
 | Discord OAuth2 app callback for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` | Same |
-| Supabase Auth redirect allow-list | `http://localhost:3000/api/auth/callback` and `<public-callback-base>/api/auth/callback` | `https://your-domain.example/api/auth/callback` |
+| Supabase Auth redirect allow-list | `<local-operator-dashboard-url>/api/auth/callback`, `http://localhost:3000/api/auth/callback` for script fallback, and `<public-callback-base>/api/auth/callback` | `https://your-domain.example/api/auth/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` | `https://your-domain.example/api/paypal/webhook` |
 
 Discord is different from PayPal here: PayPal calls the dashboard directly, while
@@ -474,8 +474,8 @@ somnibot/
 ### Dashboard Required
 | Variable | Description |
 |---|---|
-| `DASHBOARD_URL` | Local/operator dashboard URL shown by the bot (`http://localhost:3000` locally) |
-| `NEXT_PUBLIC_APP_URL` | Public dashboard/callback base (`http://localhost:3000` for first local setup; stable HTTPS tunnel for production local; VPS domain for VPS) |
+| `DASHBOARD_URL` | Local/operator dashboard URL shown by the bot; launcher local commonly uses `http://localhost:3456`, script fallback uses `http://localhost:3000`, and VPS uses the public domain |
+| `NEXT_PUBLIC_APP_URL` | Public dashboard/callback base; use the stable HTTPS Funnel URL for regular-local public callbacks, the VPS domain for VPS, or `http://localhost:3000` only for script-fallback private setup before provider callbacks are configured |
 | `NEXT_PUBLIC_SUPABASE_URL` | Same as `SUPABASE_URL` |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon/public** key |
 | `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key |
