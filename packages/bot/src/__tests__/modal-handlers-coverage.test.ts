@@ -7,13 +7,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
   ChannelType: { GuildText: 0 },
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setColor: vi.fn().mockReturnThis(),
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    addFields: vi.fn().mockReturnThis(),
-    setTimestamp: vi.fn().mockReturnThis(),
-  })),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setColor: vi.fn().mockReturnThis(),
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      addFields: vi.fn().mockReturnThis(),
+      setTimestamp: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({

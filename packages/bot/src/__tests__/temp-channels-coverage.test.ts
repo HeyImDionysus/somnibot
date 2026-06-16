@@ -6,29 +6,31 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => ({
-    setName: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    addSubcommand: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({
-        setName: vi.fn().mockReturnThis(),
-        setDescription: vi.fn().mockReturnThis(),
-        addIntegerOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
-          cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
-          return this;
-        }),
-        addStringOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
-          cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMaxLength: vi.fn().mockReturnThis() });
-          return this;
-        }),
-        addUserOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
-          cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis() });
-          return this;
-        }),
-      });
-      return this;
-    }),
-  })),
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setName: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      addSubcommand: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({
+          setName: vi.fn().mockReturnThis(),
+          setDescription: vi.fn().mockReturnThis(),
+          addIntegerOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
+            cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
+            return this;
+          }),
+          addStringOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
+            cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMaxLength: vi.fn().mockReturnThis() });
+            return this;
+          }),
+          addUserOption: vi.fn().mockImplementation(function (this: any, cb2: any) {
+            cb2({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis() });
+            return this;
+          }),
+        });
+        return this;
+      }),
+    };
+  }),
   PermissionFlagsBits: {},
   ChannelType: {},
 }));

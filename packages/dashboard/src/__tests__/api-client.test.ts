@@ -12,6 +12,7 @@ import { ApiError, guildApi, rolesApi, channelsApi, deployApi, syncApi } from '@
 const mockFetch = vi.fn();
 
 beforeEach(() => {
+  mockFetch.mockReset();
   vi.stubGlobal('fetch', mockFetch);
 });
 

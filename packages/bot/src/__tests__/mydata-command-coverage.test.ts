@@ -4,20 +4,26 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => ({
-    setName: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-  })),
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setColor: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-    setTimestamp: vi.fn().mockReturnThis(),
-  })),
-  AttachmentBuilder: vi.fn().mockImplementation((_buf: any, opts: any) => ({
-    name: opts?.name,
-  })),
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setName: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+    };
+  }),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setColor: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+      setTimestamp: vi.fn().mockReturnThis(),
+    };
+  }),
+  AttachmentBuilder: vi.fn().mockImplementation(function (_buf: any, opts: any) {
+    return {
+      name: opts?.name,
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({

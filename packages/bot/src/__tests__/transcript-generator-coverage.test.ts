@@ -6,9 +6,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  AttachmentBuilder: vi.fn().mockImplementation((_buf: any, opts: any) => ({
-    name: opts?.name,
-  })),
+  AttachmentBuilder: vi.fn().mockImplementation(function (_buf: any, opts: any) {
+    return {
+      name: opts?.name,
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({
