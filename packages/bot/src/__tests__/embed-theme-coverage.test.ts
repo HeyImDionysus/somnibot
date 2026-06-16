@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  EmbedBuilder: vi.fn().mockImplementation(() => {
+  EmbedBuilder: vi.fn().mockImplementation(function () {
     const data: any = {};
     return {
       data,

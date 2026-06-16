@@ -6,32 +6,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  ActionRowBuilder: vi.fn().mockImplementation(() => ({
-    components: [],
-    addComponents: vi.fn().mockImplementation(function (this: any, ...c: any[]) {
-      this.components.push(...c);
-      return this;
-    }),
-  })),
-  ButtonBuilder: vi.fn().mockImplementation(() => ({
-    setCustomId: vi.fn().mockReturnThis(),
-    setLabel: vi.fn().mockReturnThis(),
-    setStyle: vi.fn().mockReturnThis(),
-    setEmoji: vi.fn().mockReturnThis(),
-  })),
+  ActionRowBuilder: vi.fn().mockImplementation(function () {
+    return {
+      components: [],
+      addComponents: vi.fn().mockImplementation(function (this: any, ...c: any[]) {
+        this.components.push(...c);
+        return this;
+      }),
+    };
+  }),
+  ButtonBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setLabel: vi.fn().mockReturnThis(),
+      setStyle: vi.fn().mockReturnThis(),
+      setEmoji: vi.fn().mockReturnThis(),
+    };
+  }),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setColor: vi.fn().mockReturnThis(),
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-    setThumbnail: vi.fn().mockReturnThis(),
-  })),
-  StringSelectMenuBuilder: vi.fn().mockImplementation(() => ({
-    setCustomId: vi.fn().mockReturnThis(),
-    setPlaceholder: vi.fn().mockReturnThis(),
-    addOptions: vi.fn().mockReturnThis(),
-  })),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setColor: vi.fn().mockReturnThis(),
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+      setThumbnail: vi.fn().mockReturnThis(),
+    };
+  }),
+  StringSelectMenuBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setPlaceholder: vi.fn().mockReturnThis(),
+      addOptions: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({

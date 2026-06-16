@@ -6,17 +6,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setColor: vi.fn().mockReturnThis(),
-    setImage: vi.fn().mockReturnThis(),
-    setThumbnail: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-    setAuthor: vi.fn().mockReturnThis(),
-    setTimestamp: vi.fn().mockReturnThis(),
-    addFields: vi.fn().mockReturnThis(),
-  })),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setColor: vi.fn().mockReturnThis(),
+      setImage: vi.fn().mockReturnThis(),
+      setThumbnail: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+      setAuthor: vi.fn().mockReturnThis(),
+      setTimestamp: vi.fn().mockReturnThis(),
+      addFields: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({

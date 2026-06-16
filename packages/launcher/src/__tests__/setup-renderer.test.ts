@@ -47,9 +47,12 @@ describe('launcher setup renderer wiring', () => {
   });
 
   it('renders the VPS deployment plan and approval-gated action controls from setup status', () => {
+    const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');
     const styles = readSourceFile('renderer/styles.css');
 
+    expect(html).toContain('Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.');
+    expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');

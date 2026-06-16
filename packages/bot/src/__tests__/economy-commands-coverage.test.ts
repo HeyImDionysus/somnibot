@@ -6,62 +6,72 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => ({
-    setName: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    addUserOption: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis() });
-      return this;
-    }),
-    addIntegerOption: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
-      return this;
-    }),
-    addNumberOption: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
-      return this;
-    }),
-    addStringOption: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), addChoices: vi.fn().mockReturnThis() });
-      return this;
-    }),
-    addSubcommand: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({
-        setName: vi.fn().mockReturnThis(),
-        setDescription: vi.fn().mockReturnThis(),
-        addIntegerOption: vi.fn().mockReturnThis(),
-        addStringOption: vi.fn().mockReturnThis(),
-        addUserOption: vi.fn().mockReturnThis(),
-      });
-      return this;
-    }),
-  })),
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setColor: vi.fn().mockReturnThis(),
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setAuthor: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-    setTimestamp: vi.fn().mockReturnThis(),
-    addFields: vi.fn().mockReturnThis(),
-    setThumbnail: vi.fn().mockReturnThis(),
-  })),
-  ActionRowBuilder: vi.fn().mockImplementation(() => ({
-    addComponents: vi.fn().mockReturnThis(),
-  })),
-  ButtonBuilder: vi.fn().mockImplementation(() => ({
-    setCustomId: vi.fn().mockReturnThis(),
-    setLabel: vi.fn().mockReturnThis(),
-    setEmoji: vi.fn().mockReturnThis(),
-    setStyle: vi.fn().mockReturnThis(),
-    setDisabled: vi.fn().mockReturnThis(),
-  })),
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setName: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      addUserOption: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis() });
+        return this;
+      }),
+      addIntegerOption: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
+        return this;
+      }),
+      addNumberOption: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), setMinValue: vi.fn().mockReturnThis(), setMaxValue: vi.fn().mockReturnThis() });
+        return this;
+      }),
+      addStringOption: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({ setName: vi.fn().mockReturnThis(), setDescription: vi.fn().mockReturnThis(), setRequired: vi.fn().mockReturnThis(), addChoices: vi.fn().mockReturnThis() });
+        return this;
+      }),
+      addSubcommand: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({
+          setName: vi.fn().mockReturnThis(),
+          setDescription: vi.fn().mockReturnThis(),
+          addIntegerOption: vi.fn().mockReturnThis(),
+          addStringOption: vi.fn().mockReturnThis(),
+          addUserOption: vi.fn().mockReturnThis(),
+        });
+        return this;
+      }),
+    };
+  }),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setColor: vi.fn().mockReturnThis(),
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setAuthor: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+      setTimestamp: vi.fn().mockReturnThis(),
+      addFields: vi.fn().mockReturnThis(),
+      setThumbnail: vi.fn().mockReturnThis(),
+    };
+  }),
+  ActionRowBuilder: vi.fn().mockImplementation(function () {
+    return {
+      addComponents: vi.fn().mockReturnThis(),
+    };
+  }),
+  ButtonBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setLabel: vi.fn().mockReturnThis(),
+      setEmoji: vi.fn().mockReturnThis(),
+      setStyle: vi.fn().mockReturnThis(),
+      setDisabled: vi.fn().mockReturnThis(),
+    };
+  }),
   ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4 },
-  StringSelectMenuBuilder: vi.fn().mockImplementation(() => ({
-    setCustomId: vi.fn().mockReturnThis(),
-    setPlaceholder: vi.fn().mockReturnThis(),
-    addOptions: vi.fn().mockReturnThis(),
-  })),
+  StringSelectMenuBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setPlaceholder: vi.fn().mockReturnThis(),
+      addOptions: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 vi.mock('@somnibot/shared', () => ({

@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => {
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
     const self: any = {};
     for (const m of ['setName', 'setDescription', 'setDefaultMemberPermissions', 'addUserOption', 'addStringOption', 'addIntegerOption', 'addBooleanOption']) {
       self[m] = vi.fn().mockImplementation(function (this: any, cbOrVal: any) {
@@ -20,7 +20,7 @@ vi.mock('discord.js', () => ({
     }
     return self;
   }),
-  EmbedBuilder: vi.fn().mockImplementation(() => {
+  EmbedBuilder: vi.fn().mockImplementation(function () {
     const e: any = {};
     for (const m of ['setColor', 'setTitle', 'setDescription', 'setFooter', 'setTimestamp', 'addFields', 'setAuthor', 'setThumbnail']) {
       e[m] = vi.fn().mockReturnValue(e);

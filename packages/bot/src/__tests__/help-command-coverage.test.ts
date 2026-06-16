@@ -4,32 +4,40 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => ({
-    setName: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    addStringOption: vi.fn().mockImplementation(function (this: any, cb: any) {
-      cb({
-        setName: vi.fn().mockReturnThis(),
-        setDescription: vi.fn().mockReturnThis(),
-      });
-      return this;
-    }),
-  })),
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setColor: vi.fn().mockReturnThis(),
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-    addFields: vi.fn().mockReturnThis(),
-  })),
-  ActionRowBuilder: vi.fn().mockImplementation(() => ({
-    addComponents: vi.fn().mockReturnThis(),
-  })),
-  StringSelectMenuBuilder: vi.fn().mockImplementation(() => ({
-    setCustomId: vi.fn().mockReturnThis(),
-    setPlaceholder: vi.fn().mockReturnThis(),
-    addOptions: vi.fn().mockReturnThis(),
-  })),
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setName: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      addStringOption: vi.fn().mockImplementation(function (this: any, cb: any) {
+        cb({
+          setName: vi.fn().mockReturnThis(),
+          setDescription: vi.fn().mockReturnThis(),
+        });
+        return this;
+      }),
+    };
+  }),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setColor: vi.fn().mockReturnThis(),
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+      addFields: vi.fn().mockReturnThis(),
+    };
+  }),
+  ActionRowBuilder: vi.fn().mockImplementation(function () {
+    return {
+      addComponents: vi.fn().mockReturnThis(),
+    };
+  }),
+  StringSelectMenuBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setCustomId: vi.fn().mockReturnThis(),
+      setPlaceholder: vi.fn().mockReturnThis(),
+      addOptions: vi.fn().mockReturnThis(),
+    };
+  }),
   ApplicationCommandType: { ChatInput: 1 },
 }));
 

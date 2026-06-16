@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => {
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
     const self: any = {};
     for (const m of ['setName', 'setDescription', 'addStringOption', 'addIntegerOption', 'addNumberOption']) {
       self[m] = vi.fn().mockImplementation(function (this: any, cbOrVal: any) {

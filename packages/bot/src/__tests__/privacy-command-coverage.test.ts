@@ -4,16 +4,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({
-  SlashCommandBuilder: vi.fn().mockImplementation(() => ({
-    setName: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-  })),
-  EmbedBuilder: vi.fn().mockImplementation(() => ({
-    setTitle: vi.fn().mockReturnThis(),
-    setDescription: vi.fn().mockReturnThis(),
-    setColor: vi.fn().mockReturnThis(),
-    setFooter: vi.fn().mockReturnThis(),
-  })),
+  SlashCommandBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setName: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+    };
+  }),
+  EmbedBuilder: vi.fn().mockImplementation(function () {
+    return {
+      setTitle: vi.fn().mockReturnThis(),
+      setDescription: vi.fn().mockReturnThis(),
+      setColor: vi.fn().mockReturnThis(),
+      setFooter: vi.fn().mockReturnThis(),
+    };
+  }),
 }));
 
 import { buildPrivacyCommand, handlePrivacyCommand } from '../features/privacy/privacy-command.js';

@@ -263,6 +263,48 @@ describe('POST /api/setup finalize', () => {
     );
   });
 
+  it('stores VPS public callback and PayPal webhook values before locking setup', async () => {
+    vi.stubEnv('DASHBOARD_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'dashboard_url',
+        value: 'https://somnibot.example.com',
+        section: 'deployment',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'paypal_webhook_url',
+        value: 'https://somnibot.example.com/api/paypal/webhook',
+        section: 'paypal',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(process.env.PAYPAL_WEBHOOK_URL).toBe('https://somnibot.example.com/api/paypal/webhook');
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
+  });
+
   it('does not lock setup when a required public callback URL is still local', async () => {
     vi.stubEnv('DASHBOARD_URL', 'http://localhost:3456');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'http://localhost:3456');
@@ -425,6 +467,25 @@ describe('GET /api/setup status', () => {
     expect(body.operatorDashboardUrl).toBe('http://localhost:3456');
     expect(body.publicCallbackBaseUrl).toBe('https://somnibot.tailnet.ts.net');
     expect(body.paypalWebhookUrl).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(body.publicCallbackRequired).toBe(true);
+    expect(body.publicCallbackReady).toBe(true);
+    expect(body.publicCallbackError).toBeNull();
+  });
+
+  it('reports VPS callback and webhook URLs for the setup wizard', async () => {
+    vi.stubEnv('DASHBOARD_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.example.com/');
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.dashboardUrl).toBe('https://somnibot.example.com');
+    expect(body.operatorDashboardUrl).toBe('https://somnibot.example.com');
+    expect(body.publicCallbackBaseUrl).toBe('https://somnibot.example.com');
+    expect(body.paypalWebhookUrl).toBe('https://somnibot.example.com/api/paypal/webhook');
     expect(body.publicCallbackRequired).toBe(true);
     expect(body.publicCallbackReady).toBe(true);
     expect(body.publicCallbackError).toBeNull();

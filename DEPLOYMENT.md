@@ -10,7 +10,7 @@
 
 | Mode | Use it for | Dashboard local URL | Public callback base | Valkey/Redis |
 |---|---|---|---|---|
-| Regular local | Running SomniBot on a normal user machine | `http://localhost:3000` | Stable HTTPS tunnel to local port 3000, preferably Tailscale Funnel | `redis://127.0.0.1:6379` |
+| Regular local | Running SomniBot on a normal user machine | Launcher-provided URL, commonly `http://localhost:3456`; script fallback uses `http://localhost:3000` | Launcher-guided stable HTTPS tunnel to the dashboard port, preferably Tailscale Funnel | `redis://127.0.0.1:6379` |
 | WSL2 parity | Rehearsing Linux/VPS behavior before paying for or touching a VPS | WSL2-local URL | Optional tunnel for testing only | WSL2/Docker-local |
 | VPS | Always-on hosted Linux deployment | Private host/Docker URL | VPS domain, e.g. `https://somnibot.example.com` | Private Docker/service URL |
 
@@ -26,6 +26,12 @@ experience.
 - Node.js 22+, pnpm 9+
 - Docker for Lavalink and Valkey
 - For production callbacks: one stable public HTTPS dashboard URL
+
+Use the Electron launcher/setup GUI as the primary owner flow for regular-local
+and VPS setup. It records non-secret runtime values, guides Tailscale/public
+callback readiness, and exposes VPS preflight, dry-run, and approval-gated
+deployment actions with redacted output. The CLI/script steps in this guide are
+manual fallback paths and operator reference.
 
 ## Platform Defaults
 
@@ -71,7 +77,8 @@ dashboard callback allow-list in the next section.
    ```
 5. Go to **Authentication -> Providers -> Discord** and enable it with the Discord Client ID and Secret.
 6. Go to **Authentication -> URL Configuration** and allow the dashboard callback URL for your mode:
-   - Regular local first run: `http://localhost:3000/api/auth/callback`
+   - Regular local first run: `<local-operator-dashboard-url>/api/auth/callback`
+   - Regular local script fallback: `http://localhost:3000/api/auth/callback`
    - Regular local production callback: `<public-callback-base>/api/auth/callback`
    - VPS: `https://your-domain.example/api/auth/callback`
 
@@ -84,13 +91,16 @@ machine.
 
 | Component | Configuration |
 |---|---|
-| Bot | Started by `./scripts/start.sh` or `scripts\start.bat` |
-| Dashboard | Built standalone production server started by `./scripts/start.sh` or `scripts\start.bat` at `http://localhost:3000` |
+| Bot | Started by the launcher, or by `./scripts/start.sh` / `scripts\start.bat` as manual fallback |
+| Dashboard | Launcher-owned local dashboard, commonly at `http://localhost:3456`; standalone production server at `http://localhost:3000` when using script fallback |
 | Lavalink | Docker service on `localhost:2333` |
 | Valkey/Redis | Docker service on `redis://127.0.0.1:6379` |
 | Secrets | `.env` on the local machine, including Discord, Supabase, dashboard, replay, Lavalink, and optional PayPal values |
 
-Start the production regular-local stack with:
+Normal path: open the SomniBot Launcher setup GUI, choose regular-local mode,
+let it validate the required values, and start the local bot and dashboard.
+
+Manual fallback: start the production regular-local stack with:
 
 ```bash
 ./scripts/start.sh
@@ -110,22 +120,26 @@ dashboard build output.
 
 ### Public Callback Strategy
 
-For external provider callbacks, expose the local dashboard with one stable HTTPS
-URL. Tailscale Funnel is the default candidate because it can forward a public
-HTTPS URL to the local dashboard port:
+For external provider callbacks, expose the local dashboard with one stable
+HTTPS URL. The launcher is the normal path: it checks Tailscale readiness,
+keeps the operator dashboard local, and records the stable public callback base
+that providers should call.
+
+Manual fallback:
 
 ```bash
-tailscale funnel 3000
+tailscale funnel <dashboard-port>
 ```
 
 Use the printed HTTPS URL as `<public-callback-base>`. Cloudflare Tunnel, ngrok
 static domains, or a custom reverse proxy can also work if the URL is stable and
-forwards to the dashboard.
+forwards to the dashboard. The launcher-owned dashboard commonly uses port
+`3456`; the script fallback uses port `3000`.
 
 ### Regular Local Environment
 
 ```env
-DASHBOARD_URL=http://localhost:3000
+DASHBOARD_URL=<local-operator-dashboard-url>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 HEALTH_PORT=3001
 CSRF_SECRET=<openssl rand -hex 32>
@@ -138,12 +152,14 @@ LAVALINK_PASSWORD=<openssl rand -hex 16>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
 
-If you are doing a private first run without public callbacks yet, temporarily
-set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to the stable
-HTTPS callback base before configuring PayPal webhooks or production OAuth
-redirects.
+The launcher setup flow requires the stable HTTPS public callback base before
+finalizing setup. If you use the script fallback for a private first run,
+temporarily set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to
+the stable HTTPS callback base before configuring PayPal webhooks or production
+OAuth redirects.
 
-Keep both `http://localhost:3000/api/auth/callback` and
+Keep `<local-operator-dashboard-url>/api/auth/callback`,
+`http://localhost:3000/api/auth/callback` for script fallback, and
 `<public-callback-base>/api/auth/callback` in the Supabase redirect allow-list
 when operators log in through the local browser URL while external providers use
 the public callback base.
@@ -153,6 +169,12 @@ the public callback base.
 VPS mode keeps SomniBot always-on behind a real domain. The dashboard, bot,
 Lavalink, and Valkey should share the VPS or a private network. Do not expose
 Valkey or Lavalink publicly.
+
+Normal path: use the launcher/setup GUI, choose VPS mode, enter the public
+domain and non-secret SSH target details, review the redacted deployment plan,
+then run read-only preflight, dry-run deployment, or approval-gated deployment
+from the deployment plan. Do not run the live deploy action without explicit
+operator approval.
 
 ### VPS Services
 
@@ -188,7 +210,7 @@ LAVALINK_PASSWORD=<openssl rand -hex 16>
 PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook
 ```
 
-Start the production stack:
+Manual fallback: start the production stack on the VPS:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
@@ -212,6 +234,7 @@ Run the applicable checklist before calling an environment ready.
 
 ### Regular Local
 
+- [ ] Launcher setup GUI reaches regular-local Tailscale-ready state and shows the local operator dashboard URL.
 - [ ] `./scripts/start.sh` or `scripts\start.bat` starts Docker, the built bot, and the standalone dashboard production server.
 - [ ] `GET http://localhost:3000/api/health` responds.
 - [ ] Dashboard setup wizard completes.
@@ -224,6 +247,7 @@ Run the applicable checklist before calling an environment ready.
 
 ### VPS
 
+- [ ] Launcher setup GUI reaches domain-ready state, shows a redacted deployment plan, and keeps live deployment approval-gated.
 - [ ] `GET https://your-domain.example/api/health` responds.
 - [ ] Caddy/reverse proxy serves valid HTTPS for the dashboard domain.
 - [ ] Dashboard setup wizard completes.
