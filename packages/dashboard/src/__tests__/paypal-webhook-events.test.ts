@@ -41,10 +41,11 @@ describe('PayPal webhook event catalog', () => {
     }
   });
 
-  it('documents subscription expiry as an intentional non-subscription', () => {
-    expect(PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS).toEqual([
-      expect.objectContaining({ eventType: 'BILLING.SUBSCRIPTION.EXPIRED' }),
-    ]);
-    expect(routeSource).not.toContain("case 'BILLING.SUBSCRIPTION.EXPIRED'");
+  it('handles subscription expiry explicitly', () => {
+    expect(PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES).toContain(
+      'BILLING.SUBSCRIPTION.EXPIRED',
+    );
+    expect(PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS).toEqual([]);
+    expect(routeSource).toContain("case 'BILLING.SUBSCRIPTION.EXPIRED'");
   });
 });

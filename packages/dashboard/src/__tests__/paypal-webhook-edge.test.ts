@@ -78,6 +78,8 @@ function makeResolvedChain(
   resolvedValue: { data: unknown; error: unknown },
   onInsert?: (payload: unknown) => void,
   onEq?: (column: string, value: unknown) => void,
+  onUpdate?: (payload: unknown) => void,
+  onIn?: (column: string, values: unknown[]) => void,
 ) {
   const chain: Record<string, unknown> = {};
   const chainMethods = [
@@ -99,12 +101,19 @@ function makeResolvedChain(
     onEq?.(column, value);
     return chain;
   });
+  chain.in = vi.fn((column: string, values: unknown[]) => {
+    onIn?.(column, values);
+    return chain;
+  });
 
   chain.insert = vi.fn((payload: unknown) => {
     onInsert?.(payload);
     return chain;
   });
-  chain.update = vi.fn(() => chain);
+  chain.update = vi.fn((payload: unknown) => {
+    onUpdate?.(payload);
+    return chain;
+  });
   chain.upsert = vi.fn(() => chain);
   chain.then = (
     resolve: (v: unknown) => void,
@@ -117,6 +126,8 @@ function makeResolvedChain(
 function useWebhookRows(rows: Record<string, { data: unknown; error: unknown }>) {
   const inserts: Array<{ table: string; payload: unknown }> = [];
   const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
+  const updates: Array<{ table: string; payload: unknown }> = [];
+  const inCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
   mockSb.from.mockImplementation((table: string) =>
     makeResolvedChain(
       rows[table] ?? { data: null, error: null },
@@ -126,10 +137,16 @@ function useWebhookRows(rows: Record<string, { data: unknown; error: unknown }>)
       (column, value) => {
         eqCalls.push({ table, column, value });
       },
+      (payload) => {
+        updates.push({ table, payload });
+      },
+      (column, values) => {
+        inCalls.push({ table, column, values });
+      },
     ),
   );
 
-  return { inserts, eqCalls };
+  return { inserts, eqCalls, updates, inCalls };
 }
 
 let mockSb: ReturnType<typeof makeMockSupabase>;
@@ -228,6 +245,164 @@ describe('PayPal webhook — edge cases', () => {
         status: 'pending',
       }),
     });
+  });
+
+  it('subscription expiry expires only the matching product access without grace-period fulfillment', async () => {
+    const { inserts, eqCalls, updates, inCalls } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+        },
+        error: null,
+      },
+      entitlements: {
+        data: [
+          {
+            id: 'entitlement-1',
+            customer_id: 'customer-1',
+            granted_role_ids: ['role-1', 'role-2'],
+            license_key_id: 'license-1',
+          },
+        ],
+        error: null,
+      },
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-EXPIRED' },
+      id: 'EVT-SUB-EXPIRED',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(eqCalls).toContainEqual({
+      table: 'orders',
+      column: 'paypal_subscription_id',
+      value: 'SUB-EXPIRED',
+    });
+    expect(eqCalls).toEqual(
+      expect.arrayContaining([
+        { table: 'entitlements', column: 'order_id', value: 'order-expired' },
+        { table: 'entitlements', column: 'guild_id', value: 'guild-1' },
+        { table: 'entitlements', column: 'product_id', value: 'product-1' },
+        { table: 'license_keys', column: 'order_id', value: 'order-expired' },
+        { table: 'license_keys', column: 'guild_id', value: 'guild-1' },
+        { table: 'license_keys', column: 'product_id', value: 'product-1' },
+      ]),
+    );
+    expect(inCalls).toEqual(
+      expect.arrayContaining([
+        {
+          table: 'entitlements',
+          column: 'status',
+          values: ['active', 'pending', 'grace_period'],
+        },
+        {
+          table: 'license_keys',
+          column: 'status',
+          values: ['pending_activation', 'active', 'suspended'],
+        },
+        {
+          table: 'license_sessions',
+          column: 'license_key_id',
+          values: ['license-1'],
+        },
+      ]),
+    );
+    expect(updates).toEqual(
+      expect.arrayContaining([
+        {
+          table: 'entitlements',
+          payload: expect.objectContaining({ status: 'expired' }),
+        },
+        {
+          table: 'license_keys',
+          payload: expect.objectContaining({ status: 'expired' }),
+        },
+        {
+          table: 'license_sessions',
+          payload: expect.objectContaining({
+            active: false,
+            deactivation_reason: 'entitlement_revoked',
+          }),
+        },
+      ]),
+    );
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'revoke_roles',
+        payload: expect.objectContaining({
+          discord_id: 'discord-1',
+          role_ids: ['role-1', 'role-2'],
+          reason: 'subscription_expired',
+          order_id: 'order-expired',
+          product_id: 'product-1',
+        }),
+        status: 'pending',
+      }),
+    });
+    expect(inserts).toContainEqual({
+      table: 'audit_logs',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        actor_id: 'paypal_webhook',
+        action: 'subscription.expired',
+        target_type: 'order',
+        target_id: 'order-expired',
+        details: expect.objectContaining({
+          event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+          paypal_subscription_id: 'SUB-EXPIRED',
+          product_id: 'product-1',
+        }),
+      }),
+    });
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({ action: 'fulfill_suspension' }),
+      }),
+    );
+  });
+
+  it('repeated subscription expiry does not queue duplicate role revocation', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-already-expired',
+          order_number: 'ORD-ALREADY-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+        },
+        error: null,
+      },
+      entitlements: { data: [], error: null },
+      license_keys: { data: [], error: null },
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-ALREADY-EXPIRED' },
+      id: 'EVT-SUB-EXPIRED-AGAIN',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({ action: 'revoke_roles' }),
+      }),
+    );
   });
 
   it('refund event without recoverable capture_id returns 200 (logged, not retried)', async () => {

@@ -396,6 +396,146 @@ export async function handleSubscriptionCancelled(
   );
 }
 
+// ── Subscription Expired ────────────────────────────
+
+export async function handleSubscriptionExpired(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  resource: Record<string, unknown>,
+) {
+  const subscriptionId = resource.id as string;
+  if (!subscriptionId) return;
+
+  const { data: order } = await supabase
+    .from('orders')
+    .select('id, order_number, guild_id, customer_id, product_id')
+    .eq('paypal_subscription_id', subscriptionId)
+    .maybeSingle();
+
+  if (!order) return;
+
+  const now = new Date().toISOString();
+
+  const { data: activeEntitlements } = await supabase
+    .from('entitlements')
+    .select('id, customer_id, granted_role_ids, license_key_id')
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', ['active', 'pending', 'grace_period'])
+    .limit(1000);
+
+  const { data: activeLicenseKeys } = await supabase
+    .from('license_keys')
+    .select('id')
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', ['pending_activation', 'active', 'suspended'])
+    .limit(1000);
+
+  const licenseKeyIds = [
+    ...new Set([
+      ...(activeEntitlements ?? [])
+        .map((ent) => ent.license_key_id)
+        .filter((id): id is string => Boolean(id)),
+      ...(activeLicenseKeys ?? [])
+        .map((key) => key.id)
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  ];
+
+  await supabase
+    .from('entitlements')
+    .update({
+      status: 'expired',
+      expires_at: now,
+      grace_period_ends_at: null,
+      updated_at: now,
+    })
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', ['active', 'pending', 'grace_period']);
+
+  await supabase
+    .from('license_keys')
+    .update({
+      status: 'expired',
+      expires_at: now,
+      updated_at: now,
+    })
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', ['pending_activation', 'active', 'suspended']);
+
+  if (licenseKeyIds.length > 0) {
+    await supabase
+      .from('license_sessions')
+      .update({
+        active: false,
+        deactivated_at: now,
+        deactivation_reason: 'entitlement_revoked',
+      })
+      .in('license_key_id', licenseKeyIds)
+      .eq('active', true);
+  }
+
+  const roleIds = [
+    ...new Set(
+      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+    ),
+  ];
+
+  if (roleIds.length > 0) {
+    const { data: customer } = await supabase
+      .from('customers')
+      .select('discord_id')
+      .eq('id', order.customer_id)
+      .eq('guild_id', order.guild_id)
+      .maybeSingle();
+
+    if (customer?.discord_id) {
+      await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
+        discord_id: customer.discord_id,
+        role_ids: roleIds,
+        reason: 'subscription_expired',
+        order_id: order.id,
+        product_id: order.product_id,
+      });
+    }
+  }
+
+  await supabase
+    .from('audit_logs')
+    .insert({
+      guild_id: order.guild_id,
+      actor_type: 'system',
+      actor_id: 'paypal_webhook',
+      action: 'subscription.expired',
+      target_type: 'order',
+      target_id: order.id,
+      details: {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        paypal_subscription_id: subscriptionId,
+        product_id: order.product_id,
+        entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
+        license_key_ids: licenseKeyIds,
+        role_ids: roleIds,
+      },
+    })
+    .then(
+      () => {},
+      () => {
+        /* ignore */
+      },
+    );
+
+  console.log(
+    `[Webhook] Subscription expired + product access expired: ${subscriptionId}`,
+  );
+}
+
 // ── Subscription Suspended ──────────────────────────
 
 export async function handleSubscriptionSuspended(

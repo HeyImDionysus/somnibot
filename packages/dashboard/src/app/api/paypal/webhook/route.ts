@@ -26,6 +26,7 @@ import {
   handlePaymentCaptured,
   handleSubscriptionActivated,
   handleSubscriptionCancelled,
+  handleSubscriptionExpired,
   handleSubscriptionSuspended,
   handleSubscriptionPayment,
   handleCaptureRefunded,
@@ -110,6 +111,9 @@ export async function POST(req: NextRequest) {
         break;
       case 'BILLING.SUBSCRIPTION.CANCELLED':
         await handleSubscriptionCancelled(supabase, event.resource);
+        break;
+      case 'BILLING.SUBSCRIPTION.EXPIRED':
+        await handleSubscriptionExpired(supabase, event.resource);
         break;
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
         await handleSubscriptionSuspended(supabase, event.resource);

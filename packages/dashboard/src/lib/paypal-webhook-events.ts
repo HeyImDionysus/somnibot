@@ -16,6 +16,10 @@ export const PAYPAL_HANDLED_WEBHOOK_EVENTS = [
     purpose: 'Revokes cancelled subscription access.',
   },
   {
+    eventType: 'BILLING.SUBSCRIPTION.EXPIRED',
+    purpose: 'Expires access for a managed product subscription at normal term end.',
+  },
+  {
     eventType: 'BILLING.SUBSCRIPTION.SUSPENDED',
     purpose: 'Moves subscription access into grace-period handling.',
   },
@@ -49,10 +53,4 @@ export const PAYPAL_HANDLED_WEBHOOK_EVENT_TYPES = PAYPAL_HANDLED_WEBHOOK_EVENTS.
   (event) => event.eventType,
 );
 
-export const PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS = [
-  {
-    eventType: 'BILLING.SUBSCRIPTION.EXPIRED',
-    reason:
-      'Do not subscribe by default until fixed-term subscription expiry policy is explicit; cancellation, suspension, failed payment, refund, reversal, and reconciliation paths currently control access removal.',
-  },
-] as const;
+export const PAYPAL_INTENTIONALLY_EXCLUDED_WEBHOOK_EVENTS = [] as const;
