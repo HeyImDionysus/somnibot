@@ -96,6 +96,7 @@ function makeResolvedChain(
   onEq?: (column: string, value: unknown) => void,
   onUpdate?: (payload: unknown) => void,
   onIn?: (column: string, values: unknown[]) => void,
+  onUpsert?: (payload: unknown) => void,
 ) {
   const chain: Record<string, unknown> = {};
   const chainMethods = [
@@ -133,7 +134,10 @@ function makeResolvedChain(
     onUpdate?.(payload);
     return chain;
   });
-  chain.upsert = vi.fn(() => chain);
+  chain.upsert = vi.fn((payload: unknown) => {
+    onUpsert?.(payload);
+    return chain;
+  });
   chain.then = (
     resolve: (v: unknown) => void,
     reject?: (reason: unknown) => void,
@@ -146,6 +150,7 @@ type MockRowResult = { data: unknown; error: unknown };
 
 function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
   const inserts: Array<{ table: string; payload: unknown }> = [];
+  const upserts: Array<{ table: string; payload: unknown }> = [];
   const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const updates: Array<{ table: string; payload: unknown }> = [];
   const inCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
@@ -172,10 +177,13 @@ function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
       (column, values) => {
         inCalls.push({ table, column, values });
       },
+      (payload) => {
+        upserts.push({ table, payload });
+      },
     );
   });
 
-  return { inserts, eqCalls, updates, inCalls };
+  return { inserts, upserts, eqCalls, updates, inCalls };
 }
 
 let mockSb: ReturnType<typeof makeMockSupabase>;
@@ -421,6 +429,75 @@ describe('PayPal webhook — edge cases', () => {
         payload: expect.objectContaining({ action: 'fulfill_suspension' }),
       }),
     );
+  });
+
+  it('records guild_id on persisted subscription expiry webhook events', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { upserts, updates } = useWebhookRows({
+        webhook_events: [
+          { data: [{ event_id: 'EVT-SUB-EXPIRED-GUILD' }], error: null },
+          { data: null, error: null },
+        ],
+        orders: [
+          {
+            data: [
+              {
+                guild_id: 'guild-1',
+                status: 'completed',
+                created_at: '2026-06-17T15:00:00.000Z',
+              },
+            ],
+            error: null,
+          },
+          {
+            data: {
+              id: 'order-expired',
+              order_number: 'ORD-EXPIRED',
+              guild_id: 'guild-1',
+              customer_id: 'customer-1',
+              product_id: 'product-1',
+              plan_id: 'plan-1',
+            },
+            error: null,
+          },
+        ],
+        entitlements: [
+          { data: [], error: null },
+          { data: null, error: null },
+        ],
+        license_keys: { data: [], error: null },
+        audit_logs: { data: null, error: null },
+      });
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-GUILD',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(upserts).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({
+          event_id: 'EVT-SUB-EXPIRED-GUILD',
+          event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+          guild_id: 'guild-1',
+        }),
+      });
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({
+          result: 'success',
+          guild_id: 'guild-1',
+        }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it('subscription expiry preserves roles still granted by other active entitlements', async () => {
@@ -778,7 +855,7 @@ describe('PayPal webhook — edge cases', () => {
       });
       expect(updates).toContainEqual({
         table: 'webhook_events',
-        payload: { result: 'success', error_details: null },
+        payload: expect.objectContaining({ result: 'success', error_details: null }),
       });
     } finally {
       global.fetch = originalFetch;

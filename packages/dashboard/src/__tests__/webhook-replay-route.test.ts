@@ -12,11 +12,29 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 
 type ChainResult = { data: unknown; error: unknown };
 
-function makeChain(result: ChainResult, onUpdate?: (payload: unknown) => void) {
+function makeChain(
+  result: ChainResult,
+  onUpdate?: (payload: unknown) => void,
+  onEq?: (column: string, value: unknown) => void,
+  onIs?: (column: string, value: unknown) => void,
+  onLt?: (column: string, value: unknown) => void,
+) {
   const chain: Record<string, unknown> = {};
-  for (const method of ['select', 'eq', 'single']) {
+  for (const method of ['select', 'single', 'maybeSingle']) {
     chain[method] = vi.fn(() => chain);
   }
+  chain.eq = vi.fn((column: string, value: unknown) => {
+    onEq?.(column, value);
+    return chain;
+  });
+  chain.is = vi.fn((column: string, value: unknown) => {
+    onIs?.(column, value);
+    return chain;
+  });
+  chain.lt = vi.fn((column: string, value: unknown) => {
+    onLt?.(column, value);
+    return chain;
+  });
   chain.update = vi.fn((payload: unknown) => {
     onUpdate?.(payload);
     return chain;
@@ -29,9 +47,15 @@ function makeChain(result: ChainResult, onUpdate?: (payload: unknown) => void) {
   return chain;
 }
 
-function makeSupabase(event: Record<string, unknown>) {
+function makeSupabase(
+  event: Record<string, unknown>,
+  options: { claimResult?: ChainResult } = {},
+) {
   const updates: unknown[] = [];
   const inserts: unknown[] = [];
+  const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
+  const isCalls: Array<{ table: string; column: string; value: unknown }> = [];
+  const ltCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
   const supabase = {
     from: vi.fn((table: string) => {
@@ -39,10 +63,20 @@ function makeSupabase(event: Record<string, unknown>) {
       tableCallCounts.set(table, count + 1);
 
       if (table === 'webhook_events' && count === 0) {
-        return makeChain({ data: event, error: null });
+        return makeChain(
+          { data: event, error: null },
+          undefined,
+          (column, value) => eqCalls.push({ table, column, value }),
+        );
       }
       if (table === 'webhook_events') {
-        return makeChain({ data: null, error: null }, (payload) => updates.push(payload));
+        return makeChain(
+          options.claimResult ?? { data: { event_id: event.event_id }, error: null },
+          (payload) => updates.push(payload),
+          (column, value) => eqCalls.push({ table, column, value }),
+          (column, value) => isCalls.push({ table, column, value }),
+          (column, value) => ltCalls.push({ table, column, value }),
+        );
       }
       if (table === 'bot_action_queue') {
         const chain = makeChain({ data: null, error: null });
@@ -55,7 +89,7 @@ function makeSupabase(event: Record<string, unknown>) {
       return makeChain({ data: null, error: null });
     }),
   };
-  return { supabase, updates, inserts };
+  return { supabase, updates, inserts, eqCalls, isCalls, ltCalls };
 }
 
 describe('POST /api/webhooks/[id]/replay', () => {
@@ -81,7 +115,9 @@ describe('POST /api/webhooks/[id]/replay', () => {
     const { supabase } = makeSupabase({
       event_id: 'EVT-STUCK',
       event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      guild_id: 'guild-1',
       result: null,
+      processed_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
       replay_count: 0,
       payload: {
         id: 'EVT-STUCK',
@@ -114,6 +150,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
     const { supabase } = makeSupabase({
       event_id: 'EVT-EXPIRED-SUCCESS-ASYNC-FAIL',
       event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      guild_id: 'guild-1',
       result: 'success',
       replay_count: 1,
       payload: {
@@ -148,6 +185,7 @@ describe('POST /api/webhooks/[id]/replay', () => {
     const { supabase } = makeSupabase({
       event_id: 'TRANSMISSION-ONLY',
       event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      guild_id: 'guild-1',
       result: 'error',
       replay_count: 0,
       payload: {
@@ -177,5 +215,97 @@ describe('POST /api/webhooks/[id]/replay', () => {
         }),
       }),
     );
+  });
+
+  it('scopes replay lookup and claim to the owner guild', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase, eqCalls, updates } = makeSupabase({
+      event_id: 'EVT-GUILD-SCOPED',
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      guild_id: 'guild-1',
+      result: 'error',
+      replay_count: 0,
+      payload: {
+        id: 'EVT-GUILD-SCOPED',
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-GUILD-SCOPED' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(new Request('http://localhost/api/webhooks/EVT-GUILD-SCOPED/replay'), {
+      params: Promise.resolve({ id: 'EVT-GUILD-SCOPED' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(eqCalls).toEqual(
+      expect.arrayContaining([
+        { table: 'webhook_events', column: 'event_id', value: 'EVT-GUILD-SCOPED' },
+        { table: 'webhook_events', column: 'guild_id', value: 'guild-1' },
+        { table: 'webhook_events', column: 'result', value: 'error' },
+      ]),
+    );
+    expect(updates).toContainEqual(
+      expect.objectContaining({
+        result: null,
+        error_details: null,
+        replay_count: 1,
+      }),
+    );
+  });
+
+  it('rejects non-stale null-result replay rows as already processing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-RECENT-NULL',
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      guild_id: 'guild-1',
+      result: null,
+      processed_at: new Date().toISOString(),
+      replay_count: 0,
+      payload: {
+        id: 'EVT-RECENT-NULL',
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-RECENT-NULL' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(new Request('http://localhost/api/webhooks/EVT-RECENT-NULL/replay'), {
+      params: Promise.resolve({ id: 'EVT-RECENT-NULL' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects replay when the atomic claim loses a race', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase(
+      {
+        event_id: 'EVT-CLAIM-RACE',
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        guild_id: 'guild-1',
+        result: 'success',
+        replay_count: 0,
+        payload: {
+          id: 'EVT-CLAIM-RACE',
+          event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+          resource: { id: 'SUB-CLAIM-RACE' },
+        },
+      },
+      { claimResult: { data: null, error: null } },
+    );
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(new Request('http://localhost/api/webhooks/EVT-CLAIM-RACE/replay'), {
+      params: Promise.resolve({ id: 'EVT-CLAIM-RACE' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

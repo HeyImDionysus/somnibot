@@ -40,6 +40,70 @@ const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   'BILLING.SUBSCRIPTION.EXPIRED',
 ]);
 
+type PayPalWebhookEvent = {
+  event_type: string;
+  resource: Record<string, unknown>;
+  id?: string;
+};
+
+function parseCustomIdGuildId(customId: unknown): string | null {
+  if (typeof customId !== 'string') return null;
+  try {
+    const parsed = JSON.parse(customId);
+    if (parsed && typeof parsed === 'object') {
+      const guildId = (parsed as { g?: unknown; guild_id?: unknown }).g
+        ?? (parsed as { guild_id?: unknown }).guild_id;
+      return typeof guildId === 'string' && guildId.length > 0 ? guildId : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function lookupSubscriptionGuildId(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  subscriptionId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('orders')
+    .select('guild_id, status, created_at')
+    .eq('paypal_subscription_id', subscriptionId)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  if (error) {
+    throw new Error(`Failed to resolve webhook guild: ${error.message}`);
+  }
+
+  const orders = Array.isArray(data) ? data : data ? [data] : [];
+  const order = orders.find((row) => row.status === 'completed') ?? orders[0];
+  return typeof order?.guild_id === 'string' ? order.guild_id : null;
+}
+
+async function resolveWebhookGuildId(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  event: PayPalWebhookEvent,
+): Promise<string | null> {
+  const customIdGuildId = parseCustomIdGuildId(event.resource.custom_id);
+  if (customIdGuildId) return customIdGuildId;
+
+  const resourceId = event.resource.id;
+  if (typeof resourceId === 'string' && event.event_type.startsWith('BILLING.SUBSCRIPTION.')) {
+    return lookupSubscriptionGuildId(supabase, resourceId);
+  }
+
+  const billingAgreementId = event.resource.billing_agreement_id;
+  if (
+    typeof billingAgreementId === 'string' &&
+    event.event_type === 'PAYMENT.SALE.COMPLETED'
+  ) {
+    return lookupSubscriptionGuildId(supabase, billingAgreementId);
+  }
+
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   // V5 Audit P3-1: IP-level rate limit to prevent signature-verification abuse
   const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
@@ -63,7 +127,7 @@ export async function POST(req: NextRequest) {
   }
 
   // V7 Audit §7.P2a — Zod-validated webhook payload shape
-  let event: { event_type: string; resource: Record<string, unknown>; id?: string };
+  let event: PayPalWebhookEvent;
   try {
     const raw = JSON.parse(rawBody);
     const paypalEventSchema = z.object({
@@ -86,7 +150,15 @@ export async function POST(req: NextRequest) {
   const resolvedEventId = eventId || randomBytes(16).toString('hex');
   const shouldRecordEventResult = Boolean(eventId) || !replay;
   let retryingFailedEvent = replay && req.headers.get('x-webhook-retrying-failed-event') === '1';
+  let webhookGuildId: string | null = null;
   if (!replay) {
+    try {
+      webhookGuildId = await resolveWebhookGuildId(supabase, event);
+    } catch (err) {
+      console.error('[Webhook] Failed to resolve webhook guild:', err);
+      return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+    }
+
     const { data: inserted, error: insertError } = await supabase
       .from('webhook_events')
       .upsert(
@@ -94,6 +166,7 @@ export async function POST(req: NextRequest) {
           event_id: resolvedEventId,
           event_type: event.event_type,
           payload: event as unknown as Record<string, unknown>,
+          ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
         },
         { onConflict: 'event_id', ignoreDuplicates: true },
       )
@@ -131,6 +204,7 @@ export async function POST(req: NextRequest) {
             result: null,
             error_details: null,
             processed_at: new Date().toISOString(),
+            ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
           })
           .eq('event_id', resolvedEventId)
           .eq('result', 'error')
@@ -164,6 +238,7 @@ export async function POST(req: NextRequest) {
               result: 'error',
               error_details: 'Stale webhook requires manual replay',
               processed_at: new Date().toISOString(),
+              ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
             })
             .eq('event_id', resolvedEventId)
             .is('result', null)
@@ -182,6 +257,7 @@ export async function POST(req: NextRequest) {
           .update({
             processed_at: new Date().toISOString(),
             error_details: null,
+            ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
           })
           .eq('event_id', resolvedEventId)
           .is('result', null)
@@ -246,7 +322,11 @@ export async function POST(req: NextRequest) {
     if (shouldRecordEventResult) {
       await supabase
         .from('webhook_events')
-        .update({ result: 'success', error_details: null })
+        .update({
+          result: 'success',
+          error_details: null,
+          ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+        })
         .eq('event_id', resolvedEventId);
     }
 
@@ -275,7 +355,11 @@ export async function POST(req: NextRequest) {
     if (shouldRecordEventResult) {
       await supabase
         .from('webhook_events')
-        .update({ result: 'error', error_details: String(err) })
+        .update({
+          result: 'error',
+          error_details: String(err),
+          ...(webhookGuildId ? { guild_id: webhookGuildId } : {}),
+        })
         .eq('event_id', resolvedEventId);
     }
 
