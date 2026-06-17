@@ -43,6 +43,21 @@ function makeReplay(body: unknown) {
   });
 }
 
+function makeSignedWebhook(body: unknown) {
+  return new Request('http://localhost/api/paypal/webhook', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'paypal-auth-algo': 'SHA256withRSA',
+      'paypal-cert-url': 'https://example.com/cert',
+      'paypal-transmission-id': 'transmission-1',
+      'paypal-transmission-sig': 'sig-1',
+      'paypal-transmission-time': new Date().toISOString(),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 /**
  * Build a fully chainable mock Supabase client.
  * Every method returns the chain object itself (for .from().select().eq()...),
@@ -603,6 +618,92 @@ describe('PayPal webhook — edge cases', () => {
       'Failed to queue role revocation for subscription expiry',
     );
     errorSpy.mockRestore();
+  });
+
+  it('subscription expiry retry can requeue roles after a previous failed queue insert', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts, inCalls, updates } = useWebhookRows({
+        webhook_events: [
+          { data: [], error: null },
+          { data: { result: 'error' }, error: null },
+          { data: null, error: null },
+        ],
+        orders: {
+          data: {
+            id: 'order-expired',
+            order_number: 'ORD-EXPIRED',
+            guild_id: 'guild-1',
+            customer_id: 'customer-1',
+            product_id: 'product-1',
+            plan_id: 'plan-1',
+          },
+          error: null,
+        },
+        entitlements: [
+          {
+            data: [
+              {
+                id: 'entitlement-1',
+                customer_id: 'customer-1',
+                granted_role_ids: ['role-1'],
+                license_key_id: 'license-1',
+              },
+            ],
+            error: null,
+          },
+          { data: [], error: null },
+          { data: null, error: null },
+        ],
+        license_keys: { data: [{ id: 'license-1' }], error: null },
+        license_sessions: { data: null, error: null },
+        customers: { data: { discord_id: 'discord-1' }, error: null },
+        bot_action_queue: { data: null, error: null },
+        audit_logs: { data: null, error: null },
+      });
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-RETRY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inCalls).toContainEqual({
+        table: 'entitlements',
+        column: 'status',
+        values: ['active', 'pending', 'grace_period', 'expired'],
+      });
+      expect(inCalls).toContainEqual({
+        table: 'license_keys',
+        column: 'status',
+        values: ['pending_activation', 'active', 'suspended', 'expired'],
+      });
+      expect(inserts).toContainEqual({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({
+          guild_id: 'guild-1',
+          action: 'revoke_roles',
+          payload: expect.objectContaining({
+            discord_id: 'discord-1',
+            role_ids: ['role-1'],
+            reason: 'subscription_expired',
+            order_id: 'order-expired',
+            product_id: 'product-1',
+          }),
+          status: 'pending',
+        }),
+      });
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: { result: 'success' },
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 
   it('refund event without recoverable capture_id returns 200 (logged, not retried)', async () => {

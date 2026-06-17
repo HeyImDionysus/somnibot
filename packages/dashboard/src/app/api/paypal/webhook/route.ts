@@ -78,13 +78,15 @@ export async function POST(req: NextRequest) {
   // I-3: Atomic dedup — INSERT the event row first; if a duplicate already exists
   // (event_id is PRIMARY KEY), the ON CONFLICT DO NOTHING makes the insert a no-op
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
+  const resolvedEventId = eventId || randomBytes(16).toString('hex');
+  const shouldRecordEventResult = Boolean(eventId) || !replay;
+  let retryingFailedEvent = false;
   if (!replay) {
-    const resolvedId = eventId || randomBytes(16).toString('hex');
-    const { data: inserted } = await supabase
+    const { data: inserted, error: insertError } = await supabase
       .from('webhook_events')
       .upsert(
         {
-          event_id: resolvedId,
+          event_id: resolvedEventId,
           event_type: event.event_type,
           payload: event as unknown as Record<string, unknown>,
         },
@@ -92,9 +94,32 @@ export async function POST(req: NextRequest) {
       )
       .select('event_id')
       .limit(1000);
+    if (insertError) {
+      console.error('[Webhook] Failed to record webhook event:', insertError.message);
+      return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+    }
 
     if (!inserted || inserted.length === 0) {
-      return NextResponse.json({ status: 'duplicate' }, { status: 200 });
+      const { data: existing, error: existingError } = await supabase
+        .from('webhook_events')
+        .select('result')
+        .eq('event_id', resolvedEventId)
+        .maybeSingle();
+
+      if (existingError) {
+        console.error('[Webhook] Failed to inspect duplicate webhook event:', existingError.message);
+        return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+      }
+
+      if (existing?.result === 'success' || existing?.result === 'duplicate') {
+        return NextResponse.json({ status: 'duplicate' }, { status: 200 });
+      }
+
+      if (existing?.result === 'error') {
+        retryingFailedEvent = true;
+      } else {
+        return NextResponse.json({ status: 'processing' }, { status: 409 });
+      }
     }
   }
 
@@ -113,7 +138,7 @@ export async function POST(req: NextRequest) {
         await handleSubscriptionCancelled(supabase, event.resource);
         break;
       case 'BILLING.SUBSCRIPTION.EXPIRED':
-        await handleSubscriptionExpired(supabase, event.resource);
+        await handleSubscriptionExpired(supabase, event.resource, { retryingFailedEvent });
         break;
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
         await handleSubscriptionSuspended(supabase, event.resource);
@@ -136,23 +161,23 @@ export async function POST(req: NextRequest) {
         console.log(`[Webhook] Unhandled event: ${event.event_type}`);
     }
 
-    if (eventId) {
+    if (shouldRecordEventResult) {
       await supabase
         .from('webhook_events')
         .update({ result: 'success' })
-        .eq('event_id', eventId);
+        .eq('event_id', resolvedEventId);
     }
 
     // Emit webhook.received audit event via bot action queue (Finding #4)
     const guildId = process.env.DISCORD_GUILD_ID;
-    if (guildId && eventId) {
+    if (guildId && shouldRecordEventResult) {
       await supabase.from('bot_action_queue').insert({
         guild_id: guildId,
         action: 'emit_audit_event',
         payload: {
           event_type: 'webhook.received',
           event_data: {
-            eventId,
+            eventId: resolvedEventId,
             eventType: event.event_type,
             provider: 'paypal',
             result: 'success',
@@ -165,11 +190,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ status: 'ok' }, { status: 200 });
   } catch (err) {
     console.error(`[Webhook] Error processing ${event.event_type}:`, err);
-    if (eventId) {
+    if (shouldRecordEventResult) {
       await supabase
         .from('webhook_events')
         .update({ result: 'error', error_details: String(err) })
-        .eq('event_id', eventId);
+        .eq('event_id', resolvedEventId);
     }
 
     // V11 Re-Audit L-2: Don't leak event_type in error responses.

@@ -419,6 +419,7 @@ export async function handleSubscriptionCancelled(
 export async function handleSubscriptionExpired(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: { retryingFailedEvent?: boolean } = {},
 ) {
   const subscriptionId = resource.id as string;
   if (!subscriptionId) return;
@@ -433,6 +434,12 @@ export async function handleSubscriptionExpired(
   if (!order) return;
 
   const now = new Date().toISOString();
+  const entitlementLookupStatuses = options.retryingFailedEvent
+    ? ['active', 'pending', 'grace_period', 'expired']
+    : ['active', 'pending', 'grace_period'];
+  const licenseKeyLookupStatuses = options.retryingFailedEvent
+    ? ['pending_activation', 'active', 'suspended', 'expired']
+    : ['pending_activation', 'active', 'suspended'];
 
   const { data: activeEntitlements, error: activeEntitlementsError } = await supabase
     .from('entitlements')
@@ -440,7 +447,7 @@ export async function handleSubscriptionExpired(
     .eq('order_id', order.id)
     .eq('guild_id', order.guild_id)
     .eq('product_id', order.product_id)
-    .in('status', ['active', 'pending', 'grace_period'])
+    .in('status', entitlementLookupStatuses)
     .limit(1000);
   requireSupabaseSuccess(
     activeEntitlementsError,
@@ -453,7 +460,7 @@ export async function handleSubscriptionExpired(
     .eq('order_id', order.id)
     .eq('guild_id', order.guild_id)
     .eq('product_id', order.product_id)
-    .in('status', ['pending_activation', 'active', 'suspended'])
+    .in('status', licenseKeyLookupStatuses)
     .limit(1000);
   requireSupabaseSuccess(
     activeLicenseKeysError,
