@@ -15,6 +15,166 @@ import {
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
 
+function formatSupabaseError(error: unknown): string {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function requireSupabaseSuccess(error: unknown, operation: string) {
+  if (error) {
+    throw new Error(`${operation}: ${formatSupabaseError(error)}`);
+  }
+}
+
+const EXPIRABLE_ENTITLEMENT_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
+const EXPIRY_RETRY_ENTITLEMENT_STATUSES = [
+  ...EXPIRABLE_ENTITLEMENT_STATUSES,
+  'expired',
+];
+
+function completedRevokeHadFailedRoles(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || !('failed' in result)) {
+    return false;
+  }
+  const failed = (result as { failed?: unknown }).failed;
+  return Array.isArray(failed) && failed.length > 0;
+}
+
+async function hasQueuedSubscriptionExpiryRoleRevocation(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  input: {
+    guildId: string;
+    discordId: string;
+    orderId: string;
+    productId: string;
+  },
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id, status, result')
+    .eq('guild_id', input.guildId)
+    .eq('action', 'revoke_roles')
+    .in('status', ['pending', 'processing', 'completed'])
+    .contains('payload', {
+      discord_id: input.discordId,
+      order_id: input.orderId,
+      product_id: input.productId,
+      reason: 'subscription_expired',
+    })
+    .limit(1000);
+  requireSupabaseSuccess(
+    error,
+    'Failed to inspect queued role revocation for subscription expiry',
+  );
+  if (!Array.isArray(data)) return false;
+  return data.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const status = (row as { status?: unknown }).status;
+    if (status !== 'completed') return true;
+    return !completedRevokeHadFailedRoles((row as { result?: unknown }).result);
+  });
+}
+
+async function hasQueuedSubscriptionExpiredAuditEvent(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  input: {
+    guildId: string;
+    discordId: string;
+    orderId: string;
+    productId: string;
+  },
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id')
+    .eq('guild_id', input.guildId)
+    .eq('action', 'emit_audit_event')
+    .in('status', ['pending', 'processing', 'completed'])
+    .contains('payload', {
+      event_type: 'subscription.expired',
+      event_data: {
+        discordId: input.discordId,
+        orderId: input.orderId,
+        productId: input.productId,
+      },
+    })
+    .limit(1000);
+  requireSupabaseSuccess(
+    error,
+    'Failed to inspect queued subscription expired audit event',
+  );
+  return Array.isArray(data) && data.length > 0;
+}
+
+function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): string | null {
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success
+    ? parsed.data
+    : { id: String(resource.id ?? '') };
+
+  const supp = capture.supplementary_data;
+  if (supp?.related_ids?.capture_id) {
+    return supp.related_ids.capture_id;
+  }
+
+  const links = capture.links ?? [];
+  const up = links.find((l) => l.rel === 'up');
+  if (up?.href) {
+    const m = up.href.match(/\/captures\/([^/?#]+)/);
+    if (m?.[1]) return m[1];
+  }
+
+  return null;
+}
+
+function resolveSaleRefundPaymentId(
+  resource: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  const parsed = paypalSaleResourceSchema.safeParse(resource);
+  const sale: PayPalSaleResource = parsed.success
+    ? parsed.data
+    : { id: String(resource.id ?? '') };
+
+  if (sale.sale_id) return sale.sale_id;
+  if (sale.capture_id) return sale.capture_id;
+
+  const links = sale.links ?? [];
+  const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
+  if (saleLink?.href) {
+    const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
+    if (m?.[1]) return m[1];
+  }
+
+  if (eventType === 'PAYMENT.SALE.REVERSED' && sale.id) {
+    return sale.id;
+  }
+
+  return null;
+}
+
+export function resolveRefundPaymentId(
+  resource: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  if (eventType === 'PAYMENT.CAPTURE.REFUNDED' || eventType === 'PAYMENT.CAPTURE.REVERSED') {
+    return resolveCaptureRefundPaymentId(resource);
+  }
+
+  if (eventType === 'PAYMENT.SALE.REFUNDED' || eventType === 'PAYMENT.SALE.REVERSED') {
+    return resolveSaleRefundPaymentId(resource, eventType);
+  }
+
+  return null;
+}
+
 // ── Order Approved ──────────────────────────────────
 
 export async function handleOrderApproved(
@@ -396,6 +556,253 @@ export async function handleSubscriptionCancelled(
   );
 }
 
+// ── Subscription Expired ────────────────────────────
+
+export async function handleSubscriptionExpired(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  resource: Record<string, unknown>,
+  options: { retryingFailedEvent?: boolean } = {},
+) {
+  const subscriptionId = resource.id as string;
+  if (!subscriptionId) return;
+
+  const { data: orders, error: orderError } = await supabase
+    .from('orders')
+    .select('id, order_number, guild_id, customer_id, product_id, plan_id, status, created_at')
+    .eq('paypal_subscription_id', subscriptionId)
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  requireSupabaseSuccess(orderError, 'Failed to load expired subscription order');
+  const orderRows = Array.isArray(orders) ? orders : orders ? [orders] : [];
+  const order = orderRows.find((row) => row.status === 'completed') ?? orderRows[0];
+  if (!order) return;
+
+  const now = new Date().toISOString();
+  const entitlementLookupStatuses = options.retryingFailedEvent
+    ? EXPIRY_RETRY_ENTITLEMENT_STATUSES
+    : EXPIRABLE_ENTITLEMENT_STATUSES;
+  const licenseKeyLookupStatuses = options.retryingFailedEvent
+    ? ['pending_activation', 'active', 'suspended', 'expired']
+    : ['pending_activation', 'active', 'suspended'];
+
+  const { data: activeEntitlements, error: activeEntitlementsError } = await supabase
+    .from('entitlements')
+    .select('id, customer_id, granted_role_ids, license_key_id')
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', entitlementLookupStatuses)
+    .limit(1000);
+  requireSupabaseSuccess(
+    activeEntitlementsError,
+    'Failed to load active entitlements for subscription expiry',
+  );
+
+  const { data: activeLicenseKeys, error: activeLicenseKeysError } = await supabase
+    .from('license_keys')
+    .select('id')
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', licenseKeyLookupStatuses)
+    .limit(1000);
+  requireSupabaseSuccess(
+    activeLicenseKeysError,
+    'Failed to load active license keys for subscription expiry',
+  );
+
+  const licenseKeyIds = [
+    ...new Set([
+      ...(activeEntitlements ?? [])
+        .map((ent) => ent.license_key_id)
+        .filter((id): id is string => Boolean(id)),
+      ...(activeLicenseKeys ?? [])
+        .map((key) => key.id)
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  ];
+
+  const expiredRoleIds = [
+    ...new Set(
+      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+    ),
+  ];
+
+  let remainingEntitlements: Array<{ granted_role_ids?: string[] | null }> = [];
+  if (expiredRoleIds.length > 0) {
+    const { data, error } = await supabase
+      .from('entitlements')
+      .select('granted_role_ids')
+      .eq('customer_id', order.customer_id)
+      .eq('guild_id', order.guild_id)
+      .neq('order_id', order.id)
+      .in('status', ['active', 'pending', 'grace_period'])
+      .limit(1000);
+    requireSupabaseSuccess(
+      error,
+      'Failed to load role-preserving entitlements for subscription expiry',
+    );
+    remainingEntitlements = data ?? [];
+  }
+
+  const preservedRoleIds = new Set(
+    (remainingEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+  );
+  const roleIds = expiredRoleIds.filter((roleId) => !preservedRoleIds.has(roleId));
+
+  const { error: expireEntitlementsError } = await supabase
+    .from('entitlements')
+    .update({
+      status: 'expired',
+      expires_at: now,
+      grace_period_ends_at: null,
+      updated_at: now,
+    })
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
+  requireSupabaseSuccess(
+    expireEntitlementsError,
+    'Failed to expire entitlements for subscription expiry',
+  );
+
+  const { error: expireLicenseKeysError } = await supabase
+    .from('license_keys')
+    .update({
+      status: 'expired',
+      expires_at: now,
+      updated_at: now,
+    })
+    .eq('order_id', order.id)
+    .eq('guild_id', order.guild_id)
+    .eq('product_id', order.product_id)
+    .in('status', ['pending_activation', 'active', 'suspended']);
+  requireSupabaseSuccess(
+    expireLicenseKeysError,
+    'Failed to expire license keys for subscription expiry',
+  );
+
+  if (licenseKeyIds.length > 0) {
+    const { error: deactivateSessionsError } = await supabase
+      .from('license_sessions')
+      .update({
+        active: false,
+        deactivated_at: now,
+        deactivation_reason: 'entitlement_revoked',
+      })
+      .in('license_key_id', licenseKeyIds)
+      .eq('active', true);
+    requireSupabaseSuccess(
+      deactivateSessionsError,
+      'Failed to deactivate license sessions for subscription expiry',
+    );
+  }
+
+  const hadActiveAccess =
+    (activeEntitlements?.length ?? 0) > 0 || licenseKeyIds.length > 0;
+
+  if (hadActiveAccess) {
+    const { data: customer, error: customerError } = await supabase
+      .from('customers')
+      .select('discord_id')
+      .eq('id', order.customer_id)
+      .eq('guild_id', order.guild_id)
+      .maybeSingle();
+    requireSupabaseSuccess(
+      customerError,
+      'Failed to load customer for subscription expiry fulfillment',
+    );
+
+    if (customer?.discord_id) {
+      let shouldQueueRoleRevocation = roleIds.length > 0;
+      if (shouldQueueRoleRevocation && options.retryingFailedEvent) {
+        shouldQueueRoleRevocation = !(await hasQueuedSubscriptionExpiryRoleRevocation(
+          supabase,
+          {
+            guildId: order.guild_id,
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+          },
+        ));
+      }
+
+      if (shouldQueueRoleRevocation) {
+        const queued = await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
+          discord_id: customer.discord_id,
+          role_ids: roleIds,
+          reason: 'subscription_expired',
+          order_id: order.id,
+          product_id: order.product_id,
+        });
+        if (!queued) {
+          throw new Error('Failed to queue role revocation for subscription expiry');
+        }
+      }
+
+      let shouldQueueAuditEvent = true;
+      if (options.retryingFailedEvent) {
+        shouldQueueAuditEvent = !(await hasQueuedSubscriptionExpiredAuditEvent(
+          supabase,
+          {
+            guildId: order.guild_id,
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+          },
+        ));
+      }
+
+      if (shouldQueueAuditEvent) {
+        const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
+          event_type: 'subscription.expired',
+          event_data: {
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+            planId: order.plan_id ?? '',
+            status: 'expired',
+          },
+        });
+        if (!queued) {
+          throw new Error('Failed to queue subscription expired audit event');
+        }
+      }
+    }
+  }
+
+  await supabase
+    .from('audit_logs')
+    .insert({
+      guild_id: order.guild_id,
+      actor_type: 'system',
+      actor_id: 'paypal_webhook',
+      action: 'subscription.expired',
+      target_type: 'order',
+      target_id: order.id,
+      details: {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        paypal_subscription_id: subscriptionId,
+        product_id: order.product_id,
+        entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
+        license_key_ids: licenseKeyIds,
+        role_ids: roleIds,
+      },
+    })
+    .then(
+      () => {},
+      () => {
+        /* ignore */
+      },
+    );
+
+  console.log(
+    `[Webhook] Subscription expired + product access expired: ${subscriptionId}`,
+  );
+}
+
 // ── Subscription Suspended ──────────────────────────
 
 export async function handleSubscriptionSuspended(
@@ -495,26 +902,7 @@ export async function handleCaptureRefunded(
   resource: Record<string, unknown>,
   eventType: string,
 ) {
-  const parsed = paypalCaptureResourceSchema.safeParse(resource);
-  const capture: PayPalCaptureResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
-
-  let captureId: string | undefined;
-
-  const supp = capture.supplementary_data;
-  if (supp?.related_ids?.capture_id) {
-    captureId = supp.related_ids.capture_id;
-  }
-
-  if (!captureId) {
-    const links = capture.links ?? [];
-    const up = links.find((l) => l.rel === 'up');
-    if (up?.href) {
-      const m = up.href.match(/\/captures\/([^/?#]+)/);
-      if (m?.[1]) captureId = m[1];
-    }
-  }
+  const captureId = resolveCaptureRefundPaymentId(resource);
 
   if (!captureId) {
     console.error(
@@ -534,25 +922,7 @@ export async function handleSaleRefunded(
   resource: Record<string, unknown>,
   eventType: string,
 ) {
-  const parsed = paypalSaleResourceSchema.safeParse(resource);
-  const sale: PayPalSaleResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
-
-  let saleId = sale.sale_id ?? sale.capture_id;
-
-  if (!saleId) {
-    const links = sale.links ?? [];
-    const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
-    if (saleLink?.href) {
-      const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
-      if (m?.[1]) saleId = m[1];
-    }
-  }
-
-  if (!saleId && eventType === 'PAYMENT.SALE.REVERSED') {
-    saleId = sale.id;
-  }
+  const saleId = resolveSaleRefundPaymentId(resource, eventType);
 
   if (!saleId) {
     console.error(

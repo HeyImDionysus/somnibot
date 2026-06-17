@@ -247,6 +247,17 @@ const EVENT_TO_AUDIT: Record<string, AuditMapping> = {
     beforeState: () => ({ status: 'active' }),
     afterState: (d) => ({ status: 'lapsed' }),
   },
+  'subscription.expired': {
+    action: 'subscription.expired',
+    category: 'subscriptions',
+    targetType: 'subscription',
+    actorType: 'system',
+    targetId: (d) => d.productId as string,
+    actorId: (d) => d.discordId as string,
+    details: (d) => ({ planId: d.planId, status: d.status }),
+    beforeState: () => ({ status: 'active' }),
+    afterState: (d) => ({ status: 'expired' }),
+  },
   'subscription.changed': {
     action: 'subscription.renewed',
     category: 'subscriptions',

@@ -80,6 +80,7 @@ const TRIGGER_META: Record<string, { label: string; icon: string; description: s
   'purchase.completed': { label: 'Purchases Product', icon: '🛒', description: 'When a purchase completes', variables: ['{user}', '{product}', '{amount}'] },
   'subscription.activated': { label: 'Subscription Activated', icon: '🔄', description: 'When a subscription starts', variables: ['{user}', '{plan}'] },
   'subscription.lapsed': { label: 'Subscription Lapsed', icon: '⚠️', description: 'When a subscription lapses', variables: ['{user}', '{plan}'] },
+  'subscription.expired': { label: 'Subscription Expired', icon: '⌛', description: 'When a subscription term ends and access is removed', variables: ['{user}', '{plan}'] },
   'ticket.opened': { label: 'Ticket Opened', icon: '🎫', description: 'When a ticket is created', variables: ['{user}', '{ticket}'] },
   'ticket.closed': { label: 'Ticket Closed', icon: '🎫', description: 'When a ticket is closed', variables: ['{ticket}'] },
   'giveaway.ended': { label: 'Giveaway Ended', icon: '🎁', description: 'When a giveaway concludes', variables: ['{giveaway}', '{winners}'] },

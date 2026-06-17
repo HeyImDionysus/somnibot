@@ -15,6 +15,7 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 
 /** V7 Audit §7.P2a — Zod schema for replay event ID path param. */
 const eventIdSchema = z.string().min(1).max(128).regex(/^[\w-]+$/, 'Invalid event ID format');
+const WEBHOOK_REPLAY_PROCESSING_STALE_MS = 5 * 60 * 1000;
 
 // V7 Audit §2.P2a: Prefer dedicated WEBHOOK_REPLAY_SECRET env var.
 // Falls back to HMAC derivation from NEXTAUTH_SECRET for backwards compat.
@@ -88,16 +89,60 @@ export async function POST(
     || 'http://localhost:3000';
 
   try {
-    // Mark as replaying
-    await supabase
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const replayCount = (event.replay_count ?? 0) + 1;
+    const claimUpdate = {
+      result: null,
+      error_details: null,
+      replayed_at: nowIso,
+      replay_count: replayCount,
+      processed_at: nowIso,
+    };
+
+    let claimQuery = supabase
       .from('webhook_events')
-      .update({
-        result: null,
-        error_details: null,
-        replayed_at: new Date().toISOString(),
-        replay_count: (event.replay_count ?? 0) + 1,
-      })
-      .eq('event_id', id);
+      .update(claimUpdate)
+      .eq('event_id', id)
+      .eq('guild_id', guildId);
+
+    if (event.result == null) {
+      const processedAt = Date.parse(String(event.processed_at ?? ''));
+      const isStale = Number.isFinite(processedAt) &&
+        Date.now() - processedAt >= WEBHOOK_REPLAY_PROCESSING_STALE_MS;
+      if (!isStale) {
+        return NextResponse.json(
+          { success: false, error: 'Webhook replay already processing' },
+          { status: 409 },
+        );
+      }
+      claimQuery = claimQuery
+        .is('result', null)
+        .lt(
+          'processed_at',
+          new Date(Date.now() - WEBHOOK_REPLAY_PROCESSING_STALE_MS).toISOString(),
+        );
+    } else {
+      claimQuery = claimQuery.eq('result', event.result);
+    }
+
+    const { data: claimed, error: claimError } = await claimQuery
+      .select('event_id')
+      .maybeSingle();
+
+    if (claimError) {
+      return NextResponse.json(
+        { success: false, error: 'Failed to claim webhook replay' },
+        { status: 500 },
+      );
+    }
+
+    if (!claimed) {
+      return NextResponse.json(
+        { success: false, error: 'Webhook replay already processing' },
+        { status: 409 },
+      );
+    }
 
     // Re-post to internal webhook endpoint with replay secret
     const headers: Record<string, string> = {
@@ -109,6 +154,20 @@ export async function POST(
       headers['X-Replay-Secret'] = getReplaySecret();
     } catch {
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
+    }
+    headers['PayPal-Transmission-Id'] = id;
+    const payloadEventType = (
+      event.payload &&
+      typeof event.payload === 'object' &&
+      'event_type' in event.payload
+    )
+      ? (event.payload as { event_type?: unknown }).event_type
+      : null;
+    const isSubscriptionExpiry =
+      event.event_type === 'BILLING.SUBSCRIPTION.EXPIRED' ||
+      payloadEventType === 'BILLING.SUBSCRIPTION.EXPIRED';
+    if (event.result === 'error' || event.result == null || isSubscriptionExpiry) {
+      headers['X-Webhook-Retrying-Failed-Event'] = '1';
     }
 
     const replayRes = await fetch(`${baseUrl}/api/paypal/webhook`, {
@@ -142,7 +201,7 @@ export async function POST(
             eventId: id,
             eventType: event.event_type ?? 'unknown',
             replayedBy: auth.ctx.discordId,
-            replayCount: (event.replay_count ?? 0) + 1,
+            replayCount,
           },
         },
         status: 'pending',

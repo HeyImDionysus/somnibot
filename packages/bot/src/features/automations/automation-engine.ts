@@ -364,6 +364,7 @@ export class AutomationEngine {
         break;
       case 'subscription.activated':
       case 'subscription.lapsed':
+      case 'subscription.expired':
         variables['plan'] = (data.planId as string) ?? '';
         break;
       case 'ticket.opened':

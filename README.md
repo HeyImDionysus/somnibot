@@ -293,16 +293,17 @@ PayPal webhook subscriptions should include:
 - `PAYMENT.CAPTURE.REVERSED`
 - `BILLING.SUBSCRIPTION.ACTIVATED`
 - `BILLING.SUBSCRIPTION.CANCELLED`
+- `BILLING.SUBSCRIPTION.EXPIRED`
 - `BILLING.SUBSCRIPTION.SUSPENDED`
 - `BILLING.SUBSCRIPTION.PAYMENT.FAILED`
 - `PAYMENT.SALE.COMPLETED`
 - `PAYMENT.SALE.REFUNDED`
 - `PAYMENT.SALE.REVERSED`
 
-Do not subscribe `BILLING.SUBSCRIPTION.EXPIRED` by default yet. SomniBot
-currently removes access through cancellation, suspension, failed payment,
-refund, reversal, and reconciliation paths; fixed-term subscription expiry
-needs an explicit product policy before it should revoke customer access.
+`BILLING.SUBSCRIPTION.EXPIRED` is handled as a normal managed-product term end:
+SomniBot expires only the matching product entitlement, license access, active
+license sessions, and product-tied roles. It is not treated as failed payment or
+general SomniBot access removal.
 
 Discord needs the Supabase callback above because dashboard login uses Supabase's
 Discord OAuth provider. Do not put the Tailscale/VPS dashboard URL in Discord
