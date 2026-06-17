@@ -31,6 +31,7 @@ import {
   handleSubscriptionPayment,
   handleCaptureRefunded,
   handleSaleRefunded,
+  resolveRefundPaymentId,
 } from './handlers';
 
 // ── Main handler ────────────────────────────────────
@@ -81,6 +82,23 @@ async function lookupSubscriptionGuildId(
   return typeof order?.guild_id === 'string' ? order.guild_id : null;
 }
 
+async function lookupPaymentGuildId(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  paymentId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('payments')
+    .select('guild_id')
+    .eq('paypal_payment_id', paymentId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to resolve payment webhook guild: ${error.message}`);
+  }
+
+  return typeof data?.guild_id === 'string' ? data.guild_id : null;
+}
+
 async function resolveWebhookGuildId(
   supabase: ReturnType<typeof createAdminSupabase>,
   event: PayPalWebhookEvent,
@@ -99,6 +117,11 @@ async function resolveWebhookGuildId(
     event.event_type === 'PAYMENT.SALE.COMPLETED'
   ) {
     return lookupSubscriptionGuildId(supabase, billingAgreementId);
+  }
+
+  const refundPaymentId = resolveRefundPaymentId(event.resource, event.event_type);
+  if (refundPaymentId) {
+    return lookupPaymentGuildId(supabase, refundPaymentId);
   }
 
   return null;

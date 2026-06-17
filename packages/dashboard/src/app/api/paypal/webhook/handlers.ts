@@ -82,6 +82,99 @@ async function hasQueuedSubscriptionExpiryRoleRevocation(
   });
 }
 
+async function hasQueuedSubscriptionExpiredAuditEvent(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  input: {
+    guildId: string;
+    discordId: string;
+    orderId: string;
+    productId: string;
+  },
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id')
+    .eq('guild_id', input.guildId)
+    .eq('action', 'emit_audit_event')
+    .in('status', ['pending', 'processing', 'completed'])
+    .contains('payload', {
+      event_type: 'subscription.expired',
+      event_data: {
+        discordId: input.discordId,
+        orderId: input.orderId,
+        productId: input.productId,
+      },
+    })
+    .limit(1000);
+  requireSupabaseSuccess(
+    error,
+    'Failed to inspect queued subscription expired audit event',
+  );
+  return Array.isArray(data) && data.length > 0;
+}
+
+function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): string | null {
+  const parsed = paypalCaptureResourceSchema.safeParse(resource);
+  const capture: PayPalCaptureResource = parsed.success
+    ? parsed.data
+    : { id: String(resource.id ?? '') };
+
+  const supp = capture.supplementary_data;
+  if (supp?.related_ids?.capture_id) {
+    return supp.related_ids.capture_id;
+  }
+
+  const links = capture.links ?? [];
+  const up = links.find((l) => l.rel === 'up');
+  if (up?.href) {
+    const m = up.href.match(/\/captures\/([^/?#]+)/);
+    if (m?.[1]) return m[1];
+  }
+
+  return null;
+}
+
+function resolveSaleRefundPaymentId(
+  resource: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  const parsed = paypalSaleResourceSchema.safeParse(resource);
+  const sale: PayPalSaleResource = parsed.success
+    ? parsed.data
+    : { id: String(resource.id ?? '') };
+
+  if (sale.sale_id) return sale.sale_id;
+  if (sale.capture_id) return sale.capture_id;
+
+  const links = sale.links ?? [];
+  const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
+  if (saleLink?.href) {
+    const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
+    if (m?.[1]) return m[1];
+  }
+
+  if (eventType === 'PAYMENT.SALE.REVERSED' && sale.id) {
+    return sale.id;
+  }
+
+  return null;
+}
+
+export function resolveRefundPaymentId(
+  resource: Record<string, unknown>,
+  eventType: string,
+): string | null {
+  if (eventType === 'PAYMENT.CAPTURE.REFUNDED' || eventType === 'PAYMENT.CAPTURE.REVERSED') {
+    return resolveCaptureRefundPaymentId(resource);
+  }
+
+  if (eventType === 'PAYMENT.SALE.REFUNDED' || eventType === 'PAYMENT.SALE.REVERSED') {
+    return resolveSaleRefundPaymentId(resource, eventType);
+  }
+
+  return null;
+}
+
 // ── Order Approved ──────────────────────────────────
 
 export async function handleOrderApproved(
@@ -649,17 +742,33 @@ export async function handleSubscriptionExpired(
         }
       }
 
-      const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
-        event_type: 'subscription.expired',
-        event_data: {
-          discordId: customer.discord_id,
-          productId: order.product_id,
-          planId: order.plan_id ?? '',
-          status: 'expired',
-        },
-      });
-      if (!queued) {
-        throw new Error('Failed to queue subscription expired audit event');
+      let shouldQueueAuditEvent = true;
+      if (options.retryingFailedEvent) {
+        shouldQueueAuditEvent = !(await hasQueuedSubscriptionExpiredAuditEvent(
+          supabase,
+          {
+            guildId: order.guild_id,
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+          },
+        ));
+      }
+
+      if (shouldQueueAuditEvent) {
+        const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
+          event_type: 'subscription.expired',
+          event_data: {
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+            planId: order.plan_id ?? '',
+            status: 'expired',
+          },
+        });
+        if (!queued) {
+          throw new Error('Failed to queue subscription expired audit event');
+        }
       }
     }
   }
@@ -793,26 +902,7 @@ export async function handleCaptureRefunded(
   resource: Record<string, unknown>,
   eventType: string,
 ) {
-  const parsed = paypalCaptureResourceSchema.safeParse(resource);
-  const capture: PayPalCaptureResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
-
-  let captureId: string | undefined;
-
-  const supp = capture.supplementary_data;
-  if (supp?.related_ids?.capture_id) {
-    captureId = supp.related_ids.capture_id;
-  }
-
-  if (!captureId) {
-    const links = capture.links ?? [];
-    const up = links.find((l) => l.rel === 'up');
-    if (up?.href) {
-      const m = up.href.match(/\/captures\/([^/?#]+)/);
-      if (m?.[1]) captureId = m[1];
-    }
-  }
+  const captureId = resolveCaptureRefundPaymentId(resource);
 
   if (!captureId) {
     console.error(
@@ -832,25 +922,7 @@ export async function handleSaleRefunded(
   resource: Record<string, unknown>,
   eventType: string,
 ) {
-  const parsed = paypalSaleResourceSchema.safeParse(resource);
-  const sale: PayPalSaleResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
-
-  let saleId = sale.sale_id ?? sale.capture_id;
-
-  if (!saleId) {
-    const links = sale.links ?? [];
-    const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
-    if (saleLink?.href) {
-      const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
-      if (m?.[1]) saleId = m[1];
-    }
-  }
-
-  if (!saleId && eventType === 'PAYMENT.SALE.REVERSED') {
-    saleId = sale.id;
-  }
+  const saleId = resolveSaleRefundPaymentId(resource, eventType);
 
   if (!saleId) {
     console.error(

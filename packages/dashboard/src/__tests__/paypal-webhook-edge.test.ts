@@ -398,12 +398,13 @@ describe('PayPal webhook — edge cases', () => {
         action: 'emit_audit_event',
         payload: expect.objectContaining({
           event_type: 'subscription.expired',
-          event_data: {
+          event_data: expect.objectContaining({
             discordId: 'discord-1',
+            orderId: 'order-expired',
             productId: 'product-1',
             planId: 'plan-1',
             status: 'expired',
-          },
+          }),
         }),
         status: 'pending',
       }),
@@ -492,6 +493,99 @@ describe('PayPal webhook — edge cases', () => {
         table: 'webhook_events',
         payload: expect.objectContaining({
           result: 'success',
+          guild_id: 'guild-1',
+        }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('records guild_id on persisted capture refund webhook events', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { upserts } = useWebhookRows({
+        payments: [
+          { data: { guild_id: 'guild-1' }, error: null },
+          {
+            data: {
+              id: 'payment-row-1',
+              order_id: 'order-1',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              status: 'completed',
+            },
+            error: null,
+          },
+        ],
+        webhook_events: { data: [{ event_id: 'EVT-CAPTURE-REFUND-GUILD' }], error: null },
+        entitlements: { data: [], error: null },
+      });
+      const req = makeSignedWebhook({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: 'REFUND-1',
+          supplementary_data: {
+            related_ids: { capture_id: 'CAPTURE-1' },
+          },
+        },
+        id: 'EVT-CAPTURE-REFUND-GUILD',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(upserts).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({
+          event_id: 'EVT-CAPTURE-REFUND-GUILD',
+          event_type: 'PAYMENT.CAPTURE.REFUNDED',
+          guild_id: 'guild-1',
+        }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('records guild_id on persisted sale reversal webhook events', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { upserts } = useWebhookRows({
+        payments: [
+          { data: { guild_id: 'guild-1' }, error: null },
+          {
+            data: {
+              id: 'payment-row-2',
+              order_id: 'order-2',
+              customer_id: 'customer-2',
+              guild_id: 'guild-1',
+              status: 'completed',
+            },
+            error: null,
+          },
+        ],
+        webhook_events: { data: [{ event_id: 'EVT-SALE-REVERSAL-GUILD' }], error: null },
+        entitlements: { data: [], error: null },
+      });
+      const req = makeSignedWebhook({
+        event_type: 'PAYMENT.SALE.REVERSED',
+        resource: { id: 'SALE-1' },
+        id: 'EVT-SALE-REVERSAL-GUILD',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(upserts).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({
+          event_id: 'EVT-SALE-REVERSAL-GUILD',
+          event_type: 'PAYMENT.SALE.REVERSED',
           guild_id: 'guild-1',
         }),
       });
@@ -1050,6 +1144,79 @@ describe('PayPal webhook — edge cases', () => {
         action: 'revoke_roles',
         payload: expect.objectContaining({
           role_ids: ['role-1'],
+        }),
+      }),
+    });
+  });
+
+  it('subscription expiry retry does not duplicate the expired audit event when only roles failed', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      license_sessions: { data: null, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: [
+        {
+          data: [{ id: 'queued-revoke', status: 'completed', result: { failed: ['role-1'] } }],
+          error: null,
+        },
+        { data: null, error: null },
+        { data: [{ id: 'queued-audit', status: 'completed' }], error: null },
+      ],
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay(
+      {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-REPLAY-AUDIT-DEDUP',
+      },
+      { 'x-webhook-retrying-failed-event': '1' },
+    );
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'revoke_roles',
+        payload: expect.objectContaining({
+          role_ids: ['role-1'],
+        }),
+      }),
+    });
+    expect(inserts).not.toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        action: 'emit_audit_event',
+        payload: expect.objectContaining({
+          event_type: 'subscription.expired',
         }),
       }),
     });
