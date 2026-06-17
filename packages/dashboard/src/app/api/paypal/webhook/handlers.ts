@@ -33,6 +33,35 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
   }
 }
 
+async function hasQueuedSubscriptionExpiryRoleRevocation(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  input: {
+    guildId: string;
+    discordId: string;
+    orderId: string;
+    productId: string;
+  },
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id')
+    .eq('guild_id', input.guildId)
+    .eq('action', 'revoke_roles')
+    .in('status', ['pending', 'processing', 'completed'])
+    .contains('payload', {
+      discord_id: input.discordId,
+      order_id: input.orderId,
+      product_id: input.productId,
+      reason: 'subscription_expired',
+    })
+    .limit(1);
+  requireSupabaseSuccess(
+    error,
+    'Failed to inspect queued role revocation for subscription expiry',
+  );
+  return Array.isArray(data) && data.length > 0;
+}
+
 // ── Order Approved ──────────────────────────────────
 
 export async function handleOrderApproved(
@@ -571,7 +600,20 @@ export async function handleSubscriptionExpired(
     );
 
     if (customer?.discord_id) {
-      if (roleIds.length > 0) {
+      let shouldQueueRoleRevocation = roleIds.length > 0;
+      if (shouldQueueRoleRevocation && options.retryingFailedEvent) {
+        shouldQueueRoleRevocation = !(await hasQueuedSubscriptionExpiryRoleRevocation(
+          supabase,
+          {
+            guildId: order.guild_id,
+            discordId: customer.discord_id,
+            orderId: order.id,
+            productId: order.product_id,
+          },
+        ));
+      }
+
+      if (shouldQueueRoleRevocation) {
         const queued = await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
           discord_id: customer.discord_id,
           role_ids: roleIds,

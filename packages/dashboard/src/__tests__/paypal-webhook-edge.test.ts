@@ -109,6 +109,7 @@ function makeResolvedChain(
     'neq',
     'is',
     'lt',
+    'contains',
   ];
 
   for (const method of chainMethods) {
@@ -770,6 +771,75 @@ describe('PayPal webhook — edge cases', () => {
         guild_id: 'guild-1',
         action: 'revoke_roles',
         payload: expect.objectContaining({ role_ids: ['role-1'] }),
+      }),
+    });
+  });
+
+  it('subscription expiry retry does not duplicate an already queued role revocation', async () => {
+    const { inserts, inCalls } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      license_sessions: { data: null, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: [
+        { data: [{ id: 'queued-revoke' }], error: null },
+        { data: null, error: null },
+      ],
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay(
+      {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-REPLAY',
+      },
+      { 'x-webhook-retrying-failed-event': '1' },
+    );
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inCalls).toContainEqual({
+      table: 'bot_action_queue',
+      column: 'status',
+      values: ['pending', 'processing', 'completed'],
+    });
+    expect(inserts).not.toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({ action: 'revoke_roles' }),
+    });
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'emit_audit_event',
+        payload: expect.objectContaining({
+          event_type: 'subscription.expired',
+        }),
       }),
     });
   });
