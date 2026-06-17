@@ -36,6 +36,9 @@ import {
 // ── Main handler ────────────────────────────────────
 
 const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
+const RESUMABLE_FAILED_EVENT_TYPES = new Set([
+  'BILLING.SUBSCRIPTION.EXPIRED',
+]);
 
 export async function POST(req: NextRequest) {
   // V5 Audit P3-1: IP-level rate limit to prevent signature-verification abuse
@@ -118,6 +121,10 @@ export async function POST(req: NextRequest) {
       }
 
       if (existing?.result === 'error') {
+        if (!RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type)) {
+          return NextResponse.json({ status: 'failed_requires_manual_replay' }, { status: 409 });
+        }
+
         const { data: claimed, error: claimError } = await supabase
           .from('webhook_events')
           .update({

@@ -33,6 +33,20 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
   }
 }
 
+const EXPIRABLE_ENTITLEMENT_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
+const EXPIRY_RETRY_ENTITLEMENT_STATUSES = [
+  ...EXPIRABLE_ENTITLEMENT_STATUSES,
+  'expired',
+];
+
+function completedRevokeHadFailedRoles(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || !('failed' in result)) {
+    return false;
+  }
+  const failed = (result as { failed?: unknown }).failed;
+  return Array.isArray(failed) && failed.length > 0;
+}
+
 async function hasQueuedSubscriptionExpiryRoleRevocation(
   supabase: ReturnType<typeof createAdminSupabase>,
   input: {
@@ -44,7 +58,7 @@ async function hasQueuedSubscriptionExpiryRoleRevocation(
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from('bot_action_queue')
-    .select('id')
+    .select('id, status, result')
     .eq('guild_id', input.guildId)
     .eq('action', 'revoke_roles')
     .in('status', ['pending', 'processing', 'completed'])
@@ -59,7 +73,13 @@ async function hasQueuedSubscriptionExpiryRoleRevocation(
     error,
     'Failed to inspect queued role revocation for subscription expiry',
   );
-  return Array.isArray(data) && data.length > 0;
+  if (!Array.isArray(data)) return false;
+  return data.some((row) => {
+    if (!row || typeof row !== 'object') return false;
+    const status = (row as { status?: unknown }).status;
+    if (status !== 'completed') return true;
+    return !completedRevokeHadFailedRoles((row as { result?: unknown }).result);
+  });
 }
 
 // ── Order Approved ──────────────────────────────────
@@ -464,8 +484,8 @@ export async function handleSubscriptionExpired(
 
   const now = new Date().toISOString();
   const entitlementLookupStatuses = options.retryingFailedEvent
-    ? ['active', 'pending', 'grace_period', 'expired']
-    : ['active', 'pending', 'grace_period'];
+    ? EXPIRY_RETRY_ENTITLEMENT_STATUSES
+    : EXPIRABLE_ENTITLEMENT_STATUSES;
   const licenseKeyLookupStatuses = options.retryingFailedEvent
     ? ['pending_activation', 'active', 'suspended', 'expired']
     : ['pending_activation', 'active', 'suspended'];
@@ -546,7 +566,7 @@ export async function handleSubscriptionExpired(
     .eq('order_id', order.id)
     .eq('guild_id', order.guild_id)
     .eq('product_id', order.product_id)
-    .in('status', ['active', 'pending', 'grace_period']);
+    .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
   requireSupabaseSuccess(
     expireEntitlementsError,
     'Failed to expire entitlements for subscription expiry',

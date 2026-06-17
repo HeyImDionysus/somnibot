@@ -100,8 +100,46 @@ describe('POST /api/webhooks/[id]/replay', () => {
       'http://localhost/api/paypal/webhook',
       expect.objectContaining({
         headers: expect.objectContaining({
+          'PayPal-Transmission-Id': 'EVT-STUCK',
           'X-Replay-Secret': replaySecret,
           'X-Webhook-Retrying-Failed-Event': '1',
+        }),
+      }),
+    );
+  });
+
+  it('passes the stored event id when replaying payloads without an id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase({
+      event_id: 'TRANSMISSION-ONLY',
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      result: 'error',
+      replay_count: 0,
+      payload: {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-TRANSMISSION-ONLY' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/TRANSMISSION-ONLY/replay'),
+      {
+        params: Promise.resolve({ id: 'TRANSMISSION-ONLY' }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost/api/paypal/webhook',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'PayPal-Transmission-Id': 'TRANSMISSION-ONLY',
+        }),
+        body: JSON.stringify({
+          event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+          resource: { id: 'SUB-TRANSMISSION-ONLY' },
         }),
       }),
     );

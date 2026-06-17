@@ -110,6 +110,7 @@ export async function POST(
     } catch {
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
+    headers['PayPal-Transmission-Id'] = id;
     if (event.result === 'error' || event.result == null) {
       headers['X-Webhook-Retrying-Failed-Event'] = '1';
     }
