@@ -34,7 +34,7 @@ describe('VPS command runner', () => {
 
     const result = await runner(command(process.execPath, [
       '-e',
-      'process.stdout.write(process.argv[1])',
+      'require("node:fs").writeSync(1, process.argv[1])',
       'runner-ok',
     ]), { index: 0, total: 1 });
 
@@ -49,7 +49,7 @@ describe('VPS command runner', () => {
 
     const result = await runner(command(process.execPath, [
       '-e',
-      'process.stderr.write("runner-failed"); process.exit(7)',
+      'require("node:fs").writeSync(2, "runner-failed"); process.exit(7)',
     ]), { index: 0, total: 1 });
 
     expect(result).toMatchObject({
@@ -64,7 +64,7 @@ describe('VPS command runner', () => {
 
     const result = await runner(command(process.execPath, [
       '-e',
-      'process.stdout.write("x".repeat(2048) + "tail-marker")',
+      'require("node:fs").writeSync(1, "x".repeat(2048) + "tail-marker")',
     ]), { index: 0, total: 1 });
 
     expect(result.ok).toBe(true);
@@ -77,7 +77,7 @@ describe('VPS command runner', () => {
 
     const result = await runner(command(process.execPath, [
       '-e',
-      'setTimeout(() => process.stdout.write("slow-ok"), 100)',
+      'setTimeout(() => require("node:fs").writeSync(1, "slow-ok"), 100)',
     ], { executionTimeoutMs: 1_000 }), { index: 0, total: 1 });
 
     expect(result).toMatchObject({
@@ -103,7 +103,7 @@ describe('VPS command runner', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'somnibot-vps-runner-'));
     const sshPath = path.join(tempDir, 'ssh');
     try {
-      writeFileSync(sshPath, `#!${process.execPath}\nprocess.stderr.write("ssh transport failed"); process.exit(255);\n`);
+      writeFileSync(sshPath, `#!${process.execPath}\nrequire("node:fs").writeSync(2, "ssh transport failed"); process.exit(255);\n`);
       chmodSync(sshPath, 0o700);
 
       const runner = createVpsCommandRunner({ timeoutMs: 5_000 });
