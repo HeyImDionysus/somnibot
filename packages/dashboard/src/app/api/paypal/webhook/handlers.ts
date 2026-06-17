@@ -585,16 +585,16 @@ export async function handleSubscriptionExpired(
       }
 
       const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
-        event_type: 'subscription.lapsed',
+        event_type: 'subscription.expired',
         event_data: {
           discordId: customer.discord_id,
           productId: order.product_id,
           planId: order.plan_id ?? '',
-          status: 'lapsed',
+          status: 'expired',
         },
       });
       if (!queued) {
-        throw new Error('Failed to queue subscription lapsed audit event');
+        throw new Error('Failed to queue subscription expired audit event');
       }
     }
   }

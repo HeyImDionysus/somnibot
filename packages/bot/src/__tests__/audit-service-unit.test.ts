@@ -67,6 +67,7 @@ describe('AuditService — Event Mapping', () => {
     'entitlement.revoked',
     'subscription.activated',
     'subscription.lapsed',
+    'subscription.expired',
     'subscription.changed',
     'level.up',
     'giveaway.ended',

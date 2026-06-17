@@ -62,7 +62,7 @@ export interface SubscriptionChangedData {
   discordId: string;
   productId: string;
   planId: string;
-  status: 'activated' | 'lapsed' | 'cancelled' | 'renewed';
+  status: 'activated' | 'lapsed' | 'cancelled' | 'renewed' | 'expired';
 }
 
 export interface TicketEventData {
@@ -346,6 +346,7 @@ export interface PlatformEventMap {
   'purchase.completed': PurchaseCompletedData;
   'subscription.activated': SubscriptionChangedData;
   'subscription.lapsed': SubscriptionChangedData;
+  'subscription.expired': SubscriptionChangedData;
   'subscription.changed': SubscriptionChangedData;
   'entitlement.granted': EntitlementGrantedData;
   'entitlement.revoked': EntitlementRevokedData;

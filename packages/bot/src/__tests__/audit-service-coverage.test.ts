@@ -172,7 +172,7 @@ describe('AuditService', () => {
 
     it('maps commerce events (purchase, entitlement, subscription)', async () => {
       service.start();
-      for (const type of ['purchase.completed', 'entitlement.granted', 'entitlement.revoked', 'subscription.activated', 'subscription.lapsed', 'subscription.changed']) {
+      for (const type of ['purchase.completed', 'entitlement.granted', 'entitlement.revoked', 'subscription.activated', 'subscription.lapsed', 'subscription.expired', 'subscription.changed']) {
         await eventBus._emit({
           type,
           guildId: 'g1',

@@ -32,12 +32,13 @@ vi.mock('@/lib/api/rate-limit', () => ({
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 
-function makeReplay(body: unknown) {
+function makeReplay(body: unknown, headers: Record<string, string> = {}) {
   return new Request('http://localhost/api/paypal/webhook', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-replay-secret': replaySecret,
+      ...headers,
     },
     body: JSON.stringify(body),
   });
@@ -106,6 +107,8 @@ function makeResolvedChain(
     'maybeSingle',
     'in',
     'neq',
+    'is',
+    'lt',
   ];
 
   for (const method of chainMethods) {
@@ -385,12 +388,12 @@ describe('PayPal webhook — edge cases', () => {
         guild_id: 'guild-1',
         action: 'emit_audit_event',
         payload: expect.objectContaining({
-          event_type: 'subscription.lapsed',
+          event_type: 'subscription.expired',
           event_data: {
             discordId: 'discord-1',
             productId: 'product-1',
             planId: 'plan-1',
-            status: 'lapsed',
+            status: 'expired',
           },
         }),
         status: 'pending',
@@ -629,7 +632,8 @@ describe('PayPal webhook — edge cases', () => {
       const { inserts, inCalls, updates } = useWebhookRows({
         webhook_events: [
           { data: [], error: null },
-          { data: { result: 'error' }, error: null },
+          { data: { result: 'error', processed_at: new Date().toISOString() }, error: null },
+          { data: { event_id: 'EVT-SUB-EXPIRED-RETRY' }, error: null },
           { data: null, error: null },
         ],
         orders: {
@@ -699,7 +703,145 @@ describe('PayPal webhook — edge cases', () => {
       });
       expect(updates).toContainEqual({
         table: 'webhook_events',
-        payload: { result: 'success' },
+        payload: expect.objectContaining({ result: null, error_details: null }),
+      });
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: { result: 'success', error_details: null },
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('subscription expiry internal replay can requeue roles when marked as a failed retry', async () => {
+    const { inserts, inCalls } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      license_sessions: { data: null, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: { data: null, error: null },
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay(
+      {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-REPLAY',
+      },
+      { 'x-webhook-retrying-failed-event': '1' },
+    );
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inCalls).toContainEqual({
+      table: 'entitlements',
+      column: 'status',
+      values: ['active', 'pending', 'grace_period', 'expired'],
+    });
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'revoke_roles',
+        payload: expect.objectContaining({ role_ids: ['role-1'] }),
+      }),
+    });
+  });
+
+  it('subscription expiry recovers stale in-progress webhook rows', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts, updates } = useWebhookRows({
+        webhook_events: [
+          { data: [], error: null },
+          {
+            data: {
+              result: null,
+              processed_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+            },
+            error: null,
+          },
+          { data: { event_id: 'EVT-SUB-EXPIRED-STALE' }, error: null },
+          { data: null, error: null },
+        ],
+        orders: {
+          data: {
+            id: 'order-expired',
+            order_number: 'ORD-EXPIRED',
+            guild_id: 'guild-1',
+            customer_id: 'customer-1',
+            product_id: 'product-1',
+            plan_id: 'plan-1',
+          },
+          error: null,
+        },
+        entitlements: [
+          {
+            data: [
+              {
+                id: 'entitlement-1',
+                customer_id: 'customer-1',
+                granted_role_ids: ['role-1'],
+                license_key_id: null,
+              },
+            ],
+            error: null,
+          },
+          { data: [], error: null },
+          { data: null, error: null },
+        ],
+        license_keys: { data: [], error: null },
+        customers: { data: { discord_id: 'discord-1' }, error: null },
+        bot_action_queue: { data: null, error: null },
+        audit_logs: { data: null, error: null },
+      });
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-STALE',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ error_details: null }),
+      });
+      expect(inserts).toContainEqual({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({
+          guild_id: 'guild-1',
+          action: 'revoke_roles',
+        }),
       });
     } finally {
       global.fetch = originalFetch;

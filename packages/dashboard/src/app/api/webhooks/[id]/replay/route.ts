@@ -110,6 +110,9 @@ export async function POST(
     } catch {
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
+    if (event.result === 'error') {
+      headers['X-Webhook-Retrying-Failed-Event'] = '1';
+    }
 
     const replayRes = await fetch(`${baseUrl}/api/paypal/webhook`, {
       method: 'POST',

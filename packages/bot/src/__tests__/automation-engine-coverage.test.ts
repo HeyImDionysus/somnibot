@@ -430,6 +430,11 @@ describe('AutomationEngine', () => {
       expect(ctx?.variables.plan).toBe('premium');
     });
 
+    it('resolves subscription.expired variables', async () => {
+      const ctx = await fireAndCapture('subscription.expired', { discordId: 'u1', planId: 'premium' });
+      expect(ctx?.variables.plan).toBe('premium');
+    });
+
     it('resolves ticket.opened variables', async () => {
       const ctx = await fireAndCapture('ticket.opened', { discordId: 'u1', ticketNumber: 42 });
       expect(ctx?.variables.ticket).toBe('#42');

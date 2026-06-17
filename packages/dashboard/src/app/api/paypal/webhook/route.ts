@@ -35,6 +35,8 @@ import {
 
 // ── Main handler ────────────────────────────────────
 
+const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
+
 export async function POST(req: NextRequest) {
   // V5 Audit P3-1: IP-level rate limit to prevent signature-verification abuse
   const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
@@ -80,7 +82,7 @@ export async function POST(req: NextRequest) {
   const eventId = event.id ?? req.headers.get('paypal-transmission-id') ?? '';
   const resolvedEventId = eventId || randomBytes(16).toString('hex');
   const shouldRecordEventResult = Boolean(eventId) || !replay;
-  let retryingFailedEvent = false;
+  let retryingFailedEvent = replay && req.headers.get('x-webhook-retrying-failed-event') === '1';
   if (!replay) {
     const { data: inserted, error: insertError } = await supabase
       .from('webhook_events')
@@ -102,7 +104,7 @@ export async function POST(req: NextRequest) {
     if (!inserted || inserted.length === 0) {
       const { data: existing, error: existingError } = await supabase
         .from('webhook_events')
-        .select('result')
+        .select('result, processed_at')
         .eq('event_id', resolvedEventId)
         .maybeSingle();
 
@@ -116,6 +118,59 @@ export async function POST(req: NextRequest) {
       }
 
       if (existing?.result === 'error') {
+        const { data: claimed, error: claimError } = await supabase
+          .from('webhook_events')
+          .update({
+            result: null,
+            error_details: null,
+            processed_at: new Date().toISOString(),
+          })
+          .eq('event_id', resolvedEventId)
+          .eq('result', 'error')
+          .select('event_id')
+          .maybeSingle();
+
+        if (claimError) {
+          console.error('[Webhook] Failed to claim failed webhook retry:', claimError.message);
+          return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+        }
+
+        if (!claimed) {
+          return NextResponse.json({ status: 'processing' }, { status: 409 });
+        }
+
+        retryingFailedEvent = true;
+      } else if (existing?.result == null) {
+        const processedAt = Date.parse(String(existing?.processed_at ?? ''));
+        const isStale = Number.isFinite(processedAt) &&
+          Date.now() - processedAt >= WEBHOOK_PROCESSING_STALE_MS;
+
+        if (!isStale) {
+          return NextResponse.json({ status: 'processing' }, { status: 409 });
+        }
+
+        const staleBefore = new Date(Date.now() - WEBHOOK_PROCESSING_STALE_MS).toISOString();
+        const { data: claimed, error: claimError } = await supabase
+          .from('webhook_events')
+          .update({
+            processed_at: new Date().toISOString(),
+            error_details: null,
+          })
+          .eq('event_id', resolvedEventId)
+          .is('result', null)
+          .lt('processed_at', staleBefore)
+          .select('event_id')
+          .maybeSingle();
+
+        if (claimError) {
+          console.error('[Webhook] Failed to claim stale webhook retry:', claimError.message);
+          return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+        }
+
+        if (!claimed) {
+          return NextResponse.json({ status: 'processing' }, { status: 409 });
+        }
+
         retryingFailedEvent = true;
       } else {
         return NextResponse.json({ status: 'processing' }, { status: 409 });
@@ -164,7 +219,7 @@ export async function POST(req: NextRequest) {
     if (shouldRecordEventResult) {
       await supabase
         .from('webhook_events')
-        .update({ result: 'success' })
+        .update({ result: 'success', error_details: null })
         .eq('event_id', resolvedEventId);
     }
 
