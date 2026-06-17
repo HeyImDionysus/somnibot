@@ -108,6 +108,40 @@ describe('POST /api/webhooks/[id]/replay', () => {
     );
   });
 
+  it('marks successful subscription expiry replays as failed-event retries', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { supabase } = makeSupabase({
+      event_id: 'EVT-EXPIRED-SUCCESS-ASYNC-FAIL',
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      result: 'success',
+      replay_count: 1,
+      payload: {
+        id: 'EVT-EXPIRED-SUCCESS-ASYNC-FAIL',
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-ASYNC-ROLE-FAIL' },
+      },
+    });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await POST(
+      new Request('http://localhost/api/webhooks/EVT-EXPIRED-SUCCESS-ASYNC-FAIL/replay'),
+      {
+        params: Promise.resolve({ id: 'EVT-EXPIRED-SUCCESS-ASYNC-FAIL' }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://localhost/api/paypal/webhook',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'X-Webhook-Retrying-Failed-Event': '1',
+        }),
+      }),
+    );
+  });
+
   it('passes the stored event id when replaying payloads without an id', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);

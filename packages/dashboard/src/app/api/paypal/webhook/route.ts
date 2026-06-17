@@ -122,7 +122,7 @@ export async function POST(req: NextRequest) {
 
       if (existing?.result === 'error') {
         if (!RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type)) {
-          return NextResponse.json({ status: 'failed_requires_manual_replay' }, { status: 409 });
+          return NextResponse.json({ status: 'failed_requires_manual_replay' }, { status: 200 });
         }
 
         const { data: claimed, error: claimError } = await supabase
@@ -157,6 +157,26 @@ export async function POST(req: NextRequest) {
         }
 
         const staleBefore = new Date(Date.now() - WEBHOOK_PROCESSING_STALE_MS).toISOString();
+        if (!RESUMABLE_FAILED_EVENT_TYPES.has(event.event_type)) {
+          const { error: markError } = await supabase
+            .from('webhook_events')
+            .update({
+              result: 'error',
+              error_details: 'Stale webhook requires manual replay',
+              processed_at: new Date().toISOString(),
+            })
+            .eq('event_id', resolvedEventId)
+            .is('result', null)
+            .lt('processed_at', staleBefore);
+
+          if (markError) {
+            console.error('[Webhook] Failed to mark stale webhook for manual replay:', markError.message);
+            return NextResponse.json({ error: 'Processing failed' }, { status: 500 });
+          }
+
+          return NextResponse.json({ status: 'stale_requires_manual_replay' }, { status: 200 });
+        }
+
         const { data: claimed, error: claimError } = await supabase
           .from('webhook_events')
           .update({

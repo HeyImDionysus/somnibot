@@ -487,6 +487,76 @@ describe('PayPal webhook — edge cases', () => {
     });
   });
 
+  it('subscription expiry uses the completed subscription order when PayPal also has a pending attempt row', async () => {
+    const { eqCalls, inserts } = useWebhookRows({
+      orders: {
+        data: [
+          {
+            id: 'order-pending-attempt',
+            order_number: 'ORD-PENDING',
+            guild_id: 'guild-1',
+            customer_id: 'customer-1',
+            product_id: 'product-1',
+            plan_id: 'plan-1',
+            status: 'pending',
+            created_at: '2026-06-17T15:00:00.000Z',
+          },
+          {
+            id: 'order-completed-activation',
+            order_number: 'ORD-COMPLETED',
+            guild_id: 'guild-1',
+            customer_id: 'customer-1',
+            product_id: 'product-1',
+            plan_id: 'plan-1',
+            status: 'completed',
+            created_at: '2026-06-17T14:00:00.000Z',
+          },
+        ],
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: null,
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+      ],
+      license_keys: { data: [], error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: { data: null, error: null },
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-DUPLICATE-ORDERS' },
+      id: 'EVT-SUB-DUPLICATE-ORDERS',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(eqCalls).toContainEqual({
+      table: 'entitlements',
+      column: 'order_id',
+      value: 'order-completed-activation',
+    });
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        action: 'revoke_roles',
+        payload: expect.objectContaining({
+          order_id: 'order-completed-activation',
+        }),
+      }),
+    });
+  });
+
   it('repeated subscription expiry does not queue duplicate role revocation', async () => {
     const { inserts } = useWebhookRows({
       orders: {
@@ -908,6 +978,71 @@ describe('PayPal webhook — edge cases', () => {
     });
   });
 
+  it('subscription expiry retry does not duplicate roles when a pending retry exists after a failed completed revoke', async () => {
+    const { inserts, inCalls } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      license_sessions: { data: null, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: [
+        {
+          data: [
+            { id: 'queued-revoke-failed', status: 'completed', result: { failed: ['role-1'] } },
+            { id: 'queued-revoke-pending', status: 'pending', result: null },
+          ],
+          error: null,
+        },
+        { data: null, error: null },
+      ],
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay(
+      {
+        event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+        resource: { id: 'SUB-EXPIRED' },
+        id: 'EVT-SUB-EXPIRED-REPLAY-PENDING-RETRY',
+      },
+      { 'x-webhook-retrying-failed-event': '1' },
+    );
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inCalls).toContainEqual({
+      table: 'bot_action_queue',
+      column: 'status',
+      values: ['pending', 'processing', 'completed'],
+    });
+    expect(inserts).not.toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({ action: 'revoke_roles' }),
+    });
+  });
+
   it('subscription expiry recovers stale in-progress webhook rows', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
@@ -1001,11 +1136,57 @@ describe('PayPal webhook — edge cases', () => {
       });
 
       const res = await POST(req as never);
-      expect(res.status).toBe(409);
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        status: 'failed_requires_manual_replay',
+      });
       expect(updates).not.toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: null }),
       });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('does not auto-retry stale non-resumable webhook rows', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { updates, inserts } = useWebhookRows({
+        webhook_events: [
+          { data: [], error: null },
+          {
+            data: {
+              result: null,
+              processed_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+            },
+            error: null,
+          },
+          { data: null, error: null },
+        ],
+      });
+      const req = makeSignedWebhook({
+        event_type: 'PAYMENT.CAPTURE.COMPLETED',
+        resource: { id: 'CAPTURE-STALE-NON-RESUMABLE' },
+        id: 'EVT-CAPTURE-STALE-NON-RESUMABLE',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        status: 'stale_requires_manual_replay',
+      });
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({
+          result: 'error',
+          error_details: 'Stale webhook requires manual replay',
+        }),
+      });
+      expect(inserts).toEqual([]);
     } finally {
       global.fetch = originalFetch;
     }

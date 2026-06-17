@@ -68,7 +68,7 @@ async function hasQueuedSubscriptionExpiryRoleRevocation(
       product_id: input.productId,
       reason: 'subscription_expired',
     })
-    .limit(1);
+    .limit(1000);
   requireSupabaseSuccess(
     error,
     'Failed to inspect queued role revocation for subscription expiry',
@@ -473,13 +473,16 @@ export async function handleSubscriptionExpired(
   const subscriptionId = resource.id as string;
   if (!subscriptionId) return;
 
-  const { data: order, error: orderError } = await supabase
+  const { data: orders, error: orderError } = await supabase
     .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id, plan_id')
+    .select('id, order_number, guild_id, customer_id, product_id, plan_id, status, created_at')
     .eq('paypal_subscription_id', subscriptionId)
-    .maybeSingle();
+    .order('created_at', { ascending: false })
+    .limit(100);
 
   requireSupabaseSuccess(orderError, 'Failed to load expired subscription order');
+  const orderRows = Array.isArray(orders) ? orders : orders ? [orders] : [];
+  const order = orderRows.find((row) => row.status === 'completed') ?? orderRows[0];
   if (!order) return;
 
   const now = new Date().toISOString();

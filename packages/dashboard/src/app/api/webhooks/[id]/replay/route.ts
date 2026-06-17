@@ -111,7 +111,17 @@ export async function POST(
       // WEBHOOK_REPLAY_SECRET not configured — replay may fail signature verification
     }
     headers['PayPal-Transmission-Id'] = id;
-    if (event.result === 'error' || event.result == null) {
+    const payloadEventType = (
+      event.payload &&
+      typeof event.payload === 'object' &&
+      'event_type' in event.payload
+    )
+      ? (event.payload as { event_type?: unknown }).event_type
+      : null;
+    const isSubscriptionExpiry =
+      event.event_type === 'BILLING.SUBSCRIPTION.EXPIRED' ||
+      payloadEventType === 'BILLING.SUBSCRIPTION.EXPIRED';
+    if (event.result === 'error' || event.result == null || isSubscriptionExpiry) {
       headers['X-Webhook-Retrying-Failed-Event'] = '1';
     }
 
