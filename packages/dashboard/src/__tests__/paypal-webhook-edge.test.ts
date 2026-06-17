@@ -123,14 +123,24 @@ function makeResolvedChain(
   return chain;
 }
 
-function useWebhookRows(rows: Record<string, { data: unknown; error: unknown }>) {
+type MockRowResult = { data: unknown; error: unknown };
+
+function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
   const inserts: Array<{ table: string; payload: unknown }> = [];
   const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const updates: Array<{ table: string; payload: unknown }> = [];
   const inCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
-  mockSb.from.mockImplementation((table: string) =>
-    makeResolvedChain(
-      rows[table] ?? { data: null, error: null },
+  const tableCallCounts = new Map<string, number>();
+  mockSb.from.mockImplementation((table: string) => {
+    const callCount = tableCallCounts.get(table) ?? 0;
+    tableCallCounts.set(table, callCount + 1);
+    const tableRows = rows[table] ?? { data: null, error: null };
+    const resolved = Array.isArray(tableRows)
+      ? tableRows[Math.min(callCount, tableRows.length - 1)]
+      : tableRows;
+
+    return makeResolvedChain(
+      resolved,
       (payload) => {
         inserts.push({ table, payload });
       },
@@ -143,8 +153,8 @@ function useWebhookRows(rows: Record<string, { data: unknown; error: unknown }>)
       (column, values) => {
         inCalls.push({ table, column, values });
       },
-    ),
-  );
+    );
+  });
 
   return { inserts, eqCalls, updates, inCalls };
 }
@@ -256,20 +266,24 @@ describe('PayPal webhook — edge cases', () => {
           guild_id: 'guild-1',
           customer_id: 'customer-1',
           product_id: 'product-1',
+          plan_id: 'plan-1',
         },
         error: null,
       },
-      entitlements: {
-        data: [
-          {
-            id: 'entitlement-1',
-            customer_id: 'customer-1',
-            granted_role_ids: ['role-1', 'role-2'],
-            license_key_id: 'license-1',
-          },
-        ],
-        error: null,
-      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1', 'role-2'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+      ],
       license_keys: { data: [{ id: 'license-1' }], error: null },
       customers: { data: { discord_id: 'discord-1' }, error: null },
       audit_logs: { data: null, error: null },
@@ -351,6 +365,23 @@ describe('PayPal webhook — edge cases', () => {
       }),
     });
     expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'emit_audit_event',
+        payload: expect.objectContaining({
+          event_type: 'subscription.lapsed',
+          event_data: {
+            discordId: 'discord-1',
+            productId: 'product-1',
+            planId: 'plan-1',
+            status: 'lapsed',
+          },
+        }),
+        status: 'pending',
+      }),
+    });
+    expect(inserts).toContainEqual({
       table: 'audit_logs',
       payload: expect.objectContaining({
         guild_id: 'guild-1',
@@ -373,6 +404,70 @@ describe('PayPal webhook — edge cases', () => {
     );
   });
 
+  it('subscription expiry preserves roles still granted by other active entitlements', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1', 'role-shared'],
+              license_key_id: 'license-1',
+            },
+          ],
+          error: null,
+        },
+        {
+          data: [
+            {
+              id: 'entitlement-2',
+              granted_role_ids: ['role-shared', 'role-other'],
+            },
+          ],
+          error: null,
+        },
+      ],
+      license_keys: { data: [{ id: 'license-1' }], error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      audit_logs: { data: null, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-EXPIRED' },
+      id: 'EVT-SUB-EXPIRED-SHARED-ROLE',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        guild_id: 'guild-1',
+        action: 'revoke_roles',
+        payload: expect.objectContaining({
+          discord_id: 'discord-1',
+          role_ids: ['role-1'],
+          reason: 'subscription_expired',
+          order_id: 'order-expired',
+          product_id: 'product-1',
+        }),
+        status: 'pending',
+      }),
+    });
+  });
+
   it('repeated subscription expiry does not queue duplicate role revocation', async () => {
     const { inserts } = useWebhookRows({
       orders: {
@@ -382,10 +477,14 @@ describe('PayPal webhook — edge cases', () => {
           guild_id: 'guild-1',
           customer_id: 'customer-1',
           product_id: 'product-1',
+          plan_id: 'plan-1',
         },
         error: null,
       },
-      entitlements: { data: [], error: null },
+      entitlements: [
+        { data: [], error: null },
+        { data: [], error: null },
+      ],
       license_keys: { data: [], error: null },
       audit_logs: { data: null, error: null },
     });
@@ -403,6 +502,107 @@ describe('PayPal webhook — edge cases', () => {
         payload: expect.objectContaining({ action: 'revoke_roles' }),
       }),
     );
+  });
+
+  it('subscription expiry returns 500 when critical entitlement expiry writes fail', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: null,
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+        { data: null, error: { message: 'entitlement update failed' } },
+      ],
+      license_keys: { data: [], error: null },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-EXPIRED' },
+      id: 'EVT-SUB-EXPIRED-WRITE-FAIL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
+    const routeError = errorSpy.mock.calls.find(
+      ([message]) => message === '[Webhook] Error processing BILLING.SUBSCRIPTION.EXPIRED:',
+    )?.[1] as Error | undefined;
+    expect(routeError?.message).toContain(
+      'Failed to expire entitlements for subscription expiry',
+    );
+    errorSpy.mockRestore();
+  });
+
+  it('subscription expiry returns 500 when role revocation cannot be queued', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-expired',
+          order_number: 'ORD-EXPIRED',
+          guild_id: 'guild-1',
+          customer_id: 'customer-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+        },
+        error: null,
+      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1'],
+              license_key_id: null,
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null },
+      ],
+      license_keys: { data: [], error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: { data: null, error: { message: 'queue insert failed' } },
+    });
+    const req = makeReplay({
+      event_type: 'BILLING.SUBSCRIPTION.EXPIRED',
+      resource: { id: 'SUB-EXPIRED' },
+      id: 'EVT-SUB-EXPIRED-QUEUE-FAIL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(500);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[Webhook] Failed to queue revoke_roles:',
+      'queue insert failed',
+    );
+    const routeError = errorSpy.mock.calls.find(
+      ([message]) => message === '[Webhook] Error processing BILLING.SUBSCRIPTION.EXPIRED:',
+    )?.[1] as Error | undefined;
+    expect(routeError?.message).toContain(
+      'Failed to queue role revocation for subscription expiry',
+    );
+    errorSpy.mockRestore();
   });
 
   it('refund event without recoverable capture_id returns 200 (logged, not retried)', async () => {

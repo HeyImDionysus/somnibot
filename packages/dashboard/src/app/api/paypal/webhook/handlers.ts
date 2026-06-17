@@ -15,6 +15,24 @@ import {
 } from '@/lib/types/paypal';
 import { generateLicenseKey, queueFulfillment } from './fulfillment';
 
+function formatSupabaseError(error: unknown): string {
+  if (
+    error &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function requireSupabaseSuccess(error: unknown, operation: string) {
+  if (error) {
+    throw new Error(`${operation}: ${formatSupabaseError(error)}`);
+  }
+}
+
 // ── Order Approved ──────────────────────────────────
 
 export async function handleOrderApproved(
@@ -405,17 +423,18 @@ export async function handleSubscriptionExpired(
   const subscriptionId = resource.id as string;
   if (!subscriptionId) return;
 
-  const { data: order } = await supabase
+  const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id')
+    .select('id, order_number, guild_id, customer_id, product_id, plan_id')
     .eq('paypal_subscription_id', subscriptionId)
     .maybeSingle();
 
+  requireSupabaseSuccess(orderError, 'Failed to load expired subscription order');
   if (!order) return;
 
   const now = new Date().toISOString();
 
-  const { data: activeEntitlements } = await supabase
+  const { data: activeEntitlements, error: activeEntitlementsError } = await supabase
     .from('entitlements')
     .select('id, customer_id, granted_role_ids, license_key_id')
     .eq('order_id', order.id)
@@ -423,8 +442,12 @@ export async function handleSubscriptionExpired(
     .eq('product_id', order.product_id)
     .in('status', ['active', 'pending', 'grace_period'])
     .limit(1000);
+  requireSupabaseSuccess(
+    activeEntitlementsError,
+    'Failed to load active entitlements for subscription expiry',
+  );
 
-  const { data: activeLicenseKeys } = await supabase
+  const { data: activeLicenseKeys, error: activeLicenseKeysError } = await supabase
     .from('license_keys')
     .select('id')
     .eq('order_id', order.id)
@@ -432,6 +455,10 @@ export async function handleSubscriptionExpired(
     .eq('product_id', order.product_id)
     .in('status', ['pending_activation', 'active', 'suspended'])
     .limit(1000);
+  requireSupabaseSuccess(
+    activeLicenseKeysError,
+    'Failed to load active license keys for subscription expiry',
+  );
 
   const licenseKeyIds = [
     ...new Set([
@@ -444,7 +471,35 @@ export async function handleSubscriptionExpired(
     ]),
   ];
 
-  await supabase
+  const expiredRoleIds = [
+    ...new Set(
+      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+    ),
+  ];
+
+  let remainingEntitlements: Array<{ granted_role_ids?: string[] | null }> = [];
+  if (expiredRoleIds.length > 0) {
+    const { data, error } = await supabase
+      .from('entitlements')
+      .select('granted_role_ids')
+      .eq('customer_id', order.customer_id)
+      .eq('guild_id', order.guild_id)
+      .neq('order_id', order.id)
+      .in('status', ['active', 'pending', 'grace_period'])
+      .limit(1000);
+    requireSupabaseSuccess(
+      error,
+      'Failed to load role-preserving entitlements for subscription expiry',
+    );
+    remainingEntitlements = data ?? [];
+  }
+
+  const preservedRoleIds = new Set(
+    (remainingEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+  );
+  const roleIds = expiredRoleIds.filter((roleId) => !preservedRoleIds.has(roleId));
+
+  const { error: expireEntitlementsError } = await supabase
     .from('entitlements')
     .update({
       status: 'expired',
@@ -456,8 +511,12 @@ export async function handleSubscriptionExpired(
     .eq('guild_id', order.guild_id)
     .eq('product_id', order.product_id)
     .in('status', ['active', 'pending', 'grace_period']);
+  requireSupabaseSuccess(
+    expireEntitlementsError,
+    'Failed to expire entitlements for subscription expiry',
+  );
 
-  await supabase
+  const { error: expireLicenseKeysError } = await supabase
     .from('license_keys')
     .update({
       status: 'expired',
@@ -468,9 +527,13 @@ export async function handleSubscriptionExpired(
     .eq('guild_id', order.guild_id)
     .eq('product_id', order.product_id)
     .in('status', ['pending_activation', 'active', 'suspended']);
+  requireSupabaseSuccess(
+    expireLicenseKeysError,
+    'Failed to expire license keys for subscription expiry',
+  );
 
   if (licenseKeyIds.length > 0) {
-    await supabase
+    const { error: deactivateSessionsError } = await supabase
       .from('license_sessions')
       .update({
         active: false,
@@ -479,30 +542,53 @@ export async function handleSubscriptionExpired(
       })
       .in('license_key_id', licenseKeyIds)
       .eq('active', true);
+    requireSupabaseSuccess(
+      deactivateSessionsError,
+      'Failed to deactivate license sessions for subscription expiry',
+    );
   }
 
-  const roleIds = [
-    ...new Set(
-      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
-    ),
-  ];
+  const hadActiveAccess =
+    (activeEntitlements?.length ?? 0) > 0 || licenseKeyIds.length > 0;
 
-  if (roleIds.length > 0) {
-    const { data: customer } = await supabase
+  if (hadActiveAccess) {
+    const { data: customer, error: customerError } = await supabase
       .from('customers')
       .select('discord_id')
       .eq('id', order.customer_id)
       .eq('guild_id', order.guild_id)
       .maybeSingle();
+    requireSupabaseSuccess(
+      customerError,
+      'Failed to load customer for subscription expiry fulfillment',
+    );
 
     if (customer?.discord_id) {
-      await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
-        discord_id: customer.discord_id,
-        role_ids: roleIds,
-        reason: 'subscription_expired',
-        order_id: order.id,
-        product_id: order.product_id,
+      if (roleIds.length > 0) {
+        const queued = await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
+          discord_id: customer.discord_id,
+          role_ids: roleIds,
+          reason: 'subscription_expired',
+          order_id: order.id,
+          product_id: order.product_id,
+        });
+        if (!queued) {
+          throw new Error('Failed to queue role revocation for subscription expiry');
+        }
+      }
+
+      const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
+        event_type: 'subscription.lapsed',
+        event_data: {
+          discordId: customer.discord_id,
+          productId: order.product_id,
+          planId: order.plan_id ?? '',
+          status: 'lapsed',
+        },
       });
+      if (!queued) {
+        throw new Error('Failed to queue subscription lapsed audit event');
+      }
     }
   }
 
