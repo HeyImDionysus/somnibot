@@ -170,7 +170,8 @@ function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
   }
 
   const validation = input.providerValidation;
-  if (!validation || validation.checks.length === 0) {
+  const checks = Array.isArray(validation?.checks) ? validation.checks : [];
+  if (checks.length === 0) {
     return {
       id: 'provider-validation',
       label: 'Provider validation',
@@ -180,7 +181,7 @@ function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
     };
   }
 
-  const failedChecks = validation.checks.filter(check => check.status === 'failed');
+  const failedChecks = checks.filter(check => check.status === 'failed');
   if (failedChecks.length > 0) {
     return {
       id: 'provider-validation',
@@ -199,7 +200,7 @@ function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
     label: 'Provider validation',
     status: 'success',
     summary: 'Discord and Supabase provider checks passed.',
-    detail: validation.checks
+    detail: checks
       .filter(check => check.status === 'success')
       .map(check => `${check.label}: ${check.summary}`)
       .join('\n'),
