@@ -22,6 +22,10 @@ const fields = {
   supabaseDbPassword: $('supabaseDbPassword'),
   supabaseAccessToken: $('supabaseAccessToken'),
   supabaseDiscordAuthProviderConfigured: $('supabaseDiscordAuthProviderConfigured'),
+  paypalClientId: $('paypalClientId'),
+  paypalClientSecret: $('paypalClientSecret'),
+  paypalWebhookId: $('paypalWebhookId'),
+  paypalSandbox: $('paypalSandbox'),
   tailscaleAuthKey: $('tailscaleAuthKey'),
 };
 
@@ -265,6 +269,14 @@ function isCredentialFormComplete() {
   ].every((key) => fields[key].value.trim().length > 0);
 }
 
+function isPayPalFormComplete() {
+  return [
+    'paypalClientId',
+    'paypalClientSecret',
+    'paypalWebhookId',
+  ].every((key) => fields[key].value.trim().length > 0);
+}
+
 function setRuntimeMode(mode, options = {}) {
   runtimeMode = mode === 'vps' ? 'vps' : 'regular-local';
   const isVps = runtimeMode === 'vps';
@@ -295,6 +307,7 @@ async function refreshSetupStatus(options = {}) {
     ...collectRuntimeConfig(),
     credentialReady: isCredentialFormComplete(),
     providerValidation: latestProviderValidation,
+    paypalReady: isPayPalFormComplete(),
     supabaseAccessTokenReady: fields.supabaseAccessToken.value.trim().length > 0,
     supabaseDiscordAuthProviderConfigured: fields.supabaseDiscordAuthProviderConfigured.checked,
     tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0,
@@ -1413,6 +1426,10 @@ function fieldLabel(key) {
     supabaseDbPassword: 'Database Password',
     supabaseAccessToken: 'Management API Token',
     supabaseDiscordAuthProviderConfigured: 'Discord auth provider confirmation',
+    paypalClientId: 'PayPal Client ID',
+    paypalClientSecret: 'PayPal Client Secret',
+    paypalWebhookId: 'PayPal Webhook ID',
+    paypalSandbox: 'PayPal sandbox mode',
   };
   return labels[key] || key;
 }

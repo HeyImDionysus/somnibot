@@ -21,6 +21,10 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="vps-deployment-plan"');
     expect(html).toContain('id="supabaseAccessToken"');
     expect(html).toContain('id="supabaseDiscordAuthProviderConfigured"');
+    expect(html).toContain('id="paypalClientId"');
+    expect(html).toContain('id="paypalClientSecret"');
+    expect(html).toContain('id="paypalWebhookId"');
+    expect(html).toContain('id="paypalSandbox"');
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
@@ -74,6 +78,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('let latestProviderValidation = null;');
     expect(renderer).toContain('providerValidation: latestProviderValidation');
+    expect(renderer).toContain('paypalReady: isPayPalFormComplete()');
     expect(renderer).toContain('latestProviderValidation = result.providerValidation;');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
     expect(renderer).toContain('The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.');
@@ -105,6 +110,7 @@ describe('launcher setup renderer wiring', () => {
   it('keeps setup status IPC wired through preload and main process VPS fields', () => {
     const preload = readSourceFile('main/preload.ts');
     const main = readSourceFile('main/index.ts');
+    const configStore = readSourceFile('main/config-store.ts');
 
     expect(preload).toContain("getSetupStatus: (input?: Record<string, unknown>)");
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
@@ -128,6 +134,13 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath');
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
     expect(main).toContain('providerValidation: input.providerValidation');
+    expect(main).toContain('paypalReady: input.paypalReady ?? Boolean(');
+    expect(main).toContain('paypalClientSecret: config.paypalClientSecret ?');
+    expect(main).toContain('paypalWebhookId: config.paypalWebhookId ?');
+    expect(configStore).toContain('PAYPAL_CLIENT_ID: config.paypalClientId');
+    expect(configStore).toContain('PAYPAL_CLIENT_SECRET: config.paypalClientSecret');
+    expect(configStore).toContain('PAYPAL_WEBHOOK_ID: config.paypalWebhookId');
+    expect(configStore).toContain('PAYPAL_SANDBOX: config.paypalSandbox ?');
     expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');

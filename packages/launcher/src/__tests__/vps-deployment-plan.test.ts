@@ -14,6 +14,7 @@ const completeVpsInput = {
   vpsSshUser: 'deploy',
   vpsDeployPath: '/opt/somnibot',
   credentialReady: true,
+  paypalReady: true,
   supabaseAccessTokenReady: true,
 };
 
@@ -253,6 +254,7 @@ describe('VPS deployment plan generator', () => {
 
     expect(plan.status).toBe('ready');
     expect(plan.warnings).toContain('Credential fields are not complete yet; the deployment plan will keep secret values as placeholders.');
+    expect(plan.warnings).toContain('PayPal app/webhook fields are not complete yet; store payments will stay disabled until PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_WEBHOOK_ID are set.');
     expect(plan.environment?.redactedEnvFile).toContain('DISCORD_TOKEN=<DISCORD_TOKEN>');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_SECRET_KEY=<SUPABASE_SECRET_KEY>');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_ACCESS_TOKEN=');

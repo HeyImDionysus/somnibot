@@ -46,6 +46,11 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
       && config.supabaseSecretKey
       && config.supabasePublishableKey,
     ),
+    paypalReady: Boolean(
+      config.paypalClientId
+      && config.paypalClientSecret
+      && config.paypalWebhookId
+    ),
     supabaseAccessTokenReady: Boolean(config.supabaseAccessToken),
     supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
   });

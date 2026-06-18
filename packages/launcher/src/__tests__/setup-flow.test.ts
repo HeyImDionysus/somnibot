@@ -119,6 +119,30 @@ describe('setup flow status', () => {
     expect(status.primaryAction.enabled).toBe(true);
   });
 
+  it('shows PayPal webhook readiness as a first-class setup step', () => {
+    const incompleteStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      ...completeCredentials,
+    });
+
+    const incompleteStep = incompleteStatus.steps.find(step => step.id === 'paypal-webhook');
+    expect(incompleteStep?.status).toBe('pending');
+    expect(incompleteStep?.summary).toContain('Waiting for PayPal');
+    expect(incompleteStatus.primaryAction.enabled).toBe(true);
+
+    const readyStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      paypalReady: true,
+      ...completeCredentials,
+    });
+
+    const readyStep = readyStatus.steps.find(step => step.id === 'paypal-webhook');
+    expect(readyStep?.status).toBe('success');
+    expect(readyStep?.detail).toContain('PayPal runtime credentials');
+  });
+
   it('treats invalid regular local callback URLs as recoverable errors', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',
@@ -187,6 +211,7 @@ describe('setup flow status', () => {
       'credentials',
       'provider-validation',
       'auth-provider',
+      'paypal-webhook',
       'vps-deploy',
     ]);
     expect(status.steps.find(step => step.id === 'vps-domain')?.status).toBe('success');

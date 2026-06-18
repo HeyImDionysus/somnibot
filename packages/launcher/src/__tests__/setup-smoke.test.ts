@@ -27,6 +27,7 @@ describe('setup end-to-end smoke contract', () => {
       credentials: 'success',
       'provider-validation': 'pending',
       'auth-provider': 'success',
+      'paypal-webhook': 'pending',
       'start-local': 'success',
     });
     expect(status.firstBlockingStepId).toBeNull();
@@ -95,6 +96,7 @@ describe('setup end-to-end smoke contract', () => {
       credentials: 'success',
       'provider-validation': 'pending',
       'auth-provider': 'success',
+      'paypal-webhook': 'pending',
       'vps-deploy': 'blocked',
     });
     expect(status.firstBlockingStepId).toBe('vps-deploy');
