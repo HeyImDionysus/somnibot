@@ -53,6 +53,7 @@ export interface LauncherConfig {
   vpsSshHost: string;
   vpsSshUser: string;
   vpsDeployPath: string;
+  tailscaleAuthKey?: string;
 
   // ── Phase 6: First-run onboarding ──
   firstRunComplete: boolean;
@@ -80,6 +81,7 @@ const DEFAULTS: LauncherConfig = {
   vpsSshHost: '',
   vpsSshUser: '',
   vpsDeployPath: '',
+  tailscaleAuthKey: '',
   firstRunComplete: false,
   lavalinkEnabled: false,
   lastPids: { bot: null, dashboard: null, lavalink: null, valkey: null },
@@ -102,6 +104,7 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'tailscaleAuthKey',
 ]);
 
 /**
@@ -179,6 +182,7 @@ export function getConfig(): LauncherConfig {
     vpsSshHost: store.get('vpsSshHost', ''),
     vpsSshUser: store.get('vpsSshUser', ''),
     vpsDeployPath: store.get('vpsDeployPath', ''),
+    tailscaleAuthKey: getSensitive('tailscaleAuthKey'),
     firstRunComplete: store.get('firstRunComplete', false),
     lavalinkEnabled: store.get('lavalinkEnabled', false),
     lastPids: store.get('lastPids', { bot: null, dashboard: null, lavalink: null, valkey: null }),

@@ -184,6 +184,7 @@ function registerIpcHandlers(): void {
       vpsSshHost: config.vpsSshHost,
       vpsSshUser: config.vpsSshUser,
       vpsDeployPath: config.vpsDeployPath,
+      tailscaleAuthKey: config.tailscaleAuthKey ? '••••••••' : '',
     };
   });
 
@@ -193,7 +194,7 @@ function registerIpcHandlers(): void {
     // back, strip it so the real secret in the config store is preserved.
     const MASK = '••••••••';
     const sanitized = { ...config };
-    for (const key of ['supabaseSecretKey', 'supabaseDbPassword', 'discordToken', 'discordClientSecret'] as const) {
+    for (const key of ['supabaseSecretKey', 'supabaseDbPassword', 'discordToken', 'discordClientSecret', 'tailscaleAuthKey'] as const) {
       if (sanitized[key] === MASK) {
         delete sanitized[key];
       }
@@ -353,7 +354,9 @@ function registerIpcHandlers(): void {
       };
     }
 
-    const readiness = await enableSomniBotFunnel();
+    const readiness = await enableSomniBotFunnel(undefined, {
+      authKey: cfg.tailscaleAuthKey,
+    });
     if (readiness.publicCallbackBaseUrl && cfg.runtimeMode === 'regular-local') {
       saveConfig({
         publicCallbackBaseUrl: readiness.publicCallbackBaseUrl,

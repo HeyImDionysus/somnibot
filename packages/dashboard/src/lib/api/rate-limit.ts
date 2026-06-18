@@ -16,10 +16,24 @@ import { createConnection, type Socket } from 'node:net';
 let valkeySocket: Socket | null = null;
 let valkeyReady = false;
 let valkeyFailed = false;
-// V5 Audit §14.P2a: Ensure degradation warning logs once, not on every request.
+let lastValkeyFailureAt = 0;
+// V5 Audit §14.P2a: Ensure degradation warning logs once per degraded state,
+// not on every request.
 let _degradedWarningLogged = false;
+const VALKEY_RETRY_AFTER_MS = 5_000;
 let pendingCallbacks: Array<(reply: string | number | null) => void> = [];
 let connectionWaiters: Array<(ready: boolean) => void> = [];
+
+function markValkeyReady(): void {
+  valkeyFailed = false;
+  lastValkeyFailureAt = 0;
+  _degradedWarningLogged = false;
+}
+
+function markValkeyFailed(): void {
+  valkeyFailed = true;
+  lastValkeyFailureAt = Date.now();
+}
 
 function parseRedisUrl(url: string): { host: string; port: number; username: string; password: string } {
   try {
@@ -83,13 +97,19 @@ async function ensureValkeyReady(): Promise<boolean> {
 }
 
 function ensureValkey(): boolean {
-  if (valkeyFailed) return false;
+  if (valkeyFailed) {
+    if (Date.now() - lastValkeyFailureAt < VALKEY_RETRY_AFTER_MS) return false;
+    valkeyFailed = false;
+    valkeySocket = null;
+  }
   if (valkeyReady) return true;
   if (valkeySocket) return false; // connecting
 
   const url = process.env.VALKEY_URL || process.env.REDIS_URL;
   if (!url) {
-    valkeyFailed = true;
+    markValkeyFailed();
+    valkeyReady = false;
+    valkeySocket = null;
     return false;
   }
 
@@ -103,20 +123,25 @@ function ensureValkey(): boolean {
 
     sock.on('connect', () => {
       if (!password) {
+        sock.setTimeout(0);
         valkeyReady = true;
+        markValkeyReady();
         resolveConnectionWaiters(true);
         return;
       }
 
       pendingCallbacks.push((reply) => {
         if (reply === 'OK') {
+          sock.setTimeout(0);
           valkeyReady = true;
+          markValkeyReady();
           resolveConnectionWaiters(true);
           return;
         }
 
-        valkeyFailed = true;
+        markValkeyFailed();
         valkeyReady = false;
+        valkeySocket = null;
         resolveConnectionWaiters(false);
         sock.destroy();
       });
@@ -168,7 +193,8 @@ function ensureValkey(): boolean {
     });
 
     sock.on('error', () => {
-      valkeyFailed = true;
+      if (valkeySocket !== sock) return;
+      markValkeyFailed();
       valkeyReady = false;
       valkeySocket = null;
       resolveConnectionWaiters(false);
@@ -176,6 +202,7 @@ function ensureValkey(): boolean {
     });
 
     sock.on('close', () => {
+      if (valkeySocket !== sock) return;
       valkeyReady = false;
       valkeySocket = null;
       resolveConnectionWaiters(false);
@@ -183,13 +210,18 @@ function ensureValkey(): boolean {
     });
 
     sock.on('timeout', () => {
-      valkeyFailed = true;
+      if (valkeySocket !== sock) return;
+      markValkeyFailed();
+      valkeyReady = false;
+      valkeySocket = null;
       resolveConnectionWaiters(false);
       rejectPendingCallbacks();
       sock.destroy();
     });
   } catch {
-    valkeyFailed = true;
+    markValkeyFailed();
+    valkeyReady = false;
+    valkeySocket = null;
     resolveConnectionWaiters(false);
     rejectPendingCallbacks();
   }

@@ -14,6 +14,7 @@ const SENSITIVE_KEYS = [
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'tailscaleAuthKey',
 ] as const;
 
 const MASK = '••••••••';
@@ -39,6 +40,7 @@ interface LauncherConfig {
   vpsSshHost: string;
   vpsSshUser: string;
   vpsDeployPath: string;
+  tailscaleAuthKey?: string;
   lavalinkEnabled: boolean;
 }
 
@@ -86,6 +88,7 @@ describe('Launcher Config', () => {
     vpsSshHost: '',
     vpsSshUser: '',
     vpsDeployPath: '',
+    tailscaleAuthKey: 'tskey-auth-secret',
     lavalinkEnabled: true,
   };
 
@@ -111,6 +114,7 @@ describe('Launcher Config', () => {
     expect(masked.discordClientSecret).toBe(MASK);
     expect(masked.supabaseSecretKey).toBe(MASK);
     expect(masked.supabaseDbPassword).toBe(MASK);
+    expect(masked.tailscaleAuthKey).toBe(MASK);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
     expect(masked.discordGuildId).toBe(validConfig.discordGuildId);
@@ -134,6 +138,7 @@ describe('Launcher Config', () => {
       supabaseUrl: 'https://updated.supabase.co',
       supabaseSecretKey: MASK,
       supabaseDbPassword: MASK,
+      tailscaleAuthKey: MASK,
       supabasePublishableKey: 'new-pub-key',
       runtimeMode: 'vps',
       vpsDomain: 'somnibot.example.com',
@@ -146,6 +151,7 @@ describe('Launcher Config', () => {
     expect(sanitized).not.toHaveProperty('discordClientSecret');
     expect(sanitized).not.toHaveProperty('supabaseSecretKey');
     expect(sanitized).not.toHaveProperty('supabaseDbPassword');
+    expect(sanitized).not.toHaveProperty('tailscaleAuthKey');
 
     // Non-masked fields are preserved
     expect(sanitized.discordApplicationId).toBe('12345');
@@ -161,6 +167,7 @@ describe('Launcher Config', () => {
       discordToken: 'brand-new-token',
       supabaseSecretKey: 'brand-new-secret',
       supabaseDbPassword: 'brand-new-db-password',
+      tailscaleAuthKey: 'brand-new-tailscale-key',
     };
 
     const sanitized = stripMaskedFields(fromRenderer);
@@ -169,5 +176,6 @@ describe('Launcher Config', () => {
     expect(sanitized.discordToken).toBe('brand-new-token');
     expect(sanitized.supabaseSecretKey).toBe('brand-new-secret');
     expect(sanitized.supabaseDbPassword).toBe('brand-new-db-password');
+    expect(sanitized.tailscaleAuthKey).toBe('brand-new-tailscale-key');
   });
 });

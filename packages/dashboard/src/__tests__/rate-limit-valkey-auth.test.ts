@@ -50,6 +50,12 @@ function bulk(value: string): string {
   return `$${Buffer.byteLength(value)}\r\n${value}\r\n`;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 async function startValkeyFixture(password: string, heartbeat: string): Promise<ValkeyFixture> {
   const sockets = new Set<Socket>();
   const commands: string[][] = [];
@@ -163,6 +169,57 @@ describe('rate-limit Valkey authentication', () => {
 
       expect(fixture.commands).toEqual([
         ['AUTH', 's3cret value'],
+        ['PING'],
+        ['GET', 'somnibot:heartbeat:bot'],
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('retries Valkey after a transient authentication failure backoff', async () => {
+    const heartbeat = JSON.stringify({ timestamp: Date.now() });
+    const fixture = await startValkeyFixture('correct value', heartbeat);
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    process.env.VALKEY_URL = 'redis://:wrong-value@127.0.0.1:' + new URL(fixture.url).port;
+
+    try {
+      const { checkValkeyHealth } = await import('@/lib/api/rate-limit');
+
+      await expect(checkValkeyHealth()).resolves.toBe(false);
+
+      process.env.VALKEY_URL = fixture.url;
+      now += 5_001;
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'wrong-value'],
+        ['AUTH', 'correct value'],
+        ['PING'],
+      ]);
+    } finally {
+      vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
+  it('keeps the Valkey health socket usable after an idle period', async () => {
+    const heartbeat = JSON.stringify({ timestamp: Date.now() });
+    const fixture = await startValkeyFixture('idle-safe value', heartbeat);
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { checkValkeyHealth, readValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await wait(2_100);
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await expect(readValkeyKey('somnibot:heartbeat:bot')).resolves.toBe(heartbeat);
+
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'idle-safe value'],
+        ['PING'],
         ['PING'],
         ['GET', 'somnibot:heartbeat:bot'],
       ]);

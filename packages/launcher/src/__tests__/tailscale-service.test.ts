@@ -1,11 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   SOMNIBOT_FUNNEL_TARGET,
   TAILSCALE_DNS_PROPAGATION_WAIT_MS,
   TailscaleCommandError,
   buildEnableFunnelArgs,
+  buildLoginWithAuthKeyArgs,
   enableSomniBotFunnel,
   getTailscaleReadiness,
+  loginWithTailscaleAuthKey,
   parseFunnelStatusJson,
   parseFunnelStatusText,
   parseTailscaleStatusJson,
@@ -36,6 +39,14 @@ describe('tailscale-service', () => {
       '--https=443',
       '--yes',
       SOMNIBOT_FUNNEL_TARGET,
+    ]);
+  });
+
+  it('builds the auth-key login command using a file reference', () => {
+    expect(buildLoginWithAuthKeyArgs('/tmp/somnibot-authkey')).toEqual([
+      'up',
+      '--auth-key=file:/tmp/somnibot-authkey',
+      '--timeout=30s',
     ]);
   });
 
@@ -265,6 +276,99 @@ Available on the internet:
     const readiness = await enableSomniBotFunnel(runner);
 
     expect(calls[0]).toBe('funnel --bg --https=443 --yes http://127.0.0.1:3456');
+    expect(readiness.funnelEnabled).toBe(true);
+    expect(readiness.publicCallbackBaseUrl).toBe('https://somnibot.dionysus.ts.net');
+  });
+
+  it('logs in with a Tailscale auth key through a temporary file', async () => {
+    const calls: string[] = [];
+    const runner: TailscaleRunner = async (args) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'up') {
+        expect(args[1]).toMatch(/^--auth-key=file:/);
+        const authKeyPath = args[1].replace('--auth-key=file:', '');
+        expect(readFileSync(authKeyPath, 'utf8')).toBe('tskey-auth-secret');
+        return { stdout: '', stderr: '' };
+      }
+      return runnerFor({
+        version: { stdout: '1.84.0\n' },
+        'status --json': {
+          stdout: JSON.stringify({
+            BackendState: 'Running',
+            Self: { DNSName: 'somnibot.dionysus.ts.net.' },
+          }),
+        },
+        'funnel status --json': {
+          stdout: JSON.stringify({ Web: {} }),
+        },
+        'funnel status': {
+          stdout: 'No serve config\n',
+        },
+      })(args);
+    };
+
+    const readiness = await loginWithTailscaleAuthKey('tskey-auth-secret', runner);
+
+    expect(calls[0]).toMatch(/^up --auth-key=file:/);
+    expect(calls[0]).not.toContain('tskey-auth-secret');
+    expect(readiness.state).toBe('not-configured');
+  });
+
+  it('uses a configured auth key before enabling Funnel on a signed-out machine', async () => {
+    const calls: string[] = [];
+    let loggedIn = false;
+    let funnelEnabled = false;
+
+    const runner: TailscaleRunner = async (args) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'up') {
+        loggedIn = true;
+        return { stdout: '', stderr: '' };
+      }
+      if (args[0] === 'funnel' && args[1] === '--bg') {
+        funnelEnabled = true;
+        return { stdout: 'Available on the internet: https://somnibot.dionysus.ts.net', stderr: '' };
+      }
+      if (args.join(' ') === 'version') {
+        return { stdout: '1.84.0\n', stderr: '' };
+      }
+      if (args.join(' ') === 'status --json') {
+        return {
+          stdout: JSON.stringify({
+            BackendState: loggedIn ? 'Running' : 'NeedsLogin',
+            Self: { DNSName: loggedIn ? 'somnibot.dionysus.ts.net.' : '' },
+          }),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'funnel status --json') {
+        return {
+          stdout: JSON.stringify(funnelEnabled
+            ? {
+              Web: {
+                'somnibot.dionysus.ts.net:443': {
+                  Handlers: { '/': { Proxy: 'http://127.0.0.1:3456' } },
+                },
+              },
+              AllowFunnel: {
+                'somnibot.dionysus.ts.net:443': true,
+              },
+            }
+            : { Web: {} }),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'funnel status') {
+        return { stdout: 'No serve config\n', stderr: '' };
+      }
+      throw new TailscaleCommandError(`Unexpected command: ${args.join(' ')}`);
+    };
+
+    const readiness = await enableSomniBotFunnel(runner, { authKey: 'tskey-auth-secret' });
+
+    expect(calls.some((call) => call.startsWith('up --auth-key=file:'))).toBe(true);
+    expect(calls.some((call) => call.startsWith('funnel --bg --https=443'))).toBe(true);
+    expect(calls.join('\n')).not.toContain('tskey-auth-secret');
     expect(readiness.funnelEnabled).toBe(true);
     expect(readiness.publicCallbackBaseUrl).toBe('https://somnibot.dionysus.ts.net');
   });

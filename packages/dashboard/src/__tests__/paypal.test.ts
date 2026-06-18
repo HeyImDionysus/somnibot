@@ -132,6 +132,25 @@ describe('getPayPalWebhookId', () => {
 });
 
 describe('verifyWebhookSignature', () => {
+  it('rejects missing PayPal signature headers before config or token lookup', async () => {
+    process.env.PAYPAL_WEBHOOK_ID = 'test-webhook-id';
+    process.env.PAYPAL_WEBHOOK_URL = 'http://localhost/api/paypal/webhook';
+    process.env.PAYPAL_SANDBOX = 'true';
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { verifyWebhookSignature } = await import('@/app/api/paypal/webhook/verify');
+    const verified = await verifyWebhookSignature(
+      new Request('http://localhost/api/paypal/webhook') as never,
+      JSON.stringify({ id: 'EVT-1', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: {} }),
+    );
+
+    expect(verified).toBe(false);
+    expect(createAdminSupabase).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith('[Webhook] PayPal signature headers are missing — refusing to process');
+    errorSpy.mockRestore();
+  });
+
   it('refuses to process when no webhook ID is configured', async () => {
     delete process.env.PAYPAL_WEBHOOK_ID;
     mockSavedPayPalSettings([]);
@@ -139,7 +158,15 @@ describe('verifyWebhookSignature', () => {
 
     const { verifyWebhookSignature } = await import('@/app/api/paypal/webhook/verify');
     const verified = await verifyWebhookSignature(
-      new Request('http://localhost/api/paypal/webhook') as never,
+      new Request('http://localhost/api/paypal/webhook', {
+        headers: {
+          'paypal-auth-algo': 'SHA256withRSA',
+          'paypal-cert-url': 'https://example.com/cert',
+          'paypal-transmission-id': 'transmission-1',
+          'paypal-transmission-sig': 'sig-1',
+          'paypal-transmission-time': new Date().toISOString(),
+        },
+      }) as never,
       JSON.stringify({ id: 'EVT-1', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: {} }),
     );
 
