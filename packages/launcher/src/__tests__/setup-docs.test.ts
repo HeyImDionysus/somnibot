@@ -38,7 +38,12 @@ describe('setup documentation alignment', () => {
 
   it('keeps Discord bot invite docs aligned to the launcher happy path', () => {
     const readme = readRepoFile('README.md');
+    const launcherStep = readme.indexOf('### Step 5: Start With the Launcher');
+    const inviteStep = readme.indexOf('### Step 6: Invite the Bot to Your Server');
 
+    expect(launcherStep).toBeGreaterThan(-1);
+    expect(inviteStep).toBeGreaterThan(launcherStep);
+    expect(readme).toContain('Paste one Guild ID if you want the invite locked to one server.');
     expect(readme).toContain('Click **Open Bot Invite** in the Discord setup section.');
     expect(readme).toContain('Manual fallback');
     expect(readme).toContain('Scopes," check: `bot` and `applications.commands`.');

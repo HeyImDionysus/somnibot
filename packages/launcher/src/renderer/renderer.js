@@ -863,12 +863,12 @@ btnOpenDiscord.addEventListener('click', () => {
 });
 
 btnOpenDiscordInvite.addEventListener('click', () => {
-  const inviteUrl = buildDiscordInviteUrl();
-  if (!inviteUrl) {
-    showMessage('error', 'Enter a valid Discord Application ID before opening the bot invite.');
+  const inviteState = getDiscordInviteState();
+  if (!inviteState.url) {
+    showMessage('error', inviteState.error || 'Enter a valid Discord Application ID before opening the bot invite.');
     return;
   }
-  window.somnibot.openExternal(inviteUrl);
+  window.somnibot.openExternal(inviteState.url);
 });
 
 btnOpenSupabase.addEventListener('click', () => {
@@ -1431,9 +1431,14 @@ function normalizeDiscordSnowflake(value) {
   return /^\d{17,20}$/.test(trimmed) ? trimmed : '';
 }
 
-function buildDiscordInviteUrl() {
+function getDiscordInviteState() {
   const applicationId = normalizeDiscordSnowflake(fields.discordApplicationId.value);
-  if (!applicationId) return '';
+  if (!applicationId) {
+    return {
+      url: '',
+      error: 'Enter a valid Discord Application ID before opening the bot invite.',
+    };
+  }
 
   const params = new URLSearchParams({
     client_id: applicationId,
@@ -1441,21 +1446,36 @@ function buildDiscordInviteUrl() {
     scope: 'bot applications.commands',
   });
 
-  const guildId = normalizeDiscordSnowflake(fields.discordGuildId.value);
+  const guildIdInput = fields.discordGuildId.value.trim();
+  const guildId = normalizeDiscordSnowflake(guildIdInput);
+  if (guildIdInput && !guildId) {
+    return {
+      url: '',
+      error: 'Enter one valid Discord Guild ID, or clear the Guild ID field to choose a server in Discord.',
+    };
+  }
+
   if (guildId) {
     params.set('guild_id', guildId);
     params.set('disable_guild_select', 'true');
   }
 
-  return `https://discord.com/oauth2/authorize?${params.toString()}`;
+  return {
+    url: `https://discord.com/oauth2/authorize?${params.toString()}`,
+    error: '',
+  };
+}
+
+function buildDiscordInviteUrl() {
+  return getDiscordInviteState().url;
 }
 
 function updateDiscordInviteButton() {
-  const inviteUrl = buildDiscordInviteUrl();
-  btnOpenDiscordInvite.disabled = !inviteUrl;
-  btnOpenDiscordInvite.title = inviteUrl
+  const inviteState = getDiscordInviteState();
+  btnOpenDiscordInvite.disabled = !inviteState.url;
+  btnOpenDiscordInvite.title = inviteState.url
     ? 'Open the Discord bot invite for this Application ID'
-    : 'Enter a valid Discord Application ID first';
+    : inviteState.error || 'Enter a valid Discord Application ID first';
 }
 
 function fieldLabel(key) {
@@ -1523,6 +1543,8 @@ btnRestoreCloud.addEventListener('click', async () => {
           fields[key].value = value;
         }
       }
+      updateDiscordInviteButton();
+      updateRestoreBanner();
       await saveConfig();
       await refreshSetupStatus();
       showMessage('success', 'Credentials restored from Supabase. Review the values and run setup.');

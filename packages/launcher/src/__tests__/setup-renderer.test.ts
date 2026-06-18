@@ -77,12 +77,18 @@ describe('launcher setup renderer wiring', () => {
     expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain("const btnOpenDiscordInvite = $('btn-open-discord-invite');");
+    expect(renderer).toContain('function getDiscordInviteState()');
     expect(renderer).toContain('function buildDiscordInviteUrl()');
     expect(renderer).toContain("permissions: '8'");
     expect(renderer).toContain("scope: 'bot applications.commands'");
+    expect(renderer).toContain("const guildIdInput = fields.discordGuildId.value.trim();");
+    expect(renderer).toContain('Enter one valid Discord Guild ID, or clear the Guild ID field to choose a server in Discord.');
     expect(renderer).toContain("params.set('guild_id', guildId)");
     expect(renderer).toContain("params.set('disable_guild_select', 'true')");
     expect(renderer).toContain('btnOpenDiscordInvite.addEventListener');
+    expect(renderer).toContain('const inviteState = getDiscordInviteState();');
+    expect(renderer).toContain('window.somnibot.openExternal(inviteState.url);');
+    expect(renderer).toContain('updateDiscordInviteButton();\n      updateRestoreBanner();');
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('let latestProviderValidation = null;');
     expect(renderer).toContain('providerValidation: latestProviderValidation');

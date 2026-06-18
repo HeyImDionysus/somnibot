@@ -192,24 +192,7 @@ PAYPAL_WEBHOOK_URL=
 
 Save the file.
 
-### Step 5: Invite the Bot to Your Server
-
-Use the launcher first:
-
-1. Paste the Discord Application ID into the launcher.
-2. Paste the Guild ID if you want the invite locked to one server.
-3. Click **Open Bot Invite** in the Discord setup section.
-4. Authorize the bot for your server.
-
-Manual fallback:
-
-1. Go back to [discord.com/developers/applications](https://discord.com/developers/applications) → your app → **OAuth2** → **URL Generator**.
-2. Under "Scopes," check: `bot` and `applications.commands`.
-3. Under "Bot Permissions," check: `Administrator` (or individually select the permissions you want).
-4. Copy the generated URL at the bottom and open it in your browser.
-5. Select your Discord server from the dropdown → **Authorize**.
-
-### Step 6: Start With the Launcher
+### Step 5: Start With the Launcher
 
 Use the SomniBot Launcher setup GUI for the normal owner path. The launcher
 checks your environment, records non-secret setup values, starts the local bot
@@ -246,6 +229,23 @@ You should see:
 If you change `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, rebuild before starting again because
 those values are baked into the production dashboard build.
+
+### Step 6: Invite the Bot to Your Server
+
+Use the launcher first:
+
+1. Paste the Discord Application ID into the launcher.
+2. Paste one Guild ID if you want the invite locked to one server.
+3. Click **Open Bot Invite** in the Discord setup section.
+4. Authorize the bot for your server.
+
+Manual fallback:
+
+1. Go back to [discord.com/developers/applications](https://discord.com/developers/applications) → your app → **OAuth2** → **URL Generator**.
+2. Under "Scopes," check: `bot` and `applications.commands`.
+3. Under "Bot Permissions," check: `Administrator` (or individually select the permissions you want).
+4. Copy the generated URL at the bottom and open it in your browser.
+5. Select your Discord server from the dropdown → **Authorize**.
 
 ### Step 7: First-Time Setup
 
