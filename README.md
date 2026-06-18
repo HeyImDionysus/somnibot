@@ -192,39 +192,15 @@ PAYPAL_WEBHOOK_URL=
 
 Save the file.
 
-### Step 5: Start With the Launcher
+### Step 5: Open the Launcher Setup GUI
 
 Use the SomniBot Launcher setup GUI for the normal owner path. The launcher
-checks your environment, records non-secret setup values, starts the local bot
-and dashboard, and keeps regular-local public callbacks tied to the dashboard
-port it owns.
+checks your environment, records non-secret setup values, generates the Discord
+bot invite, starts the local bot and dashboard after setup is ready, and keeps
+regular-local public callbacks tied to the dashboard port it owns.
 
-Manual fallback:
-
-**Mac / Linux:**
-```bash
-./scripts/start.sh
-```
-
-**Windows:**
-```
-scripts\start.bat
-```
-
-This starts the production regular-local stack: Docker (Lavalink + Valkey), the
-built bot, and the dashboard's standalone production server.
-
-You should see:
-```
-✅ Everything is running!
-
-🤖 Bot:        Running
-🌐 Dashboard:  http://localhost:3000
-🎵 Lavalink:   http://localhost:2333
-📦 Valkey:     redis://localhost:6379
-```
-
-**Open [http://localhost:3000](http://localhost:3000)** in your browser to see the dashboard.
+Do not click **Set Up & Start** or run the script fallback until after Step 6.
+The first bot boot expects the bot to already be in a Discord server.
 
 If you change `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, rebuild before starting again because
@@ -250,14 +226,39 @@ Manual fallback:
 ### Step 7: First-Time Setup
 
 1. In the launcher setup GUI, choose regular-local mode.
-2. Follow the setup flow. It verifies Discord and Supabase values, records the
-   local dashboard URL, and guides public callback readiness when needed.
-3. If you are using the script fallback, go to
+2. After the bot is authorized in Discord, click **Set Up & Start**. The setup
+   flow verifies Discord and Supabase values, records the local dashboard URL,
+   and guides public callback readiness when needed.
+3. If you are using the script fallback, start the regular-local stack now:
+
+   **Mac / Linux:**
+   ```bash
+   ./scripts/start.sh
+   ```
+
+   **Windows:**
+   ```
+   scripts\start.bat
+   ```
+
+   This starts Docker (Lavalink + Valkey), the built bot, and the dashboard's
+   standalone production server.
+4. If you are using the script fallback, go to
    [http://localhost:3000/setup](http://localhost:3000/setup) and complete the
    dashboard setup wizard.
-4. Once complete, open the launcher-provided dashboard URL or
+5. Once complete, open the launcher-provided dashboard URL or
    [http://localhost:3000/login](http://localhost:3000/login) for the script
    fallback, then click "Continue with Discord."
+
+For the script fallback, you should see:
+```
+✅ Everything is running!
+
+🤖 Bot:        Running
+🌐 Dashboard:  http://localhost:3000
+🎵 Lavalink:   http://localhost:2333
+📦 Valkey:     redis://localhost:6379
+```
 
 Plain English version:
 
@@ -554,7 +555,7 @@ somnibot/
 Make sure Docker Desktop is open. On Mac, look for the whale icon in the menu bar. On Windows, look for it in the system tray. If you just installed it, restart your computer.
 
 ### Bot starts but no slash commands appear
-Slash commands can take up to an hour to register with Discord the first time. If they don't appear after an hour, kick the bot from your server and re-invite it using the URL from Step 5.
+Slash commands can take up to an hour to register with Discord the first time. If they don't appear after an hour, kick the bot from your server and re-invite it using the launcher invite flow from Step 6.
 
 ### "Lavalink node error" / Music doesn't work
 1. Make sure Docker is running: `docker ps` should show `somni-lavalink`.
