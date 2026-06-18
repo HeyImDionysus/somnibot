@@ -11,6 +11,23 @@ export interface ValidationResult {
   meta?: Record<string, string>;
 }
 
+export type ProviderValidationCheckId =
+  | 'discord-bot-token'
+  | 'discord-application'
+  | 'discord-client-secret'
+  | 'discord-guild'
+  | 'supabase-project';
+
+export type ProviderValidationCheckStatus = 'success' | 'failed' | 'skipped';
+
+export interface ProviderValidationCheck {
+  id: ProviderValidationCheckId;
+  label: string;
+  status: ProviderValidationCheckStatus;
+  summary: string;
+  detail?: string;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Discord Token                                                      */
 /* ------------------------------------------------------------------ */
@@ -223,6 +240,7 @@ export interface FullValidationResult {
   valid: boolean;
   errors: string[];
   meta: Record<string, string>;
+  checks: ProviderValidationCheck[];
 }
 
 export async function validateAllCredentials(config: {
@@ -236,29 +254,106 @@ export async function validateAllCredentials(config: {
 }): Promise<FullValidationResult> {
   const errors: string[] = [];
   const meta: Record<string, string> = {};
+  const checks: ProviderValidationCheck[] = [];
 
   // 1. Discord token (must come first — other Discord checks need it)
   const tokenResult = await validateDiscordToken(config.discordToken);
   if (!tokenResult.ok) {
     errors.push(tokenResult.error!);
-    // Can't continue Discord validation without a valid token
-    return { valid: false, errors, meta };
-  }
-  Object.assign(meta, tokenResult.meta);
+    checks.push({
+      id: 'discord-bot-token',
+      label: 'Discord bot token',
+      status: 'failed',
+      summary: 'Discord bot token could not be verified.',
+      detail: tokenResult.error,
+    });
+    checks.push({
+      id: 'discord-application',
+      label: 'Discord application',
+      status: 'skipped',
+      summary: 'Application ID check waits for a valid bot token.',
+    });
+    checks.push({
+      id: 'discord-guild',
+      label: 'Discord server',
+      status: 'skipped',
+      summary: 'Server membership check waits for a valid bot token.',
+    });
+  } else {
+    checks.push({
+      id: 'discord-bot-token',
+      label: 'Discord bot token',
+      status: 'success',
+      summary: tokenResult.meta?.botUsername
+        ? `Bot token verified for ${tokenResult.meta.botUsername}.`
+        : 'Discord bot token verified.',
+    });
+    Object.assign(meta, tokenResult.meta);
 
-  // 2. Application ID (uses token)
-  const appResult = await validateDiscordAppId(config.discordApplicationId, config.discordToken);
-  if (!appResult.ok) errors.push(appResult.error!);
+    // 2. Application ID (uses token)
+    const appResult = await validateDiscordAppId(config.discordApplicationId, config.discordToken);
+    if (!appResult.ok) {
+      errors.push(appResult.error!);
+      checks.push({
+        id: 'discord-application',
+        label: 'Discord application',
+        status: 'failed',
+        summary: 'Application ID does not match the bot token.',
+        detail: appResult.error,
+      });
+    } else {
+      checks.push({
+        id: 'discord-application',
+        label: 'Discord application',
+        status: 'success',
+        summary: 'Application ID matches the bot token.',
+      });
+    }
+
+    // 4. Guild ID (optional, uses token)
+    const guildResult = await validateGuildId(config.discordGuildId, config.discordToken);
+    if (!guildResult.ok) {
+      errors.push(guildResult.error!);
+      checks.push({
+        id: 'discord-guild',
+        label: 'Discord server',
+        status: 'failed',
+        summary: 'Discord server membership could not be verified.',
+        detail: guildResult.error,
+      });
+    } else {
+      if (guildResult.meta) Object.assign(meta, guildResult.meta);
+      checks.push({
+        id: 'discord-guild',
+        label: 'Discord server',
+        status: 'success',
+        summary: guildResult.meta?.guildName
+          ? `Server readiness verified: ${guildResult.meta.guildName}.`
+          : 'Discord server readiness verified.',
+      });
+    }
+  }
 
   // 3. Client Secret — can't verify via API, just check it's not empty
   if (!config.discordClientSecret.trim()) {
-    errors.push('Discord Client Secret is required. Get it from Discord Developer Portal → OAuth2 → Client Secret.');
+    const error = 'Discord Client Secret is required. Get it from Discord Developer Portal → OAuth2 → Client Secret.';
+    errors.push(error);
+    checks.push({
+      id: 'discord-client-secret',
+      label: 'Discord client secret',
+      status: 'failed',
+      summary: 'Discord client secret is missing.',
+      detail: error,
+    });
+  } else {
+    checks.push({
+      id: 'discord-client-secret',
+      label: 'Discord client secret',
+      status: 'success',
+      summary: 'Discord client secret is filled in.',
+      detail: 'Discord only proves this during OAuth redirects, so setup keeps it masked and passes it to the dashboard.',
+    });
   }
-
-  // 4. Guild ID (optional, uses token)
-  const guildResult = await validateGuildId(config.discordGuildId, config.discordToken);
-  if (!guildResult.ok) errors.push(guildResult.error!);
-  else if (guildResult.meta) Object.assign(meta, guildResult.meta);
 
   // 5. Supabase (independent of Discord)
   const supaResult = await validateSupabase(
@@ -266,7 +361,23 @@ export async function validateAllCredentials(config: {
     config.supabaseSecretKey,
     config.supabasePublishableKey,
   );
-  if (!supaResult.ok) errors.push(supaResult.error!);
+  if (!supaResult.ok) {
+    errors.push(supaResult.error!);
+    checks.push({
+      id: 'supabase-project',
+      label: 'Supabase project',
+      status: 'failed',
+      summary: 'Supabase project and API keys could not be verified.',
+      detail: supaResult.error,
+    });
+  } else {
+    checks.push({
+      id: 'supabase-project',
+      label: 'Supabase project',
+      status: 'success',
+      summary: 'Supabase project URL and API keys verified.',
+    });
+  }
 
-  return { valid: errors.length === 0, errors, meta };
+  return { valid: errors.length === 0, errors, meta, checks };
 }

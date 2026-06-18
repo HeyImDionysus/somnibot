@@ -112,6 +112,7 @@ let setupStatusSeq = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
 let latestTailscaleReadiness = null;
+let latestProviderValidation = null;
 let tailscaleReadinessSeq = 0;
 let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
@@ -170,6 +171,7 @@ async function init() {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
+      latestProviderValidation = null;
       updateRestoreBanner();
       refreshSetupStatus();
     });
@@ -292,6 +294,7 @@ async function refreshSetupStatus(options = {}) {
   const input = {
     ...collectRuntimeConfig(),
     credentialReady: isCredentialFormComplete(),
+    providerValidation: latestProviderValidation,
     supabaseAccessTokenReady: fields.supabaseAccessToken.value.trim().length > 0,
     supabaseDiscordAuthProviderConfigured: fields.supabaseDiscordAuthProviderConfigured.checked,
     tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0,
@@ -689,7 +692,12 @@ btnStart.addEventListener('click', async () => {
   setFieldsDisabled(true);
 
   try {
+    latestProviderValidation = null;
     const result = await window.somnibot.runSetupAutomation(config);
+
+    if (result.providerValidation) {
+      latestProviderValidation = result.providerValidation;
+    }
 
     if (result.meta) {
       showMeta(result.meta);

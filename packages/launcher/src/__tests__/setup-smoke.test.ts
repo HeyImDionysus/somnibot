@@ -25,6 +25,7 @@ describe('setup end-to-end smoke contract', () => {
       'runtime-choice': 'success',
       'regular-callback': 'success',
       credentials: 'success',
+      'provider-validation': 'pending',
       'auth-provider': 'success',
       'start-local': 'success',
     });
@@ -92,6 +93,7 @@ describe('setup end-to-end smoke contract', () => {
       'vps-domain': 'success',
       'vps-ssh': 'success',
       credentials: 'success',
+      'provider-validation': 'pending',
       'auth-provider': 'success',
       'vps-deploy': 'blocked',
     });

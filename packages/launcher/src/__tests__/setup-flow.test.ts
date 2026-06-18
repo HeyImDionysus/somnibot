@@ -132,6 +132,43 @@ describe('setup flow status', () => {
     expect(status.primaryAction.enabled).toBe(false);
   });
 
+  it('surfaces provider validation failures as exact retryable setup items', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
+      providerValidation: {
+        valid: false,
+        errors: ['Application ID mismatch.'],
+        checks: [
+          {
+            id: 'discord-bot-token',
+            label: 'Discord bot token',
+            status: 'success',
+            summary: 'Discord bot token verified.',
+          },
+          {
+            id: 'discord-application',
+            label: 'Discord application',
+            status: 'failed',
+            summary: 'Application ID does not match the bot token.',
+            detail: 'Application ID mismatch.',
+          },
+        ],
+      },
+    });
+
+    const validationStep = status.steps.find(step => step.id === 'provider-validation');
+    const startStep = status.steps.find(step => step.id === 'start-local');
+    expect(validationStep?.status).toBe('recoverable-error');
+    expect(validationStep?.detail).toContain('Discord application: Application ID mismatch.');
+    expect(startStep?.status).toBe('pending');
+    expect(startStep?.summary).toContain('provider validation fixes');
+    expect(status.firstBlockingStepId).toBeNull();
+    expect(status.primaryAction.enabled).toBe(true);
+  });
+
   it('makes VPS domain, SSH target, and manual deploy readiness first-class steps', () => {
     const status = buildSetupStatus({
       runtimeMode: 'vps',
@@ -148,6 +185,7 @@ describe('setup flow status', () => {
       'vps-domain',
       'vps-ssh',
       'credentials',
+      'provider-validation',
       'auth-provider',
       'vps-deploy',
     ]);
