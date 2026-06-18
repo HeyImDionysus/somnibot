@@ -35,6 +35,13 @@ describe('Supabase Discord auth auto-config', () => {
     })).toBe('https://somnibot.tailnet.ts.net');
   });
 
+  it('ignores blank launcher callback base and falls back to public app URL', () => {
+    expect(getDashboardBaseUrl({
+      SOMNIBOT_PUBLIC_CALLBACK_BASE_URL: '  ',
+      NEXT_PUBLIC_APP_URL: 'https://dashboard.example.com/',
+    })).toBe('https://dashboard.example.com');
+  });
+
   it('falls back to VERCEL_URL with https when no app URL is configured', () => {
     expect(getDashboardBaseUrl({
       NEXT_PUBLIC_APP_URL: '',

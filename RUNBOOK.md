@@ -126,8 +126,10 @@ current SomniBot deployment guide.
 Migrations are **forward-only**. The bot attempts to apply pending migrations on
 startup when a Supabase Management API token or direct database URL is available,
 but startup alone is not proof that the database is current. Verify migration
-success in logs, in `/api/setup` (`databaseInitialized: true`), or by checking
-the configured Supabase project before calling a setup smoke complete.
+success in bot migration logs, the `schema_migrations` table, or Supabase
+migration status before calling a setup smoke complete. `/api/setup`
+`databaseInitialized: true` only proves the setup route can query its minimal
+startup tables; it is not proof that every migration finished.
 
 To undo a migration:
 1. Create a NEW migration that reverses the changes (e.g., `DROP INDEX`, `ALTER TABLE DROP COLUMN`)
@@ -187,8 +189,8 @@ The bot's migration runner applies files from `packages/supabase/migrations/`
 when `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, or `DATABASE_URL` is available.
 It uses SHA-256 checksums and stops on the first migration error. If the runner
 itself fails or the credentials are not present, apply migrations manually in
-Supabase and treat setup as incomplete until `/api/setup` reports
-`databaseInitialized: true`.
+Supabase and treat setup as incomplete until migration logs, `schema_migrations`,
+or Supabase migration status confirm the schema is current.
 
 ### Data Retention (every 6h cron)
 

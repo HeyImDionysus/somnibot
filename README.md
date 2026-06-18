@@ -164,10 +164,12 @@ SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=false
 # Dashboard URLs:
 # DASHBOARD_URL is the local/operator URL the bot can show to owners.
 # SOMNIBOT_PUBLIC_CALLBACK_BASE_URL is the URL providers call back to.
+# Leave it blank until you have a real public callback base. The launcher fills
+# it when it enables Tailscale Funnel.
 # NEXT_PUBLIC_APP_URL is the dashboard build-time public URL. The launcher sets
 # it to the same value as SOMNIBOT_PUBLIC_CALLBACK_BASE_URL.
 DASHBOARD_URL=http://localhost:3000
-SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=http://localhost:3000
+SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
@@ -599,9 +601,11 @@ pnpm --filter @somnibot/bot test:watch
 Migrations live in `packages/supabase/migrations/`. The bot tries to run them
 on first boot when `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, or `DATABASE_URL`
 is set. Do not treat startup alone as proof that the database is initialized:
-check `/api/setup`, `/api/health`, or the migration logs. If the runner reports
-an error, apply migrations manually through Supabase and fix the runner before
-calling first-run setup complete.
+check the migration logs, the `schema_migrations` table, or Supabase migration
+status. `/api/health` only proves the dashboard health route can answer, and
+`/api/setup` only probes setup readiness; neither proves every migration
+finished. If the runner reports an error, apply migrations manually through
+Supabase and fix the runner before calling first-run setup complete.
 
 ### Further Documentation
 - **[Architecture](somnibot_architecture_v53.md)** — Full system design, 56 sections, every feature documented
