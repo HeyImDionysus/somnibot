@@ -46,8 +46,10 @@ docker compose -f docker-compose.prod.yml up -d --build
 The VPS stack keeps the dashboard, bot, Lavalink, and Valkey together on the VPS
 or private network. Caddy serves the public HTTPS dashboard domain.
 
-### CI (8 jobs — all must pass)
-install → typecheck → lint → build → test → integration-test → migration-lint → security
+### CI
+All required GitHub checks must pass before merging: install, migration lint,
+database type drift, database security audit, typecheck, lint, build, unit
+tests, integration tests, security checks, and the final CI gate.
 
 ## Rollback
 
@@ -120,7 +122,13 @@ public callback base, and PayPal/Supabase callback settings still match the
 current SomniBot deployment guide.
 
 ### Database Migrations
-Migrations are **forward-only**. To undo a migration:
+Migrations are **forward-only**. The bot attempts to apply pending migrations on
+startup when a Supabase Management API token or direct database URL is available,
+but startup alone is not proof that the database is current. Verify migration
+success in logs, in `/api/setup` (`databaseInitialized: true`), or by checking
+the configured Supabase project before calling a setup smoke complete.
+
+To undo a migration:
 1. Create a NEW migration that reverses the changes (e.g., `DROP INDEX`, `ALTER TABLE DROP COLUMN`)
 2. Name it with the next timestamp: `20260609000000_revert_<name>.sql`
 3. Test locally: `supabase db reset` (or `supabase migration up` on a staging project)
@@ -174,7 +182,12 @@ Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → ch
 ## Database
 
 ### Migrations
-Auto-run on bot start via `migration-runner.ts`. SHA-256 checksums. Stops on first error.
+The bot's migration runner applies files from `packages/supabase/migrations/`
+when `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, or `DATABASE_URL` is available.
+It uses SHA-256 checksums and stops on the first migration error. If the runner
+itself fails or the credentials are not present, apply migrations manually in
+Supabase and treat setup as incomplete until `/api/setup` reports
+`databaseInitialized: true`.
 
 ### Data Retention (every 6h cron)
 

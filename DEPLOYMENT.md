@@ -44,6 +44,13 @@ compatibility deployment on either host, it must still follow the same
 environment, Valkey/Redis, public callback, PayPal webhook, and Supabase redirect
 rules in this guide.
 
+LumaDock is not a separate supported runtime path in the current repository.
+The code paths available today are the launcher-guided regular-local/VPS setup,
+the regular-local scripts, and the VPS Docker Compose stack. If a future
+LumaDock package wraps SomniBot, it should run one of those same stacks and set
+the same environment values; do not invent different callback, Valkey, Lavalink,
+or PayPal rules for it.
+
 ---
 
 ## 1. Discord Setup
@@ -81,6 +88,12 @@ dashboard callback allow-list in the next section.
    - Regular local script fallback: `http://localhost:3000/api/auth/callback`
    - Regular local production callback: `<public-callback-base>/api/auth/callback`
    - VPS: `https://your-domain.example/api/auth/callback`
+
+If `/api/setup` still says Discord auth is not configured after you enabled the
+provider manually, check two things before changing credentials: the
+`SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` runtime flag is present, and
+the Supabase allow-list includes the exact local and public callback URLs
+SomniBot is using.
 
 ## 3. Regular Local Setup
 
@@ -140,6 +153,7 @@ forwards to the dashboard. The launcher-owned dashboard commonly uses port
 
 ```env
 DASHBOARD_URL=<local-operator-dashboard-url>
+SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=<public-callback-base>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 HEALTH_PORT=3001
 CSRF_SECRET=<openssl rand -hex 32>
@@ -152,11 +166,12 @@ LAVALINK_PASSWORD=<openssl rand -hex 16>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
 
-The launcher setup flow requires the stable HTTPS public callback base before
-finalizing setup. If you use the script fallback for a private first run,
-temporarily set `NEXT_PUBLIC_APP_URL=http://localhost:3000`, then switch it to
-the stable HTTPS callback base before configuring PayPal webhooks or production
-OAuth redirects.
+The launcher setup flow writes the local operator URL to `DASHBOARD_URL` and the
+stable public HTTPS URL to both `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` and
+`NEXT_PUBLIC_APP_URL`. If you use the script fallback for a private first run,
+temporarily use `http://localhost:3000` for both public URL variables, then
+switch them to the stable HTTPS callback base before configuring PayPal webhooks
+or production OAuth redirects.
 
 Keep `<local-operator-dashboard-url>/api/auth/callback`,
 `http://localhost:3000/api/auth/callback` for script fallback, and
@@ -193,6 +208,7 @@ operator approval.
 DOMAIN=somnibot.example.com
 DASHBOARD_URL=https://somnibot.example.com
 NEXT_PUBLIC_APP_URL=https://somnibot.example.com
+SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=https://somnibot.example.com
 NODE_ENV=production
 HEALTH_PORT=3001
 
@@ -274,10 +290,10 @@ Run the applicable checklist before calling an environment ready.
 
 ```bash
 git pull origin main
-pnpm install
-pnpm -r build
+pnpm install --frozen-lockfile
+pnpm build
 # Restart bot/dashboard services
-# Run any new migrations: supabase db push
+# Verify migrations through bot startup logs or run the migration command for your environment
 ```
 
 ---

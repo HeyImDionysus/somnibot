@@ -87,7 +87,8 @@ if not exist .env (
     echo        DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_CLIENT_SECRET
     echo        SUPABASE_URL, SUPABASE_SECRET_KEY
     echo        NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-    echo        DASHBOARD_URL, NEXT_PUBLIC_APP_URL ^(local URL first, public HTTPS callback base for production^)
+    echo        DASHBOARD_URL ^(local/operator dashboard URL^)
+    echo        SOMNIBOT_PUBLIC_CALLBACK_BASE_URL, NEXT_PUBLIC_APP_URL ^(public callback base^)
     echo        CSRF_SECRET, NEXTAUTH_SECRET, WEBHOOK_REPLAY_SECRET
     echo        ^(generate each with: openssl rand -hex 32^)
     echo        LAVALINK_PASSWORD ^(generate with: openssl rand -hex 16^)
