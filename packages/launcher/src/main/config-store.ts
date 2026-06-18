@@ -47,6 +47,12 @@ export interface LauncherConfig {
   /** Operator confirmation that Discord auth provider and callback allow-list are configured manually. */
   supabaseDiscordAuthProviderConfigured: boolean;
 
+  // ── PayPal store/webhook (required for store payments) ──
+  paypalClientId: string;
+  paypalClientSecret: string;
+  paypalWebhookId: string;
+  paypalSandbox: boolean;
+
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
 
@@ -81,6 +87,10 @@ const DEFAULTS: LauncherConfig = {
   supabaseDbPassword: '',
   supabaseAccessToken: '',
   supabaseDiscordAuthProviderConfigured: false,
+  paypalClientId: '',
+  paypalClientSecret: '',
+  paypalWebhookId: '',
+  paypalSandbox: true,
   runtimeMode: 'regular-local',
   publicCallbackBaseUrl: '',
   vpsDomain: '',
@@ -111,6 +121,8 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'supabaseSecretKey',
   'supabaseDbPassword',
   'supabaseAccessToken',
+  'paypalClientSecret',
+  'paypalWebhookId',
   'tailscaleAuthKey',
 ]);
 
@@ -184,6 +196,10 @@ export function getConfig(): LauncherConfig {
     supabaseDbPassword: getSensitive('supabaseDbPassword'),
     supabaseAccessToken: getSensitive('supabaseAccessToken'),
     supabaseDiscordAuthProviderConfigured: store.get('supabaseDiscordAuthProviderConfigured', false),
+    paypalClientId: store.get('paypalClientId', ''),
+    paypalClientSecret: getSensitive('paypalClientSecret'),
+    paypalWebhookId: getSensitive('paypalWebhookId'),
+    paypalSandbox: store.get('paypalSandbox', true),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
@@ -234,6 +250,10 @@ export function buildEnvVars(
   config: LauncherConfig,
   sessionToken: string,
 ): Record<string, string> {
+  const paypalApiBase = config.paypalSandbox
+    ? 'https://api-m.sandbox.paypal.com'
+    : 'https://api-m.paypal.com';
+
   return {
     // Discord
     DISCORD_TOKEN: config.discordToken,
@@ -273,6 +293,15 @@ export function buildEnvVars(
     // on localhost while public providers may call back through Tailscale
     // Funnel. VPS mode uses the VPS HTTPS domain for both.
     ...buildRuntimeEnvVars(config),
+
+    // PayPal store/webhook runtime. The public webhook URL is derived from
+    // the runtime profile; the operator-provided credentials stay in the
+    // encrypted launcher store and are passed only to child processes.
+    PAYPAL_CLIENT_ID: config.paypalClientId,
+    PAYPAL_CLIENT_SECRET: config.paypalClientSecret,
+    PAYPAL_WEBHOOK_ID: config.paypalWebhookId,
+    PAYPAL_SANDBOX: config.paypalSandbox ? 'true' : 'false',
+    PAYPAL_API_BASE: paypalApiBase,
 
     // Lavalink defaults
     // V7 Audit §9.8: Use the same password that was written to application.yml.

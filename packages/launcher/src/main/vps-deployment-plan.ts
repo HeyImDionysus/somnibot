@@ -12,6 +12,7 @@ export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
 
 export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
+  paypalReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
 }
@@ -350,6 +351,10 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
 
   if (!input.credentialReady) {
     warnings.push('Credential fields are not complete yet; the deployment plan will keep secret values as placeholders.');
+  }
+
+  if (!input.paypalReady) {
+    warnings.push('PayPal app/webhook fields are not complete yet; store payments will stay disabled until PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, and PAYPAL_WEBHOOK_ID are set.');
   }
 
   if (!hasAuthProviderSetupPath(input)) {

@@ -15,6 +15,8 @@ const SENSITIVE_KEYS = [
   'supabaseSecretKey',
   'supabaseDbPassword',
   'supabaseAccessToken',
+  'paypalClientSecret',
+  'paypalWebhookId',
   'tailscaleAuthKey',
 ] as const;
 
@@ -37,6 +39,10 @@ interface LauncherConfig {
   supabaseDbPassword: string;
   supabaseAccessToken: string;
   supabaseDiscordAuthProviderConfigured: boolean;
+  paypalClientId: string;
+  paypalClientSecret: string;
+  paypalWebhookId: string;
+  paypalSandbox: boolean;
   runtimeMode: 'regular-local' | 'vps';
   publicCallbackBaseUrl: string;
   vpsDomain: string;
@@ -87,6 +93,10 @@ describe('Launcher Config', () => {
     supabaseDbPassword: 'database-password',
     supabaseAccessToken: 'sbp-access-token',
     supabaseDiscordAuthProviderConfigured: false,
+    paypalClientId: 'paypal-client-id',
+    paypalClientSecret: 'paypal-client-secret',
+    paypalWebhookId: 'paypal-webhook-id',
+    paypalSandbox: true,
     runtimeMode: 'regular-local',
     publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
     vpsDomain: '',
@@ -120,6 +130,8 @@ describe('Launcher Config', () => {
     expect(masked.supabaseSecretKey).toBe(MASK);
     expect(masked.supabaseDbPassword).toBe(MASK);
     expect(masked.supabaseAccessToken).toBe(MASK);
+    expect(masked.paypalClientSecret).toBe(MASK);
+    expect(masked.paypalWebhookId).toBe(MASK);
     expect(masked.tailscaleAuthKey).toBe(MASK);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
@@ -145,6 +157,10 @@ describe('Launcher Config', () => {
       supabaseSecretKey: MASK,
       supabaseDbPassword: MASK,
       supabaseAccessToken: MASK,
+      paypalClientId: 'paypal-client-id-new',
+      paypalClientSecret: MASK,
+      paypalWebhookId: MASK,
+      paypalSandbox: false,
       tailscaleAuthKey: MASK,
       supabasePublishableKey: 'new-pub-key',
       supabaseDiscordAuthProviderConfigured: true,
@@ -160,6 +176,8 @@ describe('Launcher Config', () => {
     expect(sanitized).not.toHaveProperty('supabaseSecretKey');
     expect(sanitized).not.toHaveProperty('supabaseDbPassword');
     expect(sanitized).not.toHaveProperty('supabaseAccessToken');
+    expect(sanitized).not.toHaveProperty('paypalClientSecret');
+    expect(sanitized).not.toHaveProperty('paypalWebhookId');
     expect(sanitized).not.toHaveProperty('tailscaleAuthKey');
 
     // Non-masked fields are preserved
@@ -168,6 +186,8 @@ describe('Launcher Config', () => {
     expect(sanitized.supabaseUrl).toBe('https://updated.supabase.co');
     expect(sanitized.supabasePublishableKey).toBe('new-pub-key');
     expect(sanitized.supabaseDiscordAuthProviderConfigured).toBe(true);
+    expect(sanitized.paypalClientId).toBe('paypal-client-id-new');
+    expect(sanitized.paypalSandbox).toBe(false);
     expect(sanitized.runtimeMode).toBe('vps');
     expect(sanitized.vpsDomain).toBe('somnibot.example.com');
   });
@@ -178,6 +198,8 @@ describe('Launcher Config', () => {
       supabaseSecretKey: 'brand-new-secret',
       supabaseDbPassword: 'brand-new-db-password',
       supabaseAccessToken: 'brand-new-access-token',
+      paypalClientSecret: 'brand-new-paypal-secret',
+      paypalWebhookId: 'brand-new-webhook-id',
       tailscaleAuthKey: 'brand-new-tailscale-key',
     };
 
@@ -188,6 +210,8 @@ describe('Launcher Config', () => {
     expect(sanitized.supabaseSecretKey).toBe('brand-new-secret');
     expect(sanitized.supabaseDbPassword).toBe('brand-new-db-password');
     expect(sanitized.supabaseAccessToken).toBe('brand-new-access-token');
+    expect(sanitized.paypalClientSecret).toBe('brand-new-paypal-secret');
+    expect(sanitized.paypalWebhookId).toBe('brand-new-webhook-id');
     expect(sanitized.tailscaleAuthKey).toBe('brand-new-tailscale-key');
   });
 });

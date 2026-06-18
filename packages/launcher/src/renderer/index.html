@@ -273,6 +273,35 @@
           </label>
         </div>
 
+        <div class="section-header" style="margin-top: 24px;">
+          <h2>PayPal</h2>
+        </div>
+
+        <div class="field-group">
+          <div class="field">
+            <label for="paypalClientId">Client ID <span class="req">*</span></label>
+            <input type="password" id="paypalClientId" placeholder="PayPal REST app client ID" autocomplete="off" />
+            <button class="toggle-vis" data-target="paypalClientId" title="Show/hide">👁</button>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="paypalClientSecret">Client Secret <span class="req">*</span></label>
+              <input type="password" id="paypalClientSecret" placeholder="PayPal REST app secret" autocomplete="off" />
+              <button class="toggle-vis" data-target="paypalClientSecret" title="Show/hide">👁</button>
+            </div>
+            <div class="field">
+              <label for="paypalWebhookId">Webhook ID <span class="req">*</span></label>
+              <input type="password" id="paypalWebhookId" placeholder="Webhook ID for the URL above" autocomplete="off" />
+              <button class="toggle-vis" data-target="paypalWebhookId" title="Show/hide">👁</button>
+            </div>
+          </div>
+          <label class="toggle-label setup-confirmation-row" for="paypalSandbox">
+            <input type="checkbox" id="paypalSandbox" checked />
+            <span class="toggle-switch"></span>
+            <span class="toggle-text">Use PayPal sandbox</span>
+          </label>
+        </div>
+
         <!-- ─── Public Callback (Tailscale) ─── -->
         <div class="section-header" id="tailscale-section-header" style="margin-top: 24px;">
           <h2>Public Callback</h2>

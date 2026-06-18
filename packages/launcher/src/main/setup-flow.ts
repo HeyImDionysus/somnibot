@@ -21,6 +21,7 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig {
     errors?: string[];
     checks: ProviderValidationCheck[];
   };
+  paypalReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
   tailscaleAuthKeyReady?: boolean;
@@ -126,6 +127,43 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
     summary: 'Waiting for auth-provider setup access.',
     detail: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
     actionLabel: 'Add token or confirm manual setup',
+    manualAction: true,
+  };
+}
+
+function buildPayPalStep(input: SetupFlowInput): SetupStep {
+  const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
+  const publicBaseReady = runtimeMode === 'vps'
+    ? Boolean(normalizeVpsDomain(input.vpsDomain))
+    : Boolean(normalizeBaseUrl(input.publicCallbackBaseUrl));
+
+  if (input.paypalReady) {
+    return {
+      id: 'paypal-webhook',
+      label: 'PayPal webhook',
+      status: 'success',
+      summary: 'PayPal app and webhook credentials are filled in.',
+      detail: 'The bot and dashboard will receive PayPal runtime credentials, and the webhook URL is derived from the active public callback base.',
+    };
+  }
+
+  if (!publicBaseReady) {
+    return {
+      id: 'paypal-webhook',
+      label: 'PayPal webhook',
+      status: 'pending',
+      summary: 'Waiting for the public callback URL.',
+      detail: 'The launcher needs the public callback base before the PayPal webhook can be created. After the webhook URL appears in the summary, create the PayPal webhook and paste its ID here.',
+    };
+  }
+
+  return {
+    id: 'paypal-webhook',
+    label: 'PayPal webhook',
+    status: 'pending',
+    summary: 'Waiting for PayPal app and webhook credentials.',
+    detail: 'Create or select a PayPal app, add a webhook using the PayPal webhook URL shown above, then paste the Client ID, Client Secret, and Webhook ID into the launcher.',
+    actionLabel: 'Add PayPal credentials',
     manualAction: true,
   };
 }
@@ -363,6 +401,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
   const providerValidationStep = buildProviderValidationStep(input);
 
   const authProviderStep = buildAuthProviderStep(input);
+  const paypalStep = buildPayPalStep(input);
 
   const startStep: SetupStep = input.checking
     ? {
@@ -434,6 +473,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     credentialStep,
     providerValidationStep,
     authProviderStep,
+    paypalStep,
     startStep,
   ];
 }
@@ -495,6 +535,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
   const credentialStep = buildCredentialStep(input, 'VPS');
   const providerValidationStep = buildProviderValidationStep(input);
   const authProviderStep = buildAuthProviderStep(input);
+  const paypalStep = buildPayPalStep(input);
 
   const deployStep: SetupStep = deploymentPlan.status === 'ready'
     ? {
@@ -536,6 +577,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
     credentialStep,
     providerValidationStep,
     authProviderStep,
+    paypalStep,
     deployStep,
   ];
 }

@@ -94,6 +94,8 @@ function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
     'supabaseSecretKey',
     'supabaseDbPassword',
     'supabaseAccessToken',
+    'paypalClientSecret',
+    'paypalWebhookId',
     'discordToken',
     'discordClientSecret',
     'tailscaleAuthKey',
@@ -504,6 +506,10 @@ function registerIpcHandlers(): void {
       supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
       supabaseAccessToken: config.supabaseAccessToken ? '••••••••' : '',
       supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
+      paypalClientId: config.paypalClientId,
+      paypalClientSecret: config.paypalClientSecret ? '••••••••' : '',
+      paypalWebhookId: config.paypalWebhookId ? '••••••••' : '',
+      paypalSandbox: config.paypalSandbox,
       runtimeMode: config.runtimeMode,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
       vpsDomain: config.vpsDomain,
@@ -537,6 +543,11 @@ function registerIpcHandlers(): void {
         && config.supabasePublishableKey
       ),
       providerValidation: input.providerValidation,
+      paypalReady: input.paypalReady ?? Boolean(
+        config.paypalClientId
+        && config.paypalClientSecret
+        && config.paypalWebhookId
+      ),
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
         ?? config.supabaseDiscordAuthProviderConfigured,
