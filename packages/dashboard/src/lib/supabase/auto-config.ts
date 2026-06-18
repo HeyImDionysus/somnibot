@@ -66,12 +66,14 @@ function getAuthConfigUrl(projectRef: string) {
  * Resolve the dashboard's public base URL for Supabase auth callback allow-listing.
  */
 export function getDashboardBaseUrl(env?: DashboardUrlEnv): string {
-  const appUrl = (
-    env?.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL
-    ?? process.env['SOMNIBOT_PUBLIC_CALLBACK_BASE_URL']
-    ?? env?.NEXT_PUBLIC_APP_URL
-    ?? process.env['NEXT_PUBLIC_APP_URL']
-  )?.trim();
+  const appUrl = [
+    env?.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL,
+    process.env['SOMNIBOT_PUBLIC_CALLBACK_BASE_URL'],
+    env?.NEXT_PUBLIC_APP_URL,
+    process.env['NEXT_PUBLIC_APP_URL'],
+  ]
+    .map((value) => value?.trim())
+    .find((value): value is string => Boolean(value));
   if (appUrl) {
     return appUrl.replace(/\/+$/, '');
   }

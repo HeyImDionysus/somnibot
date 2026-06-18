@@ -42,6 +42,10 @@ export interface LauncherConfig {
   supabasePublishableKey: string;
   /** Direct Postgres connection URL — required for running DB migrations. */
   supabaseDbPassword: string;
+  /** Optional Supabase Management API token for auth-provider setup. */
+  supabaseAccessToken: string;
+  /** Operator confirmation that Discord auth provider and callback allow-list are configured manually. */
+  supabaseDiscordAuthProviderConfigured: boolean;
 
   // ── UI state ──
   windowBounds?: { width: number; height: number; x?: number; y?: number };
@@ -75,6 +79,8 @@ const DEFAULTS: LauncherConfig = {
   supabaseSecretKey: '',
   supabasePublishableKey: '',
   supabaseDbPassword: '',
+  supabaseAccessToken: '',
+  supabaseDiscordAuthProviderConfigured: false,
   runtimeMode: 'regular-local',
   publicCallbackBaseUrl: '',
   vpsDomain: '',
@@ -104,6 +110,7 @@ const SENSITIVE_KEYS: ReadonlySet<keyof LauncherConfig> = new Set([
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'supabaseAccessToken',
   'tailscaleAuthKey',
 ]);
 
@@ -175,6 +182,8 @@ export function getConfig(): LauncherConfig {
     supabaseSecretKey: getSensitive('supabaseSecretKey'),
     supabasePublishableKey: store.get('supabasePublishableKey', ''),
     supabaseDbPassword: getSensitive('supabaseDbPassword'),
+    supabaseAccessToken: getSensitive('supabaseAccessToken'),
+    supabaseDiscordAuthProviderConfigured: store.get('supabaseDiscordAuthProviderConfigured', false),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),
     publicCallbackBaseUrl: store.get('publicCallbackBaseUrl', ''),
@@ -238,6 +247,8 @@ export function buildEnvVars(
     // Supabase — bot format
     SUPABASE_URL: config.supabaseUrl,
     SUPABASE_SECRET_KEY: config.supabaseSecretKey,
+    SUPABASE_ACCESS_TOKEN: config.supabaseAccessToken,
+    SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED: config.supabaseDiscordAuthProviderConfigured ? 'true' : 'false',
 
     // Supabase — dashboard format
     NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,

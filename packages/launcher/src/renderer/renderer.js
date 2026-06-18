@@ -20,6 +20,8 @@ const fields = {
   supabaseSecretKey: $('supabaseSecretKey'),
   supabasePublishableKey: $('supabasePublishableKey'),
   supabaseDbPassword: $('supabaseDbPassword'),
+  supabaseAccessToken: $('supabaseAccessToken'),
+  supabaseDiscordAuthProviderConfigured: $('supabaseDiscordAuthProviderConfigured'),
   tailscaleAuthKey: $('tailscaleAuthKey'),
 };
 
@@ -132,7 +134,10 @@ async function init() {
   try {
     const config = await window.somnibot.getConfig();
     for (const [key, input] of Object.entries(fields)) {
-      if (config[key]) {
+      if (!input) continue;
+      if (input.type === 'checkbox') {
+        input.checked = Boolean(config[key]);
+      } else if (config[key]) {
         input.value = config[key];
       }
     }
@@ -158,7 +163,9 @@ async function init() {
   // Auto-save on field change (debounced)
   let saveTimeout = null;
   for (const input of Object.values(fields)) {
-    input.addEventListener('input', () => {
+    if (!input) continue;
+    const eventName = input.type === 'checkbox' ? 'change' : 'input';
+    input.addEventListener(eventName, () => {
       clearTimeout(saveTimeout);
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
@@ -220,7 +227,8 @@ async function saveConfig() {
 function collectCredentialConfig() {
   const config = {};
   for (const [key, input] of Object.entries(fields)) {
-    config[key] = input.value;
+    if (!input) continue;
+    config[key] = input.type === 'checkbox' ? input.checked : input.value;
   }
   return config;
 }
@@ -283,6 +291,8 @@ async function refreshSetupStatus(options = {}) {
   const input = {
     ...collectRuntimeConfig(),
     credentialReady: isCredentialFormComplete(),
+    supabaseAccessTokenReady: fields.supabaseAccessToken.value.trim().length > 0,
+    supabaseDiscordAuthProviderConfigured: fields.supabaseDiscordAuthProviderConfigured.checked,
     dashboardOnline: latestProcessStatus?.dashboard === 'online',
     checking: Boolean(options.checking),
   };
@@ -619,7 +629,7 @@ function formatStepStatus(status) {
 }
 
 /* ================================================================== */
-/*  Validation & Start                                                 */
+/*  Automated Setup & Start                                            */
 /* ================================================================== */
 
 btnStart.addEventListener('click', async () => {
@@ -646,7 +656,7 @@ btnStart.addEventListener('click', async () => {
       for (const k of missing) fields[k].classList.add('error');
       showMessage('error', `Fill in all required fields: ${missing.map(fieldLabel).join(', ')}`);
     } else {
-      showMessage('error', blockedReason || 'Finish the runtime setup steps before validation.');
+      showMessage('error', blockedReason || 'Finish the runtime setup steps before starting setup.');
     }
     await refreshSetupStatus();
     return;
@@ -666,43 +676,44 @@ btnStart.addEventListener('click', async () => {
     return;
   }
 
-  for (const input of Object.values(fields)) input.classList.remove('error', 'valid');
+  for (const input of Object.values(fields)) {
+    if (input) input.classList.remove('error', 'valid');
+  }
 
   isValidating = true;
-  btnStart.innerHTML = '<span class="spinner"></span>Validating...';
+  btnStart.innerHTML = '<span class="spinner"></span>Setting up...';
   btnStart.classList.add('loading');
   setFieldsDisabled(true);
 
   try {
-    const result = await window.somnibot.validateCredentials(config);
-
-    if (!result.valid) {
-      showMessage('error', result.errors.join('\n\n'));
-      btnStart.classList.remove('loading');
-      setFieldsDisabled(false);
-      isValidating = false;
-      await refreshSetupStatus();
-      return;
-    }
+    const result = await window.somnibot.runSetupAutomation(config);
 
     if (result.meta) {
       showMeta(result.meta);
     }
 
-    for (const input of Object.values(fields)) input.classList.add('valid');
+    if (result.publicCallbackBaseUrl) {
+      applyTailscalePublicCallbackBaseUrl(result.publicCallbackBaseUrl);
+    }
 
-    await saveConfig();
-
-    btnStart.innerHTML = '<span class="spinner"></span>Starting...';
-
-    const startResult = await window.somnibot.startBot();
-    if (!startResult.ok) {
-      showMessage('error', startResult.error || 'Failed to start.');
+    if (!result.ok) {
+      showMessage('error', result.error || result.message || 'Setup did not complete.');
       btnStart.classList.remove('loading');
-      setFieldsDisabled(false);
+      if (result.servicesStarted) {
+        isRunning = true;
+        btnStart.classList.add('hidden');
+        btnStop.classList.remove('hidden');
+        btnOpenDashboard.disabled = false;
+      } else {
+        setFieldsDisabled(false);
+      }
       isValidating = false;
       await refreshSetupStatus();
       return;
+    }
+
+    for (const input of Object.values(fields)) {
+      if (input && input.type !== 'checkbox') input.classList.add('valid');
     }
 
     isRunning = true;
@@ -714,7 +725,10 @@ btnStart.addEventListener('click', async () => {
     const summary = setupStatus?.summary;
     const dashboardText = summary?.localDashboardUrl || 'the local dashboard';
     const callbackText = summary?.publicCallbackUrl || 'the public callback URL';
-    showMessage('success', `Bot started. Local dashboard URL: ${dashboardText}. Public callback URL: ${callbackText}.`);
+    const warningText = Array.isArray(result.warnings) && result.warnings.length > 0
+      ? ` ${result.warnings.join(' ')}`
+      : '';
+    showMessage('success', `${result.message || 'Setup complete.'} Local dashboard URL: ${dashboardText}. Public callback URL: ${callbackText}.${warningText}`);
 
   } catch (err) {
     showMessage('error', `Unexpected error: ${err.message || err}`);
@@ -797,7 +811,7 @@ btnStop.addEventListener('click', async () => {
   isRunning = false;
   btnStop.classList.add('hidden');
   btnStart.classList.remove('hidden');
-  btnStart.textContent = setupStatus?.primaryAction?.label || 'Validate & Start';
+  btnStart.textContent = setupStatus?.primaryAction?.label || 'Set Up & Start';
   btnStart.classList.remove('loading');
   btnOpenDashboard.disabled = true;
   setFieldsDisabled(false);
@@ -931,7 +945,7 @@ function updateStatusUI(status) {
     isRunning = false;
     btnStop.classList.add('hidden');
     btnStart.classList.remove('hidden');
-    btnStart.textContent = setupStatus?.primaryAction?.label || 'Validate & Start';
+    btnStart.textContent = setupStatus?.primaryAction?.label || 'Set Up & Start';
     btnStart.classList.remove('loading');
     btnOpenDashboard.disabled = true;
     setFieldsDisabled(false);
@@ -1384,6 +1398,8 @@ function fieldLabel(key) {
     supabaseSecretKey: 'Secret Key',
     supabasePublishableKey: 'Publishable Key',
     supabaseDbPassword: 'Database Password',
+    supabaseAccessToken: 'Management API Token',
+    supabaseDiscordAuthProviderConfigured: 'Discord auth provider confirmation',
   };
   return labels[key] || key;
 }
@@ -1435,7 +1451,7 @@ btnRestoreCloud.addEventListener('click', async () => {
       }
       await saveConfig();
       await refreshSetupStatus();
-      showMessage('success', 'Credentials restored from Supabase! Review the values and hit "Validate & Start".');
+      showMessage('success', 'Credentials restored from Supabase. Review the values and run setup.');
       restoreBanner.classList.add('hidden');
     }
   } catch (err) {

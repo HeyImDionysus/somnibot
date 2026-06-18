@@ -162,10 +162,14 @@ SUPABASE_ACCESS_TOKEN=sbp_...your-supabase-personal-access-token
 SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=false
 
 # Dashboard URLs:
-# DASHBOARD_URL is the local URL the bot can show to operators.
-# NEXT_PUBLIC_APP_URL is the callback base. Start local, then switch it to
-# a stable HTTPS public callback base for production local or VPS mode.
+# DASHBOARD_URL is the local/operator URL the bot can show to owners.
+# SOMNIBOT_PUBLIC_CALLBACK_BASE_URL is the URL providers call back to.
+# Leave it blank until you have a real public callback base. The launcher fills
+# it when it enables Tailscale Funnel.
+# NEXT_PUBLIC_APP_URL is the dashboard build-time public URL. The launcher sets
+# it to the same value as SOMNIBOT_PUBLIC_CALLBACK_BASE_URL.
 DASHBOARD_URL=http://localhost:3000
+SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...your-anon-key
@@ -184,7 +188,7 @@ PAYPAL_WEBHOOK_URL=
 ```
 
 > **Tip:** `NEXT_PUBLIC_SUPABASE_URL` is the same value as `SUPABASE_URL`. The `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is the **publishable** key from Supabase (starts with `sb_publishable_`).
-> Generate `CSRF_SECRET`, `NEXTAUTH_SECRET`, and `WEBHOOK_REPLAY_SECRET` separately with `openssl rand -hex 32`; generate `LAVALINK_PASSWORD` with `openssl rand -hex 16`. Do not reuse your Supabase or Discord secrets. For production local or VPS callbacks, `NEXT_PUBLIC_APP_URL` should be the stable public HTTPS dashboard base.
+> Generate `CSRF_SECRET`, `NEXTAUTH_SECRET`, and `WEBHOOK_REPLAY_SECRET` separately with `openssl rand -hex 32`; generate `LAVALINK_PASSWORD` with `openssl rand -hex 16`. Do not reuse your Supabase or Discord secrets. For production local or VPS callbacks, `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` and `NEXT_PUBLIC_APP_URL` should both use the stable public HTTPS dashboard base.
 
 Save the file.
 
@@ -246,6 +250,18 @@ those values are baked into the production dashboard build.
    [http://localhost:3000/login](http://localhost:3000/login) for the script
    fallback, then click "Continue with Discord."
 
+Plain English version:
+
+- `DASHBOARD_URL` is where you open the dashboard as the operator.
+- `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` is where outside services can reach the
+  dashboard. For regular local production, this is usually the Tailscale Funnel
+  HTTPS URL. For VPS, it is the domain.
+- `NEXT_PUBLIC_APP_URL` is the public URL baked into the dashboard build. The
+  launcher sets it to the same public callback base.
+- If you manually turned on the Supabase Discord provider, setup still needs
+  `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` in the runtime environment,
+  and Supabase must allow every dashboard callback URL SomniBot is using.
+
 ### Regular Local Public Callbacks
 
 For everyday local testing, the launcher-provided local dashboard URL is enough.
@@ -273,6 +289,7 @@ Set these values when you turn on public callbacks:
 
 ```env
 DASHBOARD_URL=<local-operator-dashboard-url>
+SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=<public-callback-base>
 NEXT_PUBLIC_APP_URL=<public-callback-base>
 PAYPAL_WEBHOOK_URL=<public-callback-base>/api/paypal/webhook
 ```
@@ -363,6 +380,11 @@ SomniBot supports two real production modes. In both modes, keep the dashboard,
 bot, Lavalink, and Valkey together on the same machine or private network.
 Vercel is not required for launch.
 
+LumaDock is not a separate runtime mode in this repository today. If a future
+LumaDock package wraps SomniBot, it should launch the same regular-local or VPS
+stack described below and use the same callback, Valkey, Lavalink, and PayPal
+rules.
+
 ### Regular Local
 
 Use this when SomniBot runs on your own computer.
@@ -381,6 +403,7 @@ Use this when SomniBot runs on your own computer.
 
 Set `DASHBOARD_URL` to the local operator dashboard URL shown by the launcher
 so bot messages point to the owner control surface. Set
+`SOMNIBOT_PUBLIC_CALLBACK_BASE_URL=<public-callback-base>` and
 `NEXT_PUBLIC_APP_URL=<public-callback-base>` when providers and customer-facing
 PayPal return links must use the public HTTPS URL.
 
@@ -405,9 +428,10 @@ to run them directly.
 | Supabase dashboard callback allow-list | `https://your-domain.example/api/auth/callback` |
 | Supabase setup auth | `SUPABASE_ACCESS_TOKEN` for automatic setup, or manual provider setup plus `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` |
 
-For the supplied production Compose file, set `DOMAIN`, `NEXT_PUBLIC_APP_URL`,
-`DASHBOARD_URL`, `VALKEY_PASSWORD`, `VALKEY_URL`, and the required Discord,
-Supabase, dashboard, and Lavalink secrets in `.env`, then start the stack with:
+For the supplied production Compose file, set `DOMAIN`, `DASHBOARD_URL`,
+`SOMNIBOT_PUBLIC_CALLBACK_BASE_URL`, `NEXT_PUBLIC_APP_URL`, `VALKEY_PASSWORD`,
+`VALKEY_URL`, and the required Discord, Supabase, dashboard, and Lavalink
+secrets in `.env`, then start the stack with:
 
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
@@ -442,7 +466,7 @@ somnibot/
 │   ├── dashboard/     Next.js App Router dashboard
 │   ├── launcher/      Electron desktop launcher
 │   ├── shared/        Shared types, constants, validators
-│   ├── supabase/      Database migrations (auto-run on first boot)
+│   ├── supabase/      Database migration files
 │   └── license-sdk/   @somnibot/license-sdk for third-party integrations
 ├── services/
 │   └── lavalink/      Lavalink configuration
@@ -476,6 +500,7 @@ somnibot/
 | Variable | Description |
 |---|---|
 | `DASHBOARD_URL` | Local/operator dashboard URL shown by the bot; launcher local commonly uses `http://localhost:3456`, script fallback uses `http://localhost:3000`, and VPS uses the public domain |
+| `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL` | Runtime public callback base used by setup, Supabase redirect allow-listing, and PayPal webhook URLs; regular-local production usually uses the Tailscale Funnel HTTPS URL |
 | `NEXT_PUBLIC_APP_URL` | Public dashboard/callback base; use the stable HTTPS Funnel URL for regular-local public callbacks, the VPS domain for VPS, or `http://localhost:3000` only for script-fallback private setup before provider callbacks are configured |
 | `NEXT_PUBLIC_SUPABASE_URL` | Same as `SUPABASE_URL` |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Supabase **anon/public** key |
@@ -532,7 +557,15 @@ Slash commands can take up to an hour to register with Discord the first time. I
 2. Rebuild, then restart the production stack with `./scripts/start.sh`. If you are using the dashboard development server, restart `./scripts/start-dashboard.sh`.
 
 ### "Login redirects back to login"
-The Supabase Discord auth provider needs to be configured. Run the setup wizard at `/setup`; it can handle this automatically only when `SUPABASE_ACCESS_TOKEN` is set. If you do not use that token, manually enable the Discord provider in Supabase, allow your dashboard callback URL, and set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` before finalizing setup.
+The Supabase Discord auth provider needs to match the URLs SomniBot is actually
+using. Run the setup wizard at `/setup`; it can configure Supabase automatically
+when `SUPABASE_ACCESS_TOKEN` is set. If you turned the provider on manually,
+also set `SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true` and make sure the
+Supabase redirect allow-list includes:
+
+- `DASHBOARD_URL/api/auth/callback`
+- `SOMNIBOT_PUBLIC_CALLBACK_BASE_URL/api/auth/callback`
+- `http://localhost:3000/api/auth/callback` if you use the script fallback
 
 ### PayPal checkout errors
 1. Make sure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are set in `.env`.
@@ -565,7 +598,14 @@ pnpm --filter @somnibot/bot test:watch
 - Turborepo handles build ordering via `^build` dependency
 
 ### Database Migrations
-Migrations live in `packages/supabase/migrations/`. The bot auto-runs them on first boot if `SUPABASE_ACCESS_TOKEN` or `SUPABASE_DB_URL` is set. Otherwise, apply them manually via the Supabase SQL editor.
+Migrations live in `packages/supabase/migrations/`. The bot tries to run them
+on first boot when `SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_URL`, or `DATABASE_URL`
+is set. Do not treat startup alone as proof that the database is initialized:
+check the migration logs, the `schema_migrations` table, or Supabase migration
+status. `/api/health` only proves the dashboard health route can answer, and
+`/api/setup` only probes setup readiness; neither proves every migration
+finished. If the runner reports an error, apply migrations manually through
+Supabase and fix the runner before calling first-run setup complete.
 
 ### Further Documentation
 - **[Architecture](somnibot_architecture_v53.md)** — Full system design, 56 sections, every feature documented

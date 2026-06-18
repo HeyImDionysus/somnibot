@@ -43,6 +43,7 @@ function createListenerManager() {
 
 const EXPECTED_API_METHODS = [
   'getConfig', 'saveConfig', 'getSetupStatus', 'validateCredentials',
+  'runSetupAutomation',
   'startBot', 'stopBot', 'getStatus',
   'pullFromSupabase', 'openDashboard', 'openExternal',
   'getTailscaleReadiness', 'enableTailscaleFunnel', 'probeTailscaleCallback',

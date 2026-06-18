@@ -14,6 +14,7 @@ const completeVpsInput = {
   vpsSshUser: 'deploy',
   vpsDeployPath: '/opt/somnibot',
   credentialReady: true,
+  supabaseAccessTokenReady: true,
 };
 
 describe('VPS deployment plan generator', () => {
@@ -36,6 +37,8 @@ describe('VPS deployment plan generator', () => {
     expect(plan.environment?.redactedEnvFile).toContain('DASHBOARD_URL=https://somnibot.example.com');
     expect(plan.environment?.redactedEnvFile).toContain('NEXT_PUBLIC_APP_URL=https://somnibot.example.com');
     expect(plan.environment?.redactedEnvFile).toContain('PAYPAL_WEBHOOK_URL=https://somnibot.example.com/api/paypal/webhook');
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_ACCESS_TOKEN=<SUPABASE_ACCESS_TOKEN>');
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=false');
   });
 
   it('represents all secrets with placeholders and never emits concrete secret-looking values', () => {
@@ -46,6 +49,7 @@ describe('VPS deployment plan generator', () => {
       expect.objectContaining({ name: 'DISCORD_TOKEN', value: '<DISCORD_TOKEN>', secret: true }),
       expect.objectContaining({ name: 'DISCORD_CLIENT_SECRET', value: '<DISCORD_CLIENT_SECRET>', secret: true }),
       expect.objectContaining({ name: 'SUPABASE_SECRET_KEY', value: '<SUPABASE_SECRET_KEY>', secret: true }),
+      expect.objectContaining({ name: 'SUPABASE_ACCESS_TOKEN', value: '<SUPABASE_ACCESS_TOKEN>', secret: true }),
       expect.objectContaining({ name: 'CSRF_SECRET', value: '<openssl-rand-hex-32>', secret: true }),
       expect.objectContaining({ name: 'NEXTAUTH_SECRET', value: '<openssl-rand-hex-32>', secret: true }),
       expect.objectContaining({ name: 'WEBHOOK_REPLAY_SECRET', value: '<openssl-rand-hex-32>', secret: true }),
@@ -76,6 +80,7 @@ describe('VPS deployment plan generator', () => {
     expect(plan.approvalGates.map(gate => gate.id)).toEqual([
       'dns-domain',
       'env-file',
+      'auth-provider',
       'provider-callbacks',
       'compose-start',
     ]);
@@ -194,6 +199,7 @@ describe('VPS deployment plan generator', () => {
       vpsSshUser: 'deploy;rm',
       vpsDeployPath: '/opt/somnibot;rm',
       credentialReady: true,
+      supabaseAccessTokenReady: true,
     });
 
     expect(plan.status).toBe('blocked');
@@ -218,6 +224,22 @@ describe('VPS deployment plan generator', () => {
     expect(plan.blockedReasons).toContain('VPS deployment plan requires the public domain without an explicit port because Caddy owns ports 80 and 443.');
   });
 
+  it('blocks VPS deployment when no auth-provider setup path is available', () => {
+    const plan = buildVpsDeploymentPlan({
+      runtimeMode: 'vps',
+      vpsDomain: 'somnibot.example.com',
+      vpsSshHost: 'somnibot.example.com',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      credentialReady: true,
+    });
+
+    expect(plan.status).toBe('blocked');
+    expect(plan.canApprove).toBe(false);
+    expect(plan.commands).toEqual([]);
+    expect(plan.blockedReasons).toContain('Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.');
+  });
+
   it('warns about incomplete credentials but still only emits placeholder env values', () => {
     const plan = buildVpsDeploymentPlan({
       runtimeMode: 'vps',
@@ -226,12 +248,15 @@ describe('VPS deployment plan generator', () => {
       vpsSshUser: 'deploy',
       vpsDeployPath: '/opt/somnibot',
       credentialReady: false,
+      supabaseDiscordAuthProviderConfigured: true,
     });
 
     expect(plan.status).toBe('ready');
     expect(plan.warnings).toContain('Credential fields are not complete yet; the deployment plan will keep secret values as placeholders.');
     expect(plan.environment?.redactedEnvFile).toContain('DISCORD_TOKEN=<DISCORD_TOKEN>');
     expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_SECRET_KEY=<SUPABASE_SECRET_KEY>');
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_ACCESS_TOKEN=');
+    expect(plan.environment?.redactedEnvFile).toContain('SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true');
   });
 
   it('does not import child process execution APIs in the dry-run planner', () => {

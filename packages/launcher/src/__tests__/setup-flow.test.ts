@@ -1,19 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { buildSetupStatus } from '../main/setup-flow';
 
-const completeCredentials = { credentialReady: true };
+const completeCredentials = {
+  credentialReady: true,
+  supabaseDiscordAuthProviderConfigured: true,
+};
 
 describe('setup flow status', () => {
-  it('blocks regular local setup before a Tailscale public callback URL is set', () => {
+  it('lets regular local setup prepare Tailscale public callback automatically', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',
       ...completeCredentials,
     });
 
     expect(status.runtimeMode).toBe('regular-local');
-    expect(status.firstBlockingStepId).toBe('regular-callback');
-    expect(status.primaryAction.enabled).toBe(false);
-    expect(status.primaryAction.blockedReason).toContain('Tailscale');
+    expect(status.firstBlockingStepId).toBeNull();
+    expect(status.primaryAction.enabled).toBe(true);
+    expect(status.primaryAction.status).toBe('ready');
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('pending');
+    expect(callbackStep?.detail).toContain('enable or detect Tailscale Funnel during setup');
     expect(status.summary.localDashboardUrl).toBe('http://localhost');
     expect(status.summary.localDashboardUrl).not.toContain(':3456');
     expect(status.summary.publicCallbackUrl).toBe('Not set yet');
@@ -28,7 +34,7 @@ describe('setup flow status', () => {
     });
 
     expect(status.primaryAction).toEqual({
-      label: 'Validate & Start',
+      label: 'Set Up & Start',
       enabled: true,
       status: 'ready',
     });
@@ -36,6 +42,35 @@ describe('setup flow status', () => {
     expect(status.steps.find(step => step.id === 'regular-callback')?.status).toBe('success');
     expect(status.summary.publicCallbackUrl).toBe('https://somnibot.tailnet.ts.net');
     expect(status.summary.diagnostics.authCallbackUrl).toBe('https://somnibot.tailnet.ts.net/api/auth/callback');
+  });
+
+  it('blocks regular local setup when no auth-provider setup path is available', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.manualAction).toBe(true);
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+    expect(status.primaryAction.enabled).toBe(false);
+    expect(status.primaryAction.blockedReason).toContain('Supabase Management API token');
+  });
+
+  it('treats a Supabase Management API token as an automatic auth-provider setup path', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseAccessTokenReady: true,
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('success');
+    expect(authStep?.summary).toContain('configured automatically');
+    expect(status.primaryAction.enabled).toBe(true);
   });
 
   it('treats invalid regular local callback URLs as recoverable errors', () => {
@@ -67,6 +102,7 @@ describe('setup flow status', () => {
       'vps-domain',
       'vps-ssh',
       'credentials',
+      'auth-provider',
       'vps-deploy',
     ]);
     expect(status.steps.find(step => step.id === 'vps-domain')?.status).toBe('success');

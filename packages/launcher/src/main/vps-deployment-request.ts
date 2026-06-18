@@ -46,6 +46,8 @@ export function buildVpsDeploymentPlanFromConfig(config: LauncherConfig): VpsDep
       && config.supabaseSecretKey
       && config.supabasePublishableKey,
     ),
+    supabaseAccessTokenReady: Boolean(config.supabaseAccessToken),
+    supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
   });
 }
 

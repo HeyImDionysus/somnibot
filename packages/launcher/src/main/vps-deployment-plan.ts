@@ -12,6 +12,8 @@ export const VPS_DEPLOYMENT_BUILD_TIMEOUT_MS = 45 * 60 * 1000;
 
 export interface VpsDeploymentPlanInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
+  supabaseAccessTokenReady?: boolean;
+  supabaseDiscordAuthProviderConfigured?: boolean;
 }
 
 export interface VpsDeploymentEnvVar {
@@ -133,7 +135,15 @@ function envVar(
   };
 }
 
-function buildEnvironmentVariables(publicBaseUrl: string, domain: string): VpsDeploymentEnvVar[] {
+function hasAuthProviderSetupPath(input: Pick<VpsDeploymentPlanInput, 'supabaseAccessTokenReady' | 'supabaseDiscordAuthProviderConfigured'>): boolean {
+  return Boolean(input.supabaseAccessTokenReady || input.supabaseDiscordAuthProviderConfigured);
+}
+
+function buildEnvironmentVariables(
+  publicBaseUrl: string,
+  domain: string,
+  authProvider: Pick<VpsDeploymentPlanInput, 'supabaseAccessTokenReady' | 'supabaseDiscordAuthProviderConfigured'>,
+): VpsDeploymentEnvVar[] {
   return [
     envVar('DOMAIN', domain, { secret: false, required: true, source: 'derived' }),
     envVar('NODE_ENV', 'production', { secret: false, required: true, source: 'derived' }),
@@ -152,6 +162,16 @@ function buildEnvironmentVariables(publicBaseUrl: string, domain: string): VpsDe
     envVar('DISCORD_GUILD_ID', '<optional-discord-guild-id>', { secret: false, required: false, source: 'placeholder' }),
     envVar('SUPABASE_URL', '<SUPABASE_PROJECT_URL>', { secret: false, required: true, source: 'placeholder' }),
     envVar('SUPABASE_SECRET_KEY', '<SUPABASE_SECRET_KEY>', { secret: true, required: true, source: 'placeholder' }),
+    envVar('SUPABASE_ACCESS_TOKEN', authProvider.supabaseAccessTokenReady ? '<SUPABASE_ACCESS_TOKEN>' : '', {
+      secret: true,
+      required: !authProvider.supabaseDiscordAuthProviderConfigured,
+      source: authProvider.supabaseAccessTokenReady ? 'placeholder' : 'derived',
+    }),
+    envVar('SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED', authProvider.supabaseDiscordAuthProviderConfigured ? 'true' : 'false', {
+      secret: false,
+      required: true,
+      source: 'derived',
+    }),
     envVar('NEXT_PUBLIC_SUPABASE_URL', '<SUPABASE_PROJECT_URL>', { secret: false, required: true, source: 'placeholder' }),
     envVar('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY', '<SUPABASE_PUBLISHABLE_KEY>', { secret: false, required: true, source: 'placeholder' }),
     envVar('CSRF_SECRET', '<openssl-rand-hex-32>', { secret: true, required: true, source: 'generated-placeholder' }),
@@ -332,6 +352,10 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
     warnings.push('Credential fields are not complete yet; the deployment plan will keep secret values as placeholders.');
   }
 
+  if (!hasAuthProviderSetupPath(input)) {
+    blockedReasons.push('Supabase Discord auth provider setup requires a Management API token or manual provider confirmation before VPS deployment.');
+  }
+
   if (blockedReasons.length > 0) {
     return {
       status: 'blocked',
@@ -358,7 +382,7 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
   const deployPath = trim(input.vpsDeployPath);
   const envFilePath = joinPath(deployPath, '.env');
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
-  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain);
+  const variables = buildEnvironmentVariables(profile.publicCallbackBaseUrl, domain, input);
 
   return {
     status: 'ready',
@@ -436,6 +460,12 @@ export function buildVpsDeploymentPlan(input: VpsDeploymentPlanInput = {}): VpsD
         id: 'env-file',
         label: 'Environment file approval',
         detail: `Create or update ${envFilePath} with the redacted shape, then chmod ${ENV_FILE_PERMISSIONS}.`,
+        requiredBefore: 'Starting or rebuilding containers.',
+      },
+      {
+        id: 'auth-provider',
+        label: 'Discord auth provider approval',
+        detail: 'Confirm Supabase Discord auth can be configured automatically with a Management API token or was configured manually before deployment.',
         requiredBefore: 'Starting or rebuilding containers.',
       },
       {

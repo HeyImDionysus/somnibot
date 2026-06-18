@@ -9,6 +9,7 @@ const completeVpsInput = {
   vpsSshUser: 'deploy',
   vpsDeployPath: '/opt/somnibot',
   credentialReady: true,
+  supabaseAccessTokenReady: true,
 };
 
 describe('VPS deployment approval confirmation', () => {

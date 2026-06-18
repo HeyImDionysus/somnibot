@@ -11,7 +11,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
-import { getLauncherLocalStartBlocker } from './runtime-profile.js';
+import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker } from './runtime-profile.js';
+import {
+  evaluateDashboardHealthPayload,
+  type DashboardHealthPayload,
+} from './setup-automation-health.js';
 import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
@@ -62,6 +66,320 @@ if (!gotLock) {
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
+const MASKED_SECRET = '••••••••';
+
+type LauncherConfigPatch = Partial<LauncherConfig>;
+
+interface DashboardAuthProviderOptions {
+  manualAuthProviderConfirmed: boolean;
+  callbackBaseUrlChanged: boolean;
+}
+
+interface SetupAutomationResult {
+  ok: boolean;
+  stage: string;
+  message: string;
+  error?: string;
+  servicesStarted?: boolean;
+  meta?: Record<string, string>;
+  warnings?: string[];
+  publicCallbackBaseUrl?: string;
+  callbackProbe?: Awaited<ReturnType<typeof probePublicCallbackHealth>>;
+}
+
+function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
+  const sanitized = { ...config };
+  for (const key of [
+    'supabaseSecretKey',
+    'supabaseDbPassword',
+    'supabaseAccessToken',
+    'discordToken',
+    'discordClientSecret',
+    'tailscaleAuthKey',
+  ] as const) {
+    if (sanitized[key] === MASKED_SECRET) {
+      delete sanitized[key];
+    }
+  }
+  return sanitized;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean; error?: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = '';
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/health`, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) {
+        lastError = `Dashboard health returned HTTP ${response.status}.`;
+      } else {
+        const body = await response.json().catch(() => null) as DashboardHealthPayload | null;
+        const health = evaluateDashboardHealthPayload(body);
+        if (health.ok) {
+          return { ok: true };
+        }
+        lastError = health.error || 'Dashboard health endpoint did not report healthy status.';
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+
+    await delay(1_000);
+  }
+
+  return { ok: false, error: lastError || 'Dashboard did not become ready in time.' };
+}
+
+async function waitForPortAvailable(port: number, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await checkPortAvailable(port)) return true;
+    await delay(250);
+  }
+
+  return checkPortAvailable(port);
+}
+
+async function configureDashboardAuthProvider({
+  manualAuthProviderConfirmed,
+  callbackBaseUrlChanged,
+}: DashboardAuthProviderOptions): Promise<{ ok: boolean; error?: string; alreadyLocked?: boolean; setupLocked?: boolean }> {
+  try {
+    const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'configure-auth' }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const body = await response.json().catch(() => null) as {
+      success?: boolean;
+      error?: string;
+      setupLocked?: boolean;
+    } | null;
+
+    if (response.status === 403 && body?.setupLocked) {
+      if (manualAuthProviderConfirmed && !callbackBaseUrlChanged) {
+        return { ok: true, alreadyLocked: true };
+      }
+
+      return {
+        ok: false,
+        setupLocked: true,
+        error: [
+          body.error || 'Dashboard setup is locked and refused auth-provider configuration.',
+          'Unlock dashboard setup or confirm that the current Discord auth callback and PayPal webhook URLs are already allow-listed in Supabase before rerunning setup.',
+        ].join(' '),
+      };
+    }
+
+    if (!response.ok || body?.success === false) {
+      return {
+        ok: false,
+        error: body?.error || `Dashboard setup returned HTTP ${response.status}.`,
+      };
+    }
+
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function startLocalStack(
+  config: LauncherConfig,
+  options: { forceRestart?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const running = isRunning();
+  if (running && !options.forceRestart) {
+    return { ok: true };
+  }
+
+  if (!config.discordToken || !config.supabaseUrl || !config.supabaseSecretKey) {
+    return { ok: false, error: 'Fill in all required fields first.' };
+  }
+
+  const runtimeBlocker = getLauncherLocalStartBlocker(config);
+  if (runtimeBlocker) {
+    return { ok: false, error: runtimeBlocker };
+  }
+
+  if (running) {
+    stopAll();
+  }
+
+  const portFree = running
+    ? await waitForPortAvailable(3456)
+    : await checkPortAvailable(3456);
+  if (!portFree) {
+    return {
+      ok: false,
+      error: 'The local dashboard port is already in use. Close the application using that port, or restart your computer and try again. See diagnostics for implementation details.',
+    };
+  }
+
+  const vkResult = await startValkey();
+  if (!vkResult.ok) {
+    console.warn('[Launcher] Valkey/Redis failed to start:', vkResult.error);
+  }
+
+  if (config.lavalinkEnabled) {
+    const llResult = await startLavalink();
+    if (!llResult.ok) {
+      console.warn('[Launcher] Lavalink failed to start:', llResult.error);
+    }
+  }
+
+  sessionToken = crypto.randomBytes(32).toString('hex');
+  const envVars = buildEnvVars(config, sessionToken);
+  startAll(envVars);
+
+  pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
+    discordToken: config.discordToken,
+    discordApplicationId: config.discordApplicationId,
+    discordClientSecret: config.discordClientSecret,
+    discordGuildId: config.discordGuildId,
+    supabasePublishableKey: config.supabasePublishableKey,
+    supabaseDbPassword: config.supabaseDbPassword,
+  }).catch(() => {
+    // Sync is best-effort. Startup must not fail just because settings sync is unavailable.
+  });
+
+  return { ok: true };
+}
+
+async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
+  const previousPublicCallbackBaseUrl = getConfig().publicCallbackBaseUrl.trim();
+  saveConfig(sanitizeConfigPatch(configPatch));
+  let config = getConfig();
+  const warnings: string[] = [];
+  let callbackBaseUrlChanged = previousPublicCallbackBaseUrl !== config.publicCallbackBaseUrl.trim();
+
+  if (config.runtimeMode !== 'regular-local') {
+    return {
+      ok: false,
+      stage: 'runtime',
+      message: 'VPS mode uses the deployment plan workflow.',
+      error: 'Self-configuring local setup is only available in Regular local mode in this launcher build.',
+    };
+  }
+
+  if (!config.publicCallbackBaseUrl.trim()) {
+    const readiness = await enableSomniBotFunnel(undefined, {
+      authKey: config.tailscaleAuthKey,
+    });
+    if (readiness.publicCallbackBaseUrl) {
+      saveConfig({ publicCallbackBaseUrl: readiness.publicCallbackBaseUrl });
+      config = getConfig();
+      callbackBaseUrlChanged = true;
+    } else {
+      return {
+        ok: false,
+        stage: 'public-callback',
+        message: readiness.message,
+        error: readiness.detail || readiness.message,
+      };
+    }
+  }
+
+  if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured) {
+    return {
+      ok: false,
+      stage: 'auth-provider',
+      message: 'Supabase Discord auth setup needs one more input.',
+      error: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
+    };
+  }
+
+  const validation = await validateAllCredentials(config);
+  if (!validation.valid) {
+    return {
+      ok: false,
+      stage: 'credentials',
+      message: 'Credential validation failed.',
+      error: validation.errors.join('\n\n'),
+      meta: validation.meta,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  const startResult = await startLocalStack(config, { forceRestart: true });
+  if (!startResult.ok) {
+    return {
+      ok: false,
+      stage: 'start',
+      message: 'Local services did not start.',
+      error: startResult.error,
+      meta: validation.meta,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  const dashboardReady = await waitForDashboardHealth();
+  if (!dashboardReady.ok) {
+    return {
+      ok: false,
+      stage: 'dashboard-health',
+      message: 'Bot and dashboard were started, but dashboard readiness could not be verified yet.',
+      error: dashboardReady.error,
+      servicesStarted: true,
+      meta: validation.meta,
+      warnings,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  const authConfigured = await configureDashboardAuthProvider({
+    manualAuthProviderConfirmed: config.supabaseDiscordAuthProviderConfigured,
+    callbackBaseUrlChanged,
+  });
+  if (authConfigured.alreadyLocked) {
+    warnings.push('Setup is already locked, so auth-provider configuration was skipped for this restart.');
+  }
+  if (!authConfigured.ok) {
+    return {
+      ok: false,
+      stage: 'auth-provider',
+      message: 'Bot and dashboard are running, but Supabase Discord auth was not configured.',
+      error: authConfigured.error,
+      servicesStarted: true,
+      meta: validation.meta,
+      warnings,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  let callbackProbe: Awaited<ReturnType<typeof probePublicCallbackHealth>> | undefined;
+  if (config.publicCallbackBaseUrl.includes('.ts.net')) {
+    callbackProbe = await probePublicCallbackHealth(config.publicCallbackBaseUrl);
+    if (!callbackProbe.ok) {
+      warnings.push(callbackProbe.error || 'Public callback health check did not pass yet.');
+    }
+  }
+
+  return {
+    ok: true,
+    stage: 'complete',
+    message: 'Setup automation finished and local services are running.',
+    servicesStarted: true,
+    meta: validation.meta,
+    warnings,
+    publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    ...(callbackProbe ? { callbackProbe } : {}),
+  };
+}
 
 async function createWindow(): Promise<void> {
   const config = getConfig();
@@ -178,6 +496,8 @@ function registerIpcHandlers(): void {
       supabaseSecretKey: config.supabaseSecretKey ? '••••••••' : '',
       supabasePublishableKey: config.supabasePublishableKey,
       supabaseDbPassword: config.supabaseDbPassword ? '••••••••' : '',
+      supabaseAccessToken: config.supabaseAccessToken ? '••••••••' : '',
+      supabaseDiscordAuthProviderConfigured: config.supabaseDiscordAuthProviderConfigured,
       runtimeMode: config.runtimeMode,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
       vpsDomain: config.vpsDomain,
@@ -189,17 +509,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
-    // V5 Audit §10.P3a: Never overwrite a real secret with the mask placeholder.
-    // The renderer receives '••••••••' for masked fields; if it sends that value
-    // back, strip it so the real secret in the config store is preserved.
-    const MASK = '••••••••';
-    const sanitized = { ...config };
-    for (const key of ['supabaseSecretKey', 'supabaseDbPassword', 'discordToken', 'discordClientSecret', 'tailscaleAuthKey'] as const) {
-      if (sanitized[key] === MASK) {
-        delete sanitized[key];
-      }
-    }
-    saveConfig(sanitized);
+    saveConfig(sanitizeConfigPatch(config));
   });
 
   ipcMain.handle('get-setup-status', (_event, input: Partial<SetupFlowInput> = {}) => {
@@ -220,9 +530,16 @@ function registerIpcHandlers(): void {
         && config.supabaseSecretKey
         && config.supabasePublishableKey
       ),
+      supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
+      supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
+        ?? config.supabaseDiscordAuthProviderConfigured,
       dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',
       checking: input.checking ?? false,
     });
+  });
+
+  ipcMain.handle('run-setup-automation', async (_event, config: Partial<LauncherConfig>) => {
+    return runLocalSetupAutomation(config);
   });
 
   // ── Validation ──
@@ -233,62 +550,7 @@ function registerIpcHandlers(): void {
   // ── Process control ──
   ipcMain.handle('start-bot', async () => {
     const config = getConfig();
-
-    // Validate that required fields are filled
-    if (!config.discordToken || !config.supabaseUrl || !config.supabaseSecretKey) {
-      return { ok: false, error: 'Fill in all required fields first.' };
-    }
-
-    const runtimeBlocker = getLauncherLocalStartBlocker(config);
-    if (runtimeBlocker) {
-      return { ok: false, error: runtimeBlocker };
-    }
-
-    // Phase 6: Check port availability before starting
-    const portFree = await checkPortAvailable(3456);
-    if (!portFree) {
-      return {
-        ok: false,
-        error: 'The local dashboard port is already in use. Close the application using that port, or restart your computer and try again. See diagnostics for implementation details.',
-      };
-    }
-
-    // Start Valkey/Redis server (required for cache, rate limiting, XP cooldowns)
-    const vkResult = await startValkey();
-    if (!vkResult.ok) {
-      // Non-fatal — bot has in-memory fallbacks, but features are degraded.
-      console.warn('[Launcher] Valkey/Redis failed to start:', vkResult.error);
-    }
-
-    // Phase 6: Start managed Lavalink if enabled (non-blocking)
-    if (config.lavalinkEnabled) {
-      const llResult = await startLavalink();
-      if (!llResult.ok) {
-        // Non-fatal — music just won't work. Notify but continue.
-        console.warn('[Launcher] Lavalink failed to start:', llResult.error);
-      }
-    }
-
-    // Generate a new session token for this run
-    sessionToken = crypto.randomBytes(32).toString('hex');
-
-    // Build env vars and start processes
-    const envVars = buildEnvVars(config, sessionToken);
-    startAll(envVars);
-
-    // Sync credentials to Supabase in background (best-effort)
-    pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
-      discordToken: config.discordToken,
-      discordApplicationId: config.discordApplicationId,
-      discordClientSecret: config.discordClientSecret,
-      discordGuildId: config.discordGuildId,
-      supabasePublishableKey: config.supabasePublishableKey,
-      supabaseDbPassword: config.supabaseDbPassword,
-    }).catch(() => {
-      // Silent — sync is best-effort
-    });
-
-    return { ok: true };
+    return startLocalStack(config);
   });
 
   ipcMain.handle('stop-bot', () => {
