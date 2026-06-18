@@ -101,6 +101,9 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('function applyPayPalWebhookResult(webhookResult)');
     expect(renderer).toContain('applyPayPalWebhookResult(result.paypalWebhook)');
     expect(renderer).toContain('applyPayPalWebhookResult(result)');
+    expect(renderer).toContain('async function refreshProcessStatus()');
+    expect(renderer).toContain('const status = await window.somnibot.getStatus();');
+    expect(renderer).toContain('await refreshProcessStatus();\n    updatePayPalWebhookButton();');
     expect(renderer).toContain('Local services were restarted to load the new Webhook ID.');
     expect(renderer).toContain('window.somnibot.ensurePayPalWebhook(collectConfig())');
     expect(renderer).toContain("btnSetupPayPalWebhook.textContent = 'Create/Update Webhook';");
