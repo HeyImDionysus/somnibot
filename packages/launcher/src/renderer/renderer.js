@@ -46,6 +46,7 @@ const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
 const btnOpenDiscordInvite = $('btn-open-discord-invite');
 const btnOpenSupabase = $('btn-open-supabase');
+const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');
 const btnCheckUpdates = $('btn-check-updates');
 
 const btnRestoreCloud = $('btn-restore-cloud');
@@ -111,6 +112,7 @@ const tailscaleCommand = $('tailscale-command');
 
 let isRunning = false;
 let isValidating = false;
+let isPayPalWebhookRunning = false;
 let runtimeMode = 'regular-local';
 let setupStatus = null;
 let setupStatusSeq = 0;
@@ -156,6 +158,7 @@ async function init() {
     tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
     setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
     updateDiscordInviteButton();
+    updatePayPalWebhookButton();
   } catch (err) {
     console.error('Failed to load config:', err);
   }
@@ -180,6 +183,7 @@ async function init() {
       latestProviderValidation = null;
       updateRestoreBanner();
       updateDiscordInviteButton();
+      updatePayPalWebhookButton();
       refreshSetupStatus();
     });
   }
@@ -192,6 +196,7 @@ async function init() {
       if (input === runtimeFields.publicCallbackBaseUrl) {
         tailscalePublicCallbackBaseUrl = input.value.trim();
       }
+      updatePayPalWebhookButton();
       refreshSetupStatus();
     });
   }
@@ -280,6 +285,47 @@ function isPayPalFormComplete() {
   ].every((key) => fields[key].value.trim().length > 0);
 }
 
+function getPayPalWebhookActionState() {
+  const hasClientId = fields.paypalClientId.value.trim().length > 0;
+  const hasClientSecret = fields.paypalClientSecret.value.trim().length > 0;
+  const webhookUrl = setupStatus?.summary?.paypalWebhookUrl || '';
+  const hasWebhookUrl = webhookUrl.startsWith('https://');
+
+  if (!hasClientId || !hasClientSecret) {
+    return {
+      enabled: false,
+      title: 'Enter PayPal Client ID and Client Secret first',
+    };
+  }
+
+  if (!hasWebhookUrl) {
+    return {
+      enabled: false,
+      title: 'Finish public callback setup so the PayPal webhook URL is public HTTPS',
+    };
+  }
+
+  return {
+    enabled: true,
+    title: `Create or update PayPal webhook for ${webhookUrl}`,
+  };
+}
+
+function updatePayPalWebhookButton() {
+  const state = getPayPalWebhookActionState();
+  btnSetupPayPalWebhook.disabled = !state.enabled
+    || isPayPalWebhookRunning
+    || isValidating
+    || isVpsDeploymentActionRunning;
+  btnSetupPayPalWebhook.title = state.title;
+}
+
+function applyPayPalWebhookResult(webhookResult) {
+  if (webhookResult?.webhookId) {
+    fields.paypalWebhookId.value = webhookResult.webhookId;
+  }
+}
+
 function setRuntimeMode(mode, options = {}) {
   runtimeMode = mode === 'vps' ? 'vps' : 'regular-local';
   const isVps = runtimeMode === 'vps';
@@ -349,6 +395,7 @@ async function refreshSetupStatus(options = {}) {
     setupStatus = status;
     clearStaleVpsActionResults(status);
     renderSetupStatus(status);
+    updatePayPalWebhookButton();
     return status;
   } catch (err) {
     console.error('Failed to refresh setup status:', err);
@@ -427,6 +474,7 @@ function renderSetupStatus(status) {
     btnStart.textContent = status.primaryAction.label;
   }
   btnStart.disabled = !status.primaryAction.enabled || isValidating || isRunning;
+  updatePayPalWebhookButton();
 }
 
 function renderDeploymentPlan(plan, isVpsStatus) {
@@ -723,6 +771,8 @@ btnStart.addEventListener('click', async () => {
       applyTailscalePublicCallbackBaseUrl(result.publicCallbackBaseUrl);
     }
 
+    applyPayPalWebhookResult(result.paypalWebhook);
+
     if (!result.ok) {
       showMessage('error', result.error || result.message || 'Setup did not complete.');
       btnStart.classList.remove('loading');
@@ -875,6 +925,43 @@ btnOpenSupabase.addEventListener('click', () => {
   window.somnibot.openExternal('https://supabase.com/dashboard');
 });
 
+btnSetupPayPalWebhook.addEventListener('click', async () => {
+  if (isPayPalWebhookRunning) return;
+
+  const actionState = getPayPalWebhookActionState();
+  if (!actionState.enabled) {
+    showMessage('error', actionState.title);
+    return;
+  }
+
+  isPayPalWebhookRunning = true;
+  btnSetupPayPalWebhook.disabled = true;
+  btnSetupPayPalWebhook.textContent = 'Configuring...';
+  hideMessage();
+
+  try {
+    await saveConfig();
+    const result = await window.somnibot.ensurePayPalWebhook(collectConfig());
+    applyPayPalWebhookResult(result);
+    if (!result.ok) {
+      showMessage('error', result.error || result.message || 'PayPal webhook setup failed.');
+      return;
+    }
+
+    const restartText = result.servicesRestarted
+      ? ' Local services were restarted to load the new Webhook ID.'
+      : '';
+    showMessage('success', `${result.message} Webhook URL: ${result.webhookUrl}.${restartText}`);
+    await refreshSetupStatus();
+  } catch (err) {
+    showMessage('error', `PayPal webhook setup failed: ${err.message || err}`);
+  } finally {
+    isPayPalWebhookRunning = false;
+    btnSetupPayPalWebhook.textContent = 'Create/Update Webhook';
+    updatePayPalWebhookButton();
+  }
+});
+
 btnHelp.addEventListener('click', () => {
   window.somnibot.openExternal('https://github.com/HeyImDionysus/somnibot#readme');
 });
@@ -977,7 +1064,13 @@ function updateStatusUI(status) {
   }
 
   // If both are offline and we thought we were running, reset
-  if (status.bot === 'offline' && status.dashboard === 'offline' && isRunning) {
+  if (
+    status.bot === 'offline'
+    && status.dashboard === 'offline'
+    && isRunning
+    && !isValidating
+    && !isPayPalWebhookRunning
+  ) {
     isRunning = false;
     btnStop.classList.add('hidden');
     btnStart.classList.remove('hidden');
@@ -1418,6 +1511,7 @@ function setFieldsDisabled(disabled) {
     btn.disabled = disabled;
   });
   setTailscaleActionsDisabled(disabled);
+  updatePayPalWebhookButton();
 }
 
 function setTailscaleActionsDisabled(disabled) {

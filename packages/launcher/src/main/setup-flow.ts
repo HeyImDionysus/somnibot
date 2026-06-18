@@ -153,7 +153,7 @@ function buildPayPalStep(input: SetupFlowInput): SetupStep {
       label: 'PayPal webhook',
       status: 'pending',
       summary: 'Waiting for the public callback URL.',
-      detail: 'The launcher needs the public callback base before the PayPal webhook can be created. After the webhook URL appears in the summary, create the PayPal webhook and paste its ID here.',
+      detail: 'The launcher needs the public callback base before it can create or update the PayPal webhook.',
     };
   }
 
@@ -162,8 +162,8 @@ function buildPayPalStep(input: SetupFlowInput): SetupStep {
     label: 'PayPal webhook',
     status: 'pending',
     summary: 'Waiting for PayPal app and webhook credentials.',
-    detail: 'Create or select a PayPal app, add a webhook using the PayPal webhook URL shown above, then paste the Client ID, Client Secret, and Webhook ID into the launcher.',
-    actionLabel: 'Add PayPal credentials',
+    detail: 'Paste the PayPal app Client ID and Client Secret, then click Create/Update Webhook. The launcher will subscribe the current webhook URL to the handled event catalog and save the returned Webhook ID.',
+    actionLabel: 'Add PayPal credentials or create webhook',
     manualAction: true,
   };
 }

@@ -240,8 +240,11 @@ PayPal webhook URL is always:
 <public-callback-base>/api/paypal/webhook
 ```
 
-Use sandbox credentials first. After creating the webhook in the PayPal Developer
-Dashboard, copy the webhook ID into `PAYPAL_WEBHOOK_ID` so SomniBot can verify
+Use sandbox credentials first. In the launcher, paste the PayPal app Client ID
+and Client Secret, then click **Create/Update Webhook** after the public callback
+base is ready. The launcher creates or updates the PayPal webhook and stores the
+returned Webhook ID. Manual fallback: create the webhook in the PayPal Developer
+Dashboard and copy the webhook ID into `PAYPAL_WEBHOOK_ID` so SomniBot can verify
 incoming webhook signatures.
 
 ## 6. Smoke Checklist

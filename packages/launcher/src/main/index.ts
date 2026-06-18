@@ -11,11 +11,15 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
-import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker } from './runtime-profile.js';
+import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker, resolveRuntimeProfile } from './runtime-profile.js';
 import {
   evaluateDashboardHealthPayload,
   type DashboardHealthPayload,
 } from './setup-automation-health.js';
+import {
+  ensurePayPalWebhook,
+  type EnsurePayPalWebhookResult,
+} from './paypal-webhook-service.js';
 import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
@@ -65,10 +69,18 @@ if (!gotLock) {
 
 let mainWindow: BrowserWindow | null = null;
 let sessionToken: string | null = null;
+let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
 const MASKED_SECRET = '••••••••';
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
+type PayPalRuntimeConfig = Pick<
+  LauncherConfig,
+  'paypalClientId' | 'paypalClientSecret' | 'paypalWebhookId' | 'paypalSandbox'
+> & {
+  publicCallbackBaseUrl: string;
+  paypalWebhookUrl: string;
+};
 
 interface DashboardAuthProviderOptions {
   manualAuthProviderConfirmed: boolean;
@@ -86,6 +98,7 @@ interface SetupAutomationResult {
   warnings?: string[];
   publicCallbackBaseUrl?: string;
   callbackProbe?: Awaited<ReturnType<typeof probePublicCallbackHealth>>;
+  paypalWebhook?: EnsurePayPalWebhookResult;
 }
 
 function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
@@ -105,6 +118,47 @@ function sanitizeConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
     }
   }
   return sanitized;
+}
+
+function sanitizePayPalConfigPatch(config: LauncherConfigPatch): LauncherConfigPatch {
+  const sanitized = sanitizeConfigPatch(config);
+  for (const key of ['paypalClientId', 'paypalClientSecret', 'paypalWebhookId'] as const) {
+    if (typeof sanitized[key] === 'string') {
+      sanitized[key] = sanitized[key].trim();
+    }
+  }
+  return sanitized;
+}
+
+function snapshotPayPalRuntimeConfig(config: LauncherConfig): PayPalRuntimeConfig {
+  let publicCallbackBaseUrl = config.publicCallbackBaseUrl.trim();
+  let paypalWebhookUrl = resolvePayPalWebhookUrl(config);
+  try {
+    const profile = resolveRuntimeProfile(config);
+    publicCallbackBaseUrl = profile.publicCallbackBaseUrl;
+    paypalWebhookUrl = profile.paypalWebhookUrl;
+  } catch {
+    // Keep the raw callback value so invalid edits still differ from the running snapshot.
+  }
+
+  return {
+    paypalClientId: config.paypalClientId,
+    paypalClientSecret: config.paypalClientSecret,
+    paypalWebhookId: config.paypalWebhookId,
+    paypalSandbox: config.paypalSandbox,
+    publicCallbackBaseUrl,
+    paypalWebhookUrl,
+  };
+}
+
+function payPalRuntimeChanged(previous: PayPalRuntimeConfig | null, current: PayPalRuntimeConfig): boolean {
+  if (!previous) return true;
+  return previous.paypalClientId !== current.paypalClientId
+    || previous.paypalClientSecret !== current.paypalClientSecret
+    || previous.paypalWebhookId !== current.paypalWebhookId
+    || previous.paypalSandbox !== current.paypalSandbox
+    || previous.publicCallbackBaseUrl !== current.publicCallbackBaseUrl
+    || previous.paypalWebhookUrl !== current.paypalWebhookUrl;
 }
 
 function delay(ms: number): Promise<void> {
@@ -201,6 +255,68 @@ async function configureDashboardAuthProvider({
   }
 }
 
+function resolvePayPalWebhookUrl(config: LauncherConfig): string {
+  try {
+    return resolveRuntimeProfile(config).paypalWebhookUrl;
+  } catch {
+    return '';
+  }
+}
+
+async function ensureConfiguredPayPalWebhook(config: LauncherConfig): Promise<EnsurePayPalWebhookResult> {
+  const webhookUrl = resolvePayPalWebhookUrl(config);
+  const result = await ensurePayPalWebhook({
+    clientId: config.paypalClientId,
+    clientSecret: config.paypalClientSecret,
+    webhookId: config.paypalWebhookId,
+    webhookUrl,
+    sandbox: config.paypalSandbox,
+  });
+  if (result.ok && result.webhookId) {
+    saveConfig({ paypalWebhookId: result.webhookId });
+  }
+  return result;
+}
+
+async function restartRunningLocalStackForPayPalChange(
+  previousConfig: PayPalRuntimeConfig | null,
+  options: { forceRestart?: boolean } = {},
+): Promise<{ ok: boolean; restarted: boolean; error?: string }> {
+  if (!isRunning()) return { ok: true, restarted: false };
+  const currentConfig = getConfig();
+  if (!options.forceRestart && !payPalRuntimeChanged(previousConfig, snapshotPayPalRuntimeConfig(currentConfig))) {
+    return { ok: true, restarted: false };
+  }
+
+  const restartResult = await startLocalStack(currentConfig, { forceRestart: true });
+  if (!restartResult.ok) {
+    return {
+      ok: false,
+      restarted: false,
+      error: restartResult.error || 'Restart local services so the dashboard can load the updated PayPal settings.',
+    };
+  }
+
+  const dashboardReady = await waitForDashboardHealth();
+  if (!dashboardReady.ok) {
+    return {
+      ok: false,
+      restarted: true,
+      error: dashboardReady.error,
+    };
+  }
+
+  return { ok: true, restarted: true };
+}
+
+function maskPayPalWebhookResult(result: EnsurePayPalWebhookResult): EnsurePayPalWebhookResult {
+  if (!result.webhookId) return result;
+  return {
+    ...result,
+    webhookId: MASKED_SECRET,
+  };
+}
+
 async function startLocalStack(
   config: LauncherConfig,
   options: { forceRestart?: boolean } = {},
@@ -221,6 +337,7 @@ async function startLocalStack(
 
   if (running) {
     stopAll();
+    lastStartedPayPalConfig = null;
   }
 
   const portFree = running
@@ -248,6 +365,7 @@ async function startLocalStack(
   sessionToken = crypto.randomBytes(32).toString('hex');
   const envVars = buildEnvVars(config, sessionToken);
   startAll(envVars);
+  lastStartedPayPalConfig = snapshotPayPalRuntimeConfig(config);
 
   pushToSupabase(config.supabaseUrl, config.supabaseSecretKey, {
     discordToken: config.discordToken,
@@ -265,7 +383,7 @@ async function startLocalStack(
 
 async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
   const previousPublicCallbackBaseUrl = getConfig().publicCallbackBaseUrl.trim();
-  saveConfig(sanitizeConfigPatch(configPatch));
+  saveConfig(sanitizePayPalConfigPatch(configPatch));
   let config = getConfig();
   const warnings: string[] = [];
   let callbackBaseUrlChanged = previousPublicCallbackBaseUrl !== config.publicCallbackBaseUrl.trim();
@@ -379,6 +497,67 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     }
   }
 
+  let paypalWebhook: EnsurePayPalWebhookResult | undefined;
+  if (config.paypalClientId.trim() && config.paypalClientSecret.trim()) {
+    if (callbackProbe && !callbackProbe.ok) {
+      return {
+        ok: false,
+        stage: 'public-callback',
+        message: 'Public callback health must pass before the PayPal webhook can be changed.',
+        error: callbackProbe.error || 'Verify the public callback URL before creating or updating the PayPal webhook.',
+        servicesStarted: true,
+        meta: validation.meta,
+        providerValidation: validation,
+        warnings,
+        publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+        callbackProbe,
+      };
+    }
+
+    const previousPayPalConfig = snapshotPayPalRuntimeConfig(getConfig());
+    const rawPayPalWebhook = await ensureConfiguredPayPalWebhook(config);
+    paypalWebhook = maskPayPalWebhookResult(rawPayPalWebhook);
+    if (!rawPayPalWebhook.ok) {
+      return {
+        ok: false,
+        stage: 'paypal-webhook',
+        message: 'PayPal webhook setup did not complete.',
+        error: paypalWebhook.error || paypalWebhook.message,
+        servicesStarted: true,
+        meta: validation.meta,
+        providerValidation: validation,
+        warnings,
+        publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+        paypalWebhook,
+        ...(callbackProbe ? { callbackProbe } : {}),
+      };
+    }
+
+    const restartResult = await restartRunningLocalStackForPayPalChange(previousPayPalConfig);
+    if (!restartResult.ok) {
+      return {
+        ok: false,
+        stage: 'paypal-webhook',
+        message: 'PayPal webhook was configured, but local services could not restart.',
+        error: restartResult.error,
+        servicesStarted: restartResult.restarted,
+        meta: validation.meta,
+        providerValidation: validation,
+        warnings,
+        publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+        paypalWebhook,
+        ...(callbackProbe ? { callbackProbe } : {}),
+      };
+    }
+    if (restartResult.restarted) {
+      paypalWebhook = {
+        ...paypalWebhook,
+        servicesRestarted: true,
+      };
+    }
+    config = getConfig();
+  }
+
   return {
     ok: true,
     stage: 'complete',
@@ -388,6 +567,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     providerValidation: validation,
     warnings,
     publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    ...(paypalWebhook ? { paypalWebhook } : {}),
     ...(callbackProbe ? { callbackProbe } : {}),
   };
 }
@@ -524,7 +704,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('save-config', (_event, config: Partial<LauncherConfig>) => {
-    saveConfig(sanitizeConfigPatch(config));
+    saveConfig(sanitizePayPalConfigPatch(config));
   });
 
   ipcMain.handle('get-setup-status', (_event, input: Partial<SetupFlowInput> = {}) => {
@@ -565,6 +745,36 @@ function registerIpcHandlers(): void {
     return runLocalSetupAutomation(config);
   });
 
+  ipcMain.handle('paypal:ensure-webhook', async (_event, config: Partial<LauncherConfig>) => {
+    const previousConfig = getConfig();
+    saveConfig(sanitizePayPalConfigPatch(config));
+    const cfg = getConfig();
+    const rawResult = await ensureConfiguredPayPalWebhook(cfg);
+    if (rawResult.ok) {
+      const restartBaseline = lastStartedPayPalConfig ?? snapshotPayPalRuntimeConfig(previousConfig);
+      const restartResult = await restartRunningLocalStackForPayPalChange(
+        restartBaseline,
+        { forceRestart: !lastStartedPayPalConfig },
+      );
+      if (!restartResult.ok) {
+        return maskPayPalWebhookResult({
+          ...rawResult,
+          ok: false,
+          status: 'failed',
+          message: 'PayPal webhook was configured, but local services could not restart.',
+          error: restartResult.error || 'Restart local services so the dashboard can load the new PayPal Webhook ID.',
+        });
+      }
+      if (restartResult.restarted) {
+        return maskPayPalWebhookResult({
+          ...rawResult,
+          servicesRestarted: true,
+        });
+      }
+    }
+    return maskPayPalWebhookResult(rawResult);
+  });
+
   // ── Validation ──
   ipcMain.handle('validate-credentials', async (_event, config) => {
     return validateAllCredentials(config);
@@ -581,6 +791,7 @@ function registerIpcHandlers(): void {
     stopLavalink();
     stopValkey();
     sessionToken = null;
+    lastStartedPayPalConfig = null;
   });
 
   ipcMain.handle('get-status', () => {

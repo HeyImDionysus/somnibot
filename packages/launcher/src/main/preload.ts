@@ -57,6 +57,28 @@ export interface SomniBotAPI {
       status?: number;
       error?: string;
     };
+    paypalWebhook?: {
+      ok: boolean;
+      status: string;
+      message: string;
+      webhookId?: string;
+      webhookUrl: string;
+      apiBase: string;
+      eventTypes: string[];
+      error?: string;
+      servicesRestarted?: boolean;
+    };
+  }>;
+  ensurePayPalWebhook: (config: Record<string, unknown>) => Promise<{
+    ok: boolean;
+    status: string;
+    message: string;
+    webhookId?: string;
+    webhookUrl: string;
+    apiBase: string;
+    eventTypes: string[];
+    error?: string;
+    servicesRestarted?: boolean;
   }>;
 
   // Validation
@@ -192,6 +214,8 @@ contextBridge.exposeInMainWorld('somnibot', {
   getSetupStatus: (input?: Record<string, unknown>) => ipcRenderer.invoke('get-setup-status', input),
   runSetupAutomation: (config: Record<string, unknown>) =>
     ipcRenderer.invoke('run-setup-automation', config),
+  ensurePayPalWebhook: (config: Record<string, unknown>) =>
+    ipcRenderer.invoke('paypal:ensure-webhook', config),
 
   // Validation
   validateCredentials: (config: Record<string, string>) =>
