@@ -1504,6 +1504,10 @@ footer {
   font-weight: 500;
 }
 
+.setup-confirmation-row {
+  margin-top: 4px;
+}
+
 .lavalink-hint {
   font-size: 11px;
   color: var(--text-muted);

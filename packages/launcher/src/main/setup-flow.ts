@@ -15,6 +15,8 @@ export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-e
 
 export interface SetupFlowInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
+  supabaseAccessTokenReady?: boolean;
+  supabaseDiscordAuthProviderConfigured?: boolean;
   dashboardOnline?: boolean;
   checking?: boolean;
 }
@@ -75,6 +77,42 @@ function displayUrlWithoutPort(value: string): string {
 
 function hasVpsSshTarget(input: SetupFlowInput): boolean {
   return Boolean(input.vpsSshHost?.trim() && input.vpsSshUser?.trim() && input.vpsDeployPath?.trim());
+}
+
+function hasAuthProviderPath(input: SetupFlowInput): boolean {
+  return Boolean(input.supabaseAccessTokenReady || input.supabaseDiscordAuthProviderConfigured);
+}
+
+function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
+  if (input.supabaseAccessTokenReady) {
+    return {
+      id: 'auth-provider',
+      label: 'Supabase Auth',
+      status: 'success',
+      summary: 'Discord auth provider can be configured automatically.',
+      detail: 'The launcher will use the Supabase Management API token to enable Discord auth and keep callback URLs allow-listed.',
+    };
+  }
+
+  if (input.supabaseDiscordAuthProviderConfigured) {
+    return {
+      id: 'auth-provider',
+      label: 'Supabase Auth',
+      status: 'success',
+      summary: 'Manual Discord auth provider setup is confirmed.',
+      detail: 'The launcher will pass this confirmation to the dashboard so setup can continue without a Management API token.',
+    };
+  }
+
+  return {
+    id: 'auth-provider',
+    label: 'Supabase Auth',
+    status: 'blocked',
+    summary: 'Waiting for auth-provider setup access.',
+    detail: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
+    actionLabel: 'Add token or confirm manual setup',
+    manualAction: true,
+  };
 }
 
 function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSummary {
@@ -154,6 +192,8 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
       detail: 'Fill in Discord and Supabase credentials after the public callback step is ready.',
     };
 
+  const authProviderStep = buildAuthProviderStep(input);
+
   const startStep: SetupStep = input.checking
     ? {
       id: 'start-local',
@@ -179,21 +219,30 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
           detail: 'Finish the Tailscale/public callback step before starting regular local mode.',
           manualAction: true,
         }
-        : input.credentialReady
+        : !input.credentialReady
           ? {
-            id: 'start-local',
-            label: 'Start locally',
-            status: 'pending',
-            summary: 'Ready to validate and start.',
-            detail: 'The launcher can validate credentials, then start the local bot and dashboard.',
-          }
-          : {
             id: 'start-local',
             label: 'Start locally',
             status: 'pending',
             summary: 'Waiting for credentials.',
             detail: 'Complete the credential fields before validation and start.',
-          };
+          }
+          : !hasAuthProviderPath(input)
+            ? {
+              id: 'start-local',
+              label: 'Start locally',
+              status: 'blocked',
+              summary: 'Blocked by Supabase auth setup.',
+              detail: 'The launcher needs a Supabase Management API token or confirmed manual Discord auth provider setup before it can finish local setup.',
+              manualAction: true,
+            }
+            : {
+              id: 'start-local',
+              label: 'Start locally',
+              status: 'pending',
+              summary: 'Ready to set up and start.',
+              detail: 'The launcher can validate credentials, configure provider callbacks, then start the local bot and dashboard.',
+            };
 
   return [
     {
@@ -205,6 +254,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     },
     callbackStep,
     credentialStep,
+    authProviderStep,
     startStep,
   ];
 }
@@ -278,6 +328,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
       summary: 'Required credential fields are not complete.',
       detail: 'Fill in Discord and Supabase credentials after the VPS readiness steps.',
     };
+  const authProviderStep = buildAuthProviderStep(input);
 
   const deployStep: SetupStep = deploymentPlan.status === 'ready'
     ? {
@@ -317,6 +368,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
     domainStep,
     sshStep,
     credentialStep,
+    authProviderStep,
     deployStep,
   ];
 }
@@ -356,21 +408,21 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
     };
   } else if (firstBlocking) {
     primaryAction = {
-      label: 'Validate & Start',
+      label: 'Set Up & Start',
       enabled: false,
       status: 'blocked',
       blockedReason: firstBlocking.detail,
     };
   } else if (!input.credentialReady) {
     primaryAction = {
-      label: 'Validate & Start',
+      label: 'Set Up & Start',
       enabled: false,
       status: 'blocked',
       blockedReason: 'Fill in all required credential fields before validation.',
     };
   } else {
     primaryAction = {
-      label: 'Validate & Start',
+      label: 'Set Up & Start',
       enabled: true,
       status: 'ready',
     };

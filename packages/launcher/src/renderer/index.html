@@ -261,6 +261,16 @@
             <input type="password" id="supabaseDbPassword" placeholder="The password you set when creating the Supabase project" autocomplete="off" />
             <button class="toggle-vis" data-target="supabaseDbPassword" title="Show/hide">👁</button>
           </div>
+          <div class="field">
+            <label for="supabaseAccessToken">Management API Token <span class="opt">(optional)</span></label>
+            <input type="password" id="supabaseAccessToken" placeholder="Supabase account token for automatic auth setup" autocomplete="off" />
+            <button class="toggle-vis" data-target="supabaseAccessToken" title="Show/hide">👁</button>
+          </div>
+          <label class="toggle-label setup-confirmation-row" for="supabaseDiscordAuthProviderConfigured">
+            <input type="checkbox" id="supabaseDiscordAuthProviderConfigured" />
+            <span class="toggle-switch"></span>
+            <span class="toggle-text">Discord auth provider is already configured in Supabase</span>
+          </label>
         </div>
 
         <!-- ─── Public Callback (Tailscale) ─── -->

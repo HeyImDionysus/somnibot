@@ -48,8 +48,9 @@ or private network. Caddy serves the public HTTPS dashboard domain.
 
 ### CI
 All required GitHub checks must pass before merging: install, migration lint,
-database type drift, database security audit, typecheck, lint, build, unit
-tests, integration tests, security checks, and the final CI gate.
+database security audit, typecheck, lint, build, unit tests, integration tests,
+security checks, and the final CI gate. The database type drift check still
+runs in CI, but it is warn-only until the generated DB types are fully aligned.
 
 ## Rollback
 

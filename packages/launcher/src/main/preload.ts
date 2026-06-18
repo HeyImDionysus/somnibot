@@ -27,9 +27,24 @@ window.addEventListener('beforeunload', () => {
 
 export interface SomniBotAPI {
   // Config
-  getConfig: () => Promise<Record<string, string>>;
-  saveConfig: (config: Record<string, string>) => Promise<void>;
+  getConfig: () => Promise<Record<string, unknown>>;
+  saveConfig: (config: Record<string, unknown>) => Promise<void>;
   getSetupStatus: (input?: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  runSetupAutomation: (config: Record<string, unknown>) => Promise<{
+    ok: boolean;
+    stage: string;
+    message: string;
+    error?: string;
+    meta?: Record<string, string>;
+    warnings?: string[];
+    publicCallbackBaseUrl?: string;
+    callbackProbe?: {
+      ok: boolean;
+      url: string;
+      status?: number;
+      error?: string;
+    };
+  }>;
 
   // Validation
   validateCredentials: (config: Record<string, string>) => Promise<{
@@ -153,8 +168,10 @@ export interface SomniBotAPI {
 contextBridge.exposeInMainWorld('somnibot', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
-  saveConfig: (config: Record<string, string>) => ipcRenderer.invoke('save-config', config),
+  saveConfig: (config: Record<string, unknown>) => ipcRenderer.invoke('save-config', config),
   getSetupStatus: (input?: Record<string, unknown>) => ipcRenderer.invoke('get-setup-status', input),
+  runSetupAutomation: (config: Record<string, unknown>) =>
+    ipcRenderer.invoke('run-setup-automation', config),
 
   // Validation
   validateCredentials: (config: Record<string, string>) =>

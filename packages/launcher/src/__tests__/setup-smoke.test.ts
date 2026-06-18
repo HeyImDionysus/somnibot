@@ -13,6 +13,7 @@ describe('setup end-to-end smoke contract', () => {
       runtimeMode: 'regular-local' as const,
       publicCallbackBaseUrl: 'https://somnibot-laptop.tailnet.ts.net',
       credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
       dashboardOnline: true,
     };
 
@@ -24,11 +25,12 @@ describe('setup end-to-end smoke contract', () => {
       'runtime-choice': 'success',
       'regular-callback': 'success',
       credentials: 'success',
+      'auth-provider': 'success',
       'start-local': 'success',
     });
     expect(status.firstBlockingStepId).toBeNull();
     expect(status.primaryAction).toEqual({
-      label: 'Validate & Start',
+      label: 'Set Up & Start',
       enabled: true,
       status: 'ready',
     });
@@ -60,6 +62,7 @@ describe('setup end-to-end smoke contract', () => {
       vpsSshUser: 'deploy',
       vpsDeployPath: '/opt/somnibot',
       credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
     };
 
     const status = buildSetupStatus(input);
@@ -89,6 +92,7 @@ describe('setup end-to-end smoke contract', () => {
       'vps-domain': 'success',
       'vps-ssh': 'success',
       credentials: 'success',
+      'auth-provider': 'success',
       'vps-deploy': 'blocked',
     });
     expect(status.firstBlockingStepId).toBe('vps-deploy');

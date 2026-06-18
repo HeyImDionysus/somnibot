@@ -22,6 +22,8 @@ interface LauncherConfig {
   supabaseUrl: string;
   supabaseSecretKey: string;
   supabasePublishableKey: string;
+  supabaseAccessToken: string;
+  supabaseDiscordAuthProviderConfigured: boolean;
   runtimeMode: 'regular-local' | 'vps';
   publicCallbackBaseUrl: string;
   vpsDomain: string;
@@ -54,6 +56,8 @@ function buildEnvVars(config: LauncherConfig, sessionToken: string): Record<stri
       : config.discordGuildId,
     SUPABASE_URL: config.supabaseUrl,
     SUPABASE_SECRET_KEY: config.supabaseSecretKey,
+    SUPABASE_ACCESS_TOKEN: config.supabaseAccessToken,
+    SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED: config.supabaseDiscordAuthProviderConfigured ? 'true' : 'false',
     NEXT_PUBLIC_SUPABASE_URL: config.supabaseUrl,
     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: config.supabasePublishableKey,
     SESSION_TOKEN: sessionToken,
@@ -81,6 +85,8 @@ function makeConfig(overrides: Partial<LauncherConfig> = {}): LauncherConfig {
     supabaseUrl: 'https://test.supabase.co',
     supabaseSecretKey: 'sb-secret',
     supabasePublishableKey: 'sb-pub',
+    supabaseAccessToken: '',
+    supabaseDiscordAuthProviderConfigured: false,
     runtimeMode: 'regular-local',
     publicCallbackBaseUrl: '',
     vpsDomain: '',
@@ -120,6 +126,16 @@ describe('buildEnvVars', () => {
     expect(env.SUPABASE_SECRET_KEY).toBe('sb-secret');
     expect(env.NEXT_PUBLIC_SUPABASE_URL).toBe('https://test.supabase.co');
     expect(env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY).toBe('sb-pub');
+  });
+
+  it('passes Supabase auth-provider setup state through launcher env', () => {
+    const env = buildEnvVars(makeConfig({
+      supabaseAccessToken: 'supabase-management-token',
+      supabaseDiscordAuthProviderConfigured: true,
+    }), 'sess');
+
+    expect(env.SUPABASE_ACCESS_TOKEN).toBe('supabase-management-token');
+    expect(env.SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED).toBe('true');
   });
 
   it('includes session token', () => {

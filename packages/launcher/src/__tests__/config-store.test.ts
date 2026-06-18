@@ -14,6 +14,7 @@ const SENSITIVE_KEYS = [
   'discordClientSecret',
   'supabaseSecretKey',
   'supabaseDbPassword',
+  'supabaseAccessToken',
   'tailscaleAuthKey',
 ] as const;
 
@@ -34,6 +35,8 @@ interface LauncherConfig {
   supabaseSecretKey: string;
   supabasePublishableKey: string;
   supabaseDbPassword: string;
+  supabaseAccessToken: string;
+  supabaseDiscordAuthProviderConfigured: boolean;
   runtimeMode: 'regular-local' | 'vps';
   publicCallbackBaseUrl: string;
   vpsDomain: string;
@@ -82,6 +85,8 @@ describe('Launcher Config', () => {
     supabaseSecretKey: 'eyJhbGciOiJIUzI1NiJ9',
     supabasePublishableKey: 'eyJhbGciOiJIUzI1NiJ9.pub',
     supabaseDbPassword: 'database-password',
+    supabaseAccessToken: 'sbp-access-token',
+    supabaseDiscordAuthProviderConfigured: false,
     runtimeMode: 'regular-local',
     publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
     vpsDomain: '',
@@ -114,6 +119,7 @@ describe('Launcher Config', () => {
     expect(masked.discordClientSecret).toBe(MASK);
     expect(masked.supabaseSecretKey).toBe(MASK);
     expect(masked.supabaseDbPassword).toBe(MASK);
+    expect(masked.supabaseAccessToken).toBe(MASK);
     expect(masked.tailscaleAuthKey).toBe(MASK);
     // Non-sensitive fields are preserved
     expect(masked.supabaseUrl).toBe(validConfig.supabaseUrl);
@@ -138,8 +144,10 @@ describe('Launcher Config', () => {
       supabaseUrl: 'https://updated.supabase.co',
       supabaseSecretKey: MASK,
       supabaseDbPassword: MASK,
+      supabaseAccessToken: MASK,
       tailscaleAuthKey: MASK,
       supabasePublishableKey: 'new-pub-key',
+      supabaseDiscordAuthProviderConfigured: true,
       runtimeMode: 'vps',
       vpsDomain: 'somnibot.example.com',
     };
@@ -151,6 +159,7 @@ describe('Launcher Config', () => {
     expect(sanitized).not.toHaveProperty('discordClientSecret');
     expect(sanitized).not.toHaveProperty('supabaseSecretKey');
     expect(sanitized).not.toHaveProperty('supabaseDbPassword');
+    expect(sanitized).not.toHaveProperty('supabaseAccessToken');
     expect(sanitized).not.toHaveProperty('tailscaleAuthKey');
 
     // Non-masked fields are preserved
@@ -158,6 +167,7 @@ describe('Launcher Config', () => {
     expect(sanitized.discordGuildId).toBe('67890-new');
     expect(sanitized.supabaseUrl).toBe('https://updated.supabase.co');
     expect(sanitized.supabasePublishableKey).toBe('new-pub-key');
+    expect(sanitized.supabaseDiscordAuthProviderConfigured).toBe(true);
     expect(sanitized.runtimeMode).toBe('vps');
     expect(sanitized.vpsDomain).toBe('somnibot.example.com');
   });
@@ -167,6 +177,7 @@ describe('Launcher Config', () => {
       discordToken: 'brand-new-token',
       supabaseSecretKey: 'brand-new-secret',
       supabaseDbPassword: 'brand-new-db-password',
+      supabaseAccessToken: 'brand-new-access-token',
       tailscaleAuthKey: 'brand-new-tailscale-key',
     };
 
@@ -176,6 +187,7 @@ describe('Launcher Config', () => {
     expect(sanitized.discordToken).toBe('brand-new-token');
     expect(sanitized.supabaseSecretKey).toBe('brand-new-secret');
     expect(sanitized.supabaseDbPassword).toBe('brand-new-db-password');
+    expect(sanitized.supabaseAccessToken).toBe('brand-new-access-token');
     expect(sanitized.tailscaleAuthKey).toBe('brand-new-tailscale-key');
   });
 });

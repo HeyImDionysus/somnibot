@@ -19,6 +19,8 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="summary-auth-callback"');
     expect(html).toContain('id="summary-paypal-webhook"');
     expect(html).toContain('id="vps-deployment-plan"');
+    expect(html).toContain('id="supabaseAccessToken"');
+    expect(html).toContain('id="supabaseDiscordAuthProviderConfigured"');
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
@@ -64,6 +66,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('data-vps-deploy-action="run-live"');
     expect(renderer).toContain('window.somnibot.runVpsPreflight()');
     expect(renderer).toContain('window.somnibot.runVpsDeployment({');
+    expect(renderer).toContain('window.somnibot.runSetupAutomation(config)');
     expect(renderer).toContain("const dryRun = action !== 'run-live';");
     expect(renderer).toContain('await saveConfig();');
     expect(renderer).toContain('const currentSetup = await refreshSetupStatus();');
@@ -86,9 +89,11 @@ describe('launcher setup renderer wiring', () => {
 
     expect(preload).toContain("getSetupStatus: (input?: Record<string, unknown>)");
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
+    expect(preload).toContain("ipcRenderer.invoke('run-setup-automation', config)");
     expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
     expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
     expect(main).toContain("ipcMain.handle('get-setup-status'");
+    expect(main).toContain("ipcMain.handle('run-setup-automation'");
     expect(main).toContain("ipcMain.handle('vps:run-preflight'");
     expect(main).toContain('planVpsSshPreflight({');
     expect(main).toContain('createVpsCommandRunner()');
@@ -101,5 +106,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('vpsSshUser: input.vpsSshUser ?? config.vpsSshUser');
     expect(main).toContain('vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath');
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
+    expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
+    expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
   });
 });
