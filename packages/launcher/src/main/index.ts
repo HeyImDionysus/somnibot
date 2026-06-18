@@ -12,6 +12,10 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
 import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker } from './runtime-profile.js';
+import {
+  evaluateDashboardHealthPayload,
+  type DashboardHealthPayload,
+} from './setup-automation-health.js';
 import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
@@ -66,11 +70,17 @@ const MASKED_SECRET = '••••••••';
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
 
+interface DashboardAuthProviderOptions {
+  manualAuthProviderConfirmed: boolean;
+  callbackBaseUrlChanged: boolean;
+}
+
 interface SetupAutomationResult {
   ok: boolean;
   stage: string;
   message: string;
   error?: string;
+  servicesStarted?: boolean;
   meta?: Record<string, string>;
   warnings?: string[];
   publicCallbackBaseUrl?: string;
@@ -109,8 +119,16 @@ async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean
         cache: 'no-store',
         signal: AbortSignal.timeout(3_000),
       });
-      if (response.ok) return { ok: true };
-      lastError = `Dashboard health returned HTTP ${response.status}.`;
+      if (!response.ok) {
+        lastError = `Dashboard health returned HTTP ${response.status}.`;
+      } else {
+        const body = await response.json().catch(() => null) as DashboardHealthPayload | null;
+        const health = evaluateDashboardHealthPayload(body);
+        if (health.ok) {
+          return { ok: true };
+        }
+        lastError = health.error || 'Dashboard health endpoint did not report healthy status.';
+      }
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
@@ -132,7 +150,10 @@ async function waitForPortAvailable(port: number, timeoutMs = 10_000): Promise<b
   return checkPortAvailable(port);
 }
 
-async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: string; alreadyLocked?: boolean }> {
+async function configureDashboardAuthProvider({
+  manualAuthProviderConfirmed,
+  callbackBaseUrlChanged,
+}: DashboardAuthProviderOptions): Promise<{ ok: boolean; error?: string; alreadyLocked?: boolean; setupLocked?: boolean }> {
   try {
     const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
       method: 'POST',
@@ -147,7 +168,18 @@ async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: 
     } | null;
 
     if (response.status === 403 && body?.setupLocked) {
-      return { ok: true, alreadyLocked: true };
+      if (manualAuthProviderConfirmed && !callbackBaseUrlChanged) {
+        return { ok: true, alreadyLocked: true };
+      }
+
+      return {
+        ok: false,
+        setupLocked: true,
+        error: [
+          body.error || 'Dashboard setup is locked and refused auth-provider configuration.',
+          'Unlock dashboard setup or confirm that the current Discord auth callback and PayPal webhook URLs are already allow-listed in Supabase before rerunning setup.',
+        ].join(' '),
+      };
     }
 
     if (!response.ok || body?.success === false) {
@@ -229,9 +261,11 @@ async function startLocalStack(
 }
 
 async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promise<SetupAutomationResult> {
+  const previousPublicCallbackBaseUrl = getConfig().publicCallbackBaseUrl.trim();
   saveConfig(sanitizeConfigPatch(configPatch));
   let config = getConfig();
   const warnings: string[] = [];
+  let callbackBaseUrlChanged = previousPublicCallbackBaseUrl !== config.publicCallbackBaseUrl.trim();
 
   if (config.runtimeMode !== 'regular-local') {
     return {
@@ -249,6 +283,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     if (readiness.publicCallbackBaseUrl) {
       saveConfig({ publicCallbackBaseUrl: readiness.publicCallbackBaseUrl });
       config = getConfig();
+      callbackBaseUrlChanged = true;
     } else {
       return {
         ok: false,
@@ -299,13 +334,17 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       stage: 'dashboard-health',
       message: 'Bot and dashboard were started, but dashboard readiness could not be verified yet.',
       error: dashboardReady.error,
+      servicesStarted: true,
       meta: validation.meta,
       warnings,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
   }
 
-  const authConfigured = await configureDashboardAuthProvider();
+  const authConfigured = await configureDashboardAuthProvider({
+    manualAuthProviderConfirmed: config.supabaseDiscordAuthProviderConfigured,
+    callbackBaseUrlChanged,
+  });
   if (authConfigured.alreadyLocked) {
     warnings.push('Setup is already locked, so auth-provider configuration was skipped for this restart.');
   }
@@ -315,6 +354,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       stage: 'auth-provider',
       message: 'Bot and dashboard are running, but Supabase Discord auth was not configured.',
       error: authConfigured.error,
+      servicesStarted: true,
       meta: validation.meta,
       warnings,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
@@ -333,6 +373,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     ok: true,
     stage: 'complete',
     message: 'Setup automation finished and local services are running.',
+    servicesStarted: true,
     meta: validation.meta,
     warnings,
     publicCallbackBaseUrl: config.publicCallbackBaseUrl,

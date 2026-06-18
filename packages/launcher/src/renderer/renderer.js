@@ -699,7 +699,14 @@ btnStart.addEventListener('click', async () => {
     if (!result.ok) {
       showMessage('error', result.error || result.message || 'Setup did not complete.');
       btnStart.classList.remove('loading');
-      setFieldsDisabled(false);
+      if (result.servicesStarted) {
+        isRunning = true;
+        btnStart.classList.add('hidden');
+        btnStop.classList.remove('hidden');
+        btnOpenDashboard.disabled = false;
+      } else {
+        setFieldsDisabled(false);
+      }
       isValidating = false;
       await refreshSetupStatus();
       return;

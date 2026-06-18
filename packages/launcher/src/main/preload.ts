@@ -35,6 +35,7 @@ export interface SomniBotAPI {
     stage: string;
     message: string;
     error?: string;
+    servicesStarted?: boolean;
     meta?: Record<string, string>;
     warnings?: string[];
     publicCallbackBaseUrl?: string;

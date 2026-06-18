@@ -7,16 +7,19 @@ const completeCredentials = {
 };
 
 describe('setup flow status', () => {
-  it('blocks regular local setup before a Tailscale public callback URL is set', () => {
+  it('lets regular local setup prepare Tailscale public callback automatically', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',
       ...completeCredentials,
     });
 
     expect(status.runtimeMode).toBe('regular-local');
-    expect(status.firstBlockingStepId).toBe('regular-callback');
-    expect(status.primaryAction.enabled).toBe(false);
-    expect(status.primaryAction.blockedReason).toContain('Tailscale');
+    expect(status.firstBlockingStepId).toBeNull();
+    expect(status.primaryAction.enabled).toBe(true);
+    expect(status.primaryAction.status).toBe('ready');
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('pending');
+    expect(callbackStep?.detail).toContain('enable or detect Tailscale Funnel during setup');
     expect(status.summary.localDashboardUrl).toBe('http://localhost');
     expect(status.summary.localDashboardUrl).not.toContain(':3456');
     expect(status.summary.publicCallbackUrl).toBe('Not set yet');

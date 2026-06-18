@@ -67,6 +67,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('window.somnibot.runVpsPreflight()');
     expect(renderer).toContain('window.somnibot.runVpsDeployment({');
     expect(renderer).toContain('window.somnibot.runSetupAutomation(config)');
+    expect(renderer).toContain('result.servicesStarted');
     expect(renderer).toContain("const dryRun = action !== 'run-live';");
     expect(renderer).toContain('await saveConfig();');
     expect(renderer).toContain('const currentSetup = await refreshSetupStatus();');
@@ -90,6 +91,7 @@ describe('launcher setup renderer wiring', () => {
     expect(preload).toContain("getSetupStatus: (input?: Record<string, unknown>)");
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
     expect(preload).toContain("ipcRenderer.invoke('run-setup-automation', config)");
+    expect(preload).toContain('servicesStarted?: boolean');
     expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
     expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
     expect(main).toContain("ipcMain.handle('get-setup-status'");
@@ -110,6 +112,12 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
     expect(main).toContain('setupLocked?: boolean');
     expect(main).toContain('response.status === 403 && body?.setupLocked');
+    expect(main).toContain('manualAuthProviderConfirmed');
+    expect(main).toContain('callbackBaseUrlChanged');
+    expect(main).toContain('manualAuthProviderConfirmed && !callbackBaseUrlChanged');
+    expect(main).toContain('const authConfigured = await configureDashboardAuthProvider({');
+    expect(main).toContain('evaluateDashboardHealthPayload(body)');
+    expect(main).toContain('servicesStarted: true');
     expect(main).toContain('startLocalStack(config, { forceRestart: true })');
     expect(main).toContain('waitForPortAvailable(3456)');
   });

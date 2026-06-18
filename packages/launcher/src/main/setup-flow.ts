@@ -153,11 +153,10 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     ? {
       id: 'regular-callback',
       label: 'Tailscale public callback',
-      status: 'blocked',
-      summary: 'Waiting for a public callback URL.',
-      detail: 'Set up Tailscale Funnel and paste the HTTPS URL for this machine before validating credentials.',
-      actionLabel: 'Paste Tailscale Funnel URL',
-      manualAction: true,
+      status: 'pending',
+      summary: 'Public callback will be prepared during setup.',
+      detail: 'The launcher will enable or detect Tailscale Funnel during setup. Paste an HTTPS callback URL only if automatic Funnel setup is not available on this machine.',
+      actionLabel: 'Enable during setup',
     }
     : callbackErrors.length > 0
       ? {
@@ -210,13 +209,13 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
         summary: 'Local dashboard is online.',
         detail: 'The bot and dashboard are running on this machine.',
       }
-      : callbackStep.status !== 'success'
+      : callbackStep.status === 'recoverable-error'
         ? {
           id: 'start-local',
           label: 'Start locally',
           status: 'blocked',
           summary: 'Blocked by public callback readiness.',
-          detail: 'Finish the Tailscale/public callback step before starting regular local mode.',
+          detail: 'Fix the Tailscale/public callback URL before starting regular local mode.',
           manualAction: true,
         }
         : !input.credentialReady
@@ -241,7 +240,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
               label: 'Start locally',
               status: 'pending',
               summary: 'Ready to set up and start.',
-              detail: 'The launcher can validate credentials, configure provider callbacks, then start the local bot and dashboard.',
+              detail: 'The launcher can prepare the public callback, validate credentials, configure provider callbacks, then start the local bot and dashboard.',
             };
 
   return [
