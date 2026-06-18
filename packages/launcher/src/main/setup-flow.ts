@@ -585,7 +585,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
 function findFirstBlockingStep(steps: SetupStep[]): SetupStep | undefined {
   return steps.find(step => (
     step.status === 'blocked'
-    || (step.status === 'recoverable-error' && step.id !== 'provider-validation')
+    || step.status === 'recoverable-error'
   ));
 }
 
