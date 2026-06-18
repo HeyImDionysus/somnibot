@@ -21,6 +21,7 @@ const completeVpsInput = {
   vpsSshUser: 'deploy',
   vpsDeployPath: '/opt/somnibot',
   credentialReady: true,
+  supabaseAccessTokenReady: true,
 };
 
 function buildRequestOverrides(plan = buildVpsDeploymentPlan(completeVpsInput)) {
@@ -53,9 +54,11 @@ function executionResult(state: VpsDeploymentExecutionResult['state']): VpsDeplo
 describe('VPS deployment execution bridge', () => {
   it('redacts shared deployment/preflight text surfaces', () => {
     const secret = 'sb_secret_XXXXXXXXXXXXXXXXX';
-    const redacted = redactVpsDeploymentText(`token=${secret} header Bearer ${secret}`);
+    const accessToken = 'sbp_abcdefghijklmnopqrstuvwxyz123456';
+    const redacted = redactVpsDeploymentText(`token=${secret} SUPABASE_ACCESS_TOKEN=${accessToken} header Bearer ${secret}`);
 
     expect(redacted).not.toContain(secret);
+    expect(redacted).not.toContain(accessToken);
     expect(redacted).toContain('[redacted]');
   });
 

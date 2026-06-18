@@ -17,6 +17,8 @@ const completeConfig: LauncherConfig = {
   supabaseSecretKey: 'supabase-secret',
   supabasePublishableKey: 'supabase-publishable',
   supabaseDbPassword: '',
+  supabaseAccessToken: 'supabase-management-token',
+  supabaseDiscordAuthProviderConfigured: false,
   runtimeMode: 'vps',
   publicCallbackBaseUrl: 'https://somnibot.example.com',
   vpsDomain: 'somnibot.example.com',
@@ -125,6 +127,29 @@ describe('VPS deployment run request coordinator', () => {
     );
 
     expect(result.state).toBe('dry-run');
+  });
+
+  it('blocks VPS deployment requests until auth-provider setup is ready', async () => {
+    const result = await handleVpsDeploymentRunRequest(
+      {
+        ...completeConfig,
+        supabaseAccessToken: '',
+        supabaseDiscordAuthProviderConfigured: false,
+      },
+      { dryRun: true },
+      {
+        confirmApproval: async () => {
+          throw new Error('native approval should not be requested for blocked plans');
+        },
+        createCommandRunner: () => {
+          throw new Error('live command runner should not be created for blocked plans');
+        },
+        runGate: new VpsDeploymentRunGate(),
+      },
+    );
+
+    expect(result.state).toBe('blocked');
+    expect(result.blockedReason).toContain('No execution plan is available');
   });
 
   it('single-flights concurrent live requests through the run gate', async () => {

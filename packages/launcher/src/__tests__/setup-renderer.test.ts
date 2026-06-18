@@ -108,5 +108,9 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
     expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
+    expect(main).toContain('setupLocked?: boolean');
+    expect(main).toContain('response.status === 403 && body?.setupLocked');
+    expect(main).toContain('startLocalStack(config, { forceRestart: true })');
+    expect(main).toContain('waitForPortAvailable(3456)');
   });
 });

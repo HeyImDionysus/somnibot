@@ -121,7 +121,18 @@ async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean
   return { ok: false, error: lastError || 'Dashboard did not become ready in time.' };
 }
 
-async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: string }> {
+async function waitForPortAvailable(port: number, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await checkPortAvailable(port)) return true;
+    await delay(250);
+  }
+
+  return checkPortAvailable(port);
+}
+
+async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: string; alreadyLocked?: boolean }> {
   try {
     const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
       method: 'POST',
@@ -132,7 +143,12 @@ async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: 
     const body = await response.json().catch(() => null) as {
       success?: boolean;
       error?: string;
+      setupLocked?: boolean;
     } | null;
+
+    if (response.status === 403 && body?.setupLocked) {
+      return { ok: true, alreadyLocked: true };
+    }
 
     if (!response.ok || body?.success === false) {
       return {
@@ -150,8 +166,12 @@ async function configureDashboardAuthProvider(): Promise<{ ok: boolean; error?: 
   }
 }
 
-async function startLocalStack(config: LauncherConfig): Promise<{ ok: boolean; error?: string }> {
-  if (isRunning()) {
+async function startLocalStack(
+  config: LauncherConfig,
+  options: { forceRestart?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const running = isRunning();
+  if (running && !options.forceRestart) {
     return { ok: true };
   }
 
@@ -164,7 +184,13 @@ async function startLocalStack(config: LauncherConfig): Promise<{ ok: boolean; e
     return { ok: false, error: runtimeBlocker };
   }
 
-  const portFree = await checkPortAvailable(3456);
+  if (running) {
+    stopAll();
+  }
+
+  const portFree = running
+    ? await waitForPortAvailable(3456)
+    : await checkPortAvailable(3456);
   if (!portFree) {
     return {
       ok: false,
@@ -254,7 +280,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     };
   }
 
-  const startResult = await startLocalStack(config);
+  const startResult = await startLocalStack(config, { forceRestart: true });
   if (!startResult.ok) {
     return {
       ok: false,
@@ -280,6 +306,9 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   }
 
   const authConfigured = await configureDashboardAuthProvider();
+  if (authConfigured.alreadyLocked) {
+    warnings.push('Setup is already locked, so auth-provider configuration was skipped for this restart.');
+  }
   if (!authConfigured.ok) {
     return {
       ok: false,
