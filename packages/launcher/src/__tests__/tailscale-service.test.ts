@@ -385,6 +385,40 @@ Available on the internet:
     expect(readiness.detail).not.toContain('tskey-auth-secret');
   });
 
+  it('maps unsupported Funnel status checks to an unsupported platform state', async () => {
+    const readiness = await getTailscaleReadiness(async (args) => {
+      if (args.join(' ') === 'version') {
+        return { stdout: '1.84.0\n', stderr: '' };
+      }
+      if (args.join(' ') === 'status --json') {
+        return {
+          stdout: JSON.stringify({
+            BackendState: 'Running',
+            Self: { DNSName: 'somnibot.dionysus.ts.net.' },
+          }),
+          stderr: '',
+        };
+      }
+      throw new TailscaleCommandError('funnel not supported on this platform', {
+        stderr: 'Tailscale Funnel is not supported by this install.',
+      });
+    });
+
+    expect(readiness.state).toBe('unsupported-platform');
+    expect(readiness.message).toContain('does not support');
+  });
+
+  it('maps unsupported Funnel enable attempts to an unsupported platform state', async () => {
+    const readiness = await enableSomniBotFunnel(async () => {
+      throw new TailscaleCommandError('funnel not available', {
+        stderr: 'Tailscale Funnel is not available on this platform.',
+      });
+    });
+
+    expect(readiness.state).toBe('unsupported-platform');
+    expect(readiness.message).toContain('does not support');
+  });
+
   it('maps enable attempts while signed out to the login state', async () => {
     const readiness = await enableSomniBotFunnel(async () => {
       throw new TailscaleCommandError('not logged in', {

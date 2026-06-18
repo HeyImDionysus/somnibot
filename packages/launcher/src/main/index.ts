@@ -533,6 +533,8 @@ function registerIpcHandlers(): void {
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
         ?? config.supabaseDiscordAuthProviderConfigured,
+      tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey),
+      tailscaleReadinessState: input.tailscaleReadinessState,
       dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',
       checking: input.checking ?? false,
     });

@@ -17,6 +17,15 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
+  tailscaleAuthKeyReady?: boolean;
+  tailscaleReadinessState?: 'ready'
+    | 'not-installed'
+    | 'not-logged-in'
+    | 'not-configured'
+    | 'needs-dashboard'
+    | 'needs-policy'
+    | 'unsupported-platform'
+    | 'error';
   dashboardOnline?: boolean;
   checking?: boolean;
 }
@@ -149,31 +158,123 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     })
     : [];
 
-  const callbackStep: SetupStep = !callbackRaw
-    ? {
+  let callbackStep: SetupStep;
+  if (callbackRaw && callbackErrors.length > 0) {
+    callbackStep = {
       id: 'regular-callback',
       label: 'Tailscale public callback',
-      status: 'pending',
-      summary: 'Public callback will be prepared during setup.',
-      detail: 'The launcher will enable or detect Tailscale Funnel during setup. Paste an HTTPS callback URL only if automatic Funnel setup is not available on this machine.',
-      actionLabel: 'Enable during setup',
+      status: 'recoverable-error',
+      summary: 'The public callback URL needs attention.',
+      detail: callbackErrors.join('\n'),
+      actionLabel: 'Fix callback URL',
+    };
+  } else if (callbackRaw) {
+    callbackStep = {
+      id: 'regular-callback',
+      label: 'Tailscale public callback',
+      status: 'success',
+      summary: 'Public provider callbacks are ready.',
+      detail: 'Discord auth and PayPal webhooks will use the configured public callback URL.',
+    };
+  } else {
+    switch (input.tailscaleReadinessState) {
+      case 'not-installed':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'blocked',
+          summary: 'Tailscale is not installed.',
+          detail: 'Install Tailscale on this computer, then the launcher can prepare the public callback automatically.',
+          actionLabel: 'Install Tailscale',
+          manualAction: true,
+        };
+        break;
+      case 'not-logged-in':
+        callbackStep = input.tailscaleAuthKeyReady
+          ? {
+            id: 'regular-callback',
+            label: 'Tailscale public callback',
+            status: 'pending',
+            summary: 'Tailscale sign-in can be automated.',
+            detail: 'The launcher will use the saved Tailscale auth key to sign in, enable Funnel, and fill the public callback URL.',
+            actionLabel: 'Sign in during setup',
+          }
+          : {
+            id: 'regular-callback',
+            label: 'Tailscale public callback',
+            status: 'blocked',
+            summary: 'Tailscale is not signed in.',
+            detail: 'Sign in to Tailscale on this computer or add a Tailscale auth key so the launcher can sign in during setup.',
+            actionLabel: 'Sign in or add auth key',
+            manualAction: true,
+          };
+        break;
+      case 'needs-policy':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'blocked',
+          summary: 'Tailnet policy blocks Funnel.',
+          detail: 'Allow Tailscale Funnel for this machine in tailnet policy, then check Tailscale again.',
+          actionLabel: 'Allow Funnel in Tailscale',
+          manualAction: true,
+        };
+        break;
+      case 'unsupported-platform':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'blocked',
+          summary: 'This Tailscale install cannot use Funnel.',
+          detail: 'Use a Tailscale install that exposes the CLI Funnel feature, or paste a valid HTTPS callback URL manually.',
+          actionLabel: 'Use supported Tailscale',
+          manualAction: true,
+        };
+        break;
+      case 'error':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'recoverable-error',
+          summary: 'Tailscale readiness could not be checked.',
+          detail: 'Check Tailscale again or paste a valid HTTPS callback URL manually.',
+          actionLabel: 'Check Tailscale',
+        };
+        break;
+      case 'not-configured':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'pending',
+          summary: 'Tailscale is ready for automatic Funnel setup.',
+          detail: 'The launcher will enable Funnel and fill the public callback URL during setup.',
+          actionLabel: 'Enable during setup',
+        };
+        break;
+      case 'needs-dashboard':
+      case 'ready':
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'pending',
+          summary: 'Tailscale Funnel is ready to verify.',
+          detail: 'The launcher will start the local dashboard, verify the public callback, and keep the callback URL filled in.',
+          actionLabel: 'Verify during setup',
+        };
+        break;
+      default:
+        callbackStep = {
+          id: 'regular-callback',
+          label: 'Tailscale public callback',
+          status: 'pending',
+          summary: 'Public callback will be prepared during setup.',
+          detail: 'The launcher will enable or detect Tailscale Funnel during setup. Paste an HTTPS callback URL only if automatic Funnel setup is not available on this machine.',
+          actionLabel: 'Enable during setup',
+        };
     }
-    : callbackErrors.length > 0
-      ? {
-        id: 'regular-callback',
-        label: 'Tailscale public callback',
-        status: 'recoverable-error',
-        summary: 'The public callback URL needs attention.',
-        detail: callbackErrors.join('\n'),
-        actionLabel: 'Fix callback URL',
-      }
-      : {
-        id: 'regular-callback',
-        label: 'Tailscale public callback',
-        status: 'success',
-        summary: 'Public provider callbacks are ready.',
-        detail: 'Discord auth and PayPal webhooks will use the configured public callback URL.',
-      };
+  }
+
+  const callbackBlocksStart = callbackStep.status === 'blocked' || callbackStep.status === 'recoverable-error';
 
   const credentialStep: SetupStep = input.credentialReady
     ? {
@@ -209,13 +310,13 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
         summary: 'Local dashboard is online.',
         detail: 'The bot and dashboard are running on this machine.',
       }
-      : callbackStep.status === 'recoverable-error'
+      : callbackBlocksStart
         ? {
           id: 'start-local',
           label: 'Start locally',
           status: 'blocked',
           summary: 'Blocked by public callback readiness.',
-          detail: 'Fix the Tailscale/public callback URL before starting regular local mode.',
+          detail: callbackStep.detail,
           manualAction: true,
         }
         : !input.credentialReady

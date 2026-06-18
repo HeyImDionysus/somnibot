@@ -23,7 +23,7 @@
           <button class="runtime-choice active" id="onboarding-runtime-local" data-runtime="regular-local" type="button">
             <div>
               <strong>Regular local</strong>
-              <p>Run SomniBot on this computer with a Tailscale Funnel URL for public callbacks.</p>
+              <p>Run SomniBot on this computer while the launcher prepares Tailscale Funnel callbacks.</p>
             </div>
           </button>
           <button class="runtime-choice" id="onboarding-runtime-vps" data-runtime="vps" type="button">
@@ -41,9 +41,9 @@
       <!-- Step 2: Runtime readiness -->
       <div class="onboarding-step hidden" data-step="2">
         <div class="onboarding-icon">🌐</div>
-        <h1 class="onboarding-title" id="onboarding-runtime-title">Prepare Public Callbacks</h1>
+        <h1 class="onboarding-title" id="onboarding-runtime-title">Prepare Local Access</h1>
         <p class="onboarding-desc" id="onboarding-runtime-desc">
-          Regular local mode needs a Tailscale Funnel URL before provider callbacks can work.
+          The launcher checks Tailscale and fills the public callback URL when Funnel is ready.
         </p>
         <div class="onboarding-checklist" id="onboarding-runtime-list"></div>
         <div class="onboarding-actions">
@@ -141,10 +141,10 @@
 
         <div id="regular-runtime-fields" class="runtime-fields">
           <div class="field">
-            <label for="publicCallbackBaseUrl">Public Callback URL <span class="req">*</span></label>
-            <input type="url" id="publicCallbackBaseUrl" placeholder="https://your-machine.tailnet.ts.net" />
+            <label for="publicCallbackBaseUrl">Public Callback URL <span class="opt">(auto-filled)</span></label>
+            <input type="url" id="publicCallbackBaseUrl" placeholder="Auto-filled by Tailscale Funnel" />
           </div>
-          <p class="runtime-hint">Regular local mode needs a Tailscale Funnel HTTPS URL before Discord auth or PayPal callbacks can reach this machine.</p>
+          <p class="runtime-hint">The launcher fills this after Tailscale Funnel is ready. Paste an HTTPS URL only as a fallback.</p>
         </div>
 
         <div id="vps-runtime-fields" class="runtime-fields hidden">
