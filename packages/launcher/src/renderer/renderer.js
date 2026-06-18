@@ -164,12 +164,7 @@ async function init() {
   }
 
   // Check current status (in case app reconnected)
-  try {
-    const status = await window.somnibot.getStatus();
-    updateStatusUI(status);
-  } catch {
-    // Not running
-  }
+  await refreshProcessStatus();
 
   // Auto-save on field change (debounced)
   let saveTimeout = null;
@@ -958,6 +953,7 @@ btnSetupPayPalWebhook.addEventListener('click', async () => {
   } finally {
     isPayPalWebhookRunning = false;
     btnSetupPayPalWebhook.textContent = 'Create/Update Webhook';
+    await refreshProcessStatus();
     updatePayPalWebhookButton();
   }
 });
@@ -1034,6 +1030,15 @@ window.somnibot.onDashboardLog((log) => {
 window.somnibot.onLavalinkLog((log) => {
   appendLog('lavalink', log.type, log.line);
 });
+
+async function refreshProcessStatus() {
+  try {
+    const status = await window.somnibot.getStatus();
+    updateStatusUI(status);
+  } catch {
+    // Not running
+  }
+}
 
 function updateStatusUI(status) {
   latestProcessStatus = status;
