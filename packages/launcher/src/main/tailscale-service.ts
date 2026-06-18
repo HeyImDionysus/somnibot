@@ -127,7 +127,7 @@ export function buildVersionArgs(): string[] {
 }
 
 export function buildLoginWithAuthKeyArgs(authKeyFilePath: string): string[] {
-  return ['up', `--auth-key=file:${authKeyFilePath}`, '--timeout=30s'];
+  return ['login', `--auth-key=file:${authKeyFilePath}`, '--timeout=30s'];
 }
 
 export const defaultTailscaleRunner: TailscaleRunner = async (args, options = {}) => {

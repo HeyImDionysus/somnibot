@@ -44,7 +44,7 @@ describe('tailscale-service', () => {
 
   it('builds the auth-key login command using a file reference', () => {
     expect(buildLoginWithAuthKeyArgs('/tmp/somnibot-authkey')).toEqual([
-      'up',
+      'login',
       '--auth-key=file:/tmp/somnibot-authkey',
       '--timeout=30s',
     ]);
@@ -284,7 +284,7 @@ Available on the internet:
     const calls: string[] = [];
     const runner: TailscaleRunner = async (args) => {
       calls.push(args.join(' '));
-      if (args[0] === 'up') {
+      if (args[0] === 'login') {
         expect(args[1]).toMatch(/^--auth-key=file:/);
         const authKeyPath = args[1].replace('--auth-key=file:', '');
         expect(readFileSync(authKeyPath, 'utf8')).toBe('tskey-auth-secret');
@@ -309,7 +309,7 @@ Available on the internet:
 
     const readiness = await loginWithTailscaleAuthKey('tskey-auth-secret', runner);
 
-    expect(calls[0]).toMatch(/^up --auth-key=file:/);
+    expect(calls[0]).toMatch(/^login --auth-key=file:/);
     expect(calls[0]).not.toContain('tskey-auth-secret');
     expect(readiness.state).toBe('not-configured');
   });
@@ -321,7 +321,7 @@ Available on the internet:
 
     const runner: TailscaleRunner = async (args) => {
       calls.push(args.join(' '));
-      if (args[0] === 'up') {
+      if (args[0] === 'login') {
         loggedIn = true;
         return { stdout: '', stderr: '' };
       }
@@ -366,7 +366,7 @@ Available on the internet:
 
     const readiness = await enableSomniBotFunnel(runner, { authKey: 'tskey-auth-secret' });
 
-    expect(calls.some((call) => call.startsWith('up --auth-key=file:'))).toBe(true);
+    expect(calls.some((call) => call.startsWith('login --auth-key=file:'))).toBe(true);
     expect(calls.some((call) => call.startsWith('funnel --bg --https=443'))).toBe(true);
     expect(calls.join('\n')).not.toContain('tskey-auth-secret');
     expect(readiness.funnelEnabled).toBe(true);

@@ -68,6 +68,17 @@ function rejectPendingCallbacks(): void {
   pendingCallbacks = [];
 }
 
+function failValkeySocket(sock: Socket | null): void {
+  if (sock && valkeySocket !== sock) return;
+
+  markValkeyFailed();
+  valkeyReady = false;
+  valkeySocket = null;
+  resolveConnectionWaiters(false);
+  rejectPendingCallbacks();
+  sock?.destroy();
+}
+
 function waitForValkeyReady(timeoutMs = 1000): Promise<boolean> {
   if (valkeyReady) return Promise.resolve(true);
   if (!valkeySocket || valkeyFailed) return Promise.resolve(false);
@@ -139,11 +150,7 @@ function ensureValkey(): boolean {
           return;
         }
 
-        markValkeyFailed();
-        valkeyReady = false;
-        valkeySocket = null;
-        resolveConnectionWaiters(false);
-        sock.destroy();
+        failValkeySocket(sock);
       });
       sock.write(username ? encodeCommand('AUTH', username, password) : encodeCommand('AUTH', password));
     });
@@ -193,12 +200,7 @@ function ensureValkey(): boolean {
     });
 
     sock.on('error', () => {
-      if (valkeySocket !== sock) return;
-      markValkeyFailed();
-      valkeyReady = false;
-      valkeySocket = null;
-      resolveConnectionWaiters(false);
-      rejectPendingCallbacks();
+      failValkeySocket(sock);
     });
 
     sock.on('close', () => {
@@ -210,20 +212,10 @@ function ensureValkey(): boolean {
     });
 
     sock.on('timeout', () => {
-      if (valkeySocket !== sock) return;
-      markValkeyFailed();
-      valkeyReady = false;
-      valkeySocket = null;
-      resolveConnectionWaiters(false);
-      rejectPendingCallbacks();
-      sock.destroy();
+      failValkeySocket(sock);
     });
   } catch {
-    markValkeyFailed();
-    valkeyReady = false;
-    valkeySocket = null;
-    resolveConnectionWaiters(false);
-    rejectPendingCallbacks();
+    failValkeySocket(valkeySocket);
   }
 
   return false;
@@ -231,20 +223,27 @@ function ensureValkey(): boolean {
 
 function sendCommand(...args: (string | number)[]): Promise<string | number | null> {
   return new Promise((resolve) => {
-    if (!valkeySocket || !valkeyReady) {
+    const socket = valkeySocket;
+    if (!socket || !valkeyReady) {
       resolve(null);
       return;
     }
 
-    pendingCallbacks.push(resolve);
-    valkeySocket.write(encodeCommand(...args));
+    const callback = resolve as (reply: string | number | null) => void;
+    pendingCallbacks.push(callback);
+
+    try {
+      socket.write(encodeCommand(...args));
+    } catch {
+      failValkeySocket(socket);
+      return;
+    }
 
     // Safety timeout per command
     setTimeout(() => {
-      const idx = pendingCallbacks.indexOf(resolve as never);
+      const idx = pendingCallbacks.indexOf(callback);
       if (idx !== -1) {
-        pendingCallbacks.splice(idx, 1);
-        resolve(null);
+        failValkeySocket(socket);
       }
     }, 1000);
   });
