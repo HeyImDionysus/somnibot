@@ -35,4 +35,22 @@ describe('setup documentation alignment', () => {
     expect(docs).toContain('script-fallback private setup');
     expect(docs).toContain('approval-gated deployment');
   });
+
+  it('keeps Discord bot invite docs aligned to the launcher happy path', () => {
+    const readme = readRepoFile('README.md');
+    const launcherStep = readme.indexOf('### Step 5: Open the Launcher Setup GUI');
+    const inviteStep = readme.indexOf('### Step 6: Invite the Bot to Your Server');
+    const startStep = readme.indexOf('### Step 7: First-Time Setup');
+
+    expect(launcherStep).toBeGreaterThan(-1);
+    expect(inviteStep).toBeGreaterThan(launcherStep);
+    expect(startStep).toBeGreaterThan(inviteStep);
+    expect(readme).toContain('Do not click **Set Up & Start** or run the script fallback until after Step 6.');
+    expect(readme).toContain('After the bot is authorized in Discord, click **Set Up & Start**.');
+    expect(readme).toContain('Paste one Guild ID if you want the invite locked to one server.');
+    expect(readme).toContain('Click **Open Bot Invite** in the Discord setup section.');
+    expect(readme).toContain('Manual fallback');
+    expect(readme).toContain('Scopes," check: `bot` and `applications.commands`.');
+    expect(readme).toContain('re-invite it using the launcher invite flow from Step 6.');
+  });
 });
