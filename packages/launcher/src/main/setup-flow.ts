@@ -589,6 +589,10 @@ function findFirstBlockingStep(steps: SetupStep[]): SetupStep | undefined {
   ));
 }
 
+function isBlockingStep(step: SetupStep): boolean {
+  return step.status === 'blocked' || step.status === 'recoverable-error';
+}
+
 export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
   let deploymentPlan: VpsDeploymentPlan | undefined;
@@ -602,6 +606,12 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
     steps = buildRegularLocalSteps(input);
   }
   const firstBlocking = findFirstBlockingStep(steps);
+  const providerValidationStep = steps.find(step => step.id === 'provider-validation');
+  const callbackStep = steps.find(step => step.id === 'regular-callback');
+  const canRetryProviderValidation = runtimeMode === 'regular-local'
+    && Boolean(input.credentialReady)
+    && providerValidationStep?.status === 'recoverable-error'
+    && !(callbackStep && isBlockingStep(callbackStep));
   const summary = buildSummary(input, runtimeMode);
 
   let primaryAction: SetupPrimaryAction;
@@ -617,6 +627,12 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
       enabled: false,
       status: 'blocked',
       blockedReason: firstBlocking?.detail ?? 'VPS mode uses a separate manual deployment workflow in this launcher build.',
+    };
+  } else if (canRetryProviderValidation) {
+    primaryAction = {
+      label: 'Re-check Providers',
+      enabled: true,
+      status: 'ready',
     };
   } else if (firstBlocking) {
     primaryAction = {

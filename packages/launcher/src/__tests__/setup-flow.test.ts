@@ -190,8 +190,11 @@ describe('setup flow status', () => {
     expect(startStep?.status).toBe('pending');
     expect(startStep?.summary).toContain('provider validation fixes');
     expect(status.firstBlockingStepId).toBe('provider-validation');
-    expect(status.primaryAction.enabled).toBe(false);
-    expect(status.primaryAction.blockedReason).toContain('Discord application: Application ID mismatch.');
+    expect(status.primaryAction).toEqual({
+      label: 'Re-check Providers',
+      enabled: true,
+      status: 'ready',
+    });
   });
 
   it('blocks setup after Discord server readiness validation fails', () => {
@@ -231,8 +234,11 @@ describe('setup flow status', () => {
     expect(validationStep?.status).toBe('recoverable-error');
     expect(validationStep?.detail).toContain('Discord server: Bot is not in server 1464713668766732393');
     expect(status.firstBlockingStepId).toBe('provider-validation');
-    expect(status.primaryAction.enabled).toBe(false);
-    expect(status.primaryAction.blockedReason).toContain('Discord server: Bot is not in server 1464713668766732393');
+    expect(status.primaryAction).toEqual({
+      label: 'Re-check Providers',
+      enabled: true,
+      status: 'ready',
+    });
   });
 
   it('makes VPS domain, SSH target, and manual deploy readiness first-class steps', () => {

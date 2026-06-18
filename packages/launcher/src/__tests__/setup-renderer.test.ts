@@ -111,6 +111,8 @@ describe('launcher setup renderer wiring', () => {
     const preload = readSourceFile('main/preload.ts');
     const main = readSourceFile('main/index.ts');
     const configStore = readSourceFile('main/config-store.ts');
+    const validationIndex = main.indexOf('const validation = await validateAllCredentials(config);');
+    const authProviderIndex = main.indexOf('if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured)');
 
     expect(preload).toContain("getSetupStatus: (input?: Record<string, unknown>)");
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
@@ -151,6 +153,8 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('callbackBaseUrlChanged');
     expect(main).toContain('manualAuthProviderConfirmed && !callbackBaseUrlChanged');
     expect(main).toContain('const authConfigured = await configureDashboardAuthProvider({');
+    expect(validationIndex).toBeGreaterThan(-1);
+    expect(authProviderIndex).toBeGreaterThan(validationIndex);
     expect(main).toContain('evaluateDashboardHealthPayload(body)');
     expect(main).toContain('servicesStarted: true');
     expect(main).toContain('startLocalStack(config, { forceRestart: true })');

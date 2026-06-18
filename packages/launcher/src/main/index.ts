@@ -297,15 +297,6 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     }
   }
 
-  if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured) {
-    return {
-      ok: false,
-      stage: 'auth-provider',
-      message: 'Supabase Discord auth setup needs one more input.',
-      error: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
-    };
-  }
-
   const validation = await validateAllCredentials(config);
   if (!validation.valid) {
     return {
@@ -313,6 +304,18 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       stage: 'credentials',
       message: 'Credential validation failed.',
       error: validation.errors.join('\n\n'),
+      meta: validation.meta,
+      providerValidation: validation,
+      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+    };
+  }
+
+  if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured) {
+    return {
+      ok: false,
+      stage: 'auth-provider',
+      message: 'Supabase Discord auth setup needs one more input.',
+      error: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
       meta: validation.meta,
       providerValidation: validation,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
