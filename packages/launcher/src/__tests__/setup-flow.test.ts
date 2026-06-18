@@ -189,8 +189,56 @@ describe('setup flow status', () => {
     expect(validationStep?.detail).toContain('Discord application: Application ID mismatch.');
     expect(startStep?.status).toBe('pending');
     expect(startStep?.summary).toContain('provider validation fixes');
-    expect(status.firstBlockingStepId).toBeNull();
-    expect(status.primaryAction.enabled).toBe(true);
+    expect(status.firstBlockingStepId).toBe('provider-validation');
+    expect(status.primaryAction).toEqual({
+      label: 'Re-check Providers',
+      enabled: true,
+      status: 'ready',
+    });
+  });
+
+  it('blocks setup after Discord server readiness validation fails', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
+      providerValidation: {
+        valid: false,
+        errors: ['Bot is not in server 1464713668766732393, or the Guild ID is wrong.'],
+        checks: [
+          {
+            id: 'discord-bot-token',
+            label: 'Discord bot token',
+            status: 'success',
+            summary: 'Discord bot token verified for SomniBot.',
+          },
+          {
+            id: 'discord-application',
+            label: 'Discord application',
+            status: 'success',
+            summary: 'Application ID matches the bot token.',
+          },
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'failed',
+            summary: 'Discord server membership could not be verified.',
+            detail: 'Bot is not in server 1464713668766732393, or the Guild ID is wrong.',
+          },
+        ],
+      },
+    });
+
+    const validationStep = status.steps.find(step => step.id === 'provider-validation');
+    expect(validationStep?.status).toBe('recoverable-error');
+    expect(validationStep?.detail).toContain('Discord server: Bot is not in server 1464713668766732393');
+    expect(status.firstBlockingStepId).toBe('provider-validation');
+    expect(status.primaryAction).toEqual({
+      label: 'Re-check Providers',
+      enabled: true,
+      status: 'ready',
+    });
   });
 
   it('makes VPS domain, SSH target, and manual deploy readiness first-class steps', () => {
