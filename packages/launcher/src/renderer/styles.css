@@ -183,6 +183,14 @@ main::-webkit-scrollbar-thumb:hover {
   letter-spacing: 0.5px;
 }
 
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 /* ─── Runtime Setup ─── */
 #runtime-section {
   margin-bottom: 24px;
@@ -636,6 +644,16 @@ main::-webkit-scrollbar-thumb:hover {
 
 .link-btn:hover {
   background: var(--hot-pink-glow);
+}
+
+.link-btn:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.link-btn:disabled:hover {
+  background: none;
 }
 
 .link-btn.small {

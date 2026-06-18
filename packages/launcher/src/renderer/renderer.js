@@ -44,6 +44,7 @@ const btnToggleLogs = $('btn-toggle-logs');
 const btnCloseLogs = $('btn-close-logs');
 const btnHelp = $('btn-help');
 const btnOpenDiscord = $('btn-open-discord');
+const btnOpenDiscordInvite = $('btn-open-discord-invite');
 const btnOpenSupabase = $('btn-open-supabase');
 const btnCheckUpdates = $('btn-check-updates');
 
@@ -154,6 +155,7 @@ async function init() {
     }
     tailscalePublicCallbackBaseUrl = config.publicCallbackBaseUrl || '';
     setRuntimeMode(config.runtimeMode === 'vps' ? 'vps' : 'regular-local', { save: false });
+    updateDiscordInviteButton();
   } catch (err) {
     console.error('Failed to load config:', err);
   }
@@ -177,6 +179,7 @@ async function init() {
       input.classList.remove('error', 'valid');
       latestProviderValidation = null;
       updateRestoreBanner();
+      updateDiscordInviteButton();
       refreshSetupStatus();
     });
   }
@@ -859,6 +862,15 @@ btnOpenDiscord.addEventListener('click', () => {
   window.somnibot.openExternal('https://discord.com/developers/applications');
 });
 
+btnOpenDiscordInvite.addEventListener('click', () => {
+  const inviteUrl = buildDiscordInviteUrl();
+  if (!inviteUrl) {
+    showMessage('error', 'Enter a valid Discord Application ID before opening the bot invite.');
+    return;
+  }
+  window.somnibot.openExternal(inviteUrl);
+});
+
 btnOpenSupabase.addEventListener('click', () => {
   window.somnibot.openExternal('https://supabase.com/dashboard');
 });
@@ -1412,6 +1424,38 @@ function setTailscaleActionsDisabled(disabled) {
   btnTailscaleCheck.disabled = disabled;
   btnTailscaleEnable.disabled = disabled;
   btnTailscaleProbe.disabled = disabled;
+}
+
+function normalizeDiscordSnowflake(value) {
+  const trimmed = value.trim();
+  return /^\d{17,20}$/.test(trimmed) ? trimmed : '';
+}
+
+function buildDiscordInviteUrl() {
+  const applicationId = normalizeDiscordSnowflake(fields.discordApplicationId.value);
+  if (!applicationId) return '';
+
+  const params = new URLSearchParams({
+    client_id: applicationId,
+    permissions: '8',
+    scope: 'bot applications.commands',
+  });
+
+  const guildId = normalizeDiscordSnowflake(fields.discordGuildId.value);
+  if (guildId) {
+    params.set('guild_id', guildId);
+    params.set('disable_guild_select', 'true');
+  }
+
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
+}
+
+function updateDiscordInviteButton() {
+  const inviteUrl = buildDiscordInviteUrl();
+  btnOpenDiscordInvite.disabled = !inviteUrl;
+  btnOpenDiscordInvite.title = inviteUrl
+    ? 'Open the Discord bot invite for this Application ID'
+    : 'Enter a valid Discord Application ID first';
 }
 
 function fieldLabel(key) {

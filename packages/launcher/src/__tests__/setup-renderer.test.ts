@@ -25,6 +25,7 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('id="paypalClientSecret"');
     expect(html).toContain('id="paypalWebhookId"');
     expect(html).toContain('id="paypalSandbox"');
+    expect(html).toContain('id="btn-open-discord-invite"');
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
@@ -75,6 +76,13 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.');
     expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
+    expect(renderer).toContain("const btnOpenDiscordInvite = $('btn-open-discord-invite');");
+    expect(renderer).toContain('function buildDiscordInviteUrl()');
+    expect(renderer).toContain("permissions: '8'");
+    expect(renderer).toContain("scope: 'bot applications.commands'");
+    expect(renderer).toContain("params.set('guild_id', guildId)");
+    expect(renderer).toContain("params.set('disable_guild_select', 'true')");
+    expect(renderer).toContain('btnOpenDiscordInvite.addEventListener');
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('let latestProviderValidation = null;');
     expect(renderer).toContain('providerValidation: latestProviderValidation');

@@ -194,6 +194,15 @@ Save the file.
 
 ### Step 5: Invite the Bot to Your Server
 
+Use the launcher first:
+
+1. Paste the Discord Application ID into the launcher.
+2. Paste the Guild ID if you want the invite locked to one server.
+3. Click **Open Bot Invite** in the Discord setup section.
+4. Authorize the bot for your server.
+
+Manual fallback:
+
 1. Go back to [discord.com/developers/applications](https://discord.com/developers/applications) → your app → **OAuth2** → **URL Generator**.
 2. Under "Scopes," check: `bot` and `applications.commands`.
 3. Under "Bot Permissions," check: `Administrator` (or individually select the permissions you want).

@@ -35,4 +35,12 @@ describe('setup documentation alignment', () => {
     expect(docs).toContain('script-fallback private setup');
     expect(docs).toContain('approval-gated deployment');
   });
+
+  it('keeps Discord bot invite docs aligned to the launcher happy path', () => {
+    const readme = readRepoFile('README.md');
+
+    expect(readme).toContain('Click **Open Bot Invite** in the Discord setup section.');
+    expect(readme).toContain('Manual fallback');
+    expect(readme).toContain('Scopes," check: `bot` and `applications.commands`.');
+  });
 });
