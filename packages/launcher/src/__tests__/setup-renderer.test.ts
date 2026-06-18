@@ -72,6 +72,9 @@ describe('launcher setup renderer wiring', () => {
     expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
+    expect(renderer).toContain('let latestProviderValidation = null;');
+    expect(renderer).toContain('providerValidation: latestProviderValidation');
+    expect(renderer).toContain('latestProviderValidation = result.providerValidation;');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
     expect(renderer).toContain('The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.');
     expect(renderer).not.toContain('does not run SSH or deploy commands in this build');
@@ -107,6 +110,7 @@ describe('launcher setup renderer wiring', () => {
     expect(preload).toContain("ipcRenderer.invoke('get-setup-status', input)");
     expect(preload).toContain("ipcRenderer.invoke('run-setup-automation', config)");
     expect(preload).toContain('servicesStarted?: boolean');
+    expect(preload).toContain('providerValidation?:');
     expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
     expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
     expect(main).toContain("ipcMain.handle('get-setup-status'");
@@ -123,6 +127,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('vpsSshUser: input.vpsSshUser ?? config.vpsSshUser');
     expect(main).toContain('vpsDeployPath: input.vpsDeployPath ?? config.vpsDeployPath');
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
+    expect(main).toContain('providerValidation: input.providerValidation');
     expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');

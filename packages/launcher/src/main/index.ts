@@ -24,7 +24,7 @@ import {
   getTailscaleReadiness,
   probePublicCallbackHealth,
 } from './tailscale-service.js';
-import { validateAllCredentials } from './validators.js';
+import { validateAllCredentials, type FullValidationResult } from './validators.js';
 import { startAll, stopAll, getStatus, isRunning, checkPortAvailable, cleanupStaleProcesses } from './process-manager.js';
 import { pushToSupabase } from './supabase-sync.js';
 import { initUpdater } from './updater.js';
@@ -82,6 +82,7 @@ interface SetupAutomationResult {
   error?: string;
   servicesStarted?: boolean;
   meta?: Record<string, string>;
+  providerValidation?: FullValidationResult;
   warnings?: string[];
   publicCallbackBaseUrl?: string;
   callbackProbe?: Awaited<ReturnType<typeof probePublicCallbackHealth>>;
@@ -311,6 +312,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       message: 'Credential validation failed.',
       error: validation.errors.join('\n\n'),
       meta: validation.meta,
+      providerValidation: validation,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
   }
@@ -323,6 +325,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       message: 'Local services did not start.',
       error: startResult.error,
       meta: validation.meta,
+      providerValidation: validation,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
   }
@@ -336,6 +339,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       error: dashboardReady.error,
       servicesStarted: true,
       meta: validation.meta,
+      providerValidation: validation,
       warnings,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
@@ -356,6 +360,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       error: authConfigured.error,
       servicesStarted: true,
       meta: validation.meta,
+      providerValidation: validation,
       warnings,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
@@ -375,6 +380,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     message: 'Setup automation finished and local services are running.',
     servicesStarted: true,
     meta: validation.meta,
+    providerValidation: validation,
     warnings,
     publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     ...(callbackProbe ? { callbackProbe } : {}),
@@ -530,6 +536,7 @@ function registerIpcHandlers(): void {
         && config.supabaseSecretKey
         && config.supabasePublishableKey
       ),
+      providerValidation: input.providerValidation,
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
         ?? config.supabaseDiscordAuthProviderConfigured,

@@ -37,6 +37,18 @@ export interface SomniBotAPI {
     error?: string;
     servicesStarted?: boolean;
     meta?: Record<string, string>;
+    providerValidation?: {
+      valid: boolean;
+      errors: string[];
+      meta: Record<string, string>;
+      checks: Array<{
+        id: string;
+        label: string;
+        status: 'success' | 'failed' | 'skipped';
+        summary: string;
+        detail?: string;
+      }>;
+    };
     warnings?: string[];
     publicCallbackBaseUrl?: string;
     callbackProbe?: {
@@ -52,6 +64,13 @@ export interface SomniBotAPI {
     valid: boolean;
     errors: string[];
     meta: Record<string, string>;
+    checks: Array<{
+      id: string;
+      label: string;
+      status: 'success' | 'failed' | 'skipped';
+      summary: string;
+      detail?: string;
+    }>;
   }>;
 
   // Process control

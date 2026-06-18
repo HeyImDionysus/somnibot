@@ -10,11 +10,17 @@ import {
 } from './runtime-profile.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
 import { buildVpsHealthVerification, type VpsHealthVerification } from './vps-health-verification.js';
+import type { ProviderValidationCheck } from './validators.js';
 
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
 
 export interface SetupFlowInput extends RuntimeNetworkingConfig {
   credentialReady?: boolean;
+  providerValidation?: {
+    valid: boolean;
+    errors?: string[];
+    checks: ProviderValidationCheck[];
+  };
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
   tailscaleAuthKeyReady?: boolean;
@@ -121,6 +127,83 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
     detail: 'Add a Supabase Management API token so the launcher can configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
     actionLabel: 'Add token or confirm manual setup',
     manualAction: true,
+  };
+}
+
+function buildCredentialStep(input: SetupFlowInput, runtimeLabel: string): SetupStep {
+  return input.credentialReady
+    ? {
+      id: 'credentials',
+      label: 'Provider fields',
+      status: 'success',
+      summary: 'Required provider fields are filled in.',
+      detail: `The launcher can validate Discord and Supabase before ${runtimeLabel} setup continues.`,
+    }
+    : {
+      id: 'credentials',
+      label: 'Provider fields',
+      status: 'pending',
+      summary: 'Required provider fields are not complete.',
+      detail: 'Fill in the Discord bot, Discord OAuth, and Supabase project fields before validation.',
+    };
+}
+
+function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
+  if (!input.credentialReady) {
+    return {
+      id: 'provider-validation',
+      label: 'Provider validation',
+      status: 'pending',
+      summary: 'Waiting for provider fields.',
+      detail: 'After the required fields are filled, validation checks the Discord bot, Discord OAuth app, Discord server, and Supabase project.',
+    };
+  }
+
+  if (input.checking) {
+    return {
+      id: 'provider-validation',
+      label: 'Provider validation',
+      status: 'loading',
+      summary: 'Checking provider readiness.',
+      detail: 'The launcher is verifying Discord and Supabase without exposing secrets in the setup steps.',
+    };
+  }
+
+  const validation = input.providerValidation;
+  const checks = Array.isArray(validation?.checks) ? validation.checks : [];
+  if (checks.length === 0) {
+    return {
+      id: 'provider-validation',
+      label: 'Provider validation',
+      status: 'pending',
+      summary: 'Provider checks will run during setup.',
+      detail: 'Setup validates the Discord bot token, Application ID, optional server membership, client secret presence, and Supabase API keys before services start.',
+    };
+  }
+
+  const failedChecks = checks.filter(check => check.status === 'failed');
+  if (failedChecks.length > 0) {
+    return {
+      id: 'provider-validation',
+      label: 'Provider validation',
+      status: 'recoverable-error',
+      summary: `${failedChecks.length} provider check${failedChecks.length === 1 ? '' : 's'} need attention.`,
+      detail: failedChecks
+        .map(check => `${check.label}: ${check.detail || check.summary}`)
+        .join('\n'),
+      actionLabel: 'Fix and retry',
+    };
+  }
+
+  return {
+    id: 'provider-validation',
+    label: 'Provider validation',
+    status: 'success',
+    summary: 'Discord and Supabase provider checks passed.',
+    detail: checks
+      .filter(check => check.status === 'success')
+      .map(check => `${check.label}: ${check.summary}`)
+      .join('\n'),
   };
 }
 
@@ -276,21 +359,8 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
 
   const callbackBlocksStart = callbackStep.status === 'blocked' || callbackStep.status === 'recoverable-error';
 
-  const credentialStep: SetupStep = input.credentialReady
-    ? {
-      id: 'credentials',
-      label: 'Credentials',
-      status: 'success',
-      summary: 'Required credentials are filled in.',
-      detail: 'Validation can now check Discord and Supabase.',
-    }
-    : {
-      id: 'credentials',
-      label: 'Credentials',
-      status: 'pending',
-      summary: 'Required credential fields are not complete.',
-      detail: 'Fill in Discord and Supabase credentials after the public callback step is ready.',
-    };
+  const credentialStep = buildCredentialStep(input, 'local');
+  const providerValidationStep = buildProviderValidationStep(input);
 
   const authProviderStep = buildAuthProviderStep(input);
 
@@ -327,7 +397,15 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
             summary: 'Waiting for credentials.',
             detail: 'Complete the credential fields before validation and start.',
           }
-          : !hasAuthProviderPath(input)
+          : providerValidationStep.status === 'recoverable-error'
+            ? {
+              id: 'start-local',
+              label: 'Start locally',
+              status: 'pending',
+              summary: 'Waiting for provider validation fixes.',
+              detail: 'Fix the provider readiness items above, then run setup again. The launcher will re-check everything before starting services.',
+            }
+            : !hasAuthProviderPath(input)
             ? {
               id: 'start-local',
               label: 'Start locally',
@@ -354,6 +432,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     },
     callbackStep,
     credentialStep,
+    providerValidationStep,
     authProviderStep,
     startStep,
   ];
@@ -413,21 +492,8 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
       manualAction: true,
     };
 
-  const credentialStep: SetupStep = input.credentialReady
-    ? {
-      id: 'credentials',
-      label: 'Credentials',
-      status: 'success',
-      summary: 'Required credentials are filled in.',
-      detail: 'Credentials can be validated before a separate VPS deployment workflow.',
-    }
-    : {
-      id: 'credentials',
-      label: 'Credentials',
-      status: 'pending',
-      summary: 'Required credential fields are not complete.',
-      detail: 'Fill in Discord and Supabase credentials after the VPS readiness steps.',
-    };
+  const credentialStep = buildCredentialStep(input, 'VPS');
+  const providerValidationStep = buildProviderValidationStep(input);
   const authProviderStep = buildAuthProviderStep(input);
 
   const deployStep: SetupStep = deploymentPlan.status === 'ready'
@@ -468,13 +534,17 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
     domainStep,
     sshStep,
     credentialStep,
+    providerValidationStep,
     authProviderStep,
     deployStep,
   ];
 }
 
 function findFirstBlockingStep(steps: SetupStep[]): SetupStep | undefined {
-  return steps.find(step => step.status === 'blocked' || step.status === 'recoverable-error');
+  return steps.find(step => (
+    step.status === 'blocked'
+    || (step.status === 'recoverable-error' && step.id !== 'provider-validation')
+  ));
 }
 
 export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
