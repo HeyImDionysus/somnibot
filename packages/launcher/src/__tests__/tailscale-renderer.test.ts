@@ -18,6 +18,7 @@ describe('launcher renderer Tailscale setup wiring', () => {
     expect(html).toContain('id="btn-tailscale-enable"');
     expect(html).toContain('id="btn-tailscale-probe"');
     expect(html).toContain('id="tailscale-command"');
+    expect(html).toContain('id="tailscaleAuthKey"');
   });
 
   it('gates Funnel enablement behind the explicit Enable Funnel click handler', () => {
@@ -27,6 +28,7 @@ describe('launcher renderer Tailscale setup wiring', () => {
 
     expect(enableCallCount).toBe(1);
     expect(clickHandler).not.toBeNull();
+    expect(clickHandler?.[0]).toContain('await saveConfig();');
   });
 
   it('surfaces the documented DNS propagation wait in the GUI state copy', () => {
@@ -82,8 +84,9 @@ describe('launcher renderer Tailscale setup wiring', () => {
     const enableHandler = main.match(/ipcMain\.handle\('tailscale:enable-funnel'[\s\S]*?return readiness;/)?.[0] ?? '';
 
     expect(enableHandler).toContain("if (cfg.runtimeMode !== 'regular-local')");
+    expect(enableHandler).toContain('authKey: cfg.tailscaleAuthKey');
     expect(enableHandler.indexOf("cfg.runtimeMode !== 'regular-local'")).toBeLessThan(
-      enableHandler.indexOf('enableSomniBotFunnel()'),
+      enableHandler.indexOf('enableSomniBotFunnel'),
     );
   });
 });

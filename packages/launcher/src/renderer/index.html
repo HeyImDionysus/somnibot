@@ -270,6 +270,11 @@
         </div>
 
         <div class="tailscale-section" id="tailscale-section">
+          <div class="field">
+            <label for="tailscaleAuthKey">Tailscale Auth Key <span class="opt">(optional)</span></label>
+            <input type="password" id="tailscaleAuthKey" placeholder="tskey-auth-..." autocomplete="off" />
+            <button class="toggle-vis" data-target="tailscaleAuthKey" title="Show/hide">👁</button>
+          </div>
           <div class="tailscale-summary">
             <span class="status-dot" id="tailscale-dot"></span>
             <span id="tailscale-status-text">Tailscale not checked yet.</span>

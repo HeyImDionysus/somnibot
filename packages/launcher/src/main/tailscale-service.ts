@@ -1,4 +1,7 @@
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   REGULAR_LOCAL_DASHBOARD_HOSTNAME,
@@ -121,6 +124,10 @@ export function buildStatusArgs(): string[] {
 
 export function buildVersionArgs(): string[] {
   return ['version'];
+}
+
+export function buildLoginWithAuthKeyArgs(authKeyFilePath: string): string[] {
+  return ['login', `--auth-key=file:${authKeyFilePath}`, '--timeout=30s'];
 }
 
 export const defaultTailscaleRunner: TailscaleRunner = async (args, options = {}) => {
@@ -437,9 +444,85 @@ export async function getTailscaleReadiness(
   }
 }
 
-export async function enableSomniBotFunnel(
+function authKeyMissingReadiness(): TailscaleReadiness {
+  return readinessBase({
+    state: 'not-logged-in',
+    installed: true,
+    message: 'Tailscale is installed, but this machine is not signed in.',
+    detail: 'Add a Tailscale auth key, then enable Funnel again.',
+  });
+}
+
+export async function loginWithTailscaleAuthKey(
+  authKey: string,
   runner: TailscaleRunner = defaultTailscaleRunner,
 ): Promise<TailscaleReadiness> {
+  const trimmed = authKey.trim();
+  if (!trimmed) return authKeyMissingReadiness();
+
+  let dir = '';
+  try {
+    dir = await mkdtemp(join(tmpdir(), 'somnibot-tailscale-auth-'));
+    const authKeyPath = join(dir, 'authkey');
+    await writeFile(authKeyPath, trimmed, { mode: 0o600 });
+    await runner(buildLoginWithAuthKeyArgs(authKeyPath), { timeoutMs: 60_000 });
+  } catch (err) {
+    const error = err as TailscaleCommandError;
+    const text = `${error.stderr ?? ''}\n${error.stdout ?? ''}\n${error.message ?? ''}`.toLowerCase();
+
+    if (error.code === 'ENOENT') {
+      return readinessBase({
+        state: 'not-installed',
+        message: 'Tailscale CLI was not found on this machine.',
+        detail: 'Install Tailscale before enabling the public callback.',
+      });
+    }
+
+    if (text.includes('permission') || text.includes('policy') || text.includes('attribute')) {
+      return readinessBase({
+        state: 'needs-policy',
+        installed: true,
+        message: 'Tailscale rejected auth or Funnel setup because tailnet policy approval is needed.',
+        detail: error.stderr || error.message,
+      });
+    }
+
+    return readinessBase({
+      state: 'not-logged-in',
+      installed: true,
+      message: 'Tailscale auth failed.',
+      detail: error.stderr || error.message,
+    });
+  } finally {
+    if (dir) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  return getTailscaleReadiness(runner);
+}
+
+export async function enableSomniBotFunnel(
+  runner: TailscaleRunner = defaultTailscaleRunner,
+  options: { authKey?: string } = {},
+): Promise<TailscaleReadiness> {
+  const authKey = options.authKey?.trim() ?? '';
+  if (authKey) {
+    const readiness = await getTailscaleReadiness(runner);
+    if (readiness.state === 'not-installed' || readiness.state === 'needs-policy' || readiness.state === 'error') {
+      return readiness;
+    }
+    if (!readiness.loggedIn || readiness.state === 'not-logged-in') {
+      const loginReadiness = await loginWithTailscaleAuthKey(authKey, runner);
+      if (!loginReadiness.loggedIn) return loginReadiness;
+      if (loginReadiness.funnelEnabled && loginReadiness.publicCallbackBaseUrl) {
+        return loginReadiness;
+      }
+    } else if (readiness.funnelEnabled && readiness.publicCallbackBaseUrl) {
+      return readiness;
+    }
+  }
+
   const args = buildEnableFunnelArgs();
 
   try {

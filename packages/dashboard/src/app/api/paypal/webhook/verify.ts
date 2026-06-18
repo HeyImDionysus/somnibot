@@ -22,6 +22,21 @@ if (!process.env.WEBHOOK_REPLAY_SECRET && process.env.NEXTAUTH_SECRET) {
 
 let _replaySecret: string | undefined;
 
+const PAYPAL_SIGNATURE_HEADERS = [
+  'paypal-auth-algo',
+  'paypal-cert-url',
+  'paypal-transmission-id',
+  'paypal-transmission-sig',
+  'paypal-transmission-time',
+] as const;
+
+function hasRequiredSignatureHeaders(req: NextRequest): boolean {
+  return PAYPAL_SIGNATURE_HEADERS.every((header) => {
+    const value = req.headers.get(header);
+    return typeof value === 'string' && value.trim().length > 0;
+  });
+}
+
 function getReplaySecret(): string {
   if (_replaySecret) return _replaySecret;
 
@@ -71,6 +86,11 @@ export async function verifyWebhookSignature(
   req: NextRequest,
   rawBody: string,
 ): Promise<boolean> {
+  if (!hasRequiredSignatureHeaders(req)) {
+    console.error('[Webhook] PayPal signature headers are missing — refusing to process');
+    return false;
+  }
+
   const paypalConfig = await getPayPalRuntimeConfig();
   if (!paypalConfig.webhookId) {
     console.error('[Webhook] PAYPAL_WEBHOOK_ID is not configured — refusing to process');

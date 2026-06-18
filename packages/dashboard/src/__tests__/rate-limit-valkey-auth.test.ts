@@ -15,6 +15,10 @@ interface ValkeyFixture {
   close: () => Promise<void>;
 }
 
+interface ValkeyFixtureOptions {
+  ignorePingAfterReplies?: number;
+}
+
 function parseRespCommand(buffer: string): ParsedCommand | null {
   if (!buffer.startsWith('*')) return null;
 
@@ -50,9 +54,21 @@ function bulk(value: string): string {
   return `$${Buffer.byteLength(value)}\r\n${value}\r\n`;
 }
 
-async function startValkeyFixture(password: string, heartbeat: string): Promise<ValkeyFixture> {
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function startValkeyFixture(
+  password: string,
+  heartbeat: string,
+  options: ValkeyFixtureOptions = {},
+): Promise<ValkeyFixture> {
   const sockets = new Set<Socket>();
   const commands: string[][] = [];
+  let pingReplies = 0;
+  let ignoredPing = false;
   const server = createServer((socket) => {
     sockets.add(socket);
     let buffer = '';
@@ -83,6 +99,15 @@ async function startValkeyFixture(password: string, heartbeat: string): Promise<
         }
 
         if (name === 'PING') {
+          if (
+            options.ignorePingAfterReplies !== undefined &&
+            pingReplies >= options.ignorePingAfterReplies &&
+            !ignoredPing
+          ) {
+            ignoredPing = true;
+            continue;
+          }
+          pingReplies += 1;
           socket.write('+PONG\r\n');
         } else if (name === 'GET' && args[0] === 'somnibot:heartbeat:bot') {
           socket.write(bulk(heartbeat));
@@ -167,6 +192,92 @@ describe('rate-limit Valkey authentication', () => {
         ['GET', 'somnibot:heartbeat:bot'],
       ]);
     } finally {
+      await fixture.close();
+    }
+  });
+
+  it('retries Valkey after a transient authentication failure backoff', async () => {
+    const heartbeat = JSON.stringify({ timestamp: Date.now() });
+    const fixture = await startValkeyFixture('correct value', heartbeat);
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    process.env.VALKEY_URL = 'redis://:wrong-value@127.0.0.1:' + new URL(fixture.url).port;
+
+    try {
+      const { checkValkeyHealth } = await import('@/lib/api/rate-limit');
+
+      await expect(checkValkeyHealth()).resolves.toBe(false);
+
+      process.env.VALKEY_URL = fixture.url;
+      now += 5_001;
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'wrong-value'],
+        ['AUTH', 'correct value'],
+        ['PING'],
+      ]);
+    } finally {
+      vi.restoreAllMocks();
+      await fixture.close();
+    }
+  });
+
+  it('keeps the Valkey health socket usable after an idle period', async () => {
+    const heartbeat = JSON.stringify({ timestamp: Date.now() });
+    const fixture = await startValkeyFixture('idle-safe value', heartbeat);
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { checkValkeyHealth, readValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await wait(2_100);
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await expect(readValkeyKey('somnibot:heartbeat:bot')).resolves.toBe(heartbeat);
+
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'idle-safe value'],
+        ['PING'],
+        ['PING'],
+        ['GET', 'somnibot:heartbeat:bot'],
+      ]);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it('reconnects after a ready Valkey socket stops answering commands', async () => {
+    const heartbeat = JSON.stringify({ timestamp: Date.now() });
+    const fixture = await startValkeyFixture('timeout-safe value', heartbeat, {
+      ignorePingAfterReplies: 1,
+    });
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    process.env.VALKEY_URL = fixture.url;
+
+    try {
+      const { checkValkeyHealth, readValkeyKey } = await import('@/lib/api/rate-limit');
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await expect(checkValkeyHealth()).resolves.toBe(false);
+      await expect(readValkeyKey('somnibot:heartbeat:bot')).resolves.toBeNull();
+
+      now += 5_001;
+
+      await expect(checkValkeyHealth()).resolves.toBe(true);
+      await expect(readValkeyKey('somnibot:heartbeat:bot')).resolves.toBe(heartbeat);
+
+      expect(fixture.commands).toEqual([
+        ['AUTH', 'timeout-safe value'],
+        ['PING'],
+        ['PING'],
+        ['AUTH', 'timeout-safe value'],
+        ['PING'],
+        ['GET', 'somnibot:heartbeat:bot'],
+      ]);
+    } finally {
+      vi.restoreAllMocks();
       await fixture.close();
     }
   });

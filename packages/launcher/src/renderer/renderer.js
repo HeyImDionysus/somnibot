@@ -20,6 +20,7 @@ const fields = {
   supabaseSecretKey: $('supabaseSecretKey'),
   supabasePublishableKey: $('supabasePublishableKey'),
   supabaseDbPassword: $('supabaseDbPassword'),
+  tailscaleAuthKey: $('tailscaleAuthKey'),
 };
 
 const runtimeFields = {
@@ -1044,9 +1045,10 @@ btnTailscaleEnable.addEventListener('click', async () => {
   tailscaleReadinessSeq += 1;
   btnTailscaleEnable.disabled = true;
   btnTailscaleEnable.textContent = 'Enabling...';
-  renderTailscaleBusy('Requesting Funnel approval...');
+  renderTailscaleBusy('Signing in and enabling Funnel...');
 
   try {
+    await saveConfig();
     const readiness = await window.somnibot.enableTailscaleFunnel();
     renderTailscaleReadiness(readiness);
     if (readiness.publicCallbackBaseUrl) {
@@ -1144,7 +1146,7 @@ function renderTailscaleReadiness(readiness) {
   tailscaleUrl.classList.toggle('hidden', !publicUrl);
   tailscaleUrl.textContent = publicUrl;
 
-  btnTailscaleEnable.classList.toggle('hidden', readiness.state !== 'not-configured');
+  btnTailscaleEnable.classList.toggle('hidden', !['not-configured', 'not-logged-in'].includes(readiness.state));
   btnTailscaleProbe.classList.toggle('hidden', !publicUrl);
 
   const note = tailscaleReadinessNote(readiness);
@@ -1187,7 +1189,7 @@ function tailscaleReadinessNote(readiness) {
     case 'not-installed':
       return 'Install Tailscale, sign in, then check again.';
     case 'not-logged-in':
-      return 'Sign in through the Tailscale app or CLI, then check again.';
+      return 'Add a Tailscale auth key, then enable Funnel again.';
     case 'needs-policy':
       return 'Tailnet policy must allow Funnel before SomniBot can automate this step.';
     case 'unsupported-platform':
