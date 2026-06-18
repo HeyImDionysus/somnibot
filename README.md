@@ -312,7 +312,13 @@ Provider callback settings:
 | Discord app OAuth2 redirect for Supabase provider | `https://<project-ref>.supabase.co/auth/v1/callback` |
 | PayPal webhook URL | `<public-callback-base>/api/paypal/webhook` |
 
-PayPal webhook subscriptions should include:
+Use the launcher first: paste the PayPal app Client ID and Client Secret, then
+click **Create/Update Webhook** after the public callback URL is ready. The
+launcher creates or updates a webhook for `<public-callback-base>/api/paypal/webhook`
+and saves the returned Webhook ID.
+
+Manual fallback: create the webhook in the PayPal Developer Dashboard with these
+subscriptions:
 
 - `CHECKOUT.ORDER.APPROVED`
 - `PAYMENT.CAPTURE.COMPLETED`

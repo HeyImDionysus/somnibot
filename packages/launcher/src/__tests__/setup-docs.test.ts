@@ -36,6 +36,18 @@ describe('setup documentation alignment', () => {
     expect(docs).toContain('approval-gated deployment');
   });
 
+  it('keeps PayPal webhook docs aligned to the launcher automation path', () => {
+    const docs = [
+      readRepoFile('README.md'),
+      readRepoFile('DEPLOYMENT.md'),
+    ].join('\n');
+
+    expect(docs).toContain('click **Create/Update Webhook**');
+    expect(docs).toContain('The launcher creates or updates');
+    expect(docs).toContain('Manual fallback');
+    expect(docs).toContain('PayPal Developer Dashboard');
+  });
+
   it('keeps Discord bot invite docs aligned to the launcher happy path', () => {
     const readme = readRepoFile('README.md');
     const launcherStep = readme.indexOf('### Step 5: Open the Launcher Setup GUI');

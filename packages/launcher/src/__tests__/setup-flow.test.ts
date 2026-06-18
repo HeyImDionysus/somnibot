@@ -129,6 +129,7 @@ describe('setup flow status', () => {
     const incompleteStep = incompleteStatus.steps.find(step => step.id === 'paypal-webhook');
     expect(incompleteStep?.status).toBe('pending');
     expect(incompleteStep?.summary).toContain('Waiting for PayPal');
+    expect(incompleteStep?.detail).toContain('Create/Update Webhook');
     expect(incompleteStatus.primaryAction.enabled).toBe(true);
 
     const readyStatus = buildSetupStatus({
