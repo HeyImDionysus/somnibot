@@ -26,6 +26,52 @@ describe('setup flow status', () => {
     expect(status.summary.diagnostics.operatorDashboardUrl).toBe('http://localhost:3456');
   });
 
+  it('blocks regular local setup when Tailscale is known missing', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      tailscaleReadinessState: 'not-installed',
+      ...completeCredentials,
+    });
+
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('blocked');
+    expect(callbackStep?.summary).toContain('not installed');
+    expect(callbackStep?.manualAction).toBe(true);
+    expect(status.firstBlockingStepId).toBe('regular-callback');
+    expect(status.primaryAction.enabled).toBe(false);
+    expect(status.primaryAction.blockedReason).toContain('Install Tailscale');
+  });
+
+  it('blocks regular local setup when Tailscale is signed out without an auth key', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      tailscaleReadinessState: 'not-logged-in',
+      ...completeCredentials,
+    });
+
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('blocked');
+    expect(callbackStep?.detail).toContain('Sign in to Tailscale');
+    expect(status.firstBlockingStepId).toBe('regular-callback');
+    expect(status.primaryAction.enabled).toBe(false);
+  });
+
+  it('lets regular local setup sign in to Tailscale when an auth key is saved', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      tailscaleReadinessState: 'not-logged-in',
+      tailscaleAuthKeyReady: true,
+      ...completeCredentials,
+    });
+
+    const callbackStep = status.steps.find(step => step.id === 'regular-callback');
+    expect(callbackStep?.status).toBe('pending');
+    expect(callbackStep?.summary).toContain('sign-in can be automated');
+    expect(callbackStep?.detail).toContain('saved Tailscale auth key');
+    expect(status.firstBlockingStepId).toBeNull();
+    expect(status.primaryAction.enabled).toBe(true);
+  });
+
   it('enables regular local validation only after callback and credentials are ready', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',

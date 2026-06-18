@@ -318,6 +318,19 @@ function platformWarningMessage(): string {
   return '';
 }
 
+function isUnsupportedFunnelText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes('funnel') && (
+    normalized.includes('unsupported')
+    || normalized.includes('not supported')
+    || normalized.includes('not available')
+    || normalized.includes('unavailable')
+    || normalized.includes('unknown command')
+    || normalized.includes('unknown subcommand')
+    || normalized.includes('not implemented')
+  );
+}
+
 function commandPreview(): string[] {
   return ['tailscale', ...buildEnableFunnelArgs()];
 }
@@ -420,6 +433,18 @@ export async function getTailscaleReadiness(
   } catch (err) {
     const error = err as TailscaleCommandError;
     const text = `${error.stderr}\n${error.stdout}\n${error.message}`.toLowerCase();
+    if (isUnsupportedFunnelText(text)) {
+      return readinessBase({
+        state: 'unsupported-platform',
+        installed: true,
+        loggedIn: true,
+        version,
+        status,
+        message: 'This Tailscale install does not support the CLI Funnel feature.',
+        detail: error.stderr || error.message || platformWarning,
+      });
+    }
+
     if (text.includes('funnel') && (text.includes('policy') || text.includes('permission') || text.includes('attribute'))) {
       return readinessBase({
         state: 'needs-policy',
@@ -530,6 +555,16 @@ export async function enableSomniBotFunnel(
   } catch (err) {
     const error = err as TailscaleCommandError;
     const text = `${error.stderr}\n${error.stdout}\n${error.message}`.toLowerCase();
+    if (isUnsupportedFunnelText(text)) {
+      return readinessBase({
+        state: 'unsupported-platform',
+        installed: true,
+        loggedIn: true,
+        message: 'This Tailscale install does not support the CLI Funnel feature.',
+        detail: error.stderr || error.message,
+      });
+    }
+
     if (text.includes('login') || text.includes('not logged in') || text.includes('not signed in')) {
       return readinessBase({
         state: 'not-logged-in',

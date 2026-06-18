@@ -36,6 +36,21 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('inputmode="url"');
   });
 
+  it('presents the regular-local callback URL as auto-filled instead of required manual setup', () => {
+    const html = readSourceFile('renderer/index.html');
+    const renderer = readSourceFile('renderer/renderer.js');
+
+    expect(html).toContain('Public Callback URL <span class="opt">(auto-filled)</span>');
+    expect(html).toContain('placeholder="Auto-filled by Tailscale Funnel"');
+    expect(html).toContain('The launcher fills this after Tailscale Funnel is ready. Paste an HTTPS URL only as a fallback.');
+    expect(html).not.toContain('Public Callback URL <span class="req">*</span>');
+    expect(renderer).toContain('let latestTailscaleReadiness = null;');
+    expect(renderer).toContain('tailscaleReadinessState: runtimeMode === \'regular-local\' ? latestTailscaleReadiness?.state : undefined');
+    expect(renderer).toContain('tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0');
+    expect(renderer).toContain('latestTailscaleReadiness = readiness;');
+    expect(renderer).toContain('const firstSetupField = runtimeMode === \'vps\' ? runtimeFields.vpsDomain : fields.discordToken;');
+  });
+
   it('renders derived callback values from setup diagnostics without exposing ports in normal labels', () => {
     const renderer = readSourceFile('renderer/renderer.js');
 
@@ -110,6 +125,8 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
     expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
+    expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');
+    expect(main).toContain('tailscaleReadinessState: input.tailscaleReadinessState');
     expect(main).toContain('setupLocked?: boolean');
     expect(main).toContain('response.status === 403 && body?.setupLocked');
     expect(main).toContain('manualAuthProviderConfirmed');

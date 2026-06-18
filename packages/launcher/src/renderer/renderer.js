@@ -111,6 +111,7 @@ let setupStatus = null;
 let setupStatusSeq = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
+let latestTailscaleReadiness = null;
 let tailscaleReadinessSeq = 0;
 let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
@@ -293,6 +294,8 @@ async function refreshSetupStatus(options = {}) {
     credentialReady: isCredentialFormComplete(),
     supabaseAccessTokenReady: fields.supabaseAccessToken.value.trim().length > 0,
     supabaseDiscordAuthProviderConfigured: fields.supabaseDiscordAuthProviderConfigured.checked,
+    tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0,
+    tailscaleReadinessState: runtimeMode === 'regular-local' ? latestTailscaleReadiness?.state : undefined,
     dashboardOnline: latestProcessStatus?.dashboard === 'online',
     checking: Boolean(options.checking),
   };
@@ -1009,18 +1012,18 @@ async function initOnboarding() {
 function dismissOnboarding() {
   onboardingOverlay.classList.add('hidden');
   window.somnibot.completeFirstRun();
-  const firstRuntimeField = runtimeMode === 'vps' ? runtimeFields.vpsDomain : runtimeFields.publicCallbackBaseUrl;
-  firstRuntimeField.focus();
+  const firstSetupField = runtimeMode === 'vps' ? runtimeFields.vpsDomain : fields.discordToken;
+  firstSetupField.focus();
 }
 
 function renderOnboardingRuntimeStep() {
   if (!onboardingRuntimeTitle || !onboardingRuntimeDesc || !onboardingRuntimeList) return;
 
   const isVps = runtimeMode === 'vps';
-  onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Public Callbacks';
+  onboardingRuntimeTitle.textContent = isVps ? 'Prepare VPS Readiness' : 'Prepare Local Access';
   onboardingRuntimeDesc.textContent = isVps
     ? 'VPS mode needs a domain, SSH target, and guided deployment readiness before credentials can be validated.'
-    : 'Regular local mode needs Tailscale Funnel readiness before credentials can be validated.';
+    : 'Regular local mode checks Tailscale, prepares Funnel, and fills the public callback URL for you.';
 
   const items = isVps
     ? [
@@ -1029,9 +1032,9 @@ function renderOnboardingRuntimeStep() {
       ['Guided deploy', 'The launcher can run read-only SSH preflight, dry-run deployment, and approval-gated deployment with redacted output.'],
     ]
     : [
-      ['Tailscale Funnel', 'Enable Funnel for this machine so providers can reach the dashboard over HTTPS.'],
-      ['Public callback URL', 'Paste the Funnel URL into the setup screen before credential validation.'],
-      ['Local dashboard', 'The launcher keeps the dashboard local while public callbacks use the Funnel URL.'],
+      ['Tailscale check', 'The launcher detects whether Tailscale is installed, signed in, and allowed to use Funnel.'],
+      ['Automatic Funnel', 'If a Tailscale auth key is saved, setup can sign in, enable Funnel, and fill the callback URL.'],
+      ['Fallback URL', 'Paste an HTTPS callback URL only when automatic Funnel setup is not available on this machine.'],
     ];
 
   onboardingRuntimeList.innerHTML = items.map(([title, body], index) => (
@@ -1142,6 +1145,7 @@ function renderTailscaleError(text) {
 }
 
 function renderTailscaleReadiness(readiness) {
+  latestTailscaleReadiness = readiness;
   const currentFieldUrl = runtimeFields.publicCallbackBaseUrl.value.trim();
   const publicUrl = readiness.publicCallbackBaseUrl || currentFieldUrl;
   if (readiness.publicCallbackBaseUrl) {
@@ -1166,6 +1170,7 @@ function renderTailscaleReadiness(readiness) {
   const note = tailscaleReadinessNote(readiness);
   tailscaleNote.classList.toggle('hidden', !note);
   tailscaleNote.textContent = note;
+  refreshSetupStatus();
 }
 
 function applyTailscalePublicCallbackBaseUrl(publicUrl) {
