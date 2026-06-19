@@ -447,6 +447,7 @@ describe('GET /api/setup status', () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
+    expect(body.supabaseProjectRef).toBe('abcdefghijklmnopqrst');
     expect(body.discordCredentialsPresent).toBe(true);
     expect(body.discordClientId).toBe('123456789012345678');
     expect(body.discordAuthProviderReady).toBe(false);
@@ -527,6 +528,7 @@ describe('GET /api/setup status', () => {
     expect(body.dashboardUrl).toBe('https://somnibot.tailnet.ts.net');
     expect(body.operatorDashboardUrl).toBe('http://localhost:3456');
     expect(body.publicCallbackBaseUrl).toBe('https://somnibot.tailnet.ts.net');
+    expect(body.supabaseProjectRef).toBe('abcdefghijklmnopqrst');
     expect(body.paypalWebhookUrl).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
     expect(body.publicCallbackRequired).toBe(true);
     expect(body.publicCallbackReady).toBe(true);

@@ -158,7 +158,7 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
       : [];
     const detailParts = [
       statusDetail,
-      !providerStatus.providerEnabled && providerStatus.statusReason !== 'management-token-missing'
+      providerStatus.statusReason === 'provider-disabled'
         ? 'Discord auth provider is disabled in Supabase.'
         : '',
       providerStatus.callbackAllowListReady === false && missingCallbacks.length > 0

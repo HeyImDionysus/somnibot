@@ -148,7 +148,7 @@ describe('launcher setup renderer wiring', () => {
     const configStore = readSourceFile('main/config-store.ts');
     const validationIndex = main.indexOf('const validation = await validateAllCredentials(config);');
     const authProviderReadinessIndex = main.indexOf('const dashboardVerifiedAuthProvider = !callbackBaseUrlChanged');
-    const authProviderIndex = main.indexOf('if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured)');
+    const authProviderIndex = main.indexOf('&& !dashboardVerifiedAuthProvider');
     const startIndex = main.indexOf('const startResult = await startLocalStack(config, { forceRestart: true });');
     const dashboardHealthIndex = main.indexOf('const dashboardReady = await waitForDashboardHealth();', startIndex);
     const configureAuthIndex = main.indexOf('const authConfigured = await configureDashboardAuthProvider({', dashboardHealthIndex);
@@ -218,12 +218,17 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
     expect(main).toContain('function readDashboardSetupSnapshot');
     expect(main).toContain("fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`");
+    expect(main).toContain('supabaseProjectRef?: string | null;');
+    expect(main).toContain('function dashboardSetupMatchesLauncherConfig');
+    expect(main).toContain('function dashboardSetupVerifiesAuthProvider');
     expect(main).toContain('dashboardAuthProviderConfigured');
     expect(main).toContain('DASHBOARD_SETUP_SNAPSHOT_CACHE_MS');
     expect(main).toContain('const dashboardSetupMatchesCurrentConfig');
     expect(main).toContain('const dashboardSetupStatus = dashboardSetupMatchesCurrentConfig');
-    expect(main).toContain('const dashboardAuthProviderStatus = await readDashboardSetupSnapshot(1_500, { force: true })');
-    expect(main).toContain('saveConfig({ supabaseDiscordAuthProviderConfigured: true })');
+    expect(main).toContain('const dashboardSetupBeforeStart = await readDashboardSetupSnapshot(1_500, { force: true })');
+    expect(main).toContain('&& !dashboardVerifiedAuthProvider');
+    expect(main).toContain('Dashboard already verified Discord auth provider readiness for this launcher config');
+    expect(main).not.toContain('saveConfig({ supabaseDiscordAuthProviderConfigured: true })');
     expect(main).toContain('supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');
     expect(main).toContain('tailscaleReadinessState: input.tailscaleReadinessState');

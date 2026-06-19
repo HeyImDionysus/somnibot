@@ -191,6 +191,29 @@ describe('setup flow status', () => {
     expect(status.firstBlockingStepId).toBe('auth-provider');
   });
 
+  it('does not describe unknown auth-provider check failures as a disabled provider', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: false,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'unknown',
+        statusDetail: 'Discord auth provider readiness could not be verified.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.detail).toContain('could not be verified');
+    expect(authStep?.detail).not.toContain('disabled in Supabase');
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+  });
+
   it('does not show blocked auth-provider details after manual confirmation', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',

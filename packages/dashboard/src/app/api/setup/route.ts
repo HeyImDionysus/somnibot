@@ -173,6 +173,21 @@ function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   }
 }
 
+function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
+  const rawUrl = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '';
+  if (!rawUrl.trim()) return null;
+
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    const suffix = '.supabase.co';
+    if (!hostname.endsWith(suffix)) return null;
+    const projectRef = hostname.slice(0, -suffix.length);
+    return /^[a-z0-9]+$/.test(projectRef) ? projectRef : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): RuntimeCallbackConfig {
   const operatorDashboardUrl = normalizeRuntimeBaseUrl(env['DASHBOARD_URL']);
   const publicCallbackBaseUrl = normalizeRuntimeBaseUrl(
@@ -236,6 +251,7 @@ export async function GET(req: NextRequest) {
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
     publicCallbackReady: runtimeCallbacks.publicCallbackReady,
     publicCallbackError: runtimeCallbacks.publicCallbackError,
+    supabaseProjectRef: getSupabaseProjectRef(),
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
     discordCredentialsPresent: Boolean(process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET),
     discordAuthProviderReady: false,
