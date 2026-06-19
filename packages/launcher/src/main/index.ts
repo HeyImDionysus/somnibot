@@ -111,6 +111,8 @@ interface ReadDashboardSetupOptions {
   force?: boolean;
 }
 
+type DashboardAuthProviderStatus = NonNullable<SetupFlowInput['supabaseDiscordAuthProviderStatus']>;
+
 interface SetupAutomationResult {
   ok: boolean;
   stage: string;
@@ -237,6 +239,40 @@ function dashboardSetupMatchesLauncherConfig(
   return true;
 }
 
+function dashboardAuthProviderStatusUsableForLauncherConfig(
+  providerStatus: DashboardAuthProviderStatus | undefined,
+  config: LauncherConfig,
+): boolean {
+  if (!providerStatus) return false;
+
+  if (providerStatus.manualConfigured === true && !config.supabaseDiscordAuthProviderConfigured) {
+    return false;
+  }
+
+  if (
+    providerStatus.ready === true
+    && providerStatus.manualConfigured !== true
+    && !config.supabaseAccessToken.trim()
+    && !config.supabaseDiscordAuthProviderConfigured
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function getDashboardAuthProviderStatusForLauncherConfig(
+  snapshot: DashboardSetupStatusPayload | undefined,
+  config: LauncherConfig,
+): DashboardAuthProviderStatus | undefined {
+  if (!dashboardSetupMatchesLauncherConfig(snapshot, config)) return undefined;
+
+  const providerStatus = snapshot?.discordAuthProviderStatus;
+  return dashboardAuthProviderStatusUsableForLauncherConfig(providerStatus, config)
+    ? providerStatus
+    : undefined;
+}
+
 function dashboardSetupVerifiesAuthProvider(
   snapshot: DashboardSetupStatusPayload | undefined,
   config: LauncherConfig,
@@ -246,7 +282,7 @@ function dashboardSetupVerifiesAuthProvider(
     return false;
   }
 
-  return providerStatus.manualConfigured !== true || config.supabaseDiscordAuthProviderConfigured;
+  return dashboardAuthProviderStatusUsableForLauncherConfig(providerStatus, config);
 }
 
 async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean; error?: string }> {
@@ -629,8 +665,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
 
   if (
     dashboardVerifiedAuthProvider
-    && !config.supabaseAccessToken.trim()
-    && !config.supabaseDiscordAuthProviderConfigured
+    && (config.supabaseAccessToken.trim() || config.supabaseDiscordAuthProviderConfigured)
   ) {
     warnings.push(
       'Dashboard already verified Discord auth provider readiness for this launcher config; auth-provider configuration was skipped for this restart.',
@@ -883,17 +918,11 @@ function registerIpcHandlers(): void {
       readDashboardHealthSnapshot(),
       readDashboardSetupSnapshot(),
     ]);
-    const dashboardSetupMatchesCurrentConfig = dashboardSetupMatchesLauncherConfig(dashboardSetup, config);
-    const dashboardSetupStatus = dashboardSetupMatchesCurrentConfig
-      ? dashboardSetup?.discordAuthProviderStatus
-      : undefined;
+    const dashboardSetupStatus = getDashboardAuthProviderStatusForLauncherConfig(dashboardSetup, config);
     const selectedAuthProviderStatus = input.supabaseDiscordAuthProviderStatus
       ?? dashboardSetupStatus;
     const selectedAuthProviderStatusBlocksDashboard = selectedAuthProviderStatus?.ready === false;
-    const dashboardAuthProviderConfigured = dashboardSetupMatchesCurrentConfig && (
-      dashboardSetup?.discordAuthProviderReady === true
-      || dashboardSetup?.discordAuthConfigured === true
-    );
+    const dashboardAuthProviderConfigured = dashboardSetupVerifiesAuthProvider(dashboardSetup, config);
     const discoveredAuthProviderConfigured = Boolean(
       selectedAuthProviderStatus?.ready
       || (!selectedAuthProviderStatusBlocksDashboard && dashboardAuthProviderConfigured)

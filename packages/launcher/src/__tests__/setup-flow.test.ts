@@ -162,6 +162,7 @@ describe('setup flow status', () => {
     expect(authStep?.status).toBe('blocked');
     expect(authStep?.manualAction).toBe(true);
     expect(authStep?.detail).toContain('allow-list is missing');
+    expect(authStep?.detail).toContain('Missing callback URLs:');
     expect(authStep?.detail).toContain('https://somnibot.tailnet.ts.net/api/auth/callback');
     expect(status.firstBlockingStepId).toBe('auth-provider');
     expect(status.primaryAction.enabled).toBe(false);
@@ -187,6 +188,7 @@ describe('setup flow status', () => {
     expect(authStep?.status).toBe('blocked');
     expect(authStep?.detail).toContain('Management API token');
     expect(authStep?.detail).toContain('confirm');
+    expect(authStep?.detail).not.toContain('Missing callback URLs:');
     expect(authStep?.detail).not.toContain('undefined');
     expect(status.firstBlockingStepId).toBe('auth-provider');
   });
@@ -211,6 +213,7 @@ describe('setup flow status', () => {
     expect(authStep?.status).toBe('blocked');
     expect(authStep?.detail).toContain('could not be verified');
     expect(authStep?.detail).not.toContain('disabled in Supabase');
+    expect(authStep?.detail).not.toContain('Missing callback URLs:');
     expect(status.firstBlockingStepId).toBe('auth-provider');
   });
 

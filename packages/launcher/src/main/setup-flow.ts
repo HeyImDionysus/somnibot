@@ -161,7 +161,7 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
       providerStatus.statusReason === 'provider-disabled'
         ? 'Discord auth provider is disabled in Supabase.'
         : '',
-      providerStatus.callbackAllowListReady === false && missingCallbacks.length > 0
+      providerStatus.statusReason === 'callback-allow-list-missing' && missingCallbacks.length > 0
         ? `Missing callback URLs: ${missingCallbacks.join(', ')}.`
         : '',
       'Add a Supabase Management API token so the launcher can fix this automatically, or confirm the provider manually after updating Supabase.',

@@ -220,13 +220,15 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain("fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`");
     expect(main).toContain('supabaseProjectRef?: string | null;');
     expect(main).toContain('function dashboardSetupMatchesLauncherConfig');
+    expect(main).toContain('function dashboardAuthProviderStatusUsableForLauncherConfig');
+    expect(main).toContain('function getDashboardAuthProviderStatusForLauncherConfig');
     expect(main).toContain('function dashboardSetupVerifiesAuthProvider');
     expect(main).toContain('dashboardAuthProviderConfigured');
     expect(main).toContain('DASHBOARD_SETUP_SNAPSHOT_CACHE_MS');
-    expect(main).toContain('const dashboardSetupMatchesCurrentConfig');
-    expect(main).toContain('const dashboardSetupStatus = dashboardSetupMatchesCurrentConfig');
+    expect(main).toContain('const dashboardSetupStatus = getDashboardAuthProviderStatusForLauncherConfig');
     expect(main).toContain('const dashboardSetupBeforeStart = await readDashboardSetupSnapshot(1_500, { force: true })');
     expect(main).toContain('&& !dashboardVerifiedAuthProvider');
+    expect(main).toContain('&& (config.supabaseAccessToken.trim() || config.supabaseDiscordAuthProviderConfigured)');
     expect(main).toContain('Dashboard already verified Discord auth provider readiness for this launcher config');
     expect(main).not.toContain('saveConfig({ supabaseDiscordAuthProviderConfigured: true })');
     expect(main).toContain('supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus');
@@ -237,7 +239,9 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('manualAuthProviderConfirmed');
     expect(main).toContain('callbackBaseUrlChanged');
     expect(main).toContain('manualAuthProviderConfirmed && !callbackBaseUrlChanged');
-    expect(main).toContain('providerStatus.manualConfigured !== true || config.supabaseDiscordAuthProviderConfigured');
+    expect(main).toContain('providerStatus.manualConfigured === true && !config.supabaseDiscordAuthProviderConfigured');
+    expect(main).toContain('providerStatus.ready === true');
+    expect(main).toContain('!config.supabaseAccessToken.trim()');
     expect(main).toContain('const authConfigured = await configureDashboardAuthProvider({');
     expect(validationIndex).toBeGreaterThan(-1);
     expect(authProviderIndex).toBeGreaterThan(validationIndex);
