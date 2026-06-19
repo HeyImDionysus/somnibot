@@ -135,6 +135,7 @@ export interface SomniBotAPI {
     manualBlockReasons: string[];
     blockedReason?: string;
     redactedOutput?: string[];
+    healthProof?: Record<string, unknown>;
   }>;
   runVpsPreflight: () => Promise<{
     state: string;

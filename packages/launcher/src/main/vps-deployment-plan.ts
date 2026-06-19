@@ -235,6 +235,18 @@ function buildRemoteCommand(
 function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: string): VpsDeploymentCommand[] {
   const composeFilePath = joinPath(deployPath, COMPOSE_FILE);
   const envFilePath = joinPath(deployPath, '.env');
+  const lavalinkProbeScript = [
+    'docker',
+    'compose',
+    '-f',
+    composeFilePath,
+    'exec',
+    '-T',
+    'bot',
+    'node',
+    '-e',
+    "fetch('http://lavalink:2333/version').then((response) => { if (!response.ok) process.exit(1); return response.text(); }).then((text) => process.stdout.write(text)).catch(() => process.exit(1));",
+  ].map(shellDisplayArg).join(' ');
 
   return [
     buildRemoteCommand(sshTarget, 'test', ['-d', deployPath], {
@@ -266,6 +278,13 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       approvalRequired: false,
       commandCategory: 'service',
     }),
+    buildCommand('curl', ['-fsS', '-o', '/dev/null', publicBaseUrl], {
+      id: 'check-dashboard',
+      label: 'Check public dashboard root',
+      changesRemote: false,
+      approvalRequired: false,
+      commandCategory: 'probe',
+    }),
     buildCommand('curl', ['-fsS', `${publicBaseUrl}/api/health`], {
       id: 'check-health',
       label: 'Check public dashboard health',
@@ -273,6 +292,13 @@ function buildCommands(sshTarget: string, deployPath: string, publicBaseUrl: str
       approvalRequired: false,
       commandCategory: 'probe',
       expectedHealthStatus: 'healthy',
+    }),
+    buildRemoteCommand(sshTarget, 'sh', ['-lc', shellDisplayArg(lavalinkProbeScript)], {
+      id: 'check-lavalink',
+      label: 'Check private Lavalink route from bot container',
+      changesRemote: false,
+      approvalRequired: false,
+      commandCategory: 'probe',
     }),
   ];
 }

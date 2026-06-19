@@ -217,7 +217,7 @@ describe('setup flow status', () => {
     expect(status.firstBlockingStepId).toBe('auth-provider');
   });
 
-  it('does not show blocked auth-provider details after manual confirmation', () => {
+  it('does not let manual confirmation override an explicit dashboard auth failure', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',
       publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
@@ -235,11 +235,12 @@ describe('setup flow status', () => {
     });
 
     const authStep = status.steps.find(step => step.id === 'auth-provider');
-    expect(authStep?.status).toBe('success');
-    expect(authStep?.detail).toContain('confirmation');
-    expect(authStep?.detail).not.toContain('Add a Supabase');
-    expect(authStep?.detail).not.toContain('verify and configure');
-    expect(status.primaryAction.enabled).toBe(true);
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.manualAction).toBe(true);
+    expect(authStep?.detail).toContain('Add a Supabase');
+    expect(authStep?.detail).toContain('verify and configure');
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+    expect(status.primaryAction.enabled).toBe(false);
   });
 
   it('shows PayPal webhook readiness as a first-class setup step', () => {
@@ -254,6 +255,11 @@ describe('setup flow status', () => {
     expect(incompleteStep?.summary).toContain('Waiting for PayPal');
     expect(incompleteStep?.detail).toContain('Create/Update Webhook');
     expect(incompleteStatus.primaryAction.enabled).toBe(true);
+    expect(incompleteStatus.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: expect.arrayContaining(['discord-server', 'provider-validation', 'paypal-webhook', 'start-local']),
+      missingLabels: expect.arrayContaining(['Discord server', 'Provider validation', 'PayPal webhook', 'Start locally']),
+    });
 
     const readyStatus = buildSetupStatus({
       runtimeMode: 'regular-local',
@@ -297,6 +303,11 @@ describe('setup flow status', () => {
     expect(degradedStep?.detail).toContain('bot=offline');
     expect(degradedStatus.firstBlockingStepId).toBeNull();
     expect(degradedStatus.primaryAction.enabled).toBe(true);
+    expect(degradedStatus.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: expect.arrayContaining(['discord-server', 'provider-validation', 'paypal-webhook', 'start-local']),
+    });
+    expect(degradedStatus.completion.detail).toContain('completion proof');
 
     const readyStatus = buildSetupStatus({
       runtimeMode: 'regular-local',
@@ -506,6 +517,11 @@ describe('setup flow status', () => {
     expect(status.primaryAction.enabled).toBe(false);
     expect(status.primaryAction.label).toBe('Manual VPS Deploy');
     expect(status.deploymentPlan?.status).toBe('ready');
+    expect(status.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: expect.arrayContaining(['discord-server', 'provider-validation', 'paypal-webhook', 'vps-health-verification']),
+      missingLabels: expect.arrayContaining(['Discord server', 'Provider validation', 'PayPal webhook', 'VPS health verification']),
+    });
     expect(status.deploymentPlan?.target?.envFilePath).toBe('/opt/somnibot/.env');
     expect(status.deploymentPlan?.environment?.redactedEnvFile).toContain('DISCORD_TOKEN=<DISCORD_TOKEN>');
     expect(status.deploymentPlan?.reverseProxy?.upstream).toBe('dashboard:3000');
@@ -518,6 +534,259 @@ describe('setup flow status', () => {
       'valkey-private-url',
       'lavalink-private-url',
     ]);
+  });
+
+  it('marks regular-local owner setup complete only when final-goal proof items are ready', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      callbackProbe: { ok: true, url: 'https://somnibot.tailnet.ts.net/api/health', status: 200 },
+      discordGuildId: '1464713668766732393',
+      credentialReady: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
+        ],
+      },
+      supabaseDiscordAuthProviderConfigured: true,
+      paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      },
+      dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'online',
+        lavalink: 'online',
+        dashboardHealth: {
+          ok: true,
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
+    });
+
+    expect(status.completion).toEqual({
+      status: 'complete',
+      summary: 'Regular local owner setup is complete.',
+      detail: 'Public callbacks, provider credentials, Discord server readiness, Supabase auth, PayPal webhook readiness, and local runtime health are all verified.',
+      requiredStepIds: [
+        'regular-callback',
+        'credentials',
+        'discord-server',
+        'provider-validation',
+        'auth-provider',
+        'paypal-webhook',
+        'start-local',
+      ],
+      missingStepIds: [],
+      missingLabels: [],
+    });
+  });
+
+  it('keeps regular-local completion incomplete when manual auth conflicts with dashboard failure', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      callbackProbe: { ok: true, url: 'https://somnibot.tailnet.ts.net/api/health', status: 200 },
+      discordGuildId: '1464713668766732393',
+      credentialReady: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
+        ],
+      },
+      supabaseDiscordAuthProviderConfigured: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: true,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'callback-allow-list-missing',
+        statusDetail: 'Supabase auth callback allow-list is missing.',
+      },
+      paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      },
+      dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'online',
+        lavalink: 'online',
+        dashboardHealth: {
+          ok: true,
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
+    });
+
+    expect(status.steps.find(step => step.id === 'auth-provider')?.status).toBe('blocked');
+    expect(status.completion).toMatchObject({
+      status: 'blocked',
+      missingStepIds: expect.arrayContaining(['auth-provider']),
+      missingLabels: expect.arrayContaining(['Supabase Auth']),
+    });
+  });
+
+  it('keeps owner completion incomplete when ready-to-run inputs are not final proof', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://manual.example.com',
+      credentialReady: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server auto-detect is ready.',
+          },
+        ],
+      },
+      supabaseAccessTokenReady: true,
+      paypalReady: true,
+      dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'online',
+        dashboardHealth: {
+          ok: true,
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
+    });
+
+    expect(status.primaryAction.enabled).toBe(true);
+    expect(status.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: expect.arrayContaining([
+        'regular-callback',
+        'discord-server',
+        'auth-provider',
+        'paypal-webhook',
+      ]),
+    });
+    expect(status.completion.detail).toContain('completion proof');
+  });
+
+  it('keeps VPS owner setup incomplete until post-deploy health verification passes', () => {
+    const pendingStatus = buildSetupStatus({
+      runtimeMode: 'vps',
+      vpsDomain: 'somnibot.example.com',
+      vpsSshHost: 'somnibot.example.com',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      discordGuildId: '1464713668766732393',
+      credentialReady: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
+        ],
+      },
+      supabaseDiscordAuthProviderConfigured: true,
+      paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot.example.com/api/paypal/webhook',
+      },
+    });
+
+    expect(pendingStatus.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: ['vps-health-verification'],
+      missingLabels: ['VPS health verification'],
+    });
+
+    const completeStatus = buildSetupStatus({
+      runtimeMode: 'vps',
+      vpsDomain: 'somnibot.example.com',
+      vpsSshHost: 'somnibot.example.com',
+      vpsSshUser: 'deploy',
+      vpsDeployPath: '/opt/somnibot',
+      discordGuildId: '1464713668766732393',
+      credentialReady: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
+        ],
+      },
+      supabaseDiscordAuthProviderConfigured: true,
+      paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot.example.com/api/paypal/webhook',
+      },
+      httpsDashboardProbe: { state: 'success', httpStatus: 200 },
+      apiHealthProbe: {
+        state: 'success',
+        httpStatus: 200,
+        response: {
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
+      supabaseCallbackAllowList: { status: 'pass' },
+      lavalink: { status: 'pass' },
+    });
+
+    expect(completeStatus.healthVerification?.status).toBe('pass');
+    expect(completeStatus.completion).toMatchObject({
+      status: 'complete',
+      missingStepIds: [],
+      missingLabels: [],
+    });
   });
 
   it('blocks VPS setup when SSH/deploy details are missing', () => {

@@ -465,15 +465,25 @@ Available on the internet:
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('rejects non-Tailscale hosts before probing', async () => {
-    const fetchImpl = vi.fn();
+  it('probes manual HTTPS public callback hosts', async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+    } as Response));
     const result = await probePublicCallbackHealth(
       'https://example.com',
       fetchImpl as unknown as typeof fetch,
     );
 
-    expect(result.ok).toBe(false);
-    expect(result.error).toContain('ts.net');
-    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      ok: true,
+      url: 'https://example.com/api/health',
+      status: 200,
+      error: undefined,
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://example.com/api/health',
+      expect.objectContaining({ method: 'GET', cache: 'no-store' }),
+    );
   });
 });

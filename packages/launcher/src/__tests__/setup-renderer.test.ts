@@ -30,6 +30,7 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('Discord/Supabase callback');
     expect(html).toContain('PayPal webhook');
     expect(html).toContain('id="runtime-summary" aria-live="polite"');
+    expect(html).toContain('id="setup-completion" aria-live="polite"');
     expect(html).toContain('id="runtime-steps" aria-live="polite"');
   });
 
@@ -73,6 +74,7 @@ describe('launcher setup renderer wiring', () => {
     const html = readSourceFile('renderer/index.html');
     const renderer = readSourceFile('renderer/renderer.js');
     const styles = readSourceFile('renderer/styles.css');
+    const main = readSourceFile('main/index.ts');
 
     expect(html).toContain('Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.');
     expect(html).not.toContain('SSH automation is not run from this setup screen');
@@ -83,6 +85,13 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('function buildDiscordInviteUrl()');
     expect(renderer).toContain('discordGuildId: fields.discordGuildId.value');
     expect(renderer).toContain('function renderSetupStepAction(step)');
+    expect(renderer).toContain("const setupCompletion = $('setup-completion');");
+    expect(renderer).toContain('function renderSetupCompletion(completion)');
+    expect(renderer).toContain('renderSetupCompletion(status.completion);');
+    expect(renderer).toContain('<h3>Owner setup completion</h3>');
+    expect(renderer).toContain('function formatCompletionStatus(status)');
+    expect(styles).toContain('.setup-completion');
+    expect(styles).toContain('.setup-completion-missing');
     expect(renderer).toContain('data-setup-action="discord-invite"');
     expect(renderer).toContain("runtimeSteps.addEventListener('click'");
     expect(renderer).toContain("button.dataset.setupAction === 'discord-invite'");
@@ -100,13 +109,24 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
     expect(renderer).toContain('renderVpsHealthVerification(status.healthVerification, isVpsStatus);');
     expect(renderer).toContain('let latestProviderValidation = null;');
+    expect(renderer).toContain('let latestCallbackProbe = null;');
+    expect(renderer).toContain('let latestPayPalWebhook = null;');
+    expect(renderer).toContain('let latestVpsHealthProof = null;');
+    expect(renderer).toContain('latestVpsHealthProof = null;');
     expect(renderer).toContain('providerValidation: latestProviderValidation');
+    expect(renderer).toContain('paypalWebhook: latestPayPalWebhook');
+    expect(renderer).toContain('callbackProbe: latestCallbackProbe');
+    expect(renderer).toContain("...(runtimeMode === 'vps' && latestVpsHealthProof ? latestVpsHealthProof : {})");
+    expect(renderer).toContain('if (!dryRun) {\n      latestVpsHealthProof = null;\n    }');
+    expect(renderer).toContain('latestVpsHealthProof = vpsDeploymentResult.healthProof');
+    expect(renderer).toContain("if (runtimeMode !== 'regular-local' || isValidating) return;");
     expect(renderer).toContain('paypalReady: isPayPalFormComplete()');
     expect(renderer).toContain("const btnSetupPayPalWebhook = $('btn-setup-paypal-webhook');");
     expect(renderer).toContain('function updatePayPalWebhookButton()');
     expect(renderer).toContain('|| isValidating');
     expect(renderer).toContain('|| isVpsDeploymentActionRunning');
     expect(renderer).toContain('function applyPayPalWebhookResult(webhookResult)');
+    expect(renderer).toContain('if (webhookResult?.ok) {\n    latestVpsHealthProof = null;\n  }');
     expect(renderer).toContain('applyPayPalWebhookResult(result.paypalWebhook)');
     expect(renderer).toContain('applyPayPalWebhookResult(result)');
     expect(renderer).toContain('async function refreshProcessStatus()');
@@ -114,6 +134,15 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('await refreshProcessStatus();\n    updatePayPalWebhookButton();');
     expect(renderer).toContain('Local services were restarted to load the new Webhook ID.');
     expect(renderer).toContain('window.somnibot.ensurePayPalWebhook(collectConfig())');
+    expect(main).toContain('if (config.publicCallbackBaseUrl.trim())');
+    expect(main).not.toContain("config.publicCallbackBaseUrl.includes('.ts.net')");
+    expect(renderer).toContain('function syncTailscalePublicCallbackAvailability(publicUrl)');
+    expect(renderer).toContain("btnTailscaleProbe.classList.toggle('hidden', !publicUrl);");
+    expect(renderer).toContain('syncTailscalePublicCallbackAvailability(publicUrl);\n  const callbackField = document.getElementById');
+    expect(renderer).toContain('function canProbePublicCallbackWhileRunning()');
+    expect(renderer).toContain("return runtimeMode === 'regular-local'");
+    expect(renderer).toContain('&& isRunning');
+    expect(renderer).toContain('btnTailscaleProbe.disabled = disabled && !canProbePublicCallbackWhileRunning();');
     expect(renderer).toContain("btnSetupPayPalWebhook.textContent = 'Create/Update Webhook';");
     expect(renderer).toContain('latestProviderValidation = result.providerValidation;');
     expect(renderer).toContain('Finish VPS readiness fields before SSH preflight or deployment actions are available.');
@@ -173,6 +202,7 @@ describe('launcher setup renderer wiring', () => {
     expect(preload).toContain('providerValidation?:');
     expect(preload).toContain("runVpsPreflight: () => ipcRenderer.invoke('vps:run-preflight')");
     expect(preload).toContain("runVpsDeployment: (payload) => ipcRenderer.invoke('vps:run-deployment', payload)");
+    expect(preload).toContain('healthProof?: Record<string, unknown>');
     expect(main).toContain("ipcMain.handle('get-setup-status'");
     expect(main).toContain("ipcMain.handle('run-setup-automation'");
     expect(main).toContain("ipcMain.handle('paypal:ensure-webhook'");
@@ -218,6 +248,10 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('credentialReady: input.credentialReady ?? Boolean(');
     expect(main).toContain('providerValidation: input.providerValidation');
     expect(main).toContain('paypalReady: input.paypalReady ?? Boolean(');
+    expect(main).toContain('function buildPayPalWebhookProofKey');
+    expect(main).toContain('paypalWebhookProofKey');
+    expect(main).toContain('paypalWebhook: input.paypalWebhook ?? persistedPayPalWebhookProof');
+    expect(main).toContain('callbackProbe: input.callbackProbe');
     expect(main).toContain('paypalClientSecret: config.paypalClientSecret ?');
     expect(main).toContain('paypalWebhookId: config.paypalWebhookId ?');
     expect(configStore).toContain('PAYPAL_CLIENT_ID: config.paypalClientId');
@@ -242,8 +276,14 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('Dashboard already verified Discord auth provider readiness for this launcher config');
     expect(main).not.toContain('saveConfig({ supabaseDiscordAuthProviderConfigured: true })');
     expect(main).toContain('supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus');
+    expect(main).toContain('function vpsSupabaseCallbackSignal');
+    expect(main).toContain('Manual confirmation says the Discord auth callback allow-list is configured for this VPS setup.');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');
     expect(main).toContain('tailscaleReadinessState: input.tailscaleReadinessState');
+    expect(main).toContain('httpsDashboardProbe: input.httpsDashboardProbe');
+    expect(main).toContain('apiHealthProbe: input.apiHealthProbe');
+    expect(main).toContain('supabaseCallbackAllowList: vpsSupabaseCallbackSignal(input, selectedAuthProviderStatus)');
+    expect(main).toContain('lavalink: input.lavalink');
     expect(main).toContain('setupLocked?: boolean');
     expect(main).toContain('response.status === 403 && body?.setupLocked');
     expect(main).toContain('manualAuthProviderConfirmed');

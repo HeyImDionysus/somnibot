@@ -110,6 +110,7 @@ describe('setup end-to-end smoke contract', () => {
     const input = {
       runtimeMode: 'regular-local' as const,
       publicCallbackBaseUrl: 'https://somnibot-laptop.tailnet.ts.net',
+      callbackProbe: { ok: true, url: 'https://somnibot-laptop.tailnet.ts.net/api/health', status: 200 },
       discordGuildId: '123456789012345678',
       credentialReady: true,
       providerValidation: {
@@ -117,8 +118,12 @@ describe('setup end-to-end smoke contract', () => {
         errors: [],
         checks: successfulProviderChecks(),
       },
-      supabaseAccessTokenReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
       paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot-laptop.tailnet.ts.net/api/paypal/webhook',
+      },
       dashboardOnline: true,
       localServiceReadiness: {
         dashboard: 'online',
@@ -150,6 +155,8 @@ describe('setup end-to-end smoke contract', () => {
       'start-local': 'success',
     });
     expect(status.steps.every(step => step.status === 'success')).toBe(true);
+    expect(status.completion.status).toBe('complete');
+    expect(status.completion.missingStepIds).toEqual([]);
     expect(status.firstBlockingStepId).toBeNull();
     expect(status.primaryAction).toEqual({
       label: 'Set Up & Start',
@@ -190,8 +197,12 @@ describe('setup end-to-end smoke contract', () => {
         errors: [],
         checks: successfulProviderChecks(),
       },
-      supabaseAccessTokenReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
       paypalReady: true,
+      paypalWebhook: {
+        ok: true,
+        webhookUrl: 'https://somnibot.example.com/api/paypal/webhook',
+      },
     };
 
     const status = buildSetupStatus(input);
@@ -236,6 +247,11 @@ describe('setup end-to-end smoke contract', () => {
     });
     expect(status.deploymentPlan?.status).toBe('ready');
     expect(status.healthVerification?.status).toBe('pending');
+    expect(status.completion).toMatchObject({
+      status: 'incomplete',
+      missingStepIds: ['vps-health-verification'],
+      missingLabels: ['VPS health verification'],
+    });
 
     expect(status.summary.publicCallbackUrl).toBe('https://somnibot.example.com');
     expect(status.summary.diagnostics.publicCallbackBaseUrl).toBe(env.NEXT_PUBLIC_APP_URL);

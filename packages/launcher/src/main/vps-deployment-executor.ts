@@ -1,4 +1,9 @@
 import { type VpsDeploymentCommand, type VpsDeploymentPlan, type VpsDeploymentPlanStatus } from './vps-deployment-plan.js';
+import type {
+  VpsDashboardHealthPayload,
+  VpsHealthProbeResult,
+  VpsManualHealthSignal,
+} from './vps-health-verification.js';
 
 export type VpsDeploymentExecutionState =
   | 'blocked'
@@ -35,6 +40,12 @@ export interface VpsCommandRunResult {
   retriable?: boolean;
 }
 
+export interface VpsDeploymentHealthProof {
+  httpsDashboardProbe?: VpsHealthProbeResult;
+  apiHealthProbe?: VpsHealthProbeResult;
+  lavalink?: VpsManualHealthSignal;
+}
+
 export type VpsDeploymentCommandRunner = (
   command: VpsDeploymentCommand,
   _meta: { index: number; total: number; }
@@ -58,6 +69,7 @@ export interface VpsDeploymentExecutionResult {
   manualBlockReasons: string[];
   blockedReason?: string;
   redactedOutput?: string[];
+  healthProof?: VpsDeploymentHealthProof;
 }
 
 export class VpsDeploymentRunGate {
@@ -140,10 +152,45 @@ function validateExpectedHealthStatus(command: VpsDeploymentCommand, output: str
   }
 }
 
+function healthProofFromCommand(command: VpsDeploymentCommand, output: string | undefined): VpsDeploymentHealthProof | undefined {
+  if (command.id === 'check-dashboard') {
+    return {
+      httpsDashboardProbe: { state: 'success', httpStatus: 200 },
+    };
+  }
+
+  if (command.id === 'check-lavalink') {
+    return {
+      lavalink: {
+        status: 'pass',
+        detail: 'The read-only deployment probe reached Lavalink from inside the VPS stack.',
+      },
+    };
+  }
+
+  if (!command.expectedHealthStatus) return undefined;
+
+  let response: VpsDashboardHealthPayload | undefined;
+  try {
+    response = output ? JSON.parse(output) as VpsDashboardHealthPayload : undefined;
+  } catch {
+    response = undefined;
+  }
+
+  return {
+    apiHealthProbe: {
+      state: 'success',
+      httpStatus: 200,
+      ...(response ? { response } : {}),
+    },
+  };
+}
+
 export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Promise<VpsDeploymentExecutionResult> {
   const approvedCommandIds = new Set(input.approvedCommandIds);
   const commandStates: VpsDeploymentCommandExecutionState[] = input.plan.commands.map(commandExecutionState);
   const manualBlockReasons: string[] = [];
+  let healthProof: VpsDeploymentHealthProof | undefined;
 
   if (input.plan.status !== 'ready') {
     return {
@@ -288,6 +335,13 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
         redactedOutput: result.output ? [redactText(result.output)] : undefined,
       };
     }
+    const commandHealthProof = healthProofFromCommand(command, result.output);
+    if (commandHealthProof) {
+      healthProof = {
+        ...(healthProof ?? {}),
+        ...commandHealthProof,
+      };
+    }
   }
 
   return {
@@ -306,5 +360,6 @@ export async function runVpsDeployment(input: VpsDeploymentExecutionInput): Prom
     ],
     manualBlockReasons: [],
     redactedOutput: [],
+    ...(healthProof ? { healthProof } : {}),
   };
 }

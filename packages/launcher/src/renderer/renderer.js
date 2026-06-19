@@ -75,6 +75,7 @@ const summaryPublicCallback = $('summary-public-callback');
 const summaryAuthCallback = $('summary-auth-callback');
 const summaryPayPalWebhook = $('summary-paypal-webhook');
 const runtimeDiagnosticsList = $('runtime-diagnostics-list');
+const setupCompletion = $('setup-completion');
 const vpsDeploymentPlan = $('vps-deployment-plan');
 const vpsHealthVerification = $('vps-health-verification');
 
@@ -120,7 +121,10 @@ let setupStatusSeq = 0;
 let latestProcessStatus = null;
 let tailscalePublicCallbackBaseUrl = '';
 let latestTailscaleReadiness = null;
+let latestCallbackProbe = null;
 let latestProviderValidation = null;
+let latestPayPalWebhook = null;
+let latestVpsHealthProof = null;
 let tailscaleReadinessSeq = 0;
 let vpsPreflightResult = null;
 let vpsDeploymentResult = null;
@@ -177,6 +181,8 @@ async function init() {
       saveTimeout = setTimeout(saveConfig, 500);
       input.classList.remove('error', 'valid');
       latestProviderValidation = null;
+      latestPayPalWebhook = null;
+      latestVpsHealthProof = null;
       updateRestoreBanner();
       updateDiscordInviteButton();
       updatePayPalWebhookButton();
@@ -191,7 +197,10 @@ async function init() {
       input.classList.remove('error', 'valid');
       if (input === runtimeFields.publicCallbackBaseUrl) {
         tailscalePublicCallbackBaseUrl = input.value.trim();
+        latestCallbackProbe = null;
       }
+      latestPayPalWebhook = null;
+      latestVpsHealthProof = null;
       updatePayPalWebhookButton();
       refreshSetupStatus();
     });
@@ -317,12 +326,21 @@ function updatePayPalWebhookButton() {
 }
 
 function applyPayPalWebhookResult(webhookResult) {
+  latestPayPalWebhook = webhookResult?.ok ? webhookResult : null;
+  if (webhookResult?.ok) {
+    latestVpsHealthProof = null;
+  }
   if (webhookResult?.webhookId) {
     fields.paypalWebhookId.value = webhookResult.webhookId;
   }
 }
 
 function setRuntimeMode(mode, options = {}) {
+  if (runtimeMode !== (mode === 'vps' ? 'vps' : 'regular-local')) {
+    latestCallbackProbe = null;
+    latestPayPalWebhook = null;
+    latestVpsHealthProof = null;
+  }
   runtimeMode = mode === 'vps' ? 'vps' : 'regular-local';
   const isVps = runtimeMode === 'vps';
 
@@ -354,12 +372,15 @@ async function refreshSetupStatus(options = {}) {
     credentialReady: isCredentialFormComplete(),
     providerValidation: latestProviderValidation,
     paypalReady: isPayPalFormComplete(),
+    paypalWebhook: latestPayPalWebhook,
+    callbackProbe: latestCallbackProbe,
     supabaseAccessTokenReady: fields.supabaseAccessToken.value.trim().length > 0,
     supabaseDiscordAuthProviderConfigured: fields.supabaseDiscordAuthProviderConfigured.checked,
     tailscaleAuthKeyReady: fields.tailscaleAuthKey.value.trim().length > 0,
     tailscaleReadinessState: runtimeMode === 'regular-local' ? latestTailscaleReadiness?.state : undefined,
     dashboardOnline: latestProcessStatus?.dashboard === 'online',
     checking: Boolean(options.checking),
+    ...(runtimeMode === 'vps' && latestVpsHealthProof ? latestVpsHealthProof : {}),
   };
 
   if (options.checking) {
@@ -381,6 +402,14 @@ async function refreshSetupStatus(options = {}) {
         summary: 'Checking setup gates.',
         detail: 'The launcher is checking runtime readiness.',
       }],
+      completion: {
+        status: 'incomplete',
+        summary: 'Owner setup completion is being checked.',
+        detail: 'The launcher is refreshing proof for callback, provider, PayPal, Discord, and runtime health readiness.',
+        requiredStepIds: [],
+        missingStepIds: [],
+        missingLabels: [],
+      },
       primaryAction: { label: 'Checking...', enabled: false, status: 'loading' },
       firstBlockingStepId: null,
     });
@@ -449,6 +478,7 @@ function renderSetupStatus(status) {
 
   renderDeploymentPlan(status.deploymentPlan, isVpsStatus);
   renderVpsHealthVerification(status.healthVerification, isVpsStatus);
+  renderSetupCompletion(status.completion);
 
   runtimeSteps.innerHTML = status.steps.map((step) => {
     const statusLabel = formatStepStatus(step.status);
@@ -471,6 +501,39 @@ function renderSetupStatus(status) {
   }
   btnStart.disabled = !status.primaryAction.enabled || isValidating || isRunning;
   updatePayPalWebhookButton();
+}
+
+function renderSetupCompletion(completion) {
+  if (!setupCompletion) return;
+
+  if (!completion) {
+    setupCompletion.classList.add('hidden');
+    setupCompletion.innerHTML = '';
+    return;
+  }
+
+  const status = completion.status || 'incomplete';
+  const badgeClass = status === 'complete' ? 'ready'
+    : status === 'blocked' ? 'blocked'
+      : 'pending';
+  const missingLabels = Array.isArray(completion.missingLabels) ? completion.missingLabels : [];
+  const missing = missingLabels.length > 0
+    ? `<div class="setup-completion-missing">${renderList(missingLabels)}</div>`
+    : '';
+
+  setupCompletion.classList.remove('hidden', 'complete', 'incomplete', 'blocked');
+  setupCompletion.classList.add(status);
+  setupCompletion.innerHTML = (
+    '<div>' +
+      '<div class="setup-completion-header">' +
+        '<h3>Owner setup completion</h3>' +
+        `<span class="deployment-plan-badge ${escapeHtml(badgeClass)}">${escapeHtml(formatCompletionStatus(status))}</span>` +
+      '</div>' +
+      `<p><strong>${escapeHtml(completion.summary || '')}</strong></p>` +
+      `<p>${escapeHtml(completion.detail || '')}</p>` +
+      missing +
+    '</div>'
+  );
 }
 
 function renderSetupStepAction(step) {
@@ -663,6 +726,15 @@ function formatVpsHealthStatus(status) {
     pass: 'Ready',
     pending: 'Waiting',
     running: 'Checking',
+  };
+  return labels[status] || status;
+}
+
+function formatCompletionStatus(status) {
+  const labels = {
+    blocked: 'Blocked',
+    complete: 'Complete',
+    incomplete: 'In progress',
   };
   return labels[status] || status;
 }
@@ -873,6 +945,9 @@ btnStart.addEventListener('click', async () => {
     if (result.publicCallbackBaseUrl) {
       applyTailscalePublicCallbackBaseUrl(result.publicCallbackBaseUrl);
     }
+    if (result.callbackProbe) {
+      latestCallbackProbe = result.callbackProbe;
+    }
 
     applyPayPalWebhookResult(result.paypalWebhook);
 
@@ -888,6 +963,9 @@ btnStart.addEventListener('click', async () => {
         setFieldsDisabled(false);
       }
       isValidating = false;
+      if (result.servicesStarted) {
+        setTailscaleActionsDisabled(true);
+      }
       await refreshSetupStatus();
       return;
     }
@@ -901,6 +979,7 @@ btnStart.addEventListener('click', async () => {
     btnStart.classList.add('hidden');
     btnStop.classList.remove('hidden');
     btnOpenDashboard.disabled = false;
+    setTailscaleActionsDisabled(true);
     await refreshSetupStatus();
     const summary = setupStatus?.summary;
     const dashboardText = summary?.localDashboardUrl || 'the local dashboard';
@@ -953,11 +1032,19 @@ vpsDeploymentPlan?.addEventListener('click', async (event) => {
     }
 
     const dryRun = action !== 'run-live';
+    if (!dryRun) {
+      latestVpsHealthProof = null;
+    }
     vpsDeploymentResult = await window.somnibot.runVpsDeployment({
       operatorApproved: true,
       approvedCommandIds: getApprovedDeploymentCommandIds(plan),
       dryRun,
     });
+    if (!dryRun) {
+      latestVpsHealthProof = vpsDeploymentResult.healthProof
+        ? { ...vpsDeploymentResult.healthProof }
+        : null;
+    }
     vpsActionResultPlanKey = actionPlanKey;
     const ok = ['success', 'dry-run'].includes(vpsDeploymentResult.state);
     showMessage(
@@ -1334,7 +1421,7 @@ btnTailscaleEnable.addEventListener('click', async () => {
 });
 
 btnTailscaleProbe.addEventListener('click', async () => {
-  if (runtimeMode !== 'regular-local' || isValidating || isRunning) return;
+  if (runtimeMode !== 'regular-local' || isValidating) return;
   tailscaleReadinessSeq += 1;
   const url = runtimeFields.publicCallbackBaseUrl.value.trim() || tailscalePublicCallbackBaseUrl || tailscaleUrl.textContent.trim();
   if (!url) {
@@ -1347,6 +1434,7 @@ btnTailscaleProbe.addEventListener('click', async () => {
 
   try {
     const result = await window.somnibot.probeTailscaleCallback(url);
+    latestCallbackProbe = result;
     if (result.ok) {
       tailscaleDot.className = 'status-dot ready';
       tailscaleStatusText.textContent = 'Public callback verified.';
@@ -1360,6 +1448,7 @@ btnTailscaleProbe.addEventListener('click', async () => {
   } finally {
     btnTailscaleProbe.disabled = false;
     btnTailscaleProbe.textContent = 'Verify Callback';
+    await refreshSetupStatus();
   }
 });
 
@@ -1414,11 +1503,9 @@ function renderTailscaleReadiness(readiness) {
     : '';
 
   tailscaleDetails.classList.toggle('hidden', !tailscaleCommand.textContent);
-  tailscaleUrl.classList.toggle('hidden', !publicUrl);
-  tailscaleUrl.textContent = publicUrl;
+  syncTailscalePublicCallbackAvailability(publicUrl);
 
   btnTailscaleEnable.classList.toggle('hidden', !['not-configured', 'not-logged-in'].includes(readiness.state));
-  btnTailscaleProbe.classList.toggle('hidden', !publicUrl);
 
   const note = tailscaleReadinessNote(readiness);
   tailscaleNote.classList.toggle('hidden', !note);
@@ -1426,8 +1513,15 @@ function renderTailscaleReadiness(readiness) {
   refreshSetupStatus();
 }
 
+function syncTailscalePublicCallbackAvailability(publicUrl) {
+  tailscaleUrl.classList.toggle('hidden', !publicUrl);
+  tailscaleUrl.textContent = publicUrl;
+  btnTailscaleProbe.classList.toggle('hidden', !publicUrl);
+}
+
 function applyTailscalePublicCallbackBaseUrl(publicUrl) {
   tailscalePublicCallbackBaseUrl = publicUrl;
+  syncTailscalePublicCallbackAvailability(publicUrl);
   const callbackField = document.getElementById('publicCallbackBaseUrl');
   if (callbackField && callbackField.value !== publicUrl) {
     callbackField.value = publicUrl;
@@ -1644,7 +1738,13 @@ function setFieldsDisabled(disabled) {
 function setTailscaleActionsDisabled(disabled) {
   btnTailscaleCheck.disabled = disabled;
   btnTailscaleEnable.disabled = disabled;
-  btnTailscaleProbe.disabled = disabled;
+  btnTailscaleProbe.disabled = disabled && !canProbePublicCallbackWhileRunning();
+}
+
+function canProbePublicCallbackWhileRunning() {
+  return runtimeMode === 'regular-local'
+    && isRunning
+    && !isValidating;
 }
 
 function normalizeDiscordSnowflake(value) {
