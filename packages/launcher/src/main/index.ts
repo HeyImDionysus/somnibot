@@ -73,6 +73,11 @@ let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
 const MASKED_SECRET = '••••••••';
+const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
+let dashboardSetupSnapshotCache: {
+  loadedAt: number;
+  payload: DashboardSetupStatusPayload | undefined;
+} | null = null;
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
 type PayPalRuntimeConfig = Pick<
@@ -92,6 +97,10 @@ interface DashboardSetupStatusPayload {
   discordAuthProviderReady?: boolean;
   discordAuthConfigured?: boolean;
   discordAuthProviderStatus?: SetupFlowInput['supabaseDiscordAuthProviderStatus'];
+}
+
+interface ReadDashboardSetupOptions {
+  force?: boolean;
 }
 
 interface SetupAutomationResult {
@@ -233,8 +242,23 @@ async function readDashboardHealthSnapshot(timeoutMs = 1_500): Promise<Dashboard
   }
 }
 
-async function readDashboardSetupSnapshot(timeoutMs = 1_500): Promise<DashboardSetupStatusPayload | undefined> {
-  if (getStatus().dashboard !== 'online') return undefined;
+async function readDashboardSetupSnapshot(
+  timeoutMs = 1_500,
+  options: ReadDashboardSetupOptions = {},
+): Promise<DashboardSetupStatusPayload | undefined> {
+  if (getStatus().dashboard !== 'online') {
+    dashboardSetupSnapshotCache = null;
+    return undefined;
+  }
+
+  const now = Date.now();
+  if (
+    !options.force
+    && dashboardSetupSnapshotCache
+    && now - dashboardSetupSnapshotCache.loadedAt < DASHBOARD_SETUP_SNAPSHOT_CACHE_MS
+  ) {
+    return dashboardSetupSnapshotCache.payload;
+  }
 
   try {
     const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
@@ -242,10 +266,16 @@ async function readDashboardSetupSnapshot(timeoutMs = 1_500): Promise<DashboardS
       cache: 'no-store',
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return undefined;
+    if (!response.ok) {
+      dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload: undefined };
+      return undefined;
+    }
 
-    return await response.json().catch(() => undefined) as DashboardSetupStatusPayload | undefined;
+    const payload = await response.json().catch(() => undefined) as DashboardSetupStatusPayload | undefined;
+    dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload };
+    return payload;
   } catch {
+    dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload: undefined };
     return undefined;
   }
 }
@@ -480,6 +510,15 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
       providerValidation: validation,
       publicCallbackBaseUrl: config.publicCallbackBaseUrl,
     };
+  }
+
+  const dashboardAuthProviderStatus = await readDashboardSetupSnapshot(1_500, { force: true })
+    .then(snapshot => snapshot?.discordAuthProviderStatus);
+  const dashboardVerifiedAuthProvider = !callbackBaseUrlChanged
+    && dashboardAuthProviderStatus?.ready === true;
+  if (dashboardVerifiedAuthProvider && !config.supabaseDiscordAuthProviderConfigured) {
+    saveConfig({ supabaseDiscordAuthProviderConfigured: true });
+    config = getConfig();
   }
 
   if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured) {
@@ -768,11 +807,20 @@ function registerIpcHandlers(): void {
       readDashboardHealthSnapshot(),
       readDashboardSetupSnapshot(),
     ]);
+    const requestedPublicCallbackBaseUrl = (
+      input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl
+    ).trim();
+    const dashboardSetupMatchesCurrentConfig = requestedPublicCallbackBaseUrl === config.publicCallbackBaseUrl.trim();
+    const dashboardSetupStatus = dashboardSetupMatchesCurrentConfig
+      ? dashboardSetup?.discordAuthProviderStatus
+      : undefined;
     const selectedAuthProviderStatus = input.supabaseDiscordAuthProviderStatus
-      ?? dashboardSetup?.discordAuthProviderStatus;
+      ?? dashboardSetupStatus;
     const selectedAuthProviderStatusBlocksDashboard = selectedAuthProviderStatus?.ready === false;
-    const dashboardAuthProviderConfigured = dashboardSetup?.discordAuthProviderReady === true
-      || dashboardSetup?.discordAuthConfigured === true;
+    const dashboardAuthProviderConfigured = dashboardSetupMatchesCurrentConfig && (
+      dashboardSetup?.discordAuthProviderReady === true
+      || dashboardSetup?.discordAuthConfigured === true
+    );
     const discoveredAuthProviderConfigured = Boolean(
       selectedAuthProviderStatus?.ready
       || (!selectedAuthProviderStatusBlocksDashboard && dashboardAuthProviderConfigured)

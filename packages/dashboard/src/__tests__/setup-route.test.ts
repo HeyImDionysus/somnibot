@@ -490,6 +490,30 @@ describe('GET /api/setup status', () => {
     expect(body.discordAuthProviderStatus).not.toHaveProperty('error');
   });
 
+  it('does not report unknown auth-provider check failures as a disabled provider', async () => {
+    (getDiscordAuthProviderStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+      manualConfigured: false,
+      error: 'Failed to check Discord auth provider: TypeError: fetch failed',
+    });
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.discordAuthProviderStatus).toMatchObject({
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      statusReason: 'unknown',
+    });
+    expect(body.discordAuthProviderStatus.statusDetail).toContain('could not be verified');
+    expect(body.discordAuthProviderStatus).not.toHaveProperty('error');
+  });
+
   it('reports launcher-derived callback and webhook URLs for the setup wizard', async () => {
     vi.stubEnv('DASHBOARD_URL', 'http://localhost:3456/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');

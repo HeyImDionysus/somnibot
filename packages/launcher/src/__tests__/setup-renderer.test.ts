@@ -147,6 +147,7 @@ describe('launcher setup renderer wiring', () => {
     const renderer = readSourceFile('renderer/renderer.js');
     const configStore = readSourceFile('main/config-store.ts');
     const validationIndex = main.indexOf('const validation = await validateAllCredentials(config);');
+    const authProviderReadinessIndex = main.indexOf('const dashboardVerifiedAuthProvider = !callbackBaseUrlChanged');
     const authProviderIndex = main.indexOf('if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured)');
     const startIndex = main.indexOf('const startResult = await startLocalStack(config, { forceRestart: true });');
     const dashboardHealthIndex = main.indexOf('const dashboardReady = await waitForDashboardHealth();', startIndex);
@@ -218,6 +219,11 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('function readDashboardSetupSnapshot');
     expect(main).toContain("fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`");
     expect(main).toContain('dashboardAuthProviderConfigured');
+    expect(main).toContain('DASHBOARD_SETUP_SNAPSHOT_CACHE_MS');
+    expect(main).toContain('const dashboardSetupMatchesCurrentConfig');
+    expect(main).toContain('const dashboardSetupStatus = dashboardSetupMatchesCurrentConfig');
+    expect(main).toContain('const dashboardAuthProviderStatus = await readDashboardSetupSnapshot(1_500, { force: true })');
+    expect(main).toContain('saveConfig({ supabaseDiscordAuthProviderConfigured: true })');
     expect(main).toContain('supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');
     expect(main).toContain('tailscaleReadinessState: input.tailscaleReadinessState');
@@ -233,6 +239,8 @@ describe('launcher setup renderer wiring', () => {
     expect(dashboardHealthIndex).toBeGreaterThan(startIndex);
     expect(configureAuthIndex).toBeGreaterThan(dashboardHealthIndex);
     expect(paypalWebhookIndex).toBeGreaterThan(configureAuthIndex);
+    expect(authProviderReadinessIndex).toBeGreaterThan(validationIndex);
+    expect(authProviderIndex).toBeGreaterThan(authProviderReadinessIndex);
     expect(main).toContain('evaluateDashboardHealthPayload(body)');
     expect(main).toContain('servicesStarted: true');
     expect(main).toContain('startLocalStack(config, { forceRestart: true })');

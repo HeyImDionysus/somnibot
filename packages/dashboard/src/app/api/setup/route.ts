@@ -47,6 +47,7 @@ function getDiscordAuthProviderStatusReason(status: DiscordAuthProviderStatus): 
   if (status.error?.includes('SUPABASE_ACCESS_TOKEN')) return 'management-token-missing';
   if (status.error?.includes('project ref')) return 'project-ref-missing';
   if (status.error?.includes('Supabase Management API error')) return 'management-api-error';
+  if (status.error) return 'unknown';
   if (!status.providerEnabled) return 'provider-disabled';
   if (!status.callbackAllowListReady) return 'callback-allow-list-missing';
   return 'unknown';
