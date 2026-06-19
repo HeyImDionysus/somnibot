@@ -45,6 +45,8 @@ interface SetupStatus {
   operatorDashboardUrl?: string | null;
   publicCallbackBaseUrl?: string | null;
   paypalWebhookUrl?: string | null;
+  paypalWebhookReady?: boolean;
+  paypalWebhookError?: string | null;
   publicCallbackRequired?: boolean;
   publicCallbackReady?: boolean;
   publicCallbackError?: string | null;
@@ -114,7 +116,7 @@ export default function SetupWizardPage() {
   // Clipboard
   const [copied, setCopied] = useState('');
   const publicCallbackReadyForSetup = !status?.publicCallbackRequired || status.publicCallbackReady === true;
-  const paypalWebhookReady = Boolean(status?.paypalWebhookUrl && publicCallbackReadyForSetup);
+  const paypalWebhookReady = Boolean(status?.paypalWebhookReady && publicCallbackReadyForSetup);
   const canFinalizeSetup = guildDetected && publicCallbackReadyForSetup && !finalizing;
   const readinessGuildDetected = guildDetected || Boolean(status?.guildDetected);
   const readinessGuildName = guildName || status?.guildName;
@@ -434,8 +436,13 @@ export default function SetupWizardPage() {
                       ? 'PayPal webhook URL ready'
                       : 'PayPal webhook waiting on callback'}
                   </p>
-                  <p className="mt-1 break-all text-sm text-discord-text-secondary">
-                    {status.paypalWebhookUrl || 'A public dashboard URL will generate this automatically.'}
+                  <p
+                    role={status.paypalWebhookError ? 'alert' : undefined}
+                    className={`mt-1 break-all text-sm ${status.paypalWebhookError ? 'text-yellow-300' : 'text-discord-text-secondary'}`}
+                  >
+                    {status.paypalWebhookError
+                      || status.paypalWebhookUrl
+                      || 'A public dashboard URL will generate this automatically.'}
                   </p>
                 </div>
               </div>

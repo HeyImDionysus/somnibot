@@ -398,7 +398,9 @@ describe('owner setup readiness path', () => {
       publicCallbackRequired: true,
       publicCallbackReady: false,
       publicCallbackError: 'Public callback URL must use HTTPS before setup can finalize.',
-      paypalWebhookUrl: 'http://localhost:3456/api/paypal/webhook',
+      paypalWebhookUrl: null,
+      paypalWebhookReady: false,
+      paypalWebhookError: 'Public callback URL must use HTTPS before setup can finalize.',
     });
     expect(launcherStatus.firstBlockingStepId).toBe('regular-callback');
     expect(launcherStatus.primaryAction).toMatchObject({
