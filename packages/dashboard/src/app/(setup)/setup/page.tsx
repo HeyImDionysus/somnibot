@@ -45,12 +45,20 @@ interface SetupStatus {
   operatorDashboardUrl?: string | null;
   publicCallbackBaseUrl?: string | null;
   paypalWebhookUrl?: string | null;
+  paypalWebhookReady?: boolean;
+  paypalWebhookError?: string | null;
   publicCallbackRequired?: boolean;
   publicCallbackReady?: boolean;
   publicCallbackError?: string | null;
   discordClientId: string | null;
   discordCredentialsPresent?: boolean;
   setupCompleted?: boolean;
+}
+
+function StatusIcon({ ok }: { ok: boolean }) {
+  return ok
+    ? <CheckCircle2 className="mt-0.5 h-4 w-4 flex-shrink-0 text-green-400" />
+    : <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-yellow-400" />;
 }
 
 const STEPS: StepConfig[] = [
@@ -107,6 +115,11 @@ export default function SetupWizardPage() {
 
   // Clipboard
   const [copied, setCopied] = useState('');
+  const publicCallbackReadyForSetup = !status?.publicCallbackRequired || status.publicCallbackReady === true;
+  const paypalWebhookReady = Boolean(status?.paypalWebhookReady && publicCallbackReadyForSetup);
+  const canFinalizeSetup = guildDetected && publicCallbackReadyForSetup && !finalizing;
+  const readinessGuildDetected = guildDetected || Boolean(status?.guildDetected);
+  const readinessGuildName = guildName || status?.guildName;
 
   // Load initial status
   const fetchStatus = useCallback(async () => {
@@ -287,6 +300,7 @@ export default function SetupWizardPage() {
         const res = await fetch('/api/setup');
         if (res.ok) {
           const data: SetupStatus = await res.json();
+          setStatus(data);
           if (data.guildDetected && data.guildId) {
             setGuildDetected(true);
             setGuildName(data.guildName || '');
@@ -387,6 +401,79 @@ export default function SetupWizardPage() {
       {/* Step Content */}
       <main className="flex-1 px-6 py-8">
         <div className="mx-auto max-w-2xl">
+          {status && (
+            <section
+              aria-label="Setup readiness"
+              className="mb-6 space-y-3 rounded-lg border border-discord-border-subtle bg-discord-bg-secondary p-5"
+            >
+              <div className="flex gap-3">
+                <StatusIcon ok={!status.publicCallbackRequired || status.publicCallbackReady === true} />
+                <div>
+                  <p className="text-sm font-medium text-discord-text-primary">
+                    {status.publicCallbackRequired
+                      ? status.publicCallbackReady
+                        ? 'Public callback ready'
+                        : 'Public callback blocked'
+                      : 'Public callback optional'}
+                  </p>
+                  {status.publicCallbackError ? (
+                    <p role="alert" className="mt-1 text-sm text-yellow-300">
+                      {status.publicCallbackError}
+                    </p>
+                  ) : (
+                    <p className="mt-1 break-all text-sm text-discord-text-secondary">
+                      {status.publicCallbackBaseUrl || 'Local setup can continue before a public callback is required.'}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <StatusIcon ok={paypalWebhookReady} />
+                <div>
+                  <p className="text-sm font-medium text-discord-text-primary">
+                    {paypalWebhookReady
+                      ? 'PayPal webhook URL ready'
+                      : 'PayPal webhook waiting on callback'}
+                  </p>
+                  <p
+                    role={status.paypalWebhookError ? 'alert' : undefined}
+                    className={`mt-1 break-all text-sm ${status.paypalWebhookError ? 'text-yellow-300' : 'text-discord-text-secondary'}`}
+                  >
+                    {status.paypalWebhookError
+                      || status.paypalWebhookUrl
+                      || 'A public dashboard URL will generate this automatically.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="flex gap-3">
+                  <StatusIcon ok={status.botOnline} />
+                  <div>
+                    <p className="text-sm font-medium text-discord-text-primary">
+                      {status.botOnline ? 'Bot runtime online' : 'Bot runtime waiting'}
+                    </p>
+                    <p className="mt-1 text-sm text-discord-text-secondary">
+                      {status.botOnline ? 'Dashboard health has bot proof.' : 'Start the bot before final setup.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <StatusIcon ok={readinessGuildDetected} />
+                  <div>
+                    <p className="text-sm font-medium text-discord-text-primary">
+                      {readinessGuildDetected ? `${readinessGuildName || 'Guild'} detected` : 'Guild not detected'}
+                    </p>
+                    <p className="mt-1 text-sm text-discord-text-secondary">
+                      {readinessGuildDetected ? 'The bot has joined a server.' : 'Invite the bot before final setup.'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* ─── Step 1: Discord Bot ─── */}
           {currentStep === 1 && (
             <div className="space-y-6">
@@ -917,7 +1004,7 @@ export default function SetupWizardPage() {
                 </button>
                 <button
                   onClick={finalizeSetup}
-                  disabled={!guildDetected || finalizing}
+                  disabled={!canFinalizeSetup}
                   className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {finalizing ? (

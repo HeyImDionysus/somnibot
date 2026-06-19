@@ -22,6 +22,7 @@ import { applyRuntimePayPalEnv } from '@/lib/paypal';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
+const PAYPAL_WEBHOOK_PATH = '/api/paypal/webhook';
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -174,6 +175,41 @@ function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   }
 }
 
+function getSetupPayPalWebhookUrlError(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') {
+      return 'PayPal webhook URL must use HTTPS before it can be marked ready.';
+    }
+    if (isLocalHostname(parsed.hostname)) {
+      return 'PayPal webhook URL cannot point at localhost before it can be marked ready.';
+    }
+    if (parsed.pathname.replace(/\/$/, '') !== PAYPAL_WEBHOOK_PATH) {
+      return `PayPal webhook URL must point at ${PAYPAL_WEBHOOK_PATH}.`;
+    }
+    if (parsed.search || parsed.hash) {
+      return 'PayPal webhook URL must not include query parameters or fragments.';
+    }
+  } catch {
+    return 'PayPal webhook URL must be a valid HTTPS URL.';
+  }
+
+  return null;
+}
+
+function normalizeSetupPayPalWebhookUrl(value: string | null | undefined): string | null {
+  if (getSetupPayPalWebhookUrlError(value)) return null;
+
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+
+  const parsed = new URL(trimmed);
+  return `${parsed.origin}${PAYPAL_WEBHOOK_PATH}`;
+}
+
 function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
   const rawUrl = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '';
   if (!rawUrl.trim()) return null;
@@ -220,6 +256,48 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   };
 }
 
+function resolveSetupPayPalWebhookStatus(
+  runtimeCallbacks: RuntimeCallbackConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): { url: string | null; ready: boolean; error: string | null } {
+  const derivedWebhookUrl = normalizeSetupPayPalWebhookUrl(runtimeCallbacks.paypalWebhookUrl);
+
+  if (runtimeCallbacks.publicCallbackBaseUrl) {
+    if (derivedWebhookUrl) {
+      return { url: derivedWebhookUrl, ready: true, error: null };
+    }
+
+    if (runtimeCallbacks.publicCallbackRequired) {
+      return {
+        url: null,
+        ready: false,
+        error: runtimeCallbacks.publicCallbackError
+          ?? 'PayPal webhook URL is waiting on a public HTTPS callback URL.',
+      };
+    }
+  }
+
+  const explicitWebhookUrl = env['PAYPAL_WEBHOOK_URL'];
+  const explicitWebhookError = getSetupPayPalWebhookUrlError(explicitWebhookUrl);
+  if (explicitWebhookUrl?.trim() && explicitWebhookError) {
+    return { url: null, ready: false, error: explicitWebhookError };
+  }
+
+  if (explicitWebhookUrl?.trim()) {
+    return {
+      url: normalizeSetupPayPalWebhookUrl(explicitWebhookUrl),
+      ready: true,
+      error: null,
+    };
+  }
+
+  return {
+    url: null,
+    ready: false,
+    error: 'PayPal webhook URL is waiting on a public dashboard URL.',
+  };
+}
+
 function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {
   return NextResponse.json(
     {
@@ -238,6 +316,7 @@ export async function GET(req: NextRequest) {
 
   const supabase = createSetupSupabase();
   const runtimeCallbacks = resolveRuntimeCallbackConfig();
+  const paypalWebhookStatus = resolveSetupPayPalWebhookStatus(runtimeCallbacks);
   const status = {
     supabaseConnected: false,
     databaseInitialized: false,
@@ -248,7 +327,9 @@ export async function GET(req: NextRequest) {
     dashboardUrl: runtimeCallbacks.publicCallbackBaseUrl || runtimeCallbacks.operatorDashboardUrl || null,
     operatorDashboardUrl: runtimeCallbacks.operatorDashboardUrl,
     publicCallbackBaseUrl: runtimeCallbacks.publicCallbackBaseUrl,
-    paypalWebhookUrl: process.env['PAYPAL_WEBHOOK_URL'] || runtimeCallbacks.paypalWebhookUrl,
+    paypalWebhookUrl: paypalWebhookStatus.url,
+    paypalWebhookReady: paypalWebhookStatus.ready,
+    paypalWebhookError: paypalWebhookStatus.error,
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
     publicCallbackReady: runtimeCallbacks.publicCallbackReady,
     publicCallbackError: runtimeCallbacks.publicCallbackError,
@@ -615,8 +696,27 @@ export async function POST(request: NextRequest) {
     if (runtimeCallbacks.publicCallbackBaseUrl && !credentials.dashboard_url?.trim()) {
       credentials.dashboard_url = runtimeCallbacks.publicCallbackBaseUrl;
     }
-    if (runtimeCallbacks.paypalWebhookUrl && !credentials.paypal_webhook_url?.trim()) {
-      credentials.paypal_webhook_url = runtimeCallbacks.paypalWebhookUrl;
+    const runtimePayPalWebhookUrl = normalizeSetupPayPalWebhookUrl(runtimeCallbacks.paypalWebhookUrl);
+    const submittedPayPalWebhookUrl = credentials.paypal_webhook_url?.trim();
+    if (
+      runtimePayPalWebhookUrl
+      && (
+        runtimeCallbacks.publicCallbackRequired
+        || runtimeCallbacks.publicCallbackBaseUrl
+        || !submittedPayPalWebhookUrl
+        || getSetupPayPalWebhookUrlError(submittedPayPalWebhookUrl)
+      )
+    ) {
+      credentials.paypal_webhook_url = runtimePayPalWebhookUrl;
+    } else if (submittedPayPalWebhookUrl) {
+      const submittedPayPalWebhookError = getSetupPayPalWebhookUrlError(submittedPayPalWebhookUrl);
+      if (submittedPayPalWebhookError) {
+        return NextResponse.json(
+          { ok: false, error: submittedPayPalWebhookError, setupLocked: false },
+          { status: 400 },
+        );
+      }
+      credentials.paypal_webhook_url = normalizeSetupPayPalWebhookUrl(submittedPayPalWebhookUrl) ?? submittedPayPalWebhookUrl;
     }
 
     let submittedSupabaseAccessToken: string | undefined;
