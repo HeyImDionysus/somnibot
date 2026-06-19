@@ -226,6 +226,7 @@ describe('POST /api/setup finalize', () => {
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://old.example.com/api/paypal/webhook');
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -233,7 +234,12 @@ describe('POST /api/setup finalize', () => {
 
     const res = await POST(buildRequest('/api/setup', {
       method: 'POST',
-      body: { action: 'finalize' },
+      body: {
+        action: 'finalize',
+        credentials: {
+          paypal_webhook_url: 'https://old.example.com/api/paypal/webhook',
+        },
+      },
     }));
 
     expect(res.status).toBe(200);
@@ -528,6 +534,7 @@ describe('GET /api/setup status', () => {
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://old.example.com/api/paypal/webhook');
 
     const res = await GET(buildRequest('/api/setup'));
     const body = await res.json();

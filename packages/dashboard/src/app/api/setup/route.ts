@@ -220,6 +220,17 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   };
 }
 
+function resolveSetupPayPalWebhookUrl(
+  runtimeCallbacks: RuntimeCallbackConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (runtimeCallbacks.publicCallbackRequired) {
+    return runtimeCallbacks.paypalWebhookUrl;
+  }
+
+  return env['PAYPAL_WEBHOOK_URL'] || runtimeCallbacks.paypalWebhookUrl;
+}
+
 function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {
   return NextResponse.json(
     {
@@ -248,7 +259,7 @@ export async function GET(req: NextRequest) {
     dashboardUrl: runtimeCallbacks.publicCallbackBaseUrl || runtimeCallbacks.operatorDashboardUrl || null,
     operatorDashboardUrl: runtimeCallbacks.operatorDashboardUrl,
     publicCallbackBaseUrl: runtimeCallbacks.publicCallbackBaseUrl,
-    paypalWebhookUrl: process.env['PAYPAL_WEBHOOK_URL'] || runtimeCallbacks.paypalWebhookUrl,
+    paypalWebhookUrl: resolveSetupPayPalWebhookUrl(runtimeCallbacks),
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
     publicCallbackReady: runtimeCallbacks.publicCallbackReady,
     publicCallbackError: runtimeCallbacks.publicCallbackError,
@@ -615,7 +626,10 @@ export async function POST(request: NextRequest) {
     if (runtimeCallbacks.publicCallbackBaseUrl && !credentials.dashboard_url?.trim()) {
       credentials.dashboard_url = runtimeCallbacks.publicCallbackBaseUrl;
     }
-    if (runtimeCallbacks.paypalWebhookUrl && !credentials.paypal_webhook_url?.trim()) {
+    if (
+      runtimeCallbacks.paypalWebhookUrl
+      && (runtimeCallbacks.publicCallbackRequired || !credentials.paypal_webhook_url?.trim())
+    ) {
       credentials.paypal_webhook_url = runtimeCallbacks.paypalWebhookUrl;
     }
 

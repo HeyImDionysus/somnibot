@@ -28,9 +28,12 @@ test.describe('Health & Smoke', () => {
   });
 
   test('unauthenticated API returns 401', async ({ request }) => {
-    const res = await request.get('/api/guilds');
-    // Should redirect to auth or return 401/403
-    expect([401, 403, 302].includes(res.status())).toBe(true);
+    const res = await request.get('/api/guilds', { maxRedirects: 0 });
+    // Should redirect to auth or return 401/403.
+    expect([401, 403, 302, 307, 308].includes(res.status())).toBe(true);
+    if ([302, 307, 308].includes(res.status())) {
+      expect(res.headers().location).toContain('/login');
+    }
   });
 });
 
@@ -44,8 +47,10 @@ test.describe('Page loads', () => {
     });
   });
 
-  test('unknown route returns 404 page', async ({ page }) => {
+  test('unknown protected route redirects to login page', async ({ page }) => {
     const response = await page.goto('/this-route-does-not-exist-12345');
-    expect(response?.status()).toBe(404);
+    expect(response?.status()).toBeLessThan(500);
+    await expect(page.getByRole('heading', { name: 'SomniBot' })).toBeVisible();
+    await expect(page.getByText('Sign in with Discord to manage your server')).toBeVisible();
   });
 });
