@@ -261,10 +261,12 @@ export async function POST(req: NextRequest) {
     price_cents?: number;
   }
 
-  const requiresPayPal = type !== 'free' && price_cents > 0;
   let normalizedPlanDefs = Array.isArray(planDefs)
     ? planDefs.map((rawPlan) => rawPlan as PlanDefinition)
     : [];
+  const hasPaidSubscriptionPlan = type === 'subscription'
+    && normalizedPlanDefs.some((planDef) => (planDef.price_cents ?? price_cents) > 0);
+  const requiresPayPal = type !== 'free' && (price_cents > 0 || hasPaidSubscriptionPlan);
 
   if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
     normalizedPlanDefs = [{
