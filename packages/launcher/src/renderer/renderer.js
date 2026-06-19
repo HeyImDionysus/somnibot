@@ -76,6 +76,7 @@ const summaryAuthCallback = $('summary-auth-callback');
 const summaryPayPalWebhook = $('summary-paypal-webhook');
 const runtimeDiagnosticsList = $('runtime-diagnostics-list');
 const vpsDeploymentPlan = $('vps-deployment-plan');
+const vpsHealthVerification = $('vps-health-verification');
 
 // Onboarding
 const onboardingOverlay = $('onboarding-overlay');
@@ -447,6 +448,7 @@ function renderSetupStatus(status) {
     .join('');
 
   renderDeploymentPlan(status.deploymentPlan, isVpsStatus);
+  renderVpsHealthVerification(status.healthVerification, isVpsStatus);
 
   runtimeSteps.innerHTML = status.steps.map((step) => {
     const statusLabel = formatStepStatus(step.status);
@@ -575,6 +577,94 @@ function renderDeploymentPlan(plan, isVpsStatus) {
       `${rollback ? renderCommands(rollback.commands) + renderList(rollback.notes) : ''}` +
     '</div>'
   );
+}
+
+function renderVpsHealthVerification(verification, isVpsStatus) {
+  if (!vpsHealthVerification) return;
+
+  if (!isVpsStatus || !verification) {
+    vpsHealthVerification.classList.add('hidden');
+    vpsHealthVerification.innerHTML = '';
+    return;
+  }
+
+  vpsHealthVerification.classList.remove('hidden');
+  const status = verification.status || 'pending';
+  const blockedReasons = verification.blockedReasons || [];
+  const checks = verification.checks || [];
+  const badgeClass = getVpsHealthBadgeClass(status);
+  const summary = status === 'pass'
+    ? 'VPS health proof is complete.'
+    : status === 'fail'
+      ? 'VPS health proof has failures to fix.'
+      : status === 'running'
+        ? 'VPS health proof is running.'
+        : status === 'manual'
+          ? 'VPS health proof needs manual provider confirmation.'
+          : status === 'blocked'
+            ? 'Finish VPS deployment readiness before health proof can run.'
+            : 'VPS health proof has not run yet.';
+
+  const blockedSection = blockedReasons.length > 0
+    ? `<div class="deployment-plan-section warning"><h4>Blocked by</h4>${renderList(blockedReasons)}</div>`
+    : '';
+  const checksSection = checks.length > 0
+    ? `<div class="deployment-plan-section vps-health-checks"><h4>Health checks</h4>${checks.map(renderVpsHealthCheck).join('')}</div>`
+    : '<div class="deployment-plan-section"><p>No health checks returned.</p></div>';
+
+  vpsHealthVerification.innerHTML = (
+    '<div class="deployment-plan-header">' +
+      '<div>' +
+        '<h3>VPS health verification</h3>' +
+        `<p>${escapeHtml(summary)}</p>` +
+      '</div>' +
+      `<span class="deployment-plan-badge ${escapeHtml(badgeClass)}">${escapeHtml(formatVpsHealthStatus(status))}</span>` +
+    '</div>' +
+    blockedSection +
+    checksSection
+  );
+}
+
+function renderVpsHealthCheck(check) {
+  const status = check.status || 'pending';
+  const diagnostics = Object.entries(check.diagnostics || {})
+    .filter(([, value]) => value !== undefined && value !== null && String(value).length > 0)
+    .map(([label, value]) => [formatDiagnosticLabel(label), String(value)]);
+  const diagnosticRows = diagnostics.length > 0
+    ? `<div class="vps-health-diagnostics">${renderPlanRows(diagnostics)}</div>`
+    : '';
+  const manual = check.manualAction ? '<span class="manual-action">Manual confirmation</span>' : '';
+
+  return (
+    `<div class="vps-health-check ${escapeHtml(status)}">` +
+      '<div class="vps-health-check-header">' +
+        `<span class="deployment-plan-badge ${escapeHtml(getVpsHealthBadgeClass(status))}">${escapeHtml(formatVpsHealthStatus(status))}</span>` +
+        `<strong>${escapeHtml(check.label || check.id || 'Health check')}</strong>` +
+      '</div>' +
+      `<p><strong>${escapeHtml(check.summary || '')}</strong></p>` +
+      `<p>${escapeHtml(check.detail || '')}</p>` +
+      manual +
+      diagnosticRows +
+    '</div>'
+  );
+}
+
+function getVpsHealthBadgeClass(status) {
+  if (status === 'pass') return 'ready';
+  if (status === 'fail' || status === 'blocked') return 'blocked';
+  return status;
+}
+
+function formatVpsHealthStatus(status) {
+  const labels = {
+    blocked: 'Blocked',
+    fail: 'Fix',
+    manual: 'Manual',
+    pass: 'Ready',
+    pending: 'Waiting',
+    running: 'Checking',
+  };
+  return labels[status] || status;
 }
 
 function renderDeploymentActions(plan) {

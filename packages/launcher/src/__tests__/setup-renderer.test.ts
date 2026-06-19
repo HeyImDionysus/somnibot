@@ -77,6 +77,7 @@ describe('launcher setup renderer wiring', () => {
     expect(html).toContain('Use read-only preflight, dry-run deploy, or approval-gated deployment from the deployment plan.');
     expect(html).not.toContain('SSH automation is not run from this setup screen');
     expect(renderer).toContain("const vpsDeploymentPlan = $('vps-deployment-plan');");
+    expect(renderer).toContain("const vpsHealthVerification = $('vps-health-verification');");
     expect(renderer).toContain("const btnOpenDiscordInvite = $('btn-open-discord-invite');");
     expect(renderer).toContain('function getDiscordInviteState()');
     expect(renderer).toContain('function buildDiscordInviteUrl()');
@@ -97,6 +98,7 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('window.somnibot.openExternal(inviteState.url);');
     expect(renderer).toContain('updateDiscordInviteButton();\n      updateRestoreBanner();');
     expect(renderer).toContain('renderDeploymentPlan(status.deploymentPlan, isVpsStatus);');
+    expect(renderer).toContain('renderVpsHealthVerification(status.healthVerification, isVpsStatus);');
     expect(renderer).toContain('let latestProviderValidation = null;');
     expect(renderer).toContain('providerValidation: latestProviderValidation');
     expect(renderer).toContain('paypalReady: isPayPalFormComplete()');
@@ -135,7 +137,15 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain('<h4>Caddy/reverse proxy</h4>');
     expect(renderer).toContain('<h4>Approval gates</h4>');
     expect(renderer).toContain('<h4>Rollback</h4>');
+    expect(renderer).toContain('function renderVpsHealthVerification(verification, isVpsStatus)');
+    expect(renderer).toContain('<h3>VPS health verification</h3>');
+    expect(renderer).toContain('function renderVpsHealthCheck(check)');
+    expect(renderer).toContain('formatVpsHealthStatus(status)');
+    expect(renderer).toContain('formatDiagnosticLabel(label)');
     expect(styles).toContain('.deployment-plan');
+    expect(styles).toContain('.vps-health-verification');
+    expect(styles).toContain('.vps-health-check');
+    expect(styles).toContain('.vps-health-diagnostics');
     expect(styles).toContain('.deployment-plan-actions');
     expect(styles).toContain('.deployment-run-result');
     expect(styles).toContain('.deployment-command');
