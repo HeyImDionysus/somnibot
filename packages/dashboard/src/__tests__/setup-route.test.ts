@@ -491,6 +491,14 @@ describe('GET /api/setup status', () => {
     expect(body.discordAuthProviderStatus).not.toHaveProperty('error');
   });
 
+  it('bounds auth-provider status checks on setup status reads', async () => {
+    await GET(buildRequest('/api/setup'));
+
+    expect(getDiscordAuthProviderStatus).toHaveBeenCalledWith({
+      timeoutMs: 3_000,
+    });
+  });
+
   it('does not report unknown auth-provider check failures as a disabled provider', async () => {
     (getDiscordAuthProviderStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
       ready: false,

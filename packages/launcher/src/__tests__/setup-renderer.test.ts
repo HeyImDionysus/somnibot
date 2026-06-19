@@ -237,6 +237,7 @@ describe('launcher setup renderer wiring', () => {
     expect(main).toContain('manualAuthProviderConfirmed');
     expect(main).toContain('callbackBaseUrlChanged');
     expect(main).toContain('manualAuthProviderConfirmed && !callbackBaseUrlChanged');
+    expect(main).toContain('providerStatus.manualConfigured !== true || config.supabaseDiscordAuthProviderConfigured');
     expect(main).toContain('const authConfigured = await configureDashboardAuthProvider({');
     expect(validationIndex).toBeGreaterThan(-1);
     expect(authProviderIndex).toBeGreaterThan(validationIndex);

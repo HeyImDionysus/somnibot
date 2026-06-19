@@ -21,6 +21,7 @@ import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/r
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -338,7 +339,9 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const authProviderStatus = await getDiscordAuthProviderStatus();
+  const authProviderStatus = await getDiscordAuthProviderStatus({
+    timeoutMs: SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS,
+  });
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
   status.discordAuthProviderStatus = toPublicDiscordAuthProviderStatus(authProviderStatus);

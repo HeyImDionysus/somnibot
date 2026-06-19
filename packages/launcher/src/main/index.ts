@@ -241,8 +241,12 @@ function dashboardSetupVerifiesAuthProvider(
   snapshot: DashboardSetupStatusPayload | undefined,
   config: LauncherConfig,
 ): boolean {
-  return dashboardSetupMatchesLauncherConfig(snapshot, config)
-    && snapshot?.discordAuthProviderStatus?.ready === true;
+  const providerStatus = snapshot?.discordAuthProviderStatus;
+  if (!dashboardSetupMatchesLauncherConfig(snapshot, config) || providerStatus?.ready !== true) {
+    return false;
+  }
+
+  return providerStatus.manualConfigured !== true || config.supabaseDiscordAuthProviderConfigured;
 }
 
 async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean; error?: string }> {

@@ -4,6 +4,7 @@ import {
   ensureDiscordAuthProvider,
   getDashboardBaseUrl,
   getDashboardCallbackUrls,
+  getDiscordAuthProviderStatus,
 } from '@/lib/supabase/auto-config';
 
 describe('Supabase Discord auth auto-config', () => {
@@ -111,6 +112,39 @@ describe('Supabase Discord auth auto-config', () => {
         headers: expect.objectContaining({
           Authorization: 'Bearer setup-provided-token',
         }),
+      }),
+    );
+  });
+
+  it('passes a timeout signal to Supabase Management API status reads', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          EXTERNAL_DISCORD_ENABLED: true,
+          URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
+        }),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getDiscordAuthProviderStatus({
+      accessToken: 'setup-provided-token',
+      timeoutMs: 3_000,
+    });
+
+    expect(result).toMatchObject({
+      ready: true,
+      providerEnabled: true,
+      callbackAllowListReady: true,
+      manualConfigured: false,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.supabase.com/v1/projects/abcdefghijklmnopqrst/config/auth',
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
       }),
     );
   });

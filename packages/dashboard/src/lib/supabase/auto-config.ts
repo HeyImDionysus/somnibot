@@ -35,6 +35,8 @@ interface DashboardUrlEnv {
 
 interface AutoConfigOptions {
   accessToken?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -111,7 +113,11 @@ export function getDashboardCallbackUrls(env?: DashboardUrlEnv): string[] {
   return [...new Set(bases)].map((base) => `${base}/api/auth/callback`);
 }
 
-async function fetchAuthConfig(projectRef: string, accessToken: string): Promise<{
+function getAutoConfigAbortSignal(options?: AutoConfigOptions): AbortSignal | undefined {
+  return options?.signal ?? (options?.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined);
+}
+
+async function fetchAuthConfig(projectRef: string, accessToken: string, options?: AutoConfigOptions): Promise<{
   ok: true;
   config: Record<string, unknown>;
 } | {
@@ -125,6 +131,7 @@ async function fetchAuthConfig(projectRef: string, accessToken: string): Promise
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
+      signal: getAutoConfigAbortSignal(options),
     },
   );
 
@@ -193,7 +200,7 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
   }
 
   try {
-    const current = await fetchAuthConfig(projectRef, accessToken);
+    const current = await fetchAuthConfig(projectRef, accessToken, options);
     if (!current.ok) {
       return {
         ready: false,
@@ -291,7 +298,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
   }
 
   try {
-    const current = await fetchAuthConfig(projectRef, accessToken);
+    const current = await fetchAuthConfig(projectRef, accessToken, options);
     const currentConfig = current.ok ? current.config : {};
     const providerEnabled = current.ok && currentConfig.EXTERNAL_DISCORD_ENABLED === true;
     const allowListReady = current.ok && getMissingCallbackUrls(currentConfig).length === 0;
