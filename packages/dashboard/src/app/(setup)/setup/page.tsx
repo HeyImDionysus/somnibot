@@ -116,6 +116,8 @@ export default function SetupWizardPage() {
   const publicCallbackReadyForSetup = !status?.publicCallbackRequired || status.publicCallbackReady === true;
   const paypalWebhookReady = Boolean(status?.paypalWebhookUrl && publicCallbackReadyForSetup);
   const canFinalizeSetup = guildDetected && publicCallbackReadyForSetup && !finalizing;
+  const readinessGuildDetected = guildDetected || Boolean(status?.guildDetected);
+  const readinessGuildName = guildName || status?.guildName;
 
   // Load initial status
   const fetchStatus = useCallback(async () => {
@@ -296,6 +298,7 @@ export default function SetupWizardPage() {
         const res = await fetch('/api/setup');
         if (res.ok) {
           const data: SetupStatus = await res.json();
+          setStatus(data);
           if (data.guildDetected && data.guildId) {
             setGuildDetected(true);
             setGuildName(data.guildName || '');
@@ -450,13 +453,13 @@ export default function SetupWizardPage() {
                   </div>
                 </div>
                 <div className="flex gap-3">
-                  <StatusIcon ok={status.guildDetected} />
+                  <StatusIcon ok={readinessGuildDetected} />
                   <div>
                     <p className="text-sm font-medium text-discord-text-primary">
-                      {status.guildDetected ? `${status.guildName || 'Guild'} detected` : 'Guild not detected'}
+                      {readinessGuildDetected ? `${readinessGuildName || 'Guild'} detected` : 'Guild not detected'}
                     </p>
                     <p className="mt-1 text-sm text-discord-text-secondary">
-                      {status.guildDetected ? 'The bot has joined a server.' : 'Invite the bot before final setup.'}
+                      {readinessGuildDetected ? 'The bot has joined a server.' : 'Invite the bot before final setup.'}
                     </p>
                   </div>
                 </div>

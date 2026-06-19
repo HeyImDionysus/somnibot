@@ -132,4 +132,54 @@ test.describe('Owner setup browser readiness', () => {
     await expect(page.getByRole('button', { name: 'Finalize Setup' })).toBeDisabled();
     await expect(page.getByRole('heading', { name: 'SomniBot is Ready!' })).not.toBeVisible();
   });
+
+  test('updates readiness panel when invite polling detects the guild', async ({ page }) => {
+    let statusReads = 0;
+
+    await mockCsrf(page);
+    await page.route('**/api/setup', async (route) => {
+      const request = route.request();
+
+      if (request.method() === 'GET') {
+        statusReads += 1;
+        const guildDetected = statusReads > 1;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ...READY_STATUS,
+            guildDetected,
+            guildId: guildDetected ? 'guild-123' : null,
+            guildName: guildDetected ? 'Somni Test Guild' : null,
+          }),
+        });
+        return;
+      }
+
+      expect(request.postDataJSON()).toEqual({
+        action: 'generate-invite',
+        clientId: READY_STATUS.discordClientId,
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          inviteUrl: 'https://discord.com/oauth2/authorize?client_id=123456789012345678',
+        }),
+      });
+    });
+
+    await page.goto('/setup');
+
+    await expect(page.getByText('Guild not detected')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Connect PayPal' })).toBeVisible();
+
+    await page.getByRole('button', { name: /Continue/ }).click();
+    await expect(page.getByRole('heading', { name: 'Invite Bot to Your Server' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Invite SomniBot to Discord' }).click();
+    await expect(page.getByText('Waiting for bot to join a server...')).toBeVisible();
+    await expect(page.getByText('Somni Test Guild detected')).toBeVisible({ timeout: 7_000 });
+    await expect(page.getByRole('button', { name: 'Finalize Setup' })).toBeEnabled();
+  });
 });
