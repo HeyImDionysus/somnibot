@@ -320,6 +320,10 @@ main::-webkit-scrollbar-thumb:hover {
   overflow: hidden;
 }
 
+.vps-health-verification {
+  background: var(--bg-secondary);
+}
+
 .deployment-plan-header {
   display: flex;
   justify-content: space-between;
@@ -358,6 +362,17 @@ main::-webkit-scrollbar-thumb:hover {
 .deployment-plan-badge.blocked {
   color: var(--orange);
   background: rgba(255, 107, 0, 0.08);
+}
+
+.deployment-plan-badge.pending,
+.deployment-plan-badge.manual {
+  color: var(--text-muted);
+  background: var(--bg-primary);
+}
+
+.deployment-plan-badge.running {
+  color: var(--cyan);
+  background: rgba(0, 212, 255, 0.08);
 }
 
 .deployment-plan-grid {
@@ -461,6 +476,56 @@ main::-webkit-scrollbar-thumb:hover {
 
 .deployment-plan-section.warning {
   background: rgba(255, 107, 0, 0.05);
+}
+
+.vps-health-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vps-health-check {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.vps-health-check.pass {
+  border-color: rgba(35, 165, 89, 0.25);
+}
+
+.vps-health-check.fail,
+.vps-health-check.blocked {
+  border-color: rgba(255, 107, 0, 0.25);
+}
+
+.vps-health-check.running {
+  border-color: rgba(0, 212, 255, 0.25);
+}
+
+.vps-health-check-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.vps-health-check-header strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.vps-health-check .manual-action {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.vps-health-diagnostics {
+  margin-top: 8px;
 }
 
 .deployment-plan-section h4 {
