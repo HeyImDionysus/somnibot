@@ -215,6 +215,10 @@ describe('launcher setup renderer wiring', () => {
     expect(configStore).toContain('PAYPAL_SANDBOX: config.paypalSandbox ?');
     expect(main).toContain('supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken)');
     expect(main).toContain('supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured');
+    expect(main).toContain('function readDashboardSetupSnapshot');
+    expect(main).toContain("fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`");
+    expect(main).toContain('dashboardAuthProviderConfigured');
+    expect(main).toContain('supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus');
     expect(main).toContain('tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey)');
     expect(main).toContain('tailscaleReadinessState: input.tailscaleReadinessState');
     expect(main).toContain('setupLocked?: boolean');

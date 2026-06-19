@@ -22,6 +22,16 @@ export interface LocalServiceReadiness {
   dashboardHealth?: DashboardHealthEvaluation;
 }
 
+export interface SupabaseDiscordAuthProviderStatus {
+  ready?: boolean;
+  providerEnabled?: boolean;
+  callbackAllowListReady?: boolean;
+  missingCallbackUrls?: string[];
+  manualConfigured?: boolean;
+  statusReason?: string;
+  statusDetail?: string;
+}
+
 export interface SetupFlowInput extends RuntimeNetworkingConfig {
   discordGuildId?: string;
   credentialReady?: boolean;
@@ -33,6 +43,7 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig {
   paypalReady?: boolean;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
+  supabaseDiscordAuthProviderStatus?: SupabaseDiscordAuthProviderStatus;
   tailscaleAuthKeyReady?: boolean;
   tailscaleReadinessState?: 'ready'
     | 'not-installed'
@@ -107,10 +118,16 @@ function hasVpsSshTarget(input: SetupFlowInput): boolean {
 }
 
 function hasAuthProviderPath(input: SetupFlowInput): boolean {
-  return Boolean(input.supabaseAccessTokenReady || input.supabaseDiscordAuthProviderConfigured);
+  return Boolean(
+    input.supabaseAccessTokenReady
+    || input.supabaseDiscordAuthProviderConfigured
+    || input.supabaseDiscordAuthProviderStatus?.ready,
+  );
 }
 
 function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
+  const providerStatus = input.supabaseDiscordAuthProviderStatus;
+
   if (input.supabaseAccessTokenReady) {
     return {
       id: 'auth-provider',
@@ -121,13 +138,43 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
     };
   }
 
-  if (input.supabaseDiscordAuthProviderConfigured) {
+  if (input.supabaseDiscordAuthProviderConfigured || providerStatus?.ready) {
+    const statusDetail = providerStatus?.ready ? providerStatus.statusDetail?.trim() : undefined;
     return {
       id: 'auth-provider',
       label: 'Supabase Auth',
       status: 'success',
-      summary: 'Manual Discord auth provider setup is confirmed.',
-      detail: 'The launcher will pass this confirmation to the dashboard so setup can continue without a Management API token.',
+      summary: providerStatus?.ready && !providerStatus.manualConfigured
+        ? 'Discord auth provider readiness is verified.'
+        : 'Manual Discord auth provider setup is confirmed.',
+      detail: statusDetail || 'The launcher will pass this confirmation to the dashboard so setup can continue without a Management API token.',
+    };
+  }
+
+  if (providerStatus && providerStatus.ready === false) {
+    const statusDetail = providerStatus.statusDetail?.trim();
+    const missingCallbacks = Array.isArray(providerStatus.missingCallbackUrls)
+      ? providerStatus.missingCallbackUrls.filter(Boolean)
+      : [];
+    const detailParts = [
+      statusDetail,
+      !providerStatus.providerEnabled && providerStatus.statusReason !== 'management-token-missing'
+        ? 'Discord auth provider is disabled in Supabase.'
+        : '',
+      providerStatus.callbackAllowListReady === false && missingCallbacks.length > 0
+        ? `Missing callback URLs: ${missingCallbacks.join(', ')}.`
+        : '',
+      'Add a Supabase Management API token so the launcher can fix this automatically, or confirm the provider manually after updating Supabase.',
+    ].filter(Boolean);
+
+    return {
+      id: 'auth-provider',
+      label: 'Supabase Auth',
+      status: 'blocked',
+      summary: 'Discord auth provider readiness needs attention.',
+      detail: detailParts.join('\n'),
+      actionLabel: 'Add token or confirm manual setup',
+      manualAction: true,
     };
   }
 

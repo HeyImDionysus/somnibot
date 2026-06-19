@@ -88,6 +88,12 @@ interface DashboardAuthProviderOptions {
   callbackBaseUrlChanged: boolean;
 }
 
+interface DashboardSetupStatusPayload {
+  discordAuthProviderReady?: boolean;
+  discordAuthConfigured?: boolean;
+  discordAuthProviderStatus?: SetupFlowInput['supabaseDiscordAuthProviderStatus'];
+}
+
 interface SetupAutomationResult {
   ok: boolean;
   stage: string;
@@ -224,6 +230,23 @@ async function readDashboardHealthSnapshot(timeoutMs = 1_500): Promise<Dashboard
       services: {},
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+async function readDashboardSetupSnapshot(timeoutMs = 1_500): Promise<DashboardSetupStatusPayload | undefined> {
+  if (getStatus().dashboard !== 'online') return undefined;
+
+  try {
+    const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return undefined;
+
+    return await response.json().catch(() => undefined) as DashboardSetupStatusPayload | undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -741,7 +764,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle('get-setup-status', async (_event, input: Partial<SetupFlowInput> = {}) => {
     const config = getConfig();
     const currentStatus = getStatus();
-    const dashboardHealth = await readDashboardHealthSnapshot();
+    const [dashboardHealth, dashboardSetup] = await Promise.all([
+      readDashboardHealthSnapshot(),
+      readDashboardSetupSnapshot(),
+    ]);
+    const selectedAuthProviderStatus = input.supabaseDiscordAuthProviderStatus
+      ?? dashboardSetup?.discordAuthProviderStatus;
+    const selectedAuthProviderStatusBlocksDashboard = selectedAuthProviderStatus?.ready === false;
+    const dashboardAuthProviderConfigured = dashboardSetup?.discordAuthProviderReady === true
+      || dashboardSetup?.discordAuthConfigured === true;
+    const discoveredAuthProviderConfigured = Boolean(
+      selectedAuthProviderStatus?.ready
+      || (!selectedAuthProviderStatusBlocksDashboard && dashboardAuthProviderConfigured)
+      || config.supabaseDiscordAuthProviderConfigured,
+    );
+
     return buildSetupStatus({
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
@@ -766,7 +803,8 @@ function registerIpcHandlers(): void {
       ),
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
-        ?? config.supabaseDiscordAuthProviderConfigured,
+        ?? discoveredAuthProviderConfigured,
+      supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus,
       tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey),
       tailscaleReadinessState: input.tailscaleReadinessState,
       dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',

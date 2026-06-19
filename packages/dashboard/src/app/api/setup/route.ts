@@ -31,6 +31,67 @@ interface RuntimeCallbackConfig {
   publicCallbackError: string | null;
 }
 
+type DiscordAuthProviderStatus = Awaited<ReturnType<typeof getDiscordAuthProviderStatus>>;
+
+type DiscordAuthProviderStatusReason =
+  | 'ready'
+  | 'management-token-missing'
+  | 'project-ref-missing'
+  | 'provider-disabled'
+  | 'callback-allow-list-missing'
+  | 'management-api-error'
+  | 'unknown';
+
+function getDiscordAuthProviderStatusReason(status: DiscordAuthProviderStatus): DiscordAuthProviderStatusReason {
+  if (status.ready) return 'ready';
+  if (status.error?.includes('SUPABASE_ACCESS_TOKEN')) return 'management-token-missing';
+  if (status.error?.includes('project ref')) return 'project-ref-missing';
+  if (status.error?.includes('Supabase Management API error')) return 'management-api-error';
+  if (!status.providerEnabled) return 'provider-disabled';
+  if (!status.callbackAllowListReady) return 'callback-allow-list-missing';
+  return 'unknown';
+}
+
+function buildDiscordAuthProviderStatusDetail(
+  status: DiscordAuthProviderStatus,
+  reason: DiscordAuthProviderStatusReason,
+): string {
+  switch (reason) {
+    case 'ready':
+      return status.manualConfigured
+        ? 'Manual Discord auth provider setup is confirmed.'
+        : 'Discord auth provider is enabled and callback URLs are allow-listed.';
+    case 'management-token-missing':
+      return 'Add a Supabase Management API token so setup can verify and configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.';
+    case 'project-ref-missing':
+      return 'Check the Supabase project URL; setup could not identify the project ref needed for auth provider verification.';
+    case 'provider-disabled':
+      return 'Discord auth provider is not enabled in Supabase yet.';
+    case 'callback-allow-list-missing':
+      return status.missingCallbackUrls.length > 0
+        ? `Supabase auth callback allow-list is missing: ${status.missingCallbackUrls.join(', ')}.`
+        : 'Supabase auth callback allow-list does not include the current dashboard callback URL.';
+    case 'management-api-error':
+      return 'Supabase Management API could not verify Discord auth provider readiness. Check the server logs or retry with a valid Management API token.';
+    case 'unknown':
+    default:
+      return 'Discord auth provider readiness could not be verified.';
+  }
+}
+
+function toPublicDiscordAuthProviderStatus(status: DiscordAuthProviderStatus) {
+  const statusReason = getDiscordAuthProviderStatusReason(status);
+  return {
+    ready: status.ready,
+    providerEnabled: status.providerEnabled,
+    callbackAllowListReady: status.callbackAllowListReady,
+    missingCallbackUrls: status.missingCallbackUrls,
+    manualConfigured: status.manualConfigured,
+    statusReason,
+    statusDetail: buildDiscordAuthProviderStatusDetail(status, statusReason),
+  };
+}
+
 /**
  * Create a Supabase client from provided credentials (not from env vars).
  * Used during setup when env vars may not be fully configured yet.
@@ -178,6 +239,7 @@ export async function GET(req: NextRequest) {
     discordCredentialsPresent: Boolean(process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET),
     discordAuthProviderReady: false,
     discordAuthConfigured: false,
+    discordAuthProviderStatus: null as ReturnType<typeof toPublicDiscordAuthProviderStatus> | null,
     setupCompleted: false,
   };
 
@@ -262,6 +324,7 @@ export async function GET(req: NextRequest) {
   const authProviderStatus = await getDiscordAuthProviderStatus();
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
+  status.discordAuthProviderStatus = toPublicDiscordAuthProviderStatus(authProviderStatus);
 
   return NextResponse.json(status);
 }

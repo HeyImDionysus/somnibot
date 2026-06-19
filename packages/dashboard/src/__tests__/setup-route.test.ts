@@ -451,6 +451,43 @@ describe('GET /api/setup status', () => {
     expect(body.discordClientId).toBe('123456789012345678');
     expect(body.discordAuthProviderReady).toBe(false);
     expect(body.discordAuthConfigured).toBe(false);
+    expect(body.discordAuthProviderStatus).toMatchObject({
+      ready: false,
+      providerEnabled: true,
+      callbackAllowListReady: false,
+      missingCallbackUrls: ['http://localhost:3000/api/auth/callback'],
+      manualConfigured: false,
+      statusReason: 'callback-allow-list-missing',
+    });
+    expect(body.discordAuthProviderStatus.statusDetail).toContain('allow-list is missing');
+    expect(body.discordAuthProviderStatus).not.toHaveProperty('error');
+  });
+
+  it('reports a sanitized auth-provider setup wall when the Management API token is missing', async () => {
+    (getDiscordAuthProviderStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+      manualConfigured: false,
+      error: 'SUPABASE_ACCESS_TOKEN not set',
+    });
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.discordAuthProviderStatus).toMatchObject({
+      ready: false,
+      providerEnabled: false,
+      callbackAllowListReady: false,
+      missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+      manualConfigured: false,
+      statusReason: 'management-token-missing',
+    });
+    expect(body.discordAuthProviderStatus.statusDetail).toContain('Management API token');
+    expect(body.discordAuthProviderStatus.statusDetail).toContain('confirm');
+    expect(body.discordAuthProviderStatus).not.toHaveProperty('error');
   });
 
   it('reports launcher-derived callback and webhook URLs for the setup wizard', async () => {
