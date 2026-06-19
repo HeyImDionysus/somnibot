@@ -11,11 +11,37 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { notifyBot } from '@/lib/notify-bot';
 
-import { getPayPalRuntimeConfig, getPayPalToken } from '@/lib/paypal';
+import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 // ── PayPal Helpers ─────────────────────────────────────
+
+type PayPalSyncResult =
+  | { ok: true; id: string }
+  | { ok: false; error: string };
+
+function paypalNotReadyResponse(message: string) {
+  return NextResponse.json(
+    {
+      success: false,
+      error: message,
+    },
+    { status: 424 },
+  );
+}
+
+function paypalReadinessError(config: PayPalRuntimeConfig, target: 'paid products' | 'subscription plans') {
+  const missing = [
+    !config.clientId ? 'Client ID' : null,
+    !config.clientSecret ? 'Client Secret' : null,
+    !config.webhookId ? 'Webhook ID' : null,
+  ].filter((field): field is string => field !== null);
+
+  if (missing.length === 0) return null;
+
+  return `PayPal is not ready. Configure PayPal ${missing.join(', ')} before creating ${target}.`;
+}
 
 /**
  * Create a PayPal Catalog Product.
@@ -25,10 +51,20 @@ async function createPayPalCatalogProduct(
   name: string,
   description: string | null,
   type: 'one_time' | 'subscription',
-): Promise<string | null> {
+): Promise<PayPalSyncResult> {
   const paypalConfig = await getPayPalRuntimeConfig();
+  const readinessError = paypalReadinessError(paypalConfig, 'paid products');
+  if (readinessError) {
+    return { ok: false, error: readinessError };
+  }
+
   const token = await getPayPalToken(paypalConfig);
-  if (!token) return null;
+  if (!token) {
+    return {
+      ok: false,
+      error: 'PayPal token request failed. Check the PayPal Client ID, Client Secret, and sandbox/live mode before creating paid products.',
+    };
+  }
 
   try {
     const paypalType = type === 'subscription' ? 'SERVICE' : 'DIGITAL';
@@ -50,14 +86,26 @@ async function createPayPalCatalogProduct(
     if (!res.ok) {
       const errorText = await res.text();
       console.error('[Products] PayPal catalog creation failed:', errorText);
-      return null;
+      return {
+        ok: false,
+        error: 'PayPal catalog product creation failed. Check the PayPal app credentials and try again.',
+      };
     }
 
     const data = await res.json();
-    return data.id as string;
+    if (typeof data.id !== 'string' || data.id.trim() === '') {
+      return {
+        ok: false,
+        error: 'PayPal did not return a catalog product ID. Check the PayPal app and try again.',
+      };
+    }
+    return { ok: true, id: data.id };
   } catch (err) {
     console.error('[Products] PayPal catalog creation error:', err);
-    return null;
+    return {
+      ok: false,
+      error: 'PayPal catalog product creation failed. Check the PayPal app credentials and try again.',
+    };
   }
 }
 
@@ -71,10 +119,20 @@ async function createPayPalBillingPlan(
   currency: string,
   intervalUnit: string,
   intervalCount: number,
-): Promise<string | null> {
+): Promise<PayPalSyncResult> {
   const paypalConfig = await getPayPalRuntimeConfig();
+  const readinessError = paypalReadinessError(paypalConfig, 'subscription plans');
+  if (readinessError) {
+    return { ok: false, error: readinessError };
+  }
+
   const token = await getPayPalToken(paypalConfig);
-  if (!token) return null;
+  if (!token) {
+    return {
+      ok: false,
+      error: 'PayPal token request failed. Check the PayPal Client ID, Client Secret, and sandbox/live mode before creating subscription plans.',
+    };
+  }
 
   try {
     const res = await fetch(`${paypalConfig.apiBase}/v1/billing/plans`, {
@@ -115,14 +173,26 @@ async function createPayPalBillingPlan(
     if (!res.ok) {
       const errorText = await res.text();
       console.error('[Products] PayPal plan creation failed:', errorText);
-      return null;
+      return {
+        ok: false,
+        error: 'PayPal billing plan creation failed. Check the PayPal app credentials and try again.',
+      };
     }
 
     const data = await res.json();
-    return data.id as string;
+    if (typeof data.id !== 'string' || data.id.trim() === '') {
+      return {
+        ok: false,
+        error: 'PayPal did not return a billing plan ID. Check the PayPal app and try again.',
+      };
+    }
+    return { ok: true, id: data.id };
   } catch (err) {
     console.error('[Products] PayPal plan creation error:', err);
-    return null;
+    return {
+      ok: false,
+      error: 'PayPal billing plan creation failed. Check the PayPal app credentials and try again.',
+    };
   }
 }
 
@@ -184,13 +254,60 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Auto-create PayPal Catalog Product
+  interface PlanDefinition {
+    name?: string;
+    interval_unit?: string;
+    interval_count?: number;
+    price_cents?: number;
+  }
+
+  let normalizedPlanDefs = Array.isArray(planDefs)
+    ? planDefs.map((rawPlan) => rawPlan as PlanDefinition)
+    : [];
+  const hasPaidSubscriptionPlan = type === 'subscription'
+    && normalizedPlanDefs.some((planDef) => (planDef.price_cents ?? price_cents) > 0);
+  const requiresPayPal = type !== 'free' && (price_cents > 0 || hasPaidSubscriptionPlan);
+
+  if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
+    normalizedPlanDefs = [{
+      name: `${name} — MONTH`,
+      interval_unit: 'MONTH',
+      interval_count: 1,
+      price_cents,
+    }];
+  }
+
   let paypalProductId: string | null = null;
-  paypalProductId = type !== 'free'
-    ? await createPayPalCatalogProduct(name, description ?? null, type)
-    : null;
-  if (!paypalProductId) {
-    console.warn('[Products] PayPal catalog product creation failed — continuing without sync');
+  if (requiresPayPal) {
+    const paypalProduct = await createPayPalCatalogProduct(
+      name,
+      description ?? null,
+      type === 'subscription' ? 'subscription' : 'one_time',
+    );
+    if (!paypalProduct.ok) {
+      return paypalNotReadyResponse(paypalProduct.error);
+    }
+    paypalProductId = paypalProduct.id;
+  }
+
+  const createdPlans: { name: string; paypalPlanId: string }[] = [];
+
+  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+    for (const planDef of normalizedPlanDefs) {
+      const planName = planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`;
+      const paypalPlan = await createPayPalBillingPlan(
+        paypalProductId,
+        planName,
+        planDef.price_cents ?? price_cents,
+        currency ?? 'USD',
+        planDef.interval_unit ?? 'MONTH',
+        planDef.interval_count ?? 1,
+      );
+      if (!paypalPlan.ok) {
+        return paypalNotReadyResponse(paypalPlan.error);
+      }
+      createdPlans.push({ name: planName, paypalPlanId: paypalPlan.id });
+    }
   }
 
   // 2. Create product in database
@@ -219,37 +336,17 @@ export async function POST(req: NextRequest) {
   }
 
   // 3. Auto-create PayPal Billing Plans for subscription products
-  const createdPlans: { id: string; paypalPlanId: string | null }[] = [];
+  const savedPlans: { id: string; paypalPlanId: string }[] = [];
 
-  // V11 Re-Audit L-4: Typed plan definition — replaces `as any` cast.
-  // The Zod schema already validates planDefs as z.array(z.record(z.unknown())),
-  // but property access needs an explicit interface to avoid type escapes.
-  interface PlanDefinition {
-    name?: string;
-    interval_unit?: string;
-    interval_count?: number;
-    price_cents?: number;
-  }
-
-  if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const rawPlan of planDefs) {
-      const planDef = rawPlan as PlanDefinition;
-      const paypalPlanId = await createPayPalBillingPlan(
-        paypalProductId,
-        planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
-        planDef.price_cents ?? price_cents,
-        currency ?? 'USD',
-        planDef.interval_unit ?? 'MONTH',
-        planDef.interval_count ?? 1,
-      );
-
+  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+    for (const [index, planDef] of normalizedPlanDefs.entries()) {
       const { data: plan } = await supabase
         .from('plans')
         .insert({
           product_id: data.id,
           guild_id: guildId,
-          name: planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
-          paypal_plan_id: paypalPlanId,
+          name: createdPlans[index]?.name ?? planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
+          paypal_plan_id: createdPlans[index]?.paypalPlanId ?? null,
           interval_unit: planDef.interval_unit ?? 'MONTH',
           interval_count: planDef.interval_count ?? 1,
           price_cents: planDef.price_cents ?? price_cents,
@@ -260,7 +357,10 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (plan) {
-        createdPlans.push({ id: plan.id, paypalPlanId });
+        const createdPlan = createdPlans[index];
+        if (createdPlan) {
+          savedPlans.push({ id: plan.id, paypalPlanId: createdPlan.paypalPlanId });
+        }
       }
     }
   }
@@ -279,7 +379,7 @@ export async function POST(req: NextRequest) {
     success: true,
     data: fullProduct ?? data,
     paypal_synced: !!paypalProductId,
-    plans_created: createdPlans.length,
+    plans_created: savedPlans.length,
   });
 }
 
