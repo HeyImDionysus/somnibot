@@ -14,6 +14,7 @@ import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './conf
 import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker, resolveRuntimeProfile } from './runtime-profile.js';
 import {
   evaluateDashboardHealthPayload,
+  type DashboardHealthEvaluation,
   type DashboardHealthPayload,
 } from './setup-automation-health.js';
 import {
@@ -194,6 +195,36 @@ async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean
   }
 
   return { ok: false, error: lastError || 'Dashboard did not become ready in time.' };
+}
+
+async function readDashboardHealthSnapshot(timeoutMs = 1_500): Promise<DashboardHealthEvaluation | undefined> {
+  if (getStatus().dashboard !== 'online') return undefined;
+
+  try {
+    const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/health`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: 'unknown',
+        services: {},
+        error: `Dashboard health returned HTTP ${response.status}.`,
+      };
+    }
+
+    const body = await response.json().catch(() => null) as DashboardHealthPayload | null;
+    return evaluateDashboardHealthPayload(body);
+  } catch (err) {
+    return {
+      ok: false,
+      status: 'unknown',
+      services: {},
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 async function waitForPortAvailable(port: number, timeoutMs = 10_000): Promise<boolean> {
@@ -707,9 +738,10 @@ function registerIpcHandlers(): void {
     saveConfig(sanitizePayPalConfigPatch(config));
   });
 
-  ipcMain.handle('get-setup-status', (_event, input: Partial<SetupFlowInput> = {}) => {
+  ipcMain.handle('get-setup-status', async (_event, input: Partial<SetupFlowInput> = {}) => {
     const config = getConfig();
     const currentStatus = getStatus();
+    const dashboardHealth = await readDashboardHealthSnapshot();
     return buildSetupStatus({
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
@@ -738,6 +770,12 @@ function registerIpcHandlers(): void {
       tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey),
       tailscaleReadinessState: input.tailscaleReadinessState,
       dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',
+      localServiceReadiness: input.localServiceReadiness ?? {
+        bot: currentStatus.bot,
+        dashboard: currentStatus.dashboard,
+        lavalink: currentStatus.lavalink,
+        ...(dashboardHealth ? { dashboardHealth } : {}),
+      },
       checking: input.checking ?? false,
     });
   });

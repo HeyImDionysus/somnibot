@@ -144,6 +144,65 @@ describe('setup flow status', () => {
     expect(readyStep?.detail).toContain('PayPal runtime credentials');
   });
 
+  it('requires dashboard health proof before calling the local runtime ready', () => {
+    const degradedStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      ...completeCredentials,
+      dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'starting',
+        lavalink: 'offline',
+        dashboardHealth: {
+          ok: false,
+          status: 'degraded',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'offline',
+          },
+          error: 'Dashboard health is degraded; services: config=valid, valkey=connected, bot=offline.',
+        },
+      },
+    });
+
+    const degradedStep = degradedStatus.steps.find(step => step.id === 'start-local');
+    expect(degradedStep?.label).toBe('Runtime health');
+    expect(degradedStep?.status).toBe('pending');
+    expect(degradedStep?.summary).toContain('Waiting for local runtime health proof');
+    expect(degradedStep?.detail).toContain('bot=offline');
+    expect(degradedStatus.firstBlockingStepId).toBeNull();
+    expect(degradedStatus.primaryAction.enabled).toBe(true);
+
+    const readyStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      ...completeCredentials,
+      dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'online',
+        lavalink: 'online',
+        dashboardHealth: {
+          ok: true,
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
+    });
+
+    const readyStep = readyStatus.steps.find(step => step.id === 'start-local');
+    expect(readyStep?.status).toBe('success');
+    expect(readyStep?.summary).toContain('runtime health is verified');
+    expect(readyStep?.detail).toContain('bot=online');
+    expect(readyStep?.detail).toContain('valkey=connected');
+  });
+
   it('treats invalid regular local callback URLs as recoverable errors', () => {
     const status = buildSetupStatus({
       runtimeMode: 'regular-local',

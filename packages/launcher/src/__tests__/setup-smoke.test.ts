@@ -15,6 +15,20 @@ describe('setup end-to-end smoke contract', () => {
       credentialReady: true,
       supabaseDiscordAuthProviderConfigured: true,
       dashboardOnline: true,
+      localServiceReadiness: {
+        dashboard: 'online',
+        bot: 'online',
+        lavalink: 'offline',
+        dashboardHealth: {
+          ok: true,
+          status: 'healthy',
+          services: {
+            config: 'valid',
+            valkey: 'connected',
+            bot: 'online',
+          },
+        },
+      },
     };
 
     const status = buildSetupStatus(input);

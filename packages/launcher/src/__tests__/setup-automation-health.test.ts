@@ -3,7 +3,14 @@ import { evaluateDashboardHealthPayload } from '../main/setup-automation-health'
 
 describe('setup automation dashboard health evaluation', () => {
   it('accepts only healthy dashboard health payloads', () => {
-    expect(evaluateDashboardHealthPayload({ status: 'healthy' })).toEqual({ ok: true });
+    expect(evaluateDashboardHealthPayload({
+      status: 'healthy',
+      services: { bot: 'online', valkey: 'connected' },
+    })).toEqual({
+      ok: true,
+      status: 'healthy',
+      services: { bot: 'online', valkey: 'connected' },
+    });
   });
 
   it('rejects degraded health payloads with service details', () => {

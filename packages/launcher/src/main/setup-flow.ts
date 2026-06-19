@@ -8,11 +8,19 @@ import {
   type RuntimeMode,
   type RuntimeNetworkingConfig,
 } from './runtime-profile.js';
+import type { DashboardHealthEvaluation } from './setup-automation-health.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
 import { buildVpsHealthVerification, type VpsHealthVerification } from './vps-health-verification.js';
 import type { ProviderValidationCheck } from './validators.js';
 
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
+
+export interface LocalServiceReadiness {
+  bot?: string;
+  dashboard?: string;
+  lavalink?: string;
+  dashboardHealth?: DashboardHealthEvaluation;
+}
 
 export interface SetupFlowInput extends RuntimeNetworkingConfig {
   discordGuildId?: string;
@@ -35,6 +43,7 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig {
     | 'unsupported-platform'
     | 'error';
   dashboardOnline?: boolean;
+  localServiceReadiness?: LocalServiceReadiness;
   checking?: boolean;
 }
 
@@ -250,6 +259,56 @@ function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
 function getProviderCheck(input: SetupFlowInput, id: ProviderValidationCheck['id']): ProviderValidationCheck | undefined {
   const checks = Array.isArray(input.providerValidation?.checks) ? input.providerValidation.checks : [];
   return checks.find(check => check.id === id);
+}
+
+function formatLocalServiceDetail(readiness: LocalServiceReadiness | undefined): string {
+  if (!readiness) {
+    return 'Start setup so the launcher can check the dashboard health endpoint after services boot.';
+  }
+
+  const processSummary = [
+    readiness.dashboard ? `dashboard process=${readiness.dashboard}` : '',
+    readiness.bot ? `bot process=${readiness.bot}` : '',
+    readiness.lavalink && readiness.lavalink !== 'offline' ? `lavalink=${readiness.lavalink}` : '',
+  ].filter(Boolean);
+  const health = readiness.dashboardHealth;
+  const healthSummary = health?.services
+    ? Object.entries(health.services).map(([name, state]) => `${name}=${state}`)
+    : [];
+  const parts = [
+    ...processSummary,
+    ...healthSummary,
+  ];
+
+  return parts.length > 0
+    ? parts.join(', ')
+    : 'No local runtime services have reported status yet.';
+}
+
+function buildRunningLocalStep(input: SetupFlowInput): SetupStep {
+  const readiness = input.localServiceReadiness;
+  const health = readiness?.dashboardHealth;
+
+  if (health?.ok) {
+    return {
+      id: 'start-local',
+      label: 'Runtime health',
+      status: 'success',
+      summary: 'Local runtime health is verified.',
+      detail: `The dashboard health endpoint proves the bot heartbeat and required services are ready: ${formatLocalServiceDetail(readiness)}.`,
+    };
+  }
+
+  return {
+    id: 'start-local',
+    label: 'Runtime health',
+    status: 'pending',
+    summary: 'Waiting for local runtime health proof.',
+    detail: health?.error
+      ? `${health.error} Re-run setup after the bot, dashboard, and Valkey are healthy.`
+      : `The launcher sees local services starting, but /api/health has not proved the bot heartbeat yet. ${formatLocalServiceDetail(readiness)}`,
+    actionLabel: 'Re-check runtime',
+  };
 }
 
 function buildDiscordServerStep(input: SetupFlowInput): SetupStep {
@@ -486,22 +545,17 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
   const authProviderStep = buildAuthProviderStep(input);
   const paypalStep = buildPayPalStep(input);
 
+  const localServicesRunning = input.dashboardOnline || input.localServiceReadiness?.dashboard === 'online';
   const startStep: SetupStep = input.checking
     ? {
       id: 'start-local',
-      label: 'Start locally',
+      label: 'Runtime health',
       status: 'loading',
       summary: 'Checking setup gates.',
       detail: 'The launcher is checking readiness before starting the bot and dashboard.',
     }
-    : input.dashboardOnline
-      ? {
-        id: 'start-local',
-        label: 'Start locally',
-        status: 'success',
-        summary: 'Local dashboard is online.',
-        detail: 'The bot and dashboard are running on this machine.',
-      }
+    : localServicesRunning
+      ? buildRunningLocalStep(input)
       : callbackBlocksStart
         ? {
           id: 'start-local',

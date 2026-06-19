@@ -92,6 +92,7 @@ let dashboardStatus: ProcessStatus = 'offline';
 let lastHeartbeat = 0;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let statusCallback: ((status: StatusUpdate) => void) | null = null;
+const BOT_READY_TIMEOUT_MS = 60_000;
 
 /* ------------------------------------------------------------------ */
 /*  Phase 6: Port-conflict detection                                   */
@@ -306,13 +307,14 @@ function startBotProcess(envVars: Record<string, string>): void {
     broadcastStatus({ error: `Bot process error: ${err.message}` });
   });
 
-  // If no heartbeat within 30s, mark as online anyway
   setTimeout(() => {
     if (botProcess && botStatus === 'starting') {
-      botStatus = 'online';
-      broadcastStatus();
+      botStatus = 'error';
+      broadcastStatus({
+        error: `Bot did not report ready or heartbeat within ${Math.round(BOT_READY_TIMEOUT_MS / 1000)}s. Check the bot log and provider credentials before calling setup complete.`,
+      });
     }
-  }, 30_000);
+  }, BOT_READY_TIMEOUT_MS);
 }
 
 /* ------------------------------------------------------------------ */
