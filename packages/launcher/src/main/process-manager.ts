@@ -18,6 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { app, BrowserWindow } from 'electron';
 import { getConfig, saveConfig } from './config-store.js';
+import { shouldApplyBotReadyTimeout } from './process-manager-guards.js';
 
 /**
  * V7 Audit §10.P3a — Allowlist of parent-process env vars to forward.
@@ -91,7 +92,16 @@ let botStatus: ProcessStatus = 'offline';
 let dashboardStatus: ProcessStatus = 'offline';
 let lastHeartbeat = 0;
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+let botReadyTimeout: ReturnType<typeof setTimeout> | null = null;
 let statusCallback: ((status: StatusUpdate) => void) | null = null;
+const BOT_READY_TIMEOUT_MS = 60_000;
+
+function clearBotReadyTimeout(): void {
+  if (botReadyTimeout) {
+    clearTimeout(botReadyTimeout);
+    botReadyTimeout = null;
+  }
+}
 
 /* ------------------------------------------------------------------ */
 /*  Phase 6: Port-conflict detection                                   */
@@ -235,6 +245,7 @@ function startBotProcess(envVars: Record<string, string>): void {
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     silent: true,
   });
+  const launchedBotProcess = botProcess;
 
   // Persist PID for stale-process cleanup
   persistPid('bot', botProcess.pid ?? null);
@@ -268,17 +279,22 @@ function startBotProcess(envVars: Record<string, string>): void {
         lastHeartbeat = Date.now();
         if (botStatus !== 'online') {
           botStatus = 'online';
+          clearBotReadyTimeout();
           broadcastStatus();
         }
       } else if (typed.type === 'ready') {
         botStatus = 'online';
         lastHeartbeat = Date.now();
+        clearBotReadyTimeout();
         broadcastStatus();
       }
     }
   });
 
   botProcess.on('exit', (code, signal) => {
+    if (botProcess !== launchedBotProcess) return;
+
+    clearBotReadyTimeout();
     const wasOnline = botStatus === 'online';
     botStatus = 'offline';
     botProcess = null;
@@ -300,19 +316,25 @@ function startBotProcess(envVars: Record<string, string>): void {
   });
 
   botProcess.on('error', (err) => {
+    if (botProcess !== launchedBotProcess) return;
+
+    clearBotReadyTimeout();
     botStatus = 'error';
     botProcess = null;
     persistPid('bot', null);
     broadcastStatus({ error: `Bot process error: ${err.message}` });
   });
 
-  // If no heartbeat within 30s, mark as online anyway
-  setTimeout(() => {
-    if (botProcess && botStatus === 'starting') {
-      botStatus = 'online';
-      broadcastStatus();
+  clearBotReadyTimeout();
+  botReadyTimeout = setTimeout(() => {
+    if (shouldApplyBotReadyTimeout(botProcess, launchedBotProcess, botStatus)) {
+      botStatus = 'error';
+      broadcastStatus({
+        error: `Bot did not report ready or heartbeat within ${Math.round(BOT_READY_TIMEOUT_MS / 1000)}s. Check the bot log and provider credentials before calling setup complete.`,
+      });
     }
-  }, 30_000);
+  }, BOT_READY_TIMEOUT_MS);
+  botReadyTimeout.unref?.();
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,6 +480,7 @@ export function startAll(envVars: Record<string, string>): void {
 
 export function stopAll(): void {
   stopHeartbeatMonitor();
+  clearBotReadyTimeout();
 
   if (botProcess) {
     botProcess.removeAllListeners();

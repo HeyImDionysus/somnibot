@@ -3,31 +3,54 @@ export interface DashboardHealthPayload {
   services?: unknown;
 }
 
-function formatHealthPayloadError(payload: DashboardHealthPayload | null): string {
+export interface DashboardHealthEvaluation {
+  ok: boolean;
+  status: string;
+  services: Record<string, string>;
+  error?: string;
+}
+
+function extractServices(payload: DashboardHealthPayload | null): Record<string, string> {
+  if (!payload?.services || typeof payload.services !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(payload.services as Record<string, unknown>)
+      .map(([name, state]) => [name, String(state)]),
+  );
+}
+
+function formatHealthPayloadError(payload: DashboardHealthPayload | null, services: Record<string, string>): string {
   if (!payload || typeof payload !== 'object') {
     return 'Dashboard health endpoint responded without a healthy JSON payload.';
   }
 
   const status = typeof payload.status === 'string' ? payload.status : 'unknown';
-  const services = payload.services && typeof payload.services === 'object'
-    ? Object.entries(payload.services as Record<string, unknown>)
-      .map(([name, state]) => `${name}=${String(state)}`)
-      .join(', ')
-    : '';
+  const serviceSummary = Object.entries(services)
+    .map(([name, state]) => `${name}=${state}`)
+    .join(', ');
 
-  return services
-    ? `Dashboard health is ${status}; services: ${services}.`
+  return serviceSummary
+    ? `Dashboard health is ${status}; services: ${serviceSummary}.`
     : `Dashboard health is ${status}.`;
 }
 
-export function evaluateDashboardHealthPayload(payload: unknown): { ok: boolean; error?: string } {
+export function evaluateDashboardHealthPayload(payload: unknown): DashboardHealthEvaluation {
   const body = payload && typeof payload === 'object'
     ? payload as DashboardHealthPayload
     : null;
+  const status = typeof body?.status === 'string' ? body.status : 'unknown';
+  const services = extractServices(body);
 
   if (body?.status === 'healthy') {
-    return { ok: true };
+    return { ok: true, status, services };
   }
 
-  return { ok: false, error: formatHealthPayloadError(body) };
+  return {
+    ok: false,
+    status,
+    services,
+    error: formatHealthPayloadError(body, services),
+  };
 }

@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { shouldApplyBotReadyTimeout } from '../main/process-manager-guards';
 
 // ── Replicated pure functions from process-manager.ts ────────
 
@@ -139,5 +140,21 @@ describe('buildEnvVars', () => {
   it('overrides take precedence over base', () => {
     const result = buildEnvVars({ PATH: '/old' }, { PATH: '/new' });
     expect(result.PATH).toBe('/new');
+  });
+});
+
+describe('bot ready timeout guard', () => {
+  it('only applies to the bot process that created the timeout', () => {
+    const previousProcess = {};
+    const replacementProcess = {};
+
+    expect(shouldApplyBotReadyTimeout(replacementProcess, previousProcess, 'starting')).toBe(false);
+    expect(shouldApplyBotReadyTimeout(previousProcess, previousProcess, 'starting')).toBe(true);
+  });
+
+  it('does not apply after the matching bot is already online', () => {
+    const process = {};
+
+    expect(shouldApplyBotReadyTimeout(process, process, 'online')).toBe(false);
   });
 });
