@@ -36,7 +36,6 @@ function paypalReadinessError(config: PayPalRuntimeConfig, target: 'paid product
     !config.clientId ? 'Client ID' : null,
     !config.clientSecret ? 'Client Secret' : null,
     !config.webhookId ? 'Webhook ID' : null,
-    !config.webhookUrl ? 'Webhook URL' : null,
   ].filter((field): field is string => field !== null);
 
   if (missing.length === 0) return null;
@@ -255,16 +254,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let paypalProductId: string | null = null;
-  if (type !== 'free') {
-    const paypalProduct = await createPayPalCatalogProduct(name, description ?? null, type);
-    if (!paypalProduct.ok) {
-      return paypalNotReadyResponse(paypalProduct.error);
-    }
-    paypalProductId = paypalProduct.id;
-  }
-
-  const createdPlans: { name: string; paypalPlanId: string }[] = [];
   interface PlanDefinition {
     name?: string;
     interval_unit?: string;
@@ -272,9 +261,37 @@ export async function POST(req: NextRequest) {
     price_cents?: number;
   }
 
-  if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const rawPlan of planDefs) {
-      const planDef = rawPlan as PlanDefinition;
+  const requiresPayPal = type !== 'free' && price_cents > 0;
+  let normalizedPlanDefs = Array.isArray(planDefs)
+    ? planDefs.map((rawPlan) => rawPlan as PlanDefinition)
+    : [];
+
+  if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
+    normalizedPlanDefs = [{
+      name: `${name} — MONTH`,
+      interval_unit: 'MONTH',
+      interval_count: 1,
+      price_cents,
+    }];
+  }
+
+  let paypalProductId: string | null = null;
+  if (requiresPayPal) {
+    const paypalProduct = await createPayPalCatalogProduct(
+      name,
+      description ?? null,
+      type === 'subscription' ? 'subscription' : 'one_time',
+    );
+    if (!paypalProduct.ok) {
+      return paypalNotReadyResponse(paypalProduct.error);
+    }
+    paypalProductId = paypalProduct.id;
+  }
+
+  const createdPlans: { name: string; paypalPlanId: string }[] = [];
+
+  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+    for (const planDef of normalizedPlanDefs) {
       const planName = planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`;
       const paypalPlan = await createPayPalBillingPlan(
         paypalProductId,
@@ -319,9 +336,8 @@ export async function POST(req: NextRequest) {
   // 3. Auto-create PayPal Billing Plans for subscription products
   const savedPlans: { id: string; paypalPlanId: string }[] = [];
 
-  if (type === 'subscription' && paypalProductId && Array.isArray(planDefs) && planDefs.length > 0) {
-    for (const [index, rawPlan] of planDefs.entries()) {
-      const planDef = rawPlan as PlanDefinition;
+  if (type === 'subscription' && requiresPayPal && paypalProductId) {
+    for (const [index, planDef] of normalizedPlanDefs.entries()) {
       const { data: plan } = await supabase
         .from('plans')
         .insert({
