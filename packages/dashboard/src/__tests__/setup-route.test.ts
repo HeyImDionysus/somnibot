@@ -607,6 +607,21 @@ describe('GET /api/setup status', () => {
     expect(body.paypalWebhookError).toBe('PayPal webhook URL must use HTTPS before it can be marked ready.');
   });
 
+  it('uses a valid explicit PayPal webhook URL when the optional app URL is local', async () => {
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'http://localhost:3000');
+    vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://webhooks.example.com/api/paypal/webhook');
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.publicCallbackRequired).toBe(false);
+    expect(body.publicCallbackBaseUrl).toBe('http://localhost:3000');
+    expect(body.paypalWebhookUrl).toBe('https://webhooks.example.com/api/paypal/webhook');
+    expect(body.paypalWebhookReady).toBe(true);
+    expect(body.paypalWebhookError).toBeNull();
+  });
+
   it('reports VPS callback and webhook URLs for the setup wizard', async () => {
     vi.stubEnv('DASHBOARD_URL', 'https://somnibot.example.com/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.example.com/');

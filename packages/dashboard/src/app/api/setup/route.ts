@@ -267,12 +267,14 @@ function resolveSetupPayPalWebhookStatus(
       return { url: derivedWebhookUrl, ready: true, error: null };
     }
 
-    return {
-      url: null,
-      ready: false,
-      error: runtimeCallbacks.publicCallbackError
-        ?? 'PayPal webhook URL is waiting on a public HTTPS callback URL.',
-    };
+    if (runtimeCallbacks.publicCallbackRequired) {
+      return {
+        url: null,
+        ready: false,
+        error: runtimeCallbacks.publicCallbackError
+          ?? 'PayPal webhook URL is waiting on a public HTTPS callback URL.',
+      };
+    }
   }
 
   const explicitWebhookUrl = env['PAYPAL_WEBHOOK_URL'];
