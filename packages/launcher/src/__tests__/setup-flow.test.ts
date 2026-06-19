@@ -119,6 +119,129 @@ describe('setup flow status', () => {
     expect(status.primaryAction.enabled).toBe(true);
   });
 
+  it('accepts dashboard-verified Discord auth provider readiness', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: true,
+        providerEnabled: true,
+        callbackAllowListReady: true,
+        missingCallbackUrls: [],
+        manualConfigured: false,
+        statusReason: 'ready',
+        statusDetail: 'Discord auth provider is enabled and callback URLs are allow-listed.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('success');
+    expect(authStep?.summary).toContain('readiness is verified');
+    expect(authStep?.detail).toContain('callback URLs are allow-listed');
+    expect(status.primaryAction.enabled).toBe(true);
+  });
+
+  it('surfaces missing Supabase auth callback allow-list URLs', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: true,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'callback-allow-list-missing',
+        statusDetail: 'Supabase auth callback allow-list is missing: https://somnibot.tailnet.ts.net/api/auth/callback.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.manualAction).toBe(true);
+    expect(authStep?.detail).toContain('allow-list is missing');
+    expect(authStep?.detail).toContain('Missing callback URLs:');
+    expect(authStep?.detail).toContain('https://somnibot.tailnet.ts.net/api/auth/callback');
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+    expect(status.primaryAction.enabled).toBe(false);
+  });
+
+  it('keeps the missing-token auth-provider wall explicit and actionable', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: false,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'management-token-missing',
+        statusDetail: 'Add a Supabase Management API token so setup can verify and configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.detail).toContain('Management API token');
+    expect(authStep?.detail).toContain('confirm');
+    expect(authStep?.detail).not.toContain('Missing callback URLs:');
+    expect(authStep?.detail).not.toContain('undefined');
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+  });
+
+  it('does not describe unknown auth-provider check failures as a disabled provider', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: false,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'unknown',
+        statusDetail: 'Discord auth provider readiness could not be verified.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('blocked');
+    expect(authStep?.detail).toContain('could not be verified');
+    expect(authStep?.detail).not.toContain('disabled in Supabase');
+    expect(authStep?.detail).not.toContain('Missing callback URLs:');
+    expect(status.firstBlockingStepId).toBe('auth-provider');
+  });
+
+  it('does not show blocked auth-provider details after manual confirmation', () => {
+    const status = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
+      supabaseDiscordAuthProviderStatus: {
+        ready: false,
+        providerEnabled: false,
+        callbackAllowListReady: false,
+        missingCallbackUrls: ['https://somnibot.tailnet.ts.net/api/auth/callback'],
+        manualConfigured: false,
+        statusReason: 'management-token-missing',
+        statusDetail: 'Add a Supabase Management API token so setup can verify and configure Discord auth.',
+      },
+    });
+
+    const authStep = status.steps.find(step => step.id === 'auth-provider');
+    expect(authStep?.status).toBe('success');
+    expect(authStep?.detail).toContain('confirmation');
+    expect(authStep?.detail).not.toContain('Add a Supabase');
+    expect(authStep?.detail).not.toContain('verify and configure');
+    expect(status.primaryAction.enabled).toBe(true);
+  });
+
   it('shows PayPal webhook readiness as a first-class setup step', () => {
     const incompleteStatus = buildSetupStatus({
       runtimeMode: 'regular-local',

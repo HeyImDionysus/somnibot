@@ -21,6 +21,7 @@ import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/r
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -29,6 +30,68 @@ interface RuntimeCallbackConfig {
   publicCallbackRequired: boolean;
   publicCallbackReady: boolean;
   publicCallbackError: string | null;
+}
+
+type DiscordAuthProviderStatus = Awaited<ReturnType<typeof getDiscordAuthProviderStatus>>;
+
+type DiscordAuthProviderStatusReason =
+  | 'ready'
+  | 'management-token-missing'
+  | 'project-ref-missing'
+  | 'provider-disabled'
+  | 'callback-allow-list-missing'
+  | 'management-api-error'
+  | 'unknown';
+
+function getDiscordAuthProviderStatusReason(status: DiscordAuthProviderStatus): DiscordAuthProviderStatusReason {
+  if (status.ready) return 'ready';
+  if (status.error?.includes('SUPABASE_ACCESS_TOKEN')) return 'management-token-missing';
+  if (status.error?.includes('project ref')) return 'project-ref-missing';
+  if (status.error?.includes('Supabase Management API error')) return 'management-api-error';
+  if (status.error) return 'unknown';
+  if (!status.providerEnabled) return 'provider-disabled';
+  if (!status.callbackAllowListReady) return 'callback-allow-list-missing';
+  return 'unknown';
+}
+
+function buildDiscordAuthProviderStatusDetail(
+  status: DiscordAuthProviderStatus,
+  reason: DiscordAuthProviderStatusReason,
+): string {
+  switch (reason) {
+    case 'ready':
+      return status.manualConfigured
+        ? 'Manual Discord auth provider setup is confirmed.'
+        : 'Discord auth provider is enabled and callback URLs are allow-listed.';
+    case 'management-token-missing':
+      return 'Add a Supabase Management API token so setup can verify and configure Discord auth, or confirm that Discord auth and callback URLs are already configured in Supabase.';
+    case 'project-ref-missing':
+      return 'Check the Supabase project URL; setup could not identify the project ref needed for auth provider verification.';
+    case 'provider-disabled':
+      return 'Discord auth provider is not enabled in Supabase yet.';
+    case 'callback-allow-list-missing':
+      return status.missingCallbackUrls.length > 0
+        ? `Supabase auth callback allow-list is missing: ${status.missingCallbackUrls.join(', ')}.`
+        : 'Supabase auth callback allow-list does not include the current dashboard callback URL.';
+    case 'management-api-error':
+      return 'Supabase Management API could not verify Discord auth provider readiness. Check the server logs or retry with a valid Management API token.';
+    case 'unknown':
+    default:
+      return 'Discord auth provider readiness could not be verified.';
+  }
+}
+
+function toPublicDiscordAuthProviderStatus(status: DiscordAuthProviderStatus) {
+  const statusReason = getDiscordAuthProviderStatusReason(status);
+  return {
+    ready: status.ready,
+    providerEnabled: status.providerEnabled,
+    callbackAllowListReady: status.callbackAllowListReady,
+    missingCallbackUrls: status.missingCallbackUrls,
+    manualConfigured: status.manualConfigured,
+    statusReason,
+    statusDetail: buildDiscordAuthProviderStatusDetail(status, statusReason),
+  };
 }
 
 /**
@@ -111,6 +174,21 @@ function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   }
 }
 
+function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
+  const rawUrl = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '';
+  if (!rawUrl.trim()) return null;
+
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    const suffix = '.supabase.co';
+    if (!hostname.endsWith(suffix)) return null;
+    const projectRef = hostname.slice(0, -suffix.length);
+    return /^[a-z0-9]+$/.test(projectRef) ? projectRef : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): RuntimeCallbackConfig {
   const operatorDashboardUrl = normalizeRuntimeBaseUrl(env['DASHBOARD_URL']);
   const publicCallbackBaseUrl = normalizeRuntimeBaseUrl(
@@ -174,10 +252,12 @@ export async function GET(req: NextRequest) {
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
     publicCallbackReady: runtimeCallbacks.publicCallbackReady,
     publicCallbackError: runtimeCallbacks.publicCallbackError,
+    supabaseProjectRef: getSupabaseProjectRef(),
     discordClientId: process.env.DISCORD_APPLICATION_ID || null,
     discordCredentialsPresent: Boolean(process.env.DISCORD_APPLICATION_ID && process.env.DISCORD_CLIENT_SECRET),
     discordAuthProviderReady: false,
     discordAuthConfigured: false,
+    discordAuthProviderStatus: null as ReturnType<typeof toPublicDiscordAuthProviderStatus> | null,
     setupCompleted: false,
   };
 
@@ -259,9 +339,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const authProviderStatus = await getDiscordAuthProviderStatus();
+  const authProviderStatus = await getDiscordAuthProviderStatus({
+    timeoutMs: SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS,
+  });
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
+  status.discordAuthProviderStatus = toPublicDiscordAuthProviderStatus(authProviderStatus);
 
   return NextResponse.json(status);
 }

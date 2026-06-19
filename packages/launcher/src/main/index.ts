@@ -11,7 +11,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getConfig, saveConfig, buildEnvVars, type LauncherConfig } from './config-store.js';
-import { REGULAR_LOCAL_OPERATOR_DASHBOARD_URL, getLauncherLocalStartBlocker, resolveRuntimeProfile } from './runtime-profile.js';
+import {
+  REGULAR_LOCAL_OPERATOR_DASHBOARD_URL,
+  getLauncherLocalStartBlocker,
+  normalizeBaseUrl,
+  resolveRuntimeProfile,
+} from './runtime-profile.js';
 import {
   evaluateDashboardHealthPayload,
   type DashboardHealthEvaluation,
@@ -73,6 +78,11 @@ let sessionToken: string | null = null;
 let lastStartedPayPalConfig: PayPalRuntimeConfig | null = null;
 const activeVpsDeployment = new VpsDeploymentRunGate();
 const MASKED_SECRET = '••••••••';
+const DASHBOARD_SETUP_SNAPSHOT_CACHE_MS = 5_000;
+let dashboardSetupSnapshotCache: {
+  loadedAt: number;
+  payload: DashboardSetupStatusPayload | undefined;
+} | null = null;
 
 type LauncherConfigPatch = Partial<LauncherConfig>;
 type PayPalRuntimeConfig = Pick<
@@ -87,6 +97,21 @@ interface DashboardAuthProviderOptions {
   manualAuthProviderConfirmed: boolean;
   callbackBaseUrlChanged: boolean;
 }
+
+interface DashboardSetupStatusPayload {
+  supabaseProjectRef?: string | null;
+  publicCallbackBaseUrl?: string | null;
+  discordClientId?: string | null;
+  discordAuthProviderReady?: boolean;
+  discordAuthConfigured?: boolean;
+  discordAuthProviderStatus?: SetupFlowInput['supabaseDiscordAuthProviderStatus'];
+}
+
+interface ReadDashboardSetupOptions {
+  force?: boolean;
+}
+
+type DashboardAuthProviderStatus = NonNullable<SetupFlowInput['supabaseDiscordAuthProviderStatus']>;
 
 interface SetupAutomationResult {
   ok: boolean;
@@ -166,6 +191,100 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function getSupabaseProjectRef(supabaseUrl: string): string | null {
+  const rawUrl = supabaseUrl.trim();
+  if (!rawUrl) return null;
+
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    const suffix = '.supabase.co';
+    if (!hostname.endsWith(suffix)) return null;
+    const projectRef = hostname.slice(0, -suffix.length);
+    return /^[a-z0-9]+$/.test(projectRef) ? projectRef : null;
+  } catch {
+    return null;
+  }
+}
+
+function dashboardSetupMatchesLauncherConfig(
+  snapshot: DashboardSetupStatusPayload | undefined,
+  config: LauncherConfig,
+): boolean {
+  if (!snapshot) return false;
+
+  let profilePublicCallbackBaseUrl = '';
+  try {
+    profilePublicCallbackBaseUrl = resolveRuntimeProfile(config).publicCallbackBaseUrl;
+  } catch {
+    return false;
+  }
+
+  const dashboardPublicCallbackBaseUrl = normalizeBaseUrl(snapshot.publicCallbackBaseUrl ?? undefined);
+  if (!dashboardPublicCallbackBaseUrl || dashboardPublicCallbackBaseUrl !== profilePublicCallbackBaseUrl) {
+    return false;
+  }
+
+  const expectedProjectRef = getSupabaseProjectRef(config.supabaseUrl);
+  const dashboardProjectRef = snapshot.supabaseProjectRef?.trim() ?? '';
+  if (!expectedProjectRef || dashboardProjectRef !== expectedProjectRef) {
+    return false;
+  }
+
+  const expectedDiscordClientId = config.discordApplicationId.trim();
+  const dashboardDiscordClientId = snapshot.discordClientId?.trim() ?? '';
+  if (!expectedDiscordClientId || dashboardDiscordClientId !== expectedDiscordClientId) {
+    return false;
+  }
+
+  return true;
+}
+
+function dashboardAuthProviderStatusUsableForLauncherConfig(
+  providerStatus: DashboardAuthProviderStatus | undefined,
+  config: LauncherConfig,
+): boolean {
+  if (!providerStatus) return false;
+
+  if (providerStatus.manualConfigured === true && !config.supabaseDiscordAuthProviderConfigured) {
+    return false;
+  }
+
+  if (
+    providerStatus.ready === true
+    && providerStatus.manualConfigured !== true
+    && !config.supabaseAccessToken.trim()
+    && !config.supabaseDiscordAuthProviderConfigured
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function getDashboardAuthProviderStatusForLauncherConfig(
+  snapshot: DashboardSetupStatusPayload | undefined,
+  config: LauncherConfig,
+): DashboardAuthProviderStatus | undefined {
+  if (!dashboardSetupMatchesLauncherConfig(snapshot, config)) return undefined;
+
+  const providerStatus = snapshot?.discordAuthProviderStatus;
+  return dashboardAuthProviderStatusUsableForLauncherConfig(providerStatus, config)
+    ? providerStatus
+    : undefined;
+}
+
+function dashboardSetupVerifiesAuthProvider(
+  snapshot: DashboardSetupStatusPayload | undefined,
+  config: LauncherConfig,
+): boolean {
+  const providerStatus = snapshot?.discordAuthProviderStatus;
+  if (!dashboardSetupMatchesLauncherConfig(snapshot, config) || providerStatus?.ready !== true) {
+    return false;
+  }
+
+  return dashboardAuthProviderStatusUsableForLauncherConfig(providerStatus, config);
+}
+
 async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean; error?: string }> {
   const deadline = Date.now() + timeoutMs;
   let lastError = '';
@@ -224,6 +343,44 @@ async function readDashboardHealthSnapshot(timeoutMs = 1_500): Promise<Dashboard
       services: {},
       error: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+async function readDashboardSetupSnapshot(
+  timeoutMs = 1_500,
+  options: ReadDashboardSetupOptions = {},
+): Promise<DashboardSetupStatusPayload | undefined> {
+  if (getStatus().dashboard !== 'online') {
+    dashboardSetupSnapshotCache = null;
+    return undefined;
+  }
+
+  const now = Date.now();
+  if (
+    !options.force
+    && dashboardSetupSnapshotCache
+    && now - dashboardSetupSnapshotCache.loadedAt < DASHBOARD_SETUP_SNAPSHOT_CACHE_MS
+  ) {
+    return dashboardSetupSnapshotCache.payload;
+  }
+
+  try {
+    const response = await fetch(`${REGULAR_LOCAL_OPERATOR_DASHBOARD_URL}/api/setup`, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload: undefined };
+      return undefined;
+    }
+
+    const payload = await response.json().catch(() => undefined) as DashboardSetupStatusPayload | undefined;
+    dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload };
+    return payload;
+  } catch {
+    dashboardSetupSnapshotCache = { loadedAt: Date.now(), payload: undefined };
+    return undefined;
   }
 }
 
@@ -459,7 +616,14 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     };
   }
 
-  if (!config.supabaseAccessToken.trim() && !config.supabaseDiscordAuthProviderConfigured) {
+  const dashboardSetupBeforeStart = await readDashboardSetupSnapshot(1_500, { force: true });
+  const dashboardVerifiedAuthProvider = !callbackBaseUrlChanged
+    && dashboardSetupVerifiesAuthProvider(dashboardSetupBeforeStart, config);
+
+  if (!config.supabaseAccessToken.trim()
+    && !config.supabaseDiscordAuthProviderConfigured
+    && !dashboardVerifiedAuthProvider
+  ) {
     return {
       ok: false,
       stage: 'auth-provider',
@@ -499,25 +663,34 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
     };
   }
 
-  const authConfigured = await configureDashboardAuthProvider({
-    manualAuthProviderConfirmed: config.supabaseDiscordAuthProviderConfigured,
-    callbackBaseUrlChanged,
-  });
-  if (authConfigured.alreadyLocked) {
-    warnings.push('Setup is already locked, so auth-provider configuration was skipped for this restart.');
-  }
-  if (!authConfigured.ok) {
-    return {
-      ok: false,
-      stage: 'auth-provider',
-      message: 'Bot and dashboard are running, but Supabase Discord auth was not configured.',
-      error: authConfigured.error,
-      servicesStarted: true,
-      meta: validation.meta,
-      providerValidation: validation,
-      warnings,
-      publicCallbackBaseUrl: config.publicCallbackBaseUrl,
-    };
+  if (
+    dashboardVerifiedAuthProvider
+    && (config.supabaseAccessToken.trim() || config.supabaseDiscordAuthProviderConfigured)
+  ) {
+    warnings.push(
+      'Dashboard already verified Discord auth provider readiness for this launcher config; auth-provider configuration was skipped for this restart.',
+    );
+  } else {
+    const authConfigured = await configureDashboardAuthProvider({
+      manualAuthProviderConfirmed: config.supabaseDiscordAuthProviderConfigured,
+      callbackBaseUrlChanged,
+    });
+    if (authConfigured.alreadyLocked) {
+      warnings.push('Setup is already locked, so auth-provider configuration was skipped for this restart.');
+    }
+    if (!authConfigured.ok) {
+      return {
+        ok: false,
+        stage: 'auth-provider',
+        message: 'Bot and dashboard are running, but Supabase Discord auth was not configured.',
+        error: authConfigured.error,
+        servicesStarted: true,
+        meta: validation.meta,
+        providerValidation: validation,
+        warnings,
+        publicCallbackBaseUrl: config.publicCallbackBaseUrl,
+      };
+    }
   }
 
   let callbackProbe: Awaited<ReturnType<typeof probePublicCallbackHealth>> | undefined;
@@ -741,7 +914,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle('get-setup-status', async (_event, input: Partial<SetupFlowInput> = {}) => {
     const config = getConfig();
     const currentStatus = getStatus();
-    const dashboardHealth = await readDashboardHealthSnapshot();
+    const [dashboardHealth, dashboardSetup] = await Promise.all([
+      readDashboardHealthSnapshot(),
+      readDashboardSetupSnapshot(),
+    ]);
+    const dashboardSetupStatus = getDashboardAuthProviderStatusForLauncherConfig(dashboardSetup, config);
+    const selectedAuthProviderStatus = input.supabaseDiscordAuthProviderStatus
+      ?? dashboardSetupStatus;
+    const selectedAuthProviderStatusBlocksDashboard = selectedAuthProviderStatus?.ready === false;
+    const dashboardAuthProviderConfigured = dashboardSetupVerifiesAuthProvider(dashboardSetup, config);
+    const discoveredAuthProviderConfigured = Boolean(
+      selectedAuthProviderStatus?.ready
+      || (!selectedAuthProviderStatusBlocksDashboard && dashboardAuthProviderConfigured)
+      || config.supabaseDiscordAuthProviderConfigured,
+    );
+
     return buildSetupStatus({
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
@@ -766,7 +953,8 @@ function registerIpcHandlers(): void {
       ),
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
-        ?? config.supabaseDiscordAuthProviderConfigured,
+        ?? discoveredAuthProviderConfigured,
+      supabaseDiscordAuthProviderStatus: selectedAuthProviderStatus,
       tailscaleAuthKeyReady: input.tailscaleAuthKeyReady ?? Boolean(config.tailscaleAuthKey),
       tailscaleReadinessState: input.tailscaleReadinessState,
       dashboardOnline: input.dashboardOnline ?? currentStatus.dashboard === 'online',
