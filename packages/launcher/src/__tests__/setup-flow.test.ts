@@ -180,12 +180,20 @@ describe('setup flow status', () => {
             summary: 'Application ID does not match the bot token.',
             detail: 'Application ID mismatch.',
           },
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
         ],
       },
     });
 
     const validationStep = status.steps.find(step => step.id === 'provider-validation');
     const startStep = status.steps.find(step => step.id === 'start-local');
+    const discordStep = status.steps.find(step => step.id === 'discord-server');
+    expect(discordStep?.status).toBe('success');
     expect(validationStep?.status).toBe('recoverable-error');
     expect(validationStep?.detail).toContain('Discord application: Application ID mismatch.');
     expect(startStep?.status).toBe('pending');
@@ -232,14 +240,58 @@ describe('setup flow status', () => {
     });
 
     const validationStep = status.steps.find(step => step.id === 'provider-validation');
+    const discordStep = status.steps.find(step => step.id === 'discord-server');
+    expect(discordStep?.status).toBe('recoverable-error');
+    expect(discordStep?.summary).toContain('Bot server membership');
+    expect(discordStep?.detail).toContain('Open the bot invite');
+    expect(discordStep?.actionKind).toBe('discord-invite');
     expect(validationStep?.status).toBe('recoverable-error');
     expect(validationStep?.detail).toContain('Discord server: Bot is not in server 1464713668766732393');
-    expect(status.firstBlockingStepId).toBe('provider-validation');
+    expect(status.firstBlockingStepId).toBe('discord-server');
     expect(status.primaryAction).toEqual({
       label: 'Re-check Providers',
       enabled: true,
       status: 'ready',
     });
+  });
+
+  it('makes Discord bot invite and server verification a first-class setup step', () => {
+    const pendingStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      discordGuildId: '1464713668766732393',
+      supabaseDiscordAuthProviderConfigured: true,
+    });
+
+    const pendingStep = pendingStatus.steps.find(step => step.id === 'discord-server');
+    expect(pendingStep?.status).toBe('pending');
+    expect(pendingStep?.summary).toContain('invite and verify');
+    expect(pendingStep?.detail).toContain('entered server');
+    expect(pendingStep?.actionKind).toBe('discord-invite');
+
+    const readyStatus = buildSetupStatus({
+      runtimeMode: 'regular-local',
+      publicCallbackBaseUrl: 'https://somnibot.tailnet.ts.net',
+      credentialReady: true,
+      supabaseDiscordAuthProviderConfigured: true,
+      providerValidation: {
+        valid: true,
+        errors: [],
+        checks: [
+          {
+            id: 'discord-guild',
+            label: 'Discord server',
+            status: 'success',
+            summary: 'Server readiness verified: Test Guild.',
+          },
+        ],
+      },
+    });
+
+    const readyStep = readyStatus.steps.find(step => step.id === 'discord-server');
+    expect(readyStep?.status).toBe('success');
+    expect(readyStep?.detail).toContain('Test Guild');
   });
 
   it('makes VPS domain, SSH target, and manual deploy readiness first-class steps', () => {
@@ -258,6 +310,7 @@ describe('setup flow status', () => {
       'vps-domain',
       'vps-ssh',
       'credentials',
+      'discord-server',
       'provider-validation',
       'auth-provider',
       'paypal-webhook',

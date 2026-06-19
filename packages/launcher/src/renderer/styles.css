@@ -630,6 +630,23 @@ main::-webkit-scrollbar-thumb:hover {
   font-weight: 600;
 }
 
+.runtime-step button.manual-action {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.runtime-step button.manual-action:hover:not(:disabled) {
+  color: var(--hot-pink);
+}
+
+.runtime-step button.manual-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .link-btn {
   background: none;
   border: none;

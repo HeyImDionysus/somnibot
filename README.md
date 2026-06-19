@@ -196,11 +196,14 @@ Save the file.
 
 Use the SomniBot Launcher setup GUI for the normal owner path. The launcher
 checks your environment, records non-secret setup values, generates the Discord
-bot invite, starts the local bot and dashboard after setup is ready, and keeps
-regular-local public callbacks tied to the dashboard port it owns.
+bot invite, verifies the bot can see the selected Discord server, starts the
+local bot and dashboard after setup is ready, and keeps regular-local public
+callbacks tied to the dashboard port it owns.
 
 Do not click **Set Up & Start** or run the script fallback until after Step 6.
-The first bot boot expects the bot to already be in a Discord server.
+The bot can auto-detect the first joined server when Guild ID is blank, but the
+launcher setup wizard will still show Discord server readiness as a separate
+step so you can invite, verify, and retry without guessing.
 
 If you change `NEXT_PUBLIC_APP_URL`, `NEXT_PUBLIC_SUPABASE_URL`, or
 `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, rebuild before starting again because
@@ -212,8 +215,11 @@ Use the launcher first:
 
 1. Paste the Discord Application ID into the launcher.
 2. Paste one Guild ID if you want the invite locked to one server.
-3. Click **Open Bot Invite** in the Discord setup section.
+3. Click **Open Bot Invite** in the Discord setup section or the Discord server
+   setup step.
 4. Authorize the bot for your server.
+5. Return to the launcher and run setup; the Discord server step verifies that
+   the bot token can see the selected server.
 
 Manual fallback:
 
@@ -227,8 +233,9 @@ Manual fallback:
 
 1. In the launcher setup GUI, choose regular-local mode.
 2. After the bot is authorized in Discord, click **Set Up & Start**. The setup
-   flow verifies Discord and Supabase values, records the local dashboard URL,
-   and guides public callback readiness when needed.
+   flow verifies Discord bot token, Application ID, server membership, Supabase
+   values, records the local dashboard URL, and guides public callback readiness
+   when needed.
 3. If you are using the script fallback, start the regular-local stack now:
 
    **Mac / Linux:**
