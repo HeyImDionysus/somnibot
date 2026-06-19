@@ -24,6 +24,7 @@ import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
 import { startHealthServer } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
+import { startLauncherIpcHeartbeat, stopLauncherIpcHeartbeat } from './services/launcher-ipc.js';
 import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
 import { shutdownBot, type BotLevelServices } from './services/bot-shutdown.js';
@@ -134,6 +135,7 @@ async function main(): Promise<void> {
   // 6. Post-ready initialization
   client.once(Events.ClientReady, async () => {
     log.info('Discord ready — initializing systems...');
+    startLauncherIpcHeartbeat(client);
 
     // ── Auto-detect guild ID if not set ──
     if (!client.guildId) {
@@ -298,6 +300,7 @@ async function main(): Promise<void> {
 
   // ── Graceful shutdown ──
   const shutdown = async (signal: string) => {
+    stopLauncherIpcHeartbeat();
     await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
   };
 
