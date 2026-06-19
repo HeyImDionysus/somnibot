@@ -713,6 +713,7 @@ function registerIpcHandlers(): void {
     return buildSetupStatus({
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
       publicCallbackBaseUrl: input.publicCallbackBaseUrl ?? config.publicCallbackBaseUrl,
+      discordGuildId: input.discordGuildId ?? config.discordGuildId,
       vpsDomain: input.vpsDomain ?? config.vpsDomain,
       vpsSshHost: input.vpsSshHost ?? config.vpsSshHost,
       vpsSshUser: input.vpsSshUser ?? config.vpsSshUser,

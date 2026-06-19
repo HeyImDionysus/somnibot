@@ -15,6 +15,7 @@ import type { ProviderValidationCheck } from './validators.js';
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
 
 export interface SetupFlowInput extends RuntimeNetworkingConfig {
+  discordGuildId?: string;
   credentialReady?: boolean;
   providerValidation?: {
     valid: boolean;
@@ -44,6 +45,7 @@ export interface SetupStep {
   summary: string;
   detail: string;
   actionLabel?: string;
+  actionKind?: 'discord-invite';
   manualAction?: boolean;
 }
 
@@ -245,6 +247,86 @@ function buildProviderValidationStep(input: SetupFlowInput): SetupStep {
   };
 }
 
+function getProviderCheck(input: SetupFlowInput, id: ProviderValidationCheck['id']): ProviderValidationCheck | undefined {
+  const checks = Array.isArray(input.providerValidation?.checks) ? input.providerValidation.checks : [];
+  return checks.find(check => check.id === id);
+}
+
+function buildDiscordServerStep(input: SetupFlowInput): SetupStep {
+  const guildId = input.discordGuildId?.trim() ?? '';
+  const inviteDetail = guildId
+    ? 'Open the bot invite for the entered server, authorize SomniBot, then re-check providers so the launcher can verify membership.'
+    : 'Open the bot invite, choose the server in Discord, then re-check providers. If one server should be locked in, paste its Guild ID before inviting.';
+
+  if (!input.credentialReady) {
+    return {
+      id: 'discord-server',
+      label: 'Discord server',
+      status: 'pending',
+      summary: 'Waiting for Discord app fields.',
+      detail: 'Enter the bot token, Application ID, and client secret before inviting or verifying the bot.',
+    };
+  }
+
+  if (input.checking) {
+    return {
+      id: 'discord-server',
+      label: 'Discord server',
+      status: 'loading',
+      summary: 'Checking bot server readiness.',
+      detail: 'The launcher is verifying that the bot token works and that the bot can see the selected Discord server.',
+    };
+  }
+
+  const guildCheck = getProviderCheck(input, 'discord-guild');
+  if (!guildCheck) {
+    return {
+      id: 'discord-server',
+      label: 'Discord server',
+      status: 'pending',
+      summary: 'Ready to invite and verify the bot.',
+      detail: inviteDetail,
+      actionLabel: 'Open bot invite',
+      actionKind: 'discord-invite',
+      manualAction: true,
+    };
+  }
+
+  if (guildCheck.status === 'failed') {
+    return {
+      id: 'discord-server',
+      label: 'Discord server',
+      status: 'recoverable-error',
+      summary: 'Bot server membership needs attention.',
+      detail: [
+        guildCheck.detail || guildCheck.summary,
+        inviteDetail,
+      ].join('\n'),
+      actionLabel: 'Open bot invite',
+      actionKind: 'discord-invite',
+      manualAction: true,
+    };
+  }
+
+  if (guildCheck.status === 'skipped') {
+    return {
+      id: 'discord-server',
+      label: 'Discord server',
+      status: 'pending',
+      summary: 'Waiting for a valid Discord bot token.',
+      detail: guildCheck.summary,
+    };
+  }
+
+  return {
+    id: 'discord-server',
+    label: 'Discord server',
+    status: 'success',
+    summary: 'Discord server readiness verified.',
+    detail: guildCheck.summary,
+  };
+}
+
 function buildSummary(input: SetupFlowInput, runtimeMode: RuntimeMode): SetupSummary {
   const regularPublicBase = normalizeBaseUrl(input.publicCallbackBaseUrl);
   const vpsPublicBase = normalizeVpsDomain(input.vpsDomain);
@@ -398,6 +480,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
   const callbackBlocksStart = callbackStep.status === 'blocked' || callbackStep.status === 'recoverable-error';
 
   const credentialStep = buildCredentialStep(input, 'local');
+  const discordServerStep = buildDiscordServerStep(input);
   const providerValidationStep = buildProviderValidationStep(input);
 
   const authProviderStep = buildAuthProviderStep(input);
@@ -471,6 +554,7 @@ function buildRegularLocalSteps(input: SetupFlowInput): SetupStep[] {
     },
     callbackStep,
     credentialStep,
+    discordServerStep,
     providerValidationStep,
     authProviderStep,
     paypalStep,
@@ -533,6 +617,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
     };
 
   const credentialStep = buildCredentialStep(input, 'VPS');
+  const discordServerStep = buildDiscordServerStep(input);
   const providerValidationStep = buildProviderValidationStep(input);
   const authProviderStep = buildAuthProviderStep(input);
   const paypalStep = buildPayPalStep(input);
@@ -575,6 +660,7 @@ function buildVpsSteps(input: SetupFlowInput, deploymentPlan: VpsDeploymentPlan)
     domainStep,
     sshStep,
     credentialStep,
+    discordServerStep,
     providerValidationStep,
     authProviderStep,
     paypalStep,

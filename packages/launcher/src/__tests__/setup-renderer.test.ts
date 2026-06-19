@@ -80,6 +80,12 @@ describe('launcher setup renderer wiring', () => {
     expect(renderer).toContain("const btnOpenDiscordInvite = $('btn-open-discord-invite');");
     expect(renderer).toContain('function getDiscordInviteState()');
     expect(renderer).toContain('function buildDiscordInviteUrl()');
+    expect(renderer).toContain('discordGuildId: fields.discordGuildId.value');
+    expect(renderer).toContain('function renderSetupStepAction(step)');
+    expect(renderer).toContain('data-setup-action="discord-invite"');
+    expect(renderer).toContain("runtimeSteps.addEventListener('click'");
+    expect(renderer).toContain("button.dataset.setupAction === 'discord-invite'");
+    expect(styles).toContain('.runtime-step button.manual-action');
     expect(renderer).toContain("permissions: '8'");
     expect(renderer).toContain("scope: 'bot applications.commands'");
     expect(renderer).toContain("const guildIdInput = fields.discordGuildId.value.trim();");

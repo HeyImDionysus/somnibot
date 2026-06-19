@@ -349,6 +349,7 @@ async function refreshSetupStatus(options = {}) {
   const seq = ++setupStatusSeq;
   const input = {
     ...collectRuntimeConfig(),
+    discordGuildId: fields.discordGuildId.value,
     credentialReady: isCredentialFormComplete(),
     providerValidation: latestProviderValidation,
     paypalReady: isPayPalFormComplete(),
@@ -449,9 +450,7 @@ function renderSetupStatus(status) {
 
   runtimeSteps.innerHTML = status.steps.map((step) => {
     const statusLabel = formatStepStatus(step.status);
-    const manual = step.manualAction && step.actionLabel
-      ? `<span class="manual-action">${escapeHtml(step.actionLabel)}</span>`
-      : '';
+    const manual = renderSetupStepAction(step);
     return (
       `<div class="runtime-step ${escapeHtml(step.status)}">` +
         `<div class="runtime-step-status">${escapeHtml(statusLabel)}</div>` +
@@ -470,6 +469,25 @@ function renderSetupStatus(status) {
   }
   btnStart.disabled = !status.primaryAction.enabled || isValidating || isRunning;
   updatePayPalWebhookButton();
+}
+
+function renderSetupStepAction(step) {
+  if (!step.actionLabel) return '';
+
+  if (step.actionKind === 'discord-invite') {
+    const inviteState = getDiscordInviteState();
+    const disabled = inviteState.url ? '' : ' disabled';
+    const title = inviteState.url
+      ? 'Open the Discord bot invite'
+      : inviteState.error || 'Enter a valid Discord Application ID first';
+    return `<button class="manual-action setup-step-action" type="button" data-setup-action="discord-invite" title="${escapeHtml(title)}"${disabled}>${escapeHtml(step.actionLabel)}</button>`;
+  }
+
+  if (step.manualAction) {
+    return `<span class="manual-action">${escapeHtml(step.actionLabel)}</span>`;
+  }
+
+  return '';
 }
 
 function renderDeploymentPlan(plan, isVpsStatus) {
@@ -914,6 +932,20 @@ btnOpenDiscordInvite.addEventListener('click', () => {
     return;
   }
   window.somnibot.openExternal(inviteState.url);
+});
+
+runtimeSteps.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-setup-action]');
+  if (!button || button.disabled) return;
+
+  if (button.dataset.setupAction === 'discord-invite') {
+    const inviteState = getDiscordInviteState();
+    if (!inviteState.url) {
+      showMessage('error', inviteState.error || 'Enter a valid Discord Application ID before opening the bot invite.');
+      return;
+    }
+    window.somnibot.openExternal(inviteState.url);
+  }
 });
 
 btnOpenSupabase.addEventListener('click', () => {

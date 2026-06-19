@@ -59,8 +59,11 @@ describe('setup documentation alignment', () => {
     expect(startStep).toBeGreaterThan(inviteStep);
     expect(readme).toContain('Do not click **Set Up & Start** or run the script fallback until after Step 6.');
     expect(readme).toContain('After the bot is authorized in Discord, click **Set Up & Start**.');
+    expect(readme).toContain('Discord server readiness as a separate');
+    expect(readme).toContain('server membership');
     expect(readme).toContain('Paste one Guild ID if you want the invite locked to one server.');
-    expect(readme).toContain('Click **Open Bot Invite** in the Discord setup section.');
+    expect(readme).toContain('Click **Open Bot Invite**');
+    expect(readme).toContain('Discord server\n   setup step.');
     expect(readme).toContain('Manual fallback');
     expect(readme).toContain('Scopes," check: `bot` and `applications.commands`.');
     expect(readme).toContain('re-invite it using the launcher invite flow from Step 6.');
