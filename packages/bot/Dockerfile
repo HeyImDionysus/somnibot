@@ -23,6 +23,7 @@ COPY packages/bot/package.json packages/bot/tsconfig.json ./packages/bot/
 # Copy source code
 COPY packages/shared/src ./packages/shared/src
 COPY packages/bot/src ./packages/bot/src
+COPY scripts/clean.mjs scripts/smoke-built-bot-migration-runner.mjs ./scripts/
 
 # Install dependencies with pnpm (deterministic via lockfile)
 RUN pnpm install --frozen-lockfile
