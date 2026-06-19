@@ -12,10 +12,12 @@
 
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('MigrationRunner');
+const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -66,8 +68,8 @@ function findMigrationsDir(): string {
     // Standard monorepo layout (dev or Docker)
     join(process.cwd(), 'packages', 'supabase', 'migrations'),
     // Relative to bot dist/ (Docker: /app/packages/bot/dist → /app/packages/supabase)
-    resolve(__dirname, '..', '..', '..', 'supabase', 'migrations'),
-    resolve(__dirname, '..', '..', '..', '..', 'packages', 'supabase', 'migrations'),
+    resolve(moduleDir, '..', '..', '..', 'supabase', 'migrations'),
+    resolve(moduleDir, '..', '..', '..', '..', 'packages', 'supabase', 'migrations'),
     // Electron packaged app: bot is staged at resources/bot/ and migrations
     // are copied alongside at resources/supabase/migrations/
     join(process.cwd(), 'resources', 'supabase', 'migrations'),
