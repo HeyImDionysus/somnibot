@@ -17,6 +17,13 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Client');
 
+export function getPrimaryDiscordGuildId(discordGuildId: string): string {
+  return discordGuildId
+    .split(',')
+    .map((part) => part.trim())
+    .find(Boolean) ?? '';
+}
+
 /**
  * SomniClient — extends discord.js Client with platform infrastructure.
  *
@@ -76,7 +83,7 @@ export class SomniClient extends Client {
     super(options);
 
     this.env = env;
-    this.guildId = env.DISCORD_GUILD_ID;
+    this.guildId = getPrimaryDiscordGuildId(env.DISCORD_GUILD_ID);
     this.supabase = getSupabase();
     this.valkey = getValkey();
 

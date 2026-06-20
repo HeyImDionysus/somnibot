@@ -447,7 +447,7 @@ export async function initGuildFeatures(
       details: { version: '0.5.0' },
     });
 
-    services.diagnosticsService = new DiagnosticsService(client, supabase);
+    services.diagnosticsService = new DiagnosticsService(client, supabase, guildId);
     services.diagnosticsService.start();
 
     // V5 Fix #9: Heartbeat is now bot-level (started in index.ts), not per-guild.

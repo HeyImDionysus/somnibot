@@ -382,15 +382,19 @@ async function getOwnerRuntimeReadiness(
   supabase: SupabaseClient,
   configuredGuildId: string | null = null,
 ): Promise<OwnerRuntimeReadiness> {
-  let guildQuery = supabase
-    .from('guild')
-    .select('id, name');
-
-  if (configuredGuildId) {
-    guildQuery = guildQuery.eq('id', configuredGuildId);
+  if (!configuredGuildId) {
+    return {
+      botOnline: false,
+      guildDetected: false,
+      guildId: null,
+      guildName: null,
+    };
   }
 
-  const { data: guild } = await guildQuery
+  const { data: guild } = await supabase
+    .from('guild')
+    .select('id, name')
+    .eq('id', configuredGuildId)
     .limit(1)
     .maybeSingle() as { data: { id: string; name: string | null } | null };
 
@@ -618,8 +622,8 @@ export async function POST(request: NextRequest) {
   // Step 1: Verify Discord credentials
   if (action === 'verify-discord') {
     const { token, clientId, clientSecret } = body;
-    if (!token || !clientId) {
-      return NextResponse.json({ error: 'Missing token or clientId' }, { status: 400 });
+    if (!token || !clientId || !clientSecret?.trim()) {
+      return NextResponse.json({ error: 'Missing token, clientId, or clientSecret' }, { status: 400 });
     }
 
     try {
@@ -640,10 +644,8 @@ export async function POST(request: NextRequest) {
         const creds: Record<string, { value: string; section: string }> = {
           discord_bot_token: { value: token, section: 'discord' },
           discord_application_id: { value: clientId, section: 'discord' },
+          discord_client_secret: { value: clientSecret.trim(), section: 'discord' },
         };
-        if (clientSecret) {
-          creds.discord_client_secret = { value: clientSecret, section: 'discord' };
-        }
 
         for (const [key, { value, section }] of Object.entries(creds)) {
           await supabase
@@ -657,17 +659,15 @@ export async function POST(request: NextRequest) {
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
         // Auto-configure Discord OAuth in Supabase if we have the access token
-        if (clientSecret) {
-          const authResult = await ensureDiscordAuthProvider();
-          if (authResult.success) {
-            console.log(
-              authResult.alreadyConfigured
-                ? '[Setup] Discord auth provider already configured'
-                : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
-            );
-          } else {
-            console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
-          }
+        const authResult = await ensureDiscordAuthProvider();
+        if (authResult.success) {
+          console.log(
+            authResult.alreadyConfigured
+              ? '[Setup] Discord auth provider already configured'
+              : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
+          );
+        } else {
+          console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
         }
       }
 

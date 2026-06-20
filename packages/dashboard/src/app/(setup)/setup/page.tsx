@@ -155,6 +155,25 @@ export default function SetupWizardPage() {
     && paypalCredentialsReadyForSetup
     && paypalWebhookIdReadyForSetup,
   );
+  const pendingDiscordCredentialsNeedSave = Boolean(
+    locallyVerifiedDiscordCredentialsReady
+    && !discordCredentialsSaved
+    && !status?.discordCredentialsPresent,
+  );
+  const localPayPalCredentialsProvided = Boolean(
+    paypalClientId.trim()
+    || paypalClientSecret.trim()
+    || paypalWebhookId.trim()
+    || paypalWebhookUrl.trim(),
+  );
+  const pendingPayPalCredentialsNeedSave = Boolean(
+    localPayPalCredentialsProvided
+    && (
+      !status?.paypalCredentialsConfigured
+      || !status?.paypalWebhookIdConfigured
+      || !status?.paypalWebhookUrlReady
+    ),
+  );
   const getFinalizeBlockedReason = () => {
     if (!readinessGuildDetected) {
       return 'Invite SomniBot to a Discord server before setup can finish.';
@@ -180,7 +199,16 @@ export default function SetupWizardPage() {
     return null;
   };
   const finalizeBlockedReason = getFinalizeBlockedReason();
+  const canSavePendingCredentials = Boolean(
+    !finalizing
+    && publicCallbackReadyForSetup
+    && discordAuthConfigurableForSetup
+    && paypalWebhookReady
+    && (pendingDiscordCredentialsNeedSave || pendingPayPalCredentialsNeedSave),
+  );
   const canFinalizeSetup = !finalizeBlockedReason && !finalizing;
+  const canSubmitFinalize = canFinalizeSetup || canSavePendingCredentials;
+  const finalizeButtonLabel = canFinalizeSetup ? 'Finalize Setup' : 'Save Credentials';
 
   // Load initial status
   const fetchStatus = useCallback(async () => {
@@ -245,8 +273,8 @@ export default function SetupWizardPage() {
   // ─── Step 1: Verify Discord Credentials ───
 
   const verifyDiscord = async () => {
-    if (!discordToken || !discordClientId) {
-      setDiscordError('Bot token and Client ID are required');
+    if (!discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()) {
+      setDiscordError('Bot token, Client ID, and Client Secret are required');
       return;
     }
     setDiscordVerifying(true);
@@ -350,6 +378,7 @@ export default function SetupWizardPage() {
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data.ok) {
+        await fetchStatus();
         setFinalizeError(data.error || 'Setup could not be finalized. Check the server logs and try again.');
         return;
       }
@@ -695,7 +724,7 @@ export default function SetupWizardPage() {
                 {!discordVerified ? (
                   <button
                     onClick={verifyDiscord}
-                    disabled={discordVerifying || !discordToken || !discordClientId}
+                    disabled={discordVerifying || !discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()}
                     className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {discordVerifying ? (
@@ -1100,7 +1129,7 @@ export default function SetupWizardPage() {
                 </button>
                 <button
                   onClick={finalizeSetup}
-                  disabled={!canFinalizeSetup}
+                  disabled={!canSubmitFinalize}
                   className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {finalizing ? (
@@ -1108,7 +1137,7 @@ export default function SetupWizardPage() {
                   ) : (
                     <ChevronRight className="h-4 w-4" />
                   )}
-                  Finalize Setup
+                  {finalizeButtonLabel}
                 </button>
               </div>
             </div>

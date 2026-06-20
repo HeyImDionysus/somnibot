@@ -43,14 +43,19 @@ describe('setup wizard page wiring', () => {
 
   it('keeps final setup disabled until owner-ready proof is present', () => {
     expect(source).toContain('const finalizeBlockedReason = getFinalizeBlockedReason();');
+    expect(source).toContain('const canSavePendingCredentials = Boolean(');
     expect(source).toContain('const canFinalizeSetup = !finalizeBlockedReason && !finalizing;');
-    expect(source).toContain('disabled={!canFinalizeSetup}');
+    expect(source).toContain('const canSubmitFinalize = canFinalizeSetup || canSavePendingCredentials;');
+    expect(source).toContain('disabled={!canSubmitFinalize}');
     expect(source).toContain('if (!status?.botOnline)');
     expect(source).toContain('const locallyVerifiedDiscordCredentialsReady = Boolean(');
+    expect(source).toContain('const pendingDiscordCredentialsNeedSave = Boolean(');
     expect(source).toContain('const [discordCredentialsSaved, setDiscordCredentialsSaved] = useState(false);');
     expect(source).toContain('discordVerified');
     expect(source).toContain('discordClientSecret.trim()');
     expect(source).toContain('setDiscordCredentialsSaved(Boolean(data.credentialsSaved));');
+    expect(source).toContain('Bot token, Client ID, and Client Secret are required');
+    expect(source).toContain('disabled={discordVerifying || !discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()}');
     expect(source).toContain('Credentials verified; they will be saved when setup finalizes');
     expect(source).toContain('if (!discordAuthConfigurableForSetup)');
     expect(source).toContain('if (!paypalCredentialsReadyForSetup)');

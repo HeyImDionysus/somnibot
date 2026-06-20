@@ -57,7 +57,12 @@ function configureReadyPayPalEnv() {
 function configureFinalizeOwnerProof(mock: ReturnType<typeof createMockSupabase>, options: {
   guildDetected?: boolean;
   botOnline?: boolean;
+  configuredGuildId?: string | null;
 } = {}) {
+  if (options.configuredGuildId !== null) {
+    process.env.DISCORD_GUILD_ID = options.configuredGuildId ?? 'guild-1';
+  }
+
   const guildTable = registerTable(mock, 'guild');
   guildTable.limit.mockReturnThis();
   guildTable.maybeSingle.mockResolvedValue({
@@ -528,6 +533,34 @@ describe('POST /api/setup finalize', () => {
     expect(mock._tables.bot_diagnostics.maybeSingle).not.toHaveBeenCalled();
   });
 
+  it('does not use an arbitrary guild row when no Discord guild is configured', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { configuredGuildId: null });
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Invite SomniBot to a Discord server before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(mock._tables.guild.select).not.toHaveBeenCalled();
+    expect(mock._tables.bot_diagnostics.maybeSingle).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
   it('does not lock setup when the bot health heartbeat is missing', async () => {
     configureReadyPayPalEnv();
     configureFinalizeOwnerProof(mock, { botOnline: false });
@@ -815,6 +848,24 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
       { onConflict: 'key' },
     );
   });
+
+  it('rejects Discord verification without a client secret before calling Discord', async () => {
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'verify-discord',
+        token: 'discord-bot-token',
+        clientId: '123456789012345678',
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ error: 'Missing token, clientId, or clientSecret' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(createClient).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
 });
 
 describe('GET /api/setup status', () => {
@@ -1048,6 +1099,8 @@ describe('GET /api/setup status', () => {
   });
 
   it('reports saved PayPal values as ready after a setup retry or restart', async () => {
+    vi.stubEnv('DISCORD_GUILD_ID', 'guild-1');
+
     const guildTable = registerTable(mock, 'guild');
     guildTable.limit
       .mockResolvedValueOnce({ error: null })
