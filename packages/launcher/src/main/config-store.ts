@@ -51,6 +51,7 @@ export interface LauncherConfig {
   paypalClientId: string;
   paypalClientSecret: string;
   paypalWebhookId: string;
+  paypalWebhookProofKey: string;
   paypalSandbox: boolean;
 
   // ── UI state ──
@@ -90,6 +91,7 @@ const DEFAULTS: LauncherConfig = {
   paypalClientId: '',
   paypalClientSecret: '',
   paypalWebhookId: '',
+  paypalWebhookProofKey: '',
   paypalSandbox: true,
   runtimeMode: 'regular-local',
   publicCallbackBaseUrl: '',
@@ -199,6 +201,7 @@ export function getConfig(): LauncherConfig {
     paypalClientId: store.get('paypalClientId', ''),
     paypalClientSecret: getSensitive('paypalClientSecret'),
     paypalWebhookId: getSensitive('paypalWebhookId'),
+    paypalWebhookProofKey: store.get('paypalWebhookProofKey', ''),
     paypalSandbox: store.get('paypalSandbox', true),
     windowBounds: store.get('windowBounds'),
     runtimeMode: store.get('runtimeMode', 'regular-local'),

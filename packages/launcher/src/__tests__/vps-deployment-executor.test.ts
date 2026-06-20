@@ -152,6 +152,25 @@ describe('VPS deployment execution bridge', () => {
     });
 
     expect(result.state).toBe('success');
+    expect(result.healthProof).toMatchObject({
+      httpsDashboardProbe: { state: 'success', httpStatus: 200 },
+      apiHealthProbe: {
+        state: 'success',
+        httpStatus: 200,
+        response: { status: 'healthy' },
+      },
+      lavalink: {
+        status: 'pass',
+      },
+    });
+    expect(executedCommands.find(command => command.id === 'check-dashboard')).toMatchObject({
+      executable: 'curl',
+      args: ['-fsS', '-o', '/dev/null', 'https://somnibot.example.com'],
+    });
+    expect(executedCommands.find(command => command.id === 'check-lavalink')).toMatchObject({
+      executable: 'ssh',
+      args: expect.arrayContaining(['deploy@somnibot.example.com', 'sh', '-lc']),
+    });
     expect(executedCommands.find(command => command.id === 'protect-env-file')).toMatchObject({
       executable: 'ssh',
       args: expect.arrayContaining(['deploy@somnibot.example.com', 'chmod', '0600', '/opt/somnibot/.env']),

@@ -51,7 +51,8 @@ describe('launcher renderer Tailscale setup wiring', () => {
     expect(html).toContain('id="tailscale-section-header"');
     expect(renderer).toContain("tailscaleSectionHeader.classList.toggle('hidden', isVps)");
     expect(renderer).toContain("if (runtimeMode === 'regular-local')");
-    expect(renderer.match(/if \(runtimeMode !== 'regular-local' \|\| isValidating \|\| isRunning\) return;/g)?.length).toBe(3);
+    expect(renderer.match(/if \(runtimeMode !== 'regular-local' \|\| isValidating \|\| isRunning\) return;/g)?.length).toBe(2);
+    expect(renderer).toContain("if (runtimeMode !== 'regular-local' || isValidating) return;");
   });
 
   it('guards Tailscale refreshes and actions against stale UI updates', () => {

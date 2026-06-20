@@ -613,15 +613,6 @@ export async function probePublicCallbackHealth(
     };
   }
 
-  const parsed = new URL(normalized);
-  if (!parsed.hostname.endsWith('.ts.net')) {
-    return {
-      ok: false,
-      url: normalized,
-      error: 'Tailscale callback verification only accepts Funnel URLs on ts.net hostnames.',
-    };
-  }
-
   const url = `${normalized}/api/health`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);

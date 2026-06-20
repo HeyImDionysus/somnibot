@@ -116,12 +116,26 @@ describe('VPS deployment plan generator', () => {
         executionTimeoutMs: VPS_DEPLOYMENT_BUILD_TIMEOUT_MS,
       }),
       expect.objectContaining({
+        id: 'check-dashboard',
+        executable: 'curl',
+        args: ['-fsS', '-o', '/dev/null', 'https://somnibot.example.com'],
+        changesRemote: false,
+        approvalRequired: false,
+      }),
+      expect.objectContaining({
         id: 'check-health',
         executable: 'curl',
         args: ['-fsS', 'https://somnibot.example.com/api/health'],
         changesRemote: false,
         approvalRequired: false,
         expectedHealthStatus: 'healthy',
+      }),
+      expect.objectContaining({
+        id: 'check-lavalink',
+        executable: 'ssh',
+        args: expect.arrayContaining(['deploy@somnibot.example.com', 'sh', '-lc']),
+        changesRemote: false,
+        approvalRequired: false,
       }),
     ]));
     expect(plan.rollback?.commands).toEqual(expect.arrayContaining([
@@ -165,7 +179,7 @@ describe('VPS deployment plan generator', () => {
   it('routes remote VPS commands through SSH so live runners cannot execute them locally', () => {
     const plan = buildVpsDeploymentPlan(completeVpsInput);
     const remoteCommands = [
-      ...plan.commands.filter(command => command.id !== 'check-health'),
+      ...plan.commands.filter(command => !['check-dashboard', 'check-health'].includes(command.id)),
       ...(plan.rollback?.commands.filter(command => command.id !== 'rollback-health') ?? []),
     ];
 

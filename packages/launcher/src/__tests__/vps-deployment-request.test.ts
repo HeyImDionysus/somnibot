@@ -107,7 +107,9 @@ describe('VPS deployment run request coordinator', () => {
       'protect-env-file',
       'start-stack',
       'check-stack',
+      'check-dashboard',
       'check-health',
+      'check-lavalink',
     ]);
   });
 

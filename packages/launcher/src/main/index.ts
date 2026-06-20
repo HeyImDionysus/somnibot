@@ -26,7 +26,7 @@ import {
   ensurePayPalWebhook,
   type EnsurePayPalWebhookResult,
 } from './paypal-webhook-service.js';
-import { buildSetupStatus, type SetupFlowInput } from './setup-flow.js';
+import { buildSetupStatus, type PayPalWebhookProofStatus, type SetupFlowInput } from './setup-flow.js';
 import {
   SOMNIBOT_FUNNEL_TARGET,
   TAILSCALE_DNS_PROPAGATION_WAIT_MS,
@@ -92,6 +92,22 @@ type PayPalRuntimeConfig = Pick<
   publicCallbackBaseUrl: string;
   paypalWebhookUrl: string;
 };
+
+function buildPayPalWebhookProofKey(input: {
+  webhookId: string;
+  webhookUrl: string;
+  clientId: string;
+  sandbox: boolean;
+}): string {
+  const parts = [
+    input.webhookId.trim(),
+    normalizeBaseUrl(input.webhookUrl),
+    input.clientId.trim(),
+    input.sandbox ? 'sandbox' : 'live',
+  ];
+  if (parts.some(part => !part)) return '';
+  return crypto.createHash('sha256').update(parts.join('\0')).digest('hex');
+}
 
 interface DashboardAuthProviderOptions {
   manualAuthProviderConfirmed: boolean;
@@ -285,6 +301,39 @@ function dashboardSetupVerifiesAuthProvider(
   return dashboardAuthProviderStatusUsableForLauncherConfig(providerStatus, config);
 }
 
+function vpsSupabaseCallbackSignal(
+  input: Partial<SetupFlowInput>,
+  providerStatus: SetupFlowInput['supabaseDiscordAuthProviderStatus'],
+): SetupFlowInput['supabaseCallbackAllowList'] {
+  if (input.supabaseCallbackAllowList) {
+    return input.supabaseCallbackAllowList;
+  }
+
+  if (providerStatus?.ready === true) {
+    return {
+      status: 'pass',
+      detail: providerStatus.statusDetail ?? 'Dashboard setup status verified the Discord auth callback allow-list.',
+    };
+  }
+
+  if (providerStatus?.ready === false) {
+    return {
+      status: 'fail',
+      detail: providerStatus.statusDetail ?? 'Dashboard setup status reports the Discord auth callback allow-list is not ready.',
+      missingCallbackUrls: providerStatus.missingCallbackUrls,
+    };
+  }
+
+  if (input.supabaseDiscordAuthProviderConfigured) {
+    return {
+      status: 'pass',
+      detail: 'Manual confirmation says the Discord auth callback allow-list is configured for this VPS setup.',
+    };
+  }
+
+  return undefined;
+}
+
 async function waitForDashboardHealth(timeoutMs = 30_000): Promise<{ ok: boolean; error?: string }> {
   const deadline = Date.now() + timeoutMs;
   let lastError = '';
@@ -451,6 +500,26 @@ function resolvePayPalWebhookUrl(config: LauncherConfig): string {
   }
 }
 
+function persistedPayPalWebhookProof(config: LauncherConfig, webhookUrl: string): PayPalWebhookProofStatus | undefined {
+  const proofKey = buildPayPalWebhookProofKey({
+    webhookId: config.paypalWebhookId,
+    webhookUrl,
+    clientId: config.paypalClientId,
+    sandbox: config.paypalSandbox,
+  });
+
+  if (!proofKey || proofKey !== config.paypalWebhookProofKey) {
+    return undefined;
+  }
+
+  return {
+    ok: true,
+    webhookUrl,
+    status: 'already-configured',
+    message: 'Saved PayPal webhook proof matches the current callback URL and PayPal app.',
+  };
+}
+
 async function ensureConfiguredPayPalWebhook(config: LauncherConfig): Promise<EnsurePayPalWebhookResult> {
   const webhookUrl = resolvePayPalWebhookUrl(config);
   const result = await ensurePayPalWebhook({
@@ -461,7 +530,15 @@ async function ensureConfiguredPayPalWebhook(config: LauncherConfig): Promise<En
     sandbox: config.paypalSandbox,
   });
   if (result.ok && result.webhookId) {
-    saveConfig({ paypalWebhookId: result.webhookId });
+    saveConfig({
+      paypalWebhookId: result.webhookId,
+      paypalWebhookProofKey: buildPayPalWebhookProofKey({
+        webhookId: result.webhookId,
+        webhookUrl: result.webhookUrl,
+        clientId: config.paypalClientId,
+        sandbox: config.paypalSandbox,
+      }),
+    });
   }
   return result;
 }
@@ -694,7 +771,7 @@ async function runLocalSetupAutomation(configPatch: LauncherConfigPatch): Promis
   }
 
   let callbackProbe: Awaited<ReturnType<typeof probePublicCallbackHealth>> | undefined;
-  if (config.publicCallbackBaseUrl.includes('.ts.net')) {
+  if (config.publicCallbackBaseUrl.trim()) {
     callbackProbe = await probePublicCallbackHealth(config.publicCallbackBaseUrl);
     if (!callbackProbe.ok) {
       warnings.push(callbackProbe.error || 'Public callback health check did not pass yet.');
@@ -928,6 +1005,7 @@ function registerIpcHandlers(): void {
       || (!selectedAuthProviderStatusBlocksDashboard && dashboardAuthProviderConfigured)
       || config.supabaseDiscordAuthProviderConfigured,
     );
+    const paypalWebhookUrl = resolvePayPalWebhookUrl(config);
 
     return buildSetupStatus({
       runtimeMode: input.runtimeMode ?? config.runtimeMode,
@@ -951,6 +1029,8 @@ function registerIpcHandlers(): void {
         && config.paypalClientSecret
         && config.paypalWebhookId
       ),
+      paypalWebhook: input.paypalWebhook ?? persistedPayPalWebhookProof(config, paypalWebhookUrl),
+      callbackProbe: input.callbackProbe,
       supabaseAccessTokenReady: input.supabaseAccessTokenReady ?? Boolean(config.supabaseAccessToken),
       supabaseDiscordAuthProviderConfigured: input.supabaseDiscordAuthProviderConfigured
         ?? discoveredAuthProviderConfigured,
@@ -964,6 +1044,10 @@ function registerIpcHandlers(): void {
         lavalink: currentStatus.lavalink,
         ...(dashboardHealth ? { dashboardHealth } : {}),
       },
+      httpsDashboardProbe: input.httpsDashboardProbe,
+      apiHealthProbe: input.apiHealthProbe,
+      supabaseCallbackAllowList: vpsSupabaseCallbackSignal(input, selectedAuthProviderStatus),
+      lavalink: input.lavalink,
       checking: input.checking ?? false,
     });
   });

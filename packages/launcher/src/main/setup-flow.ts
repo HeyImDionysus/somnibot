@@ -10,7 +10,11 @@ import {
 } from './runtime-profile.js';
 import type { DashboardHealthEvaluation } from './setup-automation-health.js';
 import { buildVpsDeploymentPlan, type VpsDeploymentPlan } from './vps-deployment-plan.js';
-import { buildVpsHealthVerification, type VpsHealthVerification } from './vps-health-verification.js';
+import {
+  buildVpsHealthVerification,
+  type VpsHealthVerification,
+  type VpsHealthVerificationInput,
+} from './vps-health-verification.js';
 import type { ProviderValidationCheck } from './validators.js';
 
 export type SetupStepStatus = 'pending' | 'loading' | 'success' | 'recoverable-error' | 'blocked';
@@ -32,7 +36,25 @@ export interface SupabaseDiscordAuthProviderStatus {
   statusDetail?: string;
 }
 
-export interface SetupFlowInput extends RuntimeNetworkingConfig {
+export interface PublicCallbackProbeStatus {
+  ok?: boolean;
+  url?: string;
+  status?: number;
+  error?: string;
+}
+
+export interface PayPalWebhookProofStatus {
+  ok?: boolean;
+  webhookUrl?: string;
+  status?: string;
+  message?: string;
+  error?: string;
+}
+
+export interface SetupFlowInput extends RuntimeNetworkingConfig, Partial<Pick<
+  VpsHealthVerificationInput,
+  'httpsDashboardProbe' | 'apiHealthProbe' | 'supabaseCallbackAllowList' | 'lavalink'
+>> {
   discordGuildId?: string;
   credentialReady?: boolean;
   providerValidation?: {
@@ -41,6 +63,8 @@ export interface SetupFlowInput extends RuntimeNetworkingConfig {
     checks: ProviderValidationCheck[];
   };
   paypalReady?: boolean;
+  paypalWebhook?: PayPalWebhookProofStatus;
+  callbackProbe?: PublicCallbackProbeStatus;
   supabaseAccessTokenReady?: boolean;
   supabaseDiscordAuthProviderConfigured?: boolean;
   supabaseDiscordAuthProviderStatus?: SupabaseDiscordAuthProviderStatus;
@@ -86,10 +110,20 @@ export interface SetupPrimaryAction {
   blockedReason?: string;
 }
 
+export interface SetupCompletionStatus {
+  status: 'complete' | 'incomplete' | 'blocked';
+  summary: string;
+  detail: string;
+  requiredStepIds: string[];
+  missingStepIds: string[];
+  missingLabels: string[];
+}
+
 export interface SetupStatus {
   runtimeMode: RuntimeMode;
   summary: SetupSummary;
   steps: SetupStep[];
+  completion: SetupCompletionStatus;
   primaryAction: SetupPrimaryAction;
   firstBlockingStepId: string | null;
   deploymentPlan?: VpsDeploymentPlan;
@@ -138,13 +172,13 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
     };
   }
 
-  if (input.supabaseDiscordAuthProviderConfigured || providerStatus?.ready) {
+  if (providerStatus?.ready) {
     const statusDetail = providerStatus?.ready ? providerStatus.statusDetail?.trim() : undefined;
     return {
       id: 'auth-provider',
       label: 'Supabase Auth',
       status: 'success',
-      summary: providerStatus?.ready && !providerStatus.manualConfigured
+      summary: providerStatus.ready && !providerStatus.manualConfigured
         ? 'Discord auth provider readiness is verified.'
         : 'Manual Discord auth provider setup is confirmed.',
       detail: statusDetail || 'The launcher will pass this confirmation to the dashboard so setup can continue without a Management API token.',
@@ -175,6 +209,16 @@ function buildAuthProviderStep(input: SetupFlowInput): SetupStep {
       detail: detailParts.join('\n'),
       actionLabel: 'Add token or confirm manual setup',
       manualAction: true,
+    };
+  }
+
+  if (input.supabaseDiscordAuthProviderConfigured) {
+    return {
+      id: 'auth-provider',
+      label: 'Supabase Auth',
+      status: 'success',
+      summary: 'Manual Discord auth provider setup is confirmed.',
+      detail: 'The launcher will pass this confirmation to the dashboard so setup can continue without a Management API token.',
     };
   }
 
@@ -780,6 +824,233 @@ function isBlockingStep(step: SetupStep): boolean {
   return step.status === 'blocked' || step.status === 'recoverable-error';
 }
 
+function normalizedUrlsMatch(left: string | undefined, right: string | undefined): boolean {
+  const normalizedLeft = normalizeBaseUrl(left);
+  const normalizedRight = normalizeBaseUrl(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function publicCallbackProbeUrlMatches(probeUrl: string | undefined, publicCallbackBaseUrl: string | undefined): boolean {
+  const normalizedProbeUrl = normalizeBaseUrl(probeUrl);
+  const normalizedBaseUrl = normalizeBaseUrl(publicCallbackBaseUrl);
+  if (!normalizedProbeUrl || !normalizedBaseUrl) return false;
+
+  const normalizedHealthUrl = normalizeBaseUrl(`${normalizedBaseUrl}/api/health`);
+  return normalizedProbeUrl === normalizedBaseUrl || normalizedProbeUrl === normalizedHealthUrl;
+}
+
+function findMissingSteps(steps: SetupStep[], requiredStepIds: string[]): SetupStep[] {
+  return requiredStepIds
+    .map(id => steps.find(step => step.id === id))
+    .filter((step): step is SetupStep => Boolean(step && step.status !== 'success'));
+}
+
+function labelsForSteps(steps: SetupStep[]): string[] {
+  return steps.map(step => step.label);
+}
+
+function sentenceList(items: string[]): string {
+  if (items.length === 0) return '';
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
+function completionFromMissingSteps(
+  requiredStepIds: string[],
+  missingSteps: SetupStep[],
+  completeSummary: string,
+  completeDetail: string,
+): SetupCompletionStatus {
+  if (missingSteps.length === 0) {
+    return {
+      status: 'complete',
+      summary: completeSummary,
+      detail: completeDetail,
+      requiredStepIds,
+      missingStepIds: [],
+      missingLabels: [],
+    };
+  }
+
+  const hasHardBlock = missingSteps.some(isBlockingStep);
+  const missingLabels = labelsForSteps(missingSteps);
+  const missingText = sentenceList(missingLabels);
+
+  return {
+    status: hasHardBlock ? 'blocked' : 'incomplete',
+    summary: hasHardBlock
+      ? 'Owner setup cannot be called complete yet.'
+      : 'Owner setup is still waiting for proof.',
+    detail: `${missingText} ${missingSteps.length === 1 ? 'needs' : 'need'} ${hasHardBlock ? 'attention' : 'completion proof'} before this setup is complete.`,
+    requiredStepIds,
+    missingStepIds: missingSteps.map(step => step.id),
+    missingLabels,
+  };
+}
+
+function appendMissingProof(
+  missingSteps: SetupStep[],
+  steps: SetupStep[],
+  id: string,
+  summary: string,
+  detail: string,
+): void {
+  if (missingSteps.some(step => step.id === id)) return;
+
+  const step = steps.find(item => item.id === id);
+  missingSteps.push({
+    id,
+    label: step?.label ?? id,
+    status: 'pending',
+    summary,
+    detail,
+  });
+}
+
+function publicCallbackProofReady(input: SetupFlowInput): boolean {
+  return Boolean(
+    input.callbackProbe?.ok
+    && publicCallbackProbeUrlMatches(input.callbackProbe.url, input.publicCallbackBaseUrl),
+  );
+}
+
+function discordGuildProofReady(input: SetupFlowInput): boolean {
+  return Boolean(
+    input.discordGuildId?.trim()
+    && getProviderCheck(input, 'discord-guild')?.status === 'success',
+  );
+}
+
+function authProviderProofReady(input: SetupFlowInput): boolean {
+  return Boolean(
+    input.supabaseDiscordAuthProviderStatus?.ready
+    || (
+      input.supabaseDiscordAuthProviderConfigured
+      && input.supabaseDiscordAuthProviderStatus?.ready !== false
+    ),
+  );
+}
+
+function payPalWebhookProofReady(input: SetupFlowInput, summary: SetupSummary): boolean {
+  return Boolean(
+    input.paypalWebhook?.ok
+    && normalizedUrlsMatch(input.paypalWebhook.webhookUrl, summary.diagnostics.paypalWebhookUrl),
+  );
+}
+
+function addSharedCompletionProofRequirements(
+  input: SetupFlowInput,
+  steps: SetupStep[],
+  summary: SetupSummary,
+  missingSteps: SetupStep[],
+  options: { requireCallbackProbe: boolean },
+): void {
+  if (options.requireCallbackProbe && !publicCallbackProofReady(input)) {
+    appendMissingProof(
+      missingSteps,
+      steps,
+      'regular-callback',
+      'Waiting for public callback proof.',
+      'Verify that the configured public callback URL reaches this launcher before owner setup can be called complete.',
+    );
+  }
+
+  if (!discordGuildProofReady(input)) {
+    appendMissingProof(
+      missingSteps,
+      steps,
+      'discord-server',
+      'Waiting for Discord server proof.',
+      'Enter a concrete Discord Guild ID and re-check providers so the launcher proves the bot can see the target server.',
+    );
+  }
+
+  if (!authProviderProofReady(input)) {
+    appendMissingProof(
+      missingSteps,
+      steps,
+      'auth-provider',
+      'Waiting for Supabase auth proof.',
+      'Completion requires dashboard-verified Discord auth readiness or an explicit manual confirmation, not only a Management API token.',
+    );
+  }
+
+  if (!payPalWebhookProofReady(input, summary)) {
+    appendMissingProof(
+      missingSteps,
+      steps,
+      'paypal-webhook',
+      'Waiting for current PayPal webhook proof.',
+      'Create or update the PayPal webhook for the current callback URL before owner setup can be called complete.',
+    );
+  }
+}
+
+function buildRegularLocalCompletion(
+  input: SetupFlowInput,
+  steps: SetupStep[],
+  summary: SetupSummary,
+): SetupCompletionStatus {
+  const requiredStepIds = [
+    'regular-callback',
+    'credentials',
+    'discord-server',
+    'provider-validation',
+    'auth-provider',
+    'paypal-webhook',
+    'start-local',
+  ];
+  const missingSteps = findMissingSteps(steps, requiredStepIds);
+  addSharedCompletionProofRequirements(input, steps, summary, missingSteps, { requireCallbackProbe: true });
+
+  return completionFromMissingSteps(
+    requiredStepIds,
+    missingSteps,
+    'Regular local owner setup is complete.',
+    'Public callbacks, provider credentials, Discord server readiness, Supabase auth, PayPal webhook readiness, and local runtime health are all verified.',
+  );
+}
+
+function buildVpsCompletion(
+  input: SetupFlowInput,
+  steps: SetupStep[],
+  healthVerification: VpsHealthVerification | undefined,
+  summary: SetupSummary,
+): SetupCompletionStatus {
+  const requiredStepIds = [
+    'vps-domain',
+    'vps-ssh',
+    'credentials',
+    'discord-server',
+    'provider-validation',
+    'auth-provider',
+    'paypal-webhook',
+    'vps-health-verification',
+  ];
+  const missingSteps = findMissingSteps(steps, requiredStepIds.filter(id => id !== 'vps-health-verification'));
+  addSharedCompletionProofRequirements(input, steps, summary, missingSteps, { requireCallbackProbe: false });
+
+  if (healthVerification?.status !== 'pass') {
+    missingSteps.push({
+      id: 'vps-health-verification',
+      label: 'VPS health verification',
+      status: healthVerification?.status === 'fail' || healthVerification?.status === 'blocked' || healthVerification?.status === 'manual'
+        ? 'blocked'
+        : 'pending',
+      summary: 'Waiting for post-deploy VPS health proof.',
+      detail: 'The VPS dashboard, /api/health, Supabase callback allow-list, bot heartbeat, Valkey, and Lavalink checks must pass before VPS setup is complete.',
+    });
+  }
+
+  return completionFromMissingSteps(
+    requiredStepIds,
+    missingSteps,
+    'VPS owner setup is complete.',
+    'Domain, SSH target, provider credentials, Discord server readiness, Supabase auth, PayPal webhook readiness, and post-deploy VPS health verification are all proven.',
+  );
+}
+
 export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
   const runtimeMode = normalizeRuntimeMode(input.runtimeMode);
   let deploymentPlan: VpsDeploymentPlan | undefined;
@@ -842,11 +1113,15 @@ export function buildSetupStatus(input: SetupFlowInput = {}): SetupStatus {
       status: 'ready',
     };
   }
+  const completion = runtimeMode === 'vps'
+    ? buildVpsCompletion(input, steps, healthVerification, summary)
+    : buildRegularLocalCompletion(input, steps, summary);
 
   return {
     runtimeMode,
     summary,
     steps,
+    completion,
     primaryAction,
     firstBlockingStepId: firstBlocking?.id ?? null,
     ...(deploymentPlan ? { deploymentPlan } : {}),
