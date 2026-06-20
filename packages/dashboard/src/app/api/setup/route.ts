@@ -19,10 +19,15 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/runtime-config';
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
+import {
+  SETUP_PAYPAL_WEBHOOK_PATH,
+  getSetupPayPalWebhookUrlError,
+  isSetupLocalHostname,
+  normalizeSetupPayPalWebhookUrl,
+} from '@/lib/setup-paypal-webhook';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
-const PAYPAL_WEBHOOK_PATH = '/api/paypal/webhook';
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -166,10 +171,6 @@ function isTruthyEnv(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'required'].includes(value?.trim().toLowerCase() ?? '');
 }
 
-function isLocalHostname(hostname: string): boolean {
-  return ['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(hostname);
-}
-
 function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
@@ -182,41 +183,6 @@ function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   } catch {
     return null;
   }
-}
-
-function getSetupPayPalWebhookUrlError(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'https:') {
-      return 'PayPal webhook URL must use HTTPS before it can be marked ready.';
-    }
-    if (isLocalHostname(parsed.hostname)) {
-      return 'PayPal webhook URL cannot point at localhost before it can be marked ready.';
-    }
-    if (parsed.pathname.replace(/\/$/, '') !== PAYPAL_WEBHOOK_PATH) {
-      return `PayPal webhook URL must point at ${PAYPAL_WEBHOOK_PATH}.`;
-    }
-    if (parsed.search || parsed.hash) {
-      return 'PayPal webhook URL must not include query parameters or fragments.';
-    }
-  } catch {
-    return 'PayPal webhook URL must be a valid HTTPS URL.';
-  }
-
-  return null;
-}
-
-function normalizeSetupPayPalWebhookUrl(value: string | null | undefined): string | null {
-  if (getSetupPayPalWebhookUrlError(value)) return null;
-
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-
-  const parsed = new URL(trimmed);
-  return `${parsed.origin}${PAYPAL_WEBHOOK_PATH}`;
 }
 
 async function readSetupInstanceSettings(
@@ -266,7 +232,7 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
       const parsed = new URL(publicCallbackBaseUrl);
       if (parsed.protocol !== 'https:') {
         publicCallbackError = 'Public callback URL must use HTTPS before setup can finalize.';
-      } else if (isLocalHostname(parsed.hostname)) {
+      } else if (isSetupLocalHostname(parsed.hostname)) {
         publicCallbackError = 'Public callback URL cannot point at localhost before setup can finalize.';
       }
     }
@@ -275,7 +241,7 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   return {
     operatorDashboardUrl,
     publicCallbackBaseUrl,
-    paypalWebhookUrl: publicCallbackBaseUrl ? `${publicCallbackBaseUrl}/api/paypal/webhook` : null,
+    paypalWebhookUrl: publicCallbackBaseUrl ? `${publicCallbackBaseUrl}${SETUP_PAYPAL_WEBHOOK_PATH}` : null,
     publicCallbackRequired,
     publicCallbackReady: !publicCallbackRequired || publicCallbackError === null,
     publicCallbackError,
@@ -637,6 +603,7 @@ export async function POST(request: NextRequest) {
 
       // Save validated Discord credentials to instance_settings
       const supabase = createSetupSupabase();
+      let credentialsSaved = false;
       if (supabase) {
         const creds: Record<string, { value: string; section: string }> = {
           discord_bot_token: { value: token, section: 'discord' },
@@ -654,6 +621,7 @@ export async function POST(request: NextRequest) {
               { onConflict: 'key' },
             );
         }
+        credentialsSaved = true;
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
         // Auto-configure Discord OAuth in Supabase if we have the access token
@@ -678,7 +646,7 @@ export async function POST(request: NextRequest) {
         botAvatar: botUser.avatar
           ? `https://cdn.discordapp.com/avatars/${botUser.id}/${botUser.avatar}.png`
           : null,
-        credentialsSaved: true,
+        credentialsSaved,
       });
     } catch (err) {
       // V11 Audit R5-1: Was returning String(err) — leaks internal network/fetch

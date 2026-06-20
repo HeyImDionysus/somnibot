@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useCsrf } from '@/hooks/use-csrf';
 import { buildSetupRequestHeaders, SETUP_CSRF_UNAVAILABLE_MESSAGE } from '@/lib/setup-wizard-client';
+import { isSetupPayPalWebhookUrl } from '@/lib/setup-paypal-webhook';
 import { PAYPAL_HANDLED_WEBHOOK_EVENTS } from '@/lib/paypal-webhook-events';
 
 // ============================================================
@@ -68,19 +69,6 @@ function StatusIcon({ ok }: { ok: boolean }) {
     : <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-yellow-400" />;
 }
 
-function isSetupPayPalWebhookUrl(value: string) {
-  try {
-    const parsed = new URL(value.trim());
-    return parsed.protocol === 'https:'
-      && !['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)
-      && parsed.pathname.replace(/\/$/, '') === '/api/paypal/webhook'
-      && !parsed.search
-      && !parsed.hash;
-  } catch {
-    return false;
-  }
-}
-
 const STEPS: StepConfig[] = [
   { number: 1, title: 'Discord Bot', description: 'Create and verify your Discord bot', icon: Bot },
   { number: 2, title: 'Database', description: 'Connect your Supabase project', icon: Database },
@@ -104,6 +92,7 @@ export default function SetupWizardPage() {
   const [discordClientId, setDiscordClientId] = useState('');
   const [discordClientSecret, setDiscordClientSecret] = useState('');
   const [discordVerified, setDiscordVerified] = useState(false);
+  const [discordCredentialsSaved, setDiscordCredentialsSaved] = useState(false);
   const [discordBotName, setDiscordBotName] = useState('');
   const [discordBotAvatar, setDiscordBotAvatar] = useState<string | null>(null);
   const [discordVerifying, setDiscordVerifying] = useState(false);
@@ -138,9 +127,16 @@ export default function SetupWizardPage() {
   const publicCallbackReadyForSetup = !status?.publicCallbackRequired || status.publicCallbackReady === true;
   const readinessGuildDetected = guildDetected || Boolean(status?.guildDetected);
   const readinessGuildName = guildName || status?.guildName;
+  const locallyVerifiedDiscordCredentialsReady = Boolean(
+    discordVerified
+    && discordToken.trim()
+    && discordClientId.trim()
+    && discordClientSecret.trim()
+  );
   const discordAuthConfigurableForSetup = Boolean(
     status?.discordAuthProviderReady
-    || status?.discordCredentialsPresent,
+    || status?.discordCredentialsPresent
+    || locallyVerifiedDiscordCredentialsReady,
   );
   const paypalWebhookUrlReadyForSetup = Boolean(
     (status?.paypalWebhookUrlReady && publicCallbackReadyForSetup)
@@ -199,6 +195,7 @@ export default function SetupWizardPage() {
 
         // Auto-advance if things are already configured
         const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent);
+        setDiscordCredentialsSaved(Boolean(data.discordCredentialsPresent));
         if (data.supabaseConnected && data.databaseInitialized) {
           setSupabaseVerified(true);
           setSupabaseInitialized(true);
@@ -264,6 +261,7 @@ export default function SetupWizardPage() {
       const data = await res.json();
       if (data.valid) {
         setDiscordVerified(true);
+        setDiscordCredentialsSaved(Boolean(data.credentialsSaved));
         setDiscordBotName(data.botUsername);
         setDiscordBotAvatar(data.botAvatar);
         await fetchStatus();
@@ -342,6 +340,11 @@ export default function SetupWizardPage() {
       if (paypalClientSecret.trim()) credentials.paypal_client_secret = paypalClientSecret.trim();
       if (paypalWebhookId.trim()) credentials.paypal_webhook_id = paypalWebhookId.trim();
       if (paypalWebhookUrl.trim()) credentials.paypal_webhook_url = paypalWebhookUrl.trim();
+      if (discordVerified) {
+        if (discordToken.trim()) credentials.discord_bot_token = discordToken.trim();
+        if (discordClientId.trim()) credentials.discord_application_id = discordClientId.trim();
+        if (discordClientSecret.trim()) credentials.discord_client_secret = discordClientSecret.trim();
+      }
 
       const res = await postSetup({ action: 'finalize', credentials });
       const data = await res.json().catch(() => ({}));
@@ -678,7 +681,11 @@ export default function SetupWizardPage() {
                       <CheckCircle2 className="inline h-4 w-4 mr-1" />
                       Connected as {discordBotName}
                     </p>
-                    <p className="text-xs text-green-400/70">Credentials verified &amp; saved</p>
+                    <p className="text-xs text-green-400/70">
+                      {discordCredentialsSaved
+                        ? 'Credentials verified & saved'
+                        : 'Credentials verified; they will be saved when setup finalizes'}
+                    </p>
                   </div>
                 </div>
               )}
