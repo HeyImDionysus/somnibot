@@ -217,6 +217,24 @@ function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | n
   }
 }
 
+function normalizeConfiguredDiscordGuildId(value: string | null | undefined): string | null {
+  return value
+    ?.split(',')
+    .map(part => part.trim())
+    .find(Boolean) ?? null;
+}
+
+function getConfiguredDiscordGuildId(
+  savedSettings: SetupSettingMap = new Map(),
+  credentials: Record<string, string | undefined> = {},
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return normalizeConfiguredDiscordGuildId(credentials.discord_guild_id)
+    || normalizeConfiguredDiscordGuildId(env['DISCORD_GUILD_ID'])
+    || normalizeConfiguredDiscordGuildId(env['NEXT_PUBLIC_DISCORD_GUILD_ID'])
+    || normalizeConfiguredDiscordGuildId(savedSettings.get('discord_guild_id'));
+}
+
 function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): RuntimeCallbackConfig {
   const operatorDashboardUrl = normalizeRuntimeBaseUrl(env['DASHBOARD_URL']);
   const publicCallbackBaseUrl = normalizeRuntimeBaseUrl(
@@ -360,10 +378,19 @@ function getRequiredPayPalReadinessError(
   return null;
 }
 
-async function getOwnerRuntimeReadiness(supabase: SupabaseClient): Promise<OwnerRuntimeReadiness> {
-  const { data: guild } = await supabase
+async function getOwnerRuntimeReadiness(
+  supabase: SupabaseClient,
+  configuredGuildId: string | null = null,
+): Promise<OwnerRuntimeReadiness> {
+  let guildQuery = supabase
     .from('guild')
-    .select('id, name')
+    .select('id, name');
+
+  if (configuredGuildId) {
+    guildQuery = guildQuery.eq('id', configuredGuildId);
+  }
+
+  const { data: guild } = await guildQuery
     .limit(1)
     .maybeSingle() as { data: { id: string; name: string | null } | null };
 
@@ -471,20 +498,25 @@ export async function GET(req: NextRequest) {
     const { isCompleted } = await getSetupLock(supabase);
     status.setupCompleted = isCompleted;
 
-    const runtimeReadiness = await getOwnerRuntimeReadiness(supabase);
-    status.guildDetected = runtimeReadiness.guildDetected;
-    status.guildId = runtimeReadiness.guildId;
-    status.guildName = runtimeReadiness.guildName;
-    status.botOnline = runtimeReadiness.botOnline;
-
     const savedSettings = await readSetupInstanceSettings(supabase, [
       'discord_application_id',
       'discord_client_secret',
+      'discord_guild_id',
       'paypal_client_id',
       'paypal_client_secret',
       'paypal_webhook_id',
       'paypal_webhook_url',
     ]);
+
+    const runtimeReadiness = await getOwnerRuntimeReadiness(
+      supabase,
+      getConfiguredDiscordGuildId(savedSettings),
+    );
+    status.guildDetected = runtimeReadiness.guildDetected;
+    status.guildId = runtimeReadiness.guildId;
+    status.guildName = runtimeReadiness.guildName;
+    status.botOnline = runtimeReadiness.botOnline;
+
     const savedPayPalStatus = resolveSetupPayPalWebhookStatus(runtimeCallbacks, process.env, savedSettings);
     status.paypalWebhookUrl = savedPayPalStatus.url;
     status.paypalWebhookReady = savedPayPalStatus.ready;
@@ -808,13 +840,14 @@ export async function POST(request: NextRequest) {
       credentials.paypal_webhook_url = normalizeSetupPayPalWebhookUrl(submittedPayPalWebhookUrl) ?? submittedPayPalWebhookUrl;
     }
 
-    const savedPayPalSettings = await readSetupInstanceSettings(supabase, [
+    const savedSetupSettings = await readSetupInstanceSettings(supabase, [
+      'discord_guild_id',
       'paypal_client_id',
       'paypal_client_secret',
       'paypal_webhook_id',
       'paypal_webhook_url',
     ]);
-    const payPalReadinessError = getRequiredPayPalReadinessError(credentials, savedPayPalSettings);
+    const payPalReadinessError = getRequiredPayPalReadinessError(credentials, savedSetupSettings);
     if (payPalReadinessError) {
       return NextResponse.json(
         { ok: false, error: payPalReadinessError, setupLocked: false },
@@ -899,7 +932,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const runtimeReadiness = await getOwnerRuntimeReadiness(supabase);
+    const runtimeReadiness = await getOwnerRuntimeReadiness(
+      supabase,
+      getConfiguredDiscordGuildId(savedSetupSettings, credentials),
+    );
     if (!runtimeReadiness.guildDetected) {
       return NextResponse.json(
         {

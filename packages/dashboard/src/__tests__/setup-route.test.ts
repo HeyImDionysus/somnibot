@@ -38,6 +38,8 @@ describe('setup PayPal webhook URL validation', () => {
     ['query string', 'https://dashboard.example.com/api/paypal/webhook?debug=1', 'PayPal webhook URL must not include query parameters or fragments.'],
     ['fragment', 'https://dashboard.example.com/api/paypal/webhook#secret', 'PayPal webhook URL must not include query parameters or fragments.'],
     ['suffix path', 'https://dashboard.example.com/api/paypal/webhook/extra', 'PayPal webhook URL must point at /api/paypal/webhook.'],
+    ['0.0.0.0 host', 'https://0.0.0.0/api/paypal/webhook', 'PayPal webhook URL cannot point at localhost before it can be marked ready.'],
+    ['IPv6 loopback host', 'https://[::1]/api/paypal/webhook', 'PayPal webhook URL cannot point at localhost before it can be marked ready.'],
   ])('rejects a %s URL', (_label, url, error) => {
     expect(isSetupPayPalWebhookUrl(url)).toBe(false);
     expect(getSetupPayPalWebhookUrlError(url)).toBe(error);
@@ -89,6 +91,8 @@ describe('POST /api/setup finalize', () => {
     delete process.env.PAYPAL_CLIENT_ID;
     delete process.env.PAYPAL_CLIENT_SECRET;
     delete process.env.PAYPAL_WEBHOOK_ID;
+    delete process.env.DISCORD_GUILD_ID;
+    delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     mock = createMockSupabase();
@@ -166,6 +170,58 @@ describe('POST /api/setup finalize', () => {
     );
     expect(mock._tables.bot_diagnostics.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
     expect(mock._tables.bot_diagnostics.eq).toHaveBeenCalledWith('type', 'health');
+  });
+
+  it('checks bot health against the saved Discord guild before locking setup', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'discord_guild_id', value: 'configured-guild,secondary-guild' },
+        { key: 'paypal_client_id', value: 'saved-paypal-client-id' },
+        { key: 'paypal_client_secret', value: 'saved-paypal-client-secret' },
+        { key: 'paypal_webhook_id', value: 'WH-SAVED' },
+        { key: 'paypal_webhook_url', value: 'https://dashboard.example.com/api/paypal/webhook' },
+      ],
+      error: null,
+    });
+
+    const guildTable = registerTable(mock, 'guild');
+    guildTable.limit.mockReturnThis();
+    guildTable.maybeSingle.mockResolvedValue({
+      data: { id: 'configured-guild', name: 'Configured Guild' },
+      error: null,
+    });
+
+    const diagnosticsTable = registerTable(mock, 'bot_diagnostics');
+    diagnosticsTable.limit.mockReturnThis();
+    diagnosticsTable.order.mockReturnThis();
+    diagnosticsTable.maybeSingle.mockResolvedValue({
+      data: { snapshot_at: new Date().toISOString() },
+      error: null,
+    });
+
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(guildTable.eq).toHaveBeenCalledWith('id', 'configured-guild');
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('guild_id', 'configured-guild');
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('type', 'health');
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
   });
 
   it('does not lock setup when Discord provider is enabled without the dashboard callback allow-list', async () => {
@@ -782,6 +838,8 @@ describe('GET /api/setup status', () => {
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     delete process.env.DISCORD_APPLICATION_ID;
     delete process.env.DISCORD_CLIENT_SECRET;
+    delete process.env.DISCORD_GUILD_ID;
+    delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
 
     mock = createMockSupabase();
     (createClient as ReturnType<typeof vi.fn>).mockReturnValue(mock);
