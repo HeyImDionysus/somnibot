@@ -40,4 +40,17 @@ describe('setup wizard page wiring', () => {
     expect(source).toContain('setCurrentStep(3)');
     expect(source).not.toContain('onClick={() => setCurrentStep(5)}');
   });
+
+  it('keeps final setup disabled until owner-ready proof is present', () => {
+    expect(source).toContain('const finalizeBlockedReason = getFinalizeBlockedReason();');
+    expect(source).toContain('const canFinalizeSetup = !finalizeBlockedReason && !finalizing;');
+    expect(source).toContain('disabled={!canFinalizeSetup}');
+    expect(source).toContain('if (!status?.botOnline)');
+    expect(source).toContain('if (!discordAuthConfigurableForSetup)');
+    expect(source).toContain('if (!paypalCredentialsReadyForSetup)');
+    expect(source).toContain('if (!paypalWebhookIdReadyForSetup)');
+    expect(source).toContain('await fetchStatus();');
+    expect(source).toContain("parsed.pathname.replace(/\\/$/, '') === '/api/paypal/webhook'");
+    expect(source).toContain('data.guildDetected && data.guildId && data.botOnline');
+  });
 });
