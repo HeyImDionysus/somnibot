@@ -40,4 +40,32 @@ describe('setup wizard page wiring', () => {
     expect(source).toContain('setCurrentStep(3)');
     expect(source).not.toContain('onClick={() => setCurrentStep(5)}');
   });
+
+  it('keeps final setup disabled until owner-ready proof is present', () => {
+    expect(source).toContain('const finalizeBlockedReason = getFinalizeBlockedReason();');
+    expect(source).toContain('const canSavePendingCredentials = Boolean(');
+    expect(source).toContain('const canFinalizeSetup = !finalizeBlockedReason && !finalizing;');
+    expect(source).toContain('const canSubmitFinalize = canFinalizeSetup || canSavePendingCredentials;');
+    expect(source).toContain('disabled={!canSubmitFinalize}');
+    expect(source).toContain('if (!status?.botOnline)');
+    expect(source).toContain('const locallyVerifiedDiscordCredentialsReady = Boolean(');
+    expect(source).toContain('const pendingDiscordCredentialsNeedSave = Boolean(');
+    expect(source).toContain('const [discordCredentialsSaved, setDiscordCredentialsSaved] = useState(false);');
+    expect(source).toContain('discordVerified');
+    expect(source).toContain('discordClientSecret.trim()');
+    expect(source).toContain('setDiscordCredentialsSaved(Boolean(data.credentialsSaved));');
+    expect(source).toContain('Bot token, Client ID, and Client Secret are required');
+    expect(source).toContain('disabled={discordVerifying || !discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()}');
+    expect(source).toContain('Credentials verified; they will be saved when setup finalizes');
+    expect(source).toContain('if (!discordAuthConfigurableForSetup)');
+    expect(source).toContain('if (!paypalCredentialsReadyForSetup)');
+    expect(source).toContain('if (!paypalWebhookIdReadyForSetup)');
+    expect(source).toContain('await fetchStatus();');
+    expect(source).toContain("import { isSetupPayPalWebhookUrl } from '@/lib/setup-paypal-webhook';");
+    expect(source).toContain('credentials.discord_bot_token = discordToken.trim();');
+    expect(source).toContain('credentials.discord_application_id = discordClientId.trim();');
+    expect(source).toContain('credentials.discord_client_secret = discordClientSecret.trim();');
+    expect(source).not.toContain("parsed.pathname.replace(/\\/$/, '') === '/api/paypal/webhook'");
+    expect(source).toContain('data.guildDetected && data.guildId && data.botOnline');
+  });
 });

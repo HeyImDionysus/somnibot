@@ -173,6 +173,7 @@ describe('owner setup readiness path', () => {
       SUPABASE_SECRET_KEY: 'sb_secret_test',
       DISCORD_APPLICATION_ID: '123456789012345678',
       DISCORD_CLIENT_SECRET: 'discord-client-secret',
+      DISCORD_GUILD_ID: 'guild-1',
       PAYPAL_CLIENT_ID: paypalConfig.clientId,
       PAYPAL_CLIENT_SECRET: paypalConfig.clientSecret,
       PAYPAL_WEBHOOK_ID: paypalConfig.webhookId,

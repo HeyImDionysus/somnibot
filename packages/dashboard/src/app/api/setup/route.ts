@@ -19,10 +19,15 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/runtime-config';
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
+import {
+  SETUP_PAYPAL_WEBHOOK_PATH,
+  getSetupPayPalWebhookUrlError,
+  isSetupLocalHostname,
+  normalizeSetupPayPalWebhookUrl,
+} from '@/lib/setup-paypal-webhook';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
-const PAYPAL_WEBHOOK_PATH = '/api/paypal/webhook';
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -34,6 +39,15 @@ interface RuntimeCallbackConfig {
 }
 
 type DiscordAuthProviderStatus = Awaited<ReturnType<typeof getDiscordAuthProviderStatus>>;
+
+interface OwnerRuntimeReadiness {
+  botOnline: boolean;
+  guildDetected: boolean;
+  guildId: string | null;
+  guildName: string | null;
+}
+
+type SetupSettingMap = Map<string, string>;
 
 type DiscordAuthProviderStatusReason =
   | 'ready'
@@ -157,10 +171,6 @@ function isTruthyEnv(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'required'].includes(value?.trim().toLowerCase() ?? '');
 }
 
-function isLocalHostname(hostname: string): boolean {
-  return ['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1'].includes(hostname);
-}
-
 function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
@@ -175,39 +185,21 @@ function normalizeRuntimeBaseUrl(value: string | undefined): string | null {
   }
 }
 
-function getSetupPayPalWebhookUrlError(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
+async function readSetupInstanceSettings(
+  supabase: SupabaseClient,
+  keys: string[],
+): Promise<SetupSettingMap> {
+  const result = await supabase
+    .from('instance_settings')
+    .select('key, value')
+    .in('key', keys)
+    .limit(1000) as { data?: Array<{ key: string; value: string | null }> | null };
 
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'https:') {
-      return 'PayPal webhook URL must use HTTPS before it can be marked ready.';
-    }
-    if (isLocalHostname(parsed.hostname)) {
-      return 'PayPal webhook URL cannot point at localhost before it can be marked ready.';
-    }
-    if (parsed.pathname.replace(/\/$/, '') !== PAYPAL_WEBHOOK_PATH) {
-      return `PayPal webhook URL must point at ${PAYPAL_WEBHOOK_PATH}.`;
-    }
-    if (parsed.search || parsed.hash) {
-      return 'PayPal webhook URL must not include query parameters or fragments.';
-    }
-  } catch {
-    return 'PayPal webhook URL must be a valid HTTPS URL.';
-  }
-
-  return null;
-}
-
-function normalizeSetupPayPalWebhookUrl(value: string | null | undefined): string | null {
-  if (getSetupPayPalWebhookUrlError(value)) return null;
-
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-
-  const parsed = new URL(trimmed);
-  return `${parsed.origin}${PAYPAL_WEBHOOK_PATH}`;
+  return new Map(
+    (result.data ?? [])
+      .filter((row): row is { key: string; value: string } => typeof row.value === 'string' && row.value.trim().length > 0)
+      .map(row => [row.key, row.value.trim()]),
+  );
 }
 
 function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -225,6 +217,24 @@ function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | n
   }
 }
 
+function normalizeConfiguredDiscordGuildId(value: string | null | undefined): string | null {
+  return value
+    ?.split(',')
+    .map(part => part.trim())
+    .find(Boolean) ?? null;
+}
+
+function getConfiguredDiscordGuildId(
+  savedSettings: SetupSettingMap = new Map(),
+  credentials: Record<string, string | undefined> = {},
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return normalizeConfiguredDiscordGuildId(credentials.discord_guild_id)
+    || normalizeConfiguredDiscordGuildId(env['DISCORD_GUILD_ID'])
+    || normalizeConfiguredDiscordGuildId(env['NEXT_PUBLIC_DISCORD_GUILD_ID'])
+    || normalizeConfiguredDiscordGuildId(savedSettings.get('discord_guild_id'));
+}
+
 function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): RuntimeCallbackConfig {
   const operatorDashboardUrl = normalizeRuntimeBaseUrl(env['DASHBOARD_URL']);
   const publicCallbackBaseUrl = normalizeRuntimeBaseUrl(
@@ -240,7 +250,7 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
       const parsed = new URL(publicCallbackBaseUrl);
       if (parsed.protocol !== 'https:') {
         publicCallbackError = 'Public callback URL must use HTTPS before setup can finalize.';
-      } else if (isLocalHostname(parsed.hostname)) {
+      } else if (isSetupLocalHostname(parsed.hostname)) {
         publicCallbackError = 'Public callback URL cannot point at localhost before setup can finalize.';
       }
     }
@@ -249,7 +259,7 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
   return {
     operatorDashboardUrl,
     publicCallbackBaseUrl,
-    paypalWebhookUrl: publicCallbackBaseUrl ? `${publicCallbackBaseUrl}/api/paypal/webhook` : null,
+    paypalWebhookUrl: publicCallbackBaseUrl ? `${publicCallbackBaseUrl}${SETUP_PAYPAL_WEBHOOK_PATH}` : null,
     publicCallbackRequired,
     publicCallbackReady: !publicCallbackRequired || publicCallbackError === null,
     publicCallbackError,
@@ -259,17 +269,55 @@ function resolveRuntimeCallbackConfig(env: NodeJS.ProcessEnv = process.env): Run
 function resolveSetupPayPalWebhookStatus(
   runtimeCallbacks: RuntimeCallbackConfig,
   env: NodeJS.ProcessEnv = process.env,
-): { url: string | null; ready: boolean; error: string | null } {
+  savedSettings: SetupSettingMap = new Map(),
+): { url: string | null; urlReady: boolean; ready: boolean; error: string | null } {
   const derivedWebhookUrl = normalizeSetupPayPalWebhookUrl(runtimeCallbacks.paypalWebhookUrl);
+  const paypalClientId = env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id');
+  const paypalClientSecret = env['PAYPAL_CLIENT_SECRET']?.trim() || savedSettings.get('paypal_client_secret');
+  const paypalWebhookId = env['PAYPAL_WEBHOOK_ID']?.trim() || savedSettings.get('paypal_webhook_id');
+  const paypalCredentialsConfigured = Boolean(paypalClientId && paypalClientSecret);
+  const paypalWebhookIdConfigured = Boolean(paypalWebhookId);
+
+  const readinessForUrl = (url: string | null): { url: string | null; urlReady: boolean; ready: boolean; error: string | null } => {
+    if (!url) {
+      return {
+        url: null,
+        urlReady: false,
+        ready: false,
+        error: 'PayPal webhook URL is waiting on a public dashboard URL.',
+      };
+    }
+
+    if (!paypalCredentialsConfigured) {
+      return {
+        url,
+        urlReady: true,
+        ready: false,
+        error: 'PayPal Client ID and Client Secret are required before setup can finalize.',
+      };
+    }
+
+    if (!paypalWebhookIdConfigured) {
+      return {
+        url,
+        urlReady: true,
+        ready: false,
+        error: 'PayPal Webhook ID is required before setup can finalize.',
+      };
+    }
+
+    return { url, urlReady: true, ready: true, error: null };
+  };
 
   if (runtimeCallbacks.publicCallbackBaseUrl) {
     if (derivedWebhookUrl) {
-      return { url: derivedWebhookUrl, ready: true, error: null };
+      return readinessForUrl(derivedWebhookUrl);
     }
 
     if (runtimeCallbacks.publicCallbackRequired) {
       return {
         url: null,
+        urlReady: false,
         ready: false,
         error: runtimeCallbacks.publicCallbackError
           ?? 'PayPal webhook URL is waiting on a public HTTPS callback URL.',
@@ -277,24 +325,108 @@ function resolveSetupPayPalWebhookStatus(
     }
   }
 
-  const explicitWebhookUrl = env['PAYPAL_WEBHOOK_URL'];
+  const explicitWebhookUrl = env['PAYPAL_WEBHOOK_URL'] || savedSettings.get('paypal_webhook_url');
   const explicitWebhookError = getSetupPayPalWebhookUrlError(explicitWebhookUrl);
   if (explicitWebhookUrl?.trim() && explicitWebhookError) {
-    return { url: null, ready: false, error: explicitWebhookError };
+    return { url: null, urlReady: false, ready: false, error: explicitWebhookError };
   }
 
   if (explicitWebhookUrl?.trim()) {
-    return {
-      url: normalizeSetupPayPalWebhookUrl(explicitWebhookUrl),
-      ready: true,
-      error: null,
-    };
+    return readinessForUrl(normalizeSetupPayPalWebhookUrl(explicitWebhookUrl));
   }
 
   return {
     url: null,
+    urlReady: false,
     ready: false,
     error: 'PayPal webhook URL is waiting on a public dashboard URL.',
+  };
+}
+
+function getRequiredPayPalReadinessError(
+  credentials: Record<string, string>,
+  savedSettings: SetupSettingMap = new Map(),
+): string | null {
+  const paypalClientId = credentials.paypal_client_id?.trim()
+    || process.env['PAYPAL_CLIENT_ID']?.trim()
+    || savedSettings.get('paypal_client_id');
+  const paypalClientSecret = credentials.paypal_client_secret?.trim()
+    || process.env['PAYPAL_CLIENT_SECRET']?.trim()
+    || savedSettings.get('paypal_client_secret');
+  const paypalWebhookId = credentials.paypal_webhook_id?.trim()
+    || process.env['PAYPAL_WEBHOOK_ID']?.trim()
+    || savedSettings.get('paypal_webhook_id');
+  const paypalWebhookUrl = credentials.paypal_webhook_url?.trim()
+    || process.env['PAYPAL_WEBHOOK_URL']?.trim()
+    || savedSettings.get('paypal_webhook_url');
+
+  if (!paypalWebhookUrl) {
+    return 'PayPal webhook URL is required before setup can finalize.';
+  }
+
+  const webhookUrlError = getSetupPayPalWebhookUrlError(paypalWebhookUrl);
+  if (webhookUrlError) return webhookUrlError;
+
+  if (!paypalClientId || !paypalClientSecret) {
+    return 'PayPal Client ID and Client Secret are required before setup can finalize.';
+  }
+
+  if (!paypalWebhookId) {
+    return 'PayPal Webhook ID is required before setup can finalize.';
+  }
+
+  return null;
+}
+
+async function getOwnerRuntimeReadiness(
+  supabase: SupabaseClient,
+  configuredGuildId: string | null = null,
+): Promise<OwnerRuntimeReadiness> {
+  if (!configuredGuildId) {
+    return {
+      botOnline: false,
+      guildDetected: false,
+      guildId: null,
+      guildName: null,
+    };
+  }
+
+  const { data: guild } = await supabase
+    .from('guild')
+    .select('id, name')
+    .eq('id', configuredGuildId)
+    .limit(1)
+    .maybeSingle() as { data: { id: string; name: string | null } | null };
+
+  if (!guild?.id) {
+    return {
+      botOnline: false,
+      guildDetected: false,
+      guildId: null,
+      guildName: null,
+    };
+  }
+
+  let botOnline = false;
+  const { data: diag } = await supabase
+    .from('bot_diagnostics')
+    .select('snapshot_at')
+    .eq('guild_id', guild.id)
+    .eq('type', 'health')
+    .order('snapshot_at', { ascending: false })
+    .limit(1)
+    .maybeSingle() as { data: { snapshot_at: string } | null };
+
+  if (diag?.snapshot_at) {
+    const lastSnapshot = new Date(diag.snapshot_at).getTime();
+    botOnline = Number.isFinite(lastSnapshot) && Date.now() - lastSnapshot < 5 * 60 * 1000;
+  }
+
+  return {
+    botOnline,
+    guildDetected: true,
+    guildId: guild.id,
+    guildName: guild.name,
   };
 }
 
@@ -329,7 +461,10 @@ export async function GET(req: NextRequest) {
     publicCallbackBaseUrl: runtimeCallbacks.publicCallbackBaseUrl,
     paypalWebhookUrl: paypalWebhookStatus.url,
     paypalWebhookReady: paypalWebhookStatus.ready,
+    paypalWebhookUrlReady: paypalWebhookStatus.urlReady,
     paypalWebhookError: paypalWebhookStatus.error,
+    paypalCredentialsConfigured: Boolean(process.env['PAYPAL_CLIENT_ID']?.trim() && process.env['PAYPAL_CLIENT_SECRET']?.trim()),
+    paypalWebhookIdConfigured: Boolean(process.env['PAYPAL_WEBHOOK_ID']?.trim()),
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
     publicCallbackReady: runtimeCallbacks.publicCallbackReady,
     publicCallbackError: runtimeCallbacks.publicCallbackError,
@@ -367,52 +502,40 @@ export async function GET(req: NextRequest) {
     const { isCompleted } = await getSetupLock(supabase);
     status.setupCompleted = isCompleted;
 
-    const { data: guild } = await supabase
-      .from('guild')
-      .select('id, name')
-      .limit(1)
-      .maybeSingle();
+    const savedSettings = await readSetupInstanceSettings(supabase, [
+      'discord_application_id',
+      'discord_client_secret',
+      'discord_guild_id',
+      'paypal_client_id',
+      'paypal_client_secret',
+      'paypal_webhook_id',
+      'paypal_webhook_url',
+    ]);
 
-    if (guild) {
-      status.guildDetected = true;
-      status.guildId = guild.id;
-      status.guildName = guild.name;
-    }
+    const runtimeReadiness = await getOwnerRuntimeReadiness(
+      supabase,
+      getConfiguredDiscordGuildId(savedSettings),
+    );
+    status.guildDetected = runtimeReadiness.guildDetected;
+    status.guildId = runtimeReadiness.guildId;
+    status.guildName = runtimeReadiness.guildName;
+    status.botOnline = runtimeReadiness.botOnline;
 
-    // Check if bot has written a recent diagnostics snapshot (indicates it's online)
-    const { data: diag } = await supabase
-      .from('bot_diagnostics')
-      .select('snapshot_at')
-      .order('snapshot_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (diag) {
-      const lastSnapshot = new Date(diag.snapshot_at).getTime();
-      const now = Date.now();
-      // Bot is considered online if last snapshot was within 5 minutes
-      status.botOnline = now - lastSnapshot < 5 * 60 * 1000;
-    }
-
-    // Fallback: check if guild record exists and was recently updated
-    if (!status.botOnline && guild) {
-      status.botOnline = true; // Guild record exists = bot connected at least once
-    }
+    const savedPayPalStatus = resolveSetupPayPalWebhookStatus(runtimeCallbacks, process.env, savedSettings);
+    status.paypalWebhookUrl = savedPayPalStatus.url;
+    status.paypalWebhookReady = savedPayPalStatus.ready;
+    status.paypalWebhookUrlReady = savedPayPalStatus.urlReady;
+    status.paypalWebhookError = savedPayPalStatus.error;
+    status.paypalCredentialsConfigured = Boolean(
+      (process.env['PAYPAL_CLIENT_ID']?.trim() || savedSettings.get('paypal_client_id'))
+      && (process.env['PAYPAL_CLIENT_SECRET']?.trim() || savedSettings.get('paypal_client_secret')),
+    );
+    status.paypalWebhookIdConfigured = Boolean(
+      process.env['PAYPAL_WEBHOOK_ID']?.trim() || savedSettings.get('paypal_webhook_id'),
+    );
 
     // Check if Discord creds exist in instance_settings (for display purposes)
     if (!status.discordCredentialsPresent) {
-      const { data: settings } = await supabase
-        .from('instance_settings')
-        .select('key, value')
-        .in('key', ['discord_application_id', 'discord_client_secret'])
-        .limit(1000);
-
-      const savedSettings = new Map(
-        (settings ?? [])
-          .filter((row): row is { key: string; value: string } => typeof row.value === 'string' && row.value.length > 0)
-          .map((row) => [row.key, row.value]),
-      );
-
       if (savedSettings.has('discord_application_id') && savedSettings.has('discord_client_secret')) {
         status.discordCredentialsPresent = true;
         status.discordClientId ||= savedSettings.get('discord_application_id') ?? null;
@@ -499,8 +622,8 @@ export async function POST(request: NextRequest) {
   // Step 1: Verify Discord credentials
   if (action === 'verify-discord') {
     const { token, clientId, clientSecret } = body;
-    if (!token || !clientId) {
-      return NextResponse.json({ error: 'Missing token or clientId' }, { status: 400 });
+    if (!token || !clientId || !clientSecret?.trim()) {
+      return NextResponse.json({ error: 'Missing token, clientId, or clientSecret' }, { status: 400 });
     }
 
     try {
@@ -516,14 +639,13 @@ export async function POST(request: NextRequest) {
 
       // Save validated Discord credentials to instance_settings
       const supabase = createSetupSupabase();
+      let credentialsSaved = false;
       if (supabase) {
         const creds: Record<string, { value: string; section: string }> = {
           discord_bot_token: { value: token, section: 'discord' },
           discord_application_id: { value: clientId, section: 'discord' },
+          discord_client_secret: { value: clientSecret.trim(), section: 'discord' },
         };
-        if (clientSecret) {
-          creds.discord_client_secret = { value: clientSecret, section: 'discord' };
-        }
 
         for (const [key, { value, section }] of Object.entries(creds)) {
           await supabase
@@ -533,20 +655,19 @@ export async function POST(request: NextRequest) {
               { onConflict: 'key' },
             );
         }
+        credentialsSaved = true;
         console.log('[Setup] ✅ Discord credentials saved to instance_settings');
 
         // Auto-configure Discord OAuth in Supabase if we have the access token
-        if (clientSecret) {
-          const authResult = await ensureDiscordAuthProvider();
-          if (authResult.success) {
-            console.log(
-              authResult.alreadyConfigured
-                ? '[Setup] Discord auth provider already configured'
-                : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
-            );
-          } else {
-            console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
-          }
+        const authResult = await ensureDiscordAuthProvider();
+        if (authResult.success) {
+          console.log(
+            authResult.alreadyConfigured
+              ? '[Setup] Discord auth provider already configured'
+              : '[Setup] ✅ Discord auth provider auto-configured in Supabase',
+          );
+        } else {
+          console.warn('[Setup] ⚠️  Could not auto-configure Discord auth:', authResult.error);
         }
       }
 
@@ -557,7 +678,7 @@ export async function POST(request: NextRequest) {
         botAvatar: botUser.avatar
           ? `https://cdn.discordapp.com/avatars/${botUser.id}/${botUser.avatar}.png`
           : null,
-        credentialsSaved: true,
+        credentialsSaved,
       });
     } catch (err) {
       // V11 Audit R5-1: Was returning String(err) — leaks internal network/fetch
@@ -719,6 +840,21 @@ export async function POST(request: NextRequest) {
       credentials.paypal_webhook_url = normalizeSetupPayPalWebhookUrl(submittedPayPalWebhookUrl) ?? submittedPayPalWebhookUrl;
     }
 
+    const savedSetupSettings = await readSetupInstanceSettings(supabase, [
+      'discord_guild_id',
+      'paypal_client_id',
+      'paypal_client_secret',
+      'paypal_webhook_id',
+      'paypal_webhook_url',
+    ]);
+    const payPalReadinessError = getRequiredPayPalReadinessError(credentials, savedSetupSettings);
+    if (payPalReadinessError) {
+      return NextResponse.json(
+        { ok: false, error: payPalReadinessError, setupLocked: false },
+        { status: 400 },
+      );
+    }
+
     let submittedSupabaseAccessToken: string | undefined;
     if (Object.keys(credentials).length > 0) {
       const submittedRuntimeConfig: { url?: string; publishableKey?: string; secretKey?: string } = {};
@@ -790,6 +926,32 @@ export async function POST(request: NextRequest) {
             || 'Discord auth provider could not be configured. Set SUPABASE_ACCESS_TOKEN, or configure Discord auth manually and set SUPABASE_DISCORD_AUTH_PROVIDER_CONFIGURED=true before finalizing setup.',
           authConfigured: false,
           authError: authResult.error || null,
+          setupLocked: false,
+        },
+        { status: 400 },
+      );
+    }
+
+    const runtimeReadiness = await getOwnerRuntimeReadiness(
+      supabase,
+      getConfiguredDiscordGuildId(savedSetupSettings, credentials),
+    );
+    if (!runtimeReadiness.guildDetected) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: 'Invite SomniBot to a Discord server before setup can finalize.',
+          setupLocked: false,
+        },
+        { status: 400 },
+      );
+    }
+
+    if (!runtimeReadiness.botOnline) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: 'Start SomniBot and wait for a fresh bot health heartbeat before setup can finalize.',
           setupLocked: false,
         },
         { status: 400 },

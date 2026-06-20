@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { useCsrf } from '@/hooks/use-csrf';
 import { buildSetupRequestHeaders, SETUP_CSRF_UNAVAILABLE_MESSAGE } from '@/lib/setup-wizard-client';
+import { isSetupPayPalWebhookUrl } from '@/lib/setup-paypal-webhook';
 import { PAYPAL_HANDLED_WEBHOOK_EVENTS } from '@/lib/paypal-webhook-events';
 
 // ============================================================
@@ -46,12 +47,19 @@ interface SetupStatus {
   publicCallbackBaseUrl?: string | null;
   paypalWebhookUrl?: string | null;
   paypalWebhookReady?: boolean;
+  paypalWebhookUrlReady?: boolean;
   paypalWebhookError?: string | null;
+  paypalCredentialsConfigured?: boolean;
+  paypalWebhookIdConfigured?: boolean;
   publicCallbackRequired?: boolean;
   publicCallbackReady?: boolean;
   publicCallbackError?: string | null;
   discordClientId: string | null;
   discordCredentialsPresent?: boolean;
+  discordAuthProviderReady?: boolean;
+  discordAuthProviderStatus?: {
+    statusDetail?: string | null;
+  } | null;
   setupCompleted?: boolean;
 }
 
@@ -84,6 +92,7 @@ export default function SetupWizardPage() {
   const [discordClientId, setDiscordClientId] = useState('');
   const [discordClientSecret, setDiscordClientSecret] = useState('');
   const [discordVerified, setDiscordVerified] = useState(false);
+  const [discordCredentialsSaved, setDiscordCredentialsSaved] = useState(false);
   const [discordBotName, setDiscordBotName] = useState('');
   const [discordBotAvatar, setDiscordBotAvatar] = useState<string | null>(null);
   const [discordVerifying, setDiscordVerifying] = useState(false);
@@ -116,10 +125,90 @@ export default function SetupWizardPage() {
   // Clipboard
   const [copied, setCopied] = useState('');
   const publicCallbackReadyForSetup = !status?.publicCallbackRequired || status.publicCallbackReady === true;
-  const paypalWebhookReady = Boolean(status?.paypalWebhookReady && publicCallbackReadyForSetup);
-  const canFinalizeSetup = guildDetected && publicCallbackReadyForSetup && !finalizing;
   const readinessGuildDetected = guildDetected || Boolean(status?.guildDetected);
   const readinessGuildName = guildName || status?.guildName;
+  const locallyVerifiedDiscordCredentialsReady = Boolean(
+    discordVerified
+    && discordToken.trim()
+    && discordClientId.trim()
+    && discordClientSecret.trim()
+  );
+  const discordAuthConfigurableForSetup = Boolean(
+    status?.discordAuthProviderReady
+    || status?.discordCredentialsPresent
+    || locallyVerifiedDiscordCredentialsReady,
+  );
+  const paypalWebhookUrlReadyForSetup = Boolean(
+    (status?.paypalWebhookUrlReady && publicCallbackReadyForSetup)
+    || isSetupPayPalWebhookUrl(paypalWebhookUrl),
+  );
+  const paypalCredentialsReadyForSetup = Boolean(
+    status?.paypalCredentialsConfigured
+    || (paypalClientId.trim() && paypalClientSecret.trim()),
+  );
+  const paypalWebhookIdReadyForSetup = Boolean(
+    status?.paypalWebhookIdConfigured
+    || paypalWebhookId.trim(),
+  );
+  const paypalWebhookReady = Boolean(
+    paypalWebhookUrlReadyForSetup
+    && paypalCredentialsReadyForSetup
+    && paypalWebhookIdReadyForSetup,
+  );
+  const pendingDiscordCredentialsNeedSave = Boolean(
+    locallyVerifiedDiscordCredentialsReady
+    && !discordCredentialsSaved
+    && !status?.discordCredentialsPresent,
+  );
+  const localPayPalCredentialsProvided = Boolean(
+    paypalClientId.trim()
+    || paypalClientSecret.trim()
+    || paypalWebhookId.trim()
+    || paypalWebhookUrl.trim(),
+  );
+  const pendingPayPalCredentialsNeedSave = Boolean(
+    localPayPalCredentialsProvided
+    && (
+      !status?.paypalCredentialsConfigured
+      || !status?.paypalWebhookIdConfigured
+      || !status?.paypalWebhookUrlReady
+    ),
+  );
+  const getFinalizeBlockedReason = () => {
+    if (!readinessGuildDetected) {
+      return 'Invite SomniBot to a Discord server before setup can finish.';
+    }
+    if (!publicCallbackReadyForSetup) {
+      return status?.publicCallbackError || 'Finish public callback setup before setup can finish.';
+    }
+    if (!status?.botOnline) {
+      return 'Start SomniBot and wait for bot health before setup can finish.';
+    }
+    if (!discordAuthConfigurableForSetup) {
+      return 'Verify Discord Client ID and Client Secret before setup can finish.';
+    }
+    if (!paypalWebhookUrlReadyForSetup) {
+      return status?.paypalWebhookError || 'Create a public PayPal webhook URL before setup can finish.';
+    }
+    if (!paypalCredentialsReadyForSetup) {
+      return 'Enter PayPal Client ID and Client Secret before setup can finish.';
+    }
+    if (!paypalWebhookIdReadyForSetup) {
+      return 'Enter the PayPal Webhook ID before setup can finish.';
+    }
+    return null;
+  };
+  const finalizeBlockedReason = getFinalizeBlockedReason();
+  const canSavePendingCredentials = Boolean(
+    !finalizing
+    && publicCallbackReadyForSetup
+    && discordAuthConfigurableForSetup
+    && paypalWebhookReady
+    && (pendingDiscordCredentialsNeedSave || pendingPayPalCredentialsNeedSave),
+  );
+  const canFinalizeSetup = !finalizeBlockedReason && !finalizing;
+  const canSubmitFinalize = canFinalizeSetup || canSavePendingCredentials;
+  const finalizeButtonLabel = canFinalizeSetup ? 'Finalize Setup' : 'Save Credentials';
 
   // Load initial status
   const fetchStatus = useCallback(async () => {
@@ -134,6 +223,7 @@ export default function SetupWizardPage() {
 
         // Auto-advance if things are already configured
         const discordReady = Boolean(data.discordClientId || data.discordCredentialsPresent);
+        setDiscordCredentialsSaved(Boolean(data.discordCredentialsPresent));
         if (data.supabaseConnected && data.databaseInitialized) {
           setSupabaseVerified(true);
           setSupabaseInitialized(true);
@@ -183,8 +273,8 @@ export default function SetupWizardPage() {
   // ─── Step 1: Verify Discord Credentials ───
 
   const verifyDiscord = async () => {
-    if (!discordToken || !discordClientId) {
-      setDiscordError('Bot token and Client ID are required');
+    if (!discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()) {
+      setDiscordError('Bot token, Client ID, and Client Secret are required');
       return;
     }
     setDiscordVerifying(true);
@@ -199,8 +289,10 @@ export default function SetupWizardPage() {
       const data = await res.json();
       if (data.valid) {
         setDiscordVerified(true);
+        setDiscordCredentialsSaved(Boolean(data.credentialsSaved));
         setDiscordBotName(data.botUsername);
         setDiscordBotAvatar(data.botAvatar);
+        await fetchStatus();
       } else {
         setDiscordError(data.error || 'Invalid credentials');
       }
@@ -231,6 +323,7 @@ export default function SetupWizardPage() {
       if (data.valid) {
         setSupabaseVerified(true);
         setSupabaseInitialized(data.initialized);
+        await fetchStatus();
       } else {
         setSupabaseError(data.error || 'Connection failed');
       }
@@ -275,11 +368,17 @@ export default function SetupWizardPage() {
       if (paypalClientSecret.trim()) credentials.paypal_client_secret = paypalClientSecret.trim();
       if (paypalWebhookId.trim()) credentials.paypal_webhook_id = paypalWebhookId.trim();
       if (paypalWebhookUrl.trim()) credentials.paypal_webhook_url = paypalWebhookUrl.trim();
+      if (discordVerified) {
+        if (discordToken.trim()) credentials.discord_bot_token = discordToken.trim();
+        if (discordClientId.trim()) credentials.discord_application_id = discordClientId.trim();
+        if (discordClientSecret.trim()) credentials.discord_client_secret = discordClientSecret.trim();
+      }
 
       const res = await postSetup({ action: 'finalize', credentials });
       const data = await res.json().catch(() => ({}));
 
       if (!res.ok || !data.ok) {
+        await fetchStatus();
         setFinalizeError(data.error || 'Setup could not be finalized. Check the server logs and try again.');
         return;
       }
@@ -304,6 +403,8 @@ export default function SetupWizardPage() {
           if (data.guildDetected && data.guildId) {
             setGuildDetected(true);
             setGuildName(data.guildName || '');
+          }
+          if (data.guildDetected && data.guildId && data.botOnline) {
             setPollingForGuild(false);
             clearInterval(interval);
           }
@@ -460,6 +561,19 @@ export default function SetupWizardPage() {
                   </div>
                 </div>
                 <div className="flex gap-3">
+                  <StatusIcon ok={Boolean(status.discordAuthProviderReady)} />
+                  <div>
+                    <p className="text-sm font-medium text-discord-text-primary">
+                      {status.discordAuthProviderReady ? 'Auth callbacks ready' : 'Auth callbacks waiting'}
+                    </p>
+                    <p className="mt-1 text-sm text-discord-text-secondary">
+                      {status.discordAuthProviderReady
+                        ? 'Supabase Discord login callbacks are configured.'
+                        : 'Finish Supabase Discord auth setup before final setup.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-3">
                   <StatusIcon ok={readinessGuildDetected} />
                   <div>
                     <p className="text-sm font-medium text-discord-text-primary">
@@ -596,7 +710,11 @@ export default function SetupWizardPage() {
                       <CheckCircle2 className="inline h-4 w-4 mr-1" />
                       Connected as {discordBotName}
                     </p>
-                    <p className="text-xs text-green-400/70">Credentials verified &amp; saved</p>
+                    <p className="text-xs text-green-400/70">
+                      {discordCredentialsSaved
+                        ? 'Credentials verified & saved'
+                        : 'Credentials verified; they will be saved when setup finalizes'}
+                    </p>
                   </div>
                 </div>
               )}
@@ -606,7 +724,7 @@ export default function SetupWizardPage() {
                 {!discordVerified ? (
                   <button
                     onClick={verifyDiscord}
-                    disabled={discordVerifying || !discordToken || !discordClientId}
+                    disabled={discordVerifying || !discordToken.trim() || !discordClientId.trim() || !discordClientSecret.trim()}
                     className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {discordVerifying ? (
@@ -994,6 +1112,13 @@ export default function SetupWizardPage() {
                 </div>
               )}
 
+              {finalizeBlockedReason && !finalizeError && (
+                <div className="flex items-center gap-2 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                  {finalizeBlockedReason}
+                </div>
+              )}
+
               {/* Actions */}
               <div className="flex justify-between">
                 <button
@@ -1004,7 +1129,7 @@ export default function SetupWizardPage() {
                 </button>
                 <button
                   onClick={finalizeSetup}
-                  disabled={!canFinalizeSetup}
+                  disabled={!canSubmitFinalize}
                   className="inline-flex items-center gap-2 rounded-md bg-discord-accent px-4 py-2 text-sm font-medium text-white hover:bg-discord-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {finalizing ? (
@@ -1012,7 +1137,7 @@ export default function SetupWizardPage() {
                   ) : (
                     <ChevronRight className="h-4 w-4" />
                   )}
-                  Finalize Setup
+                  {finalizeButtonLabel}
                 </button>
               </div>
             </div>

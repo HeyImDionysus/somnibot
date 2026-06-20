@@ -15,6 +15,10 @@ import { createClient } from '@supabase/supabase-js';
 import { GET, POST } from '@/app/api/setup/route';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import {
+  getSetupPayPalWebhookUrlError,
+  isSetupPayPalWebhookUrl,
+} from '@/lib/setup-paypal-webhook';
 
 import {
   buildRequest,
@@ -22,6 +26,58 @@ import {
   mockRateLimitPass,
   registerTable,
 } from './helpers';
+
+describe('setup PayPal webhook URL validation', () => {
+  it('accepts only the exact webhook route without query parameters or fragments', () => {
+    expect(isSetupPayPalWebhookUrl('https://dashboard.example.com/api/paypal/webhook')).toBe(true);
+    expect(getSetupPayPalWebhookUrlError('https://dashboard.example.com/api/paypal/webhook')).toBeNull();
+  });
+
+  it.each([
+    ['trailing slash', 'https://dashboard.example.com/api/paypal/webhook/', 'PayPal webhook URL must point at /api/paypal/webhook.'],
+    ['query string', 'https://dashboard.example.com/api/paypal/webhook?debug=1', 'PayPal webhook URL must not include query parameters or fragments.'],
+    ['fragment', 'https://dashboard.example.com/api/paypal/webhook#secret', 'PayPal webhook URL must not include query parameters or fragments.'],
+    ['suffix path', 'https://dashboard.example.com/api/paypal/webhook/extra', 'PayPal webhook URL must point at /api/paypal/webhook.'],
+    ['0.0.0.0 host', 'https://0.0.0.0/api/paypal/webhook', 'PayPal webhook URL cannot point at localhost before it can be marked ready.'],
+    ['IPv6 loopback host', 'https://[::1]/api/paypal/webhook', 'PayPal webhook URL cannot point at localhost before it can be marked ready.'],
+  ])('rejects a %s URL', (_label, url, error) => {
+    expect(isSetupPayPalWebhookUrl(url)).toBe(false);
+    expect(getSetupPayPalWebhookUrlError(url)).toBe(error);
+  });
+});
+
+function configureReadyPayPalEnv() {
+  process.env.PAYPAL_CLIENT_ID = 'paypal-client-id';
+  process.env['PAYPAL_CLIENT_SECRET'] = 'paypal-client-secret';
+  process.env.PAYPAL_WEBHOOK_ID = 'WH-123';
+  process.env.PAYPAL_WEBHOOK_URL = 'https://dashboard.example.com/api/paypal/webhook';
+  process.env.PAYPAL_SANDBOX = 'true';
+}
+
+function configureFinalizeOwnerProof(mock: ReturnType<typeof createMockSupabase>, options: {
+  guildDetected?: boolean;
+  botOnline?: boolean;
+  configuredGuildId?: string | null;
+} = {}) {
+  if (options.configuredGuildId !== null) {
+    process.env.DISCORD_GUILD_ID = options.configuredGuildId ?? 'guild-1';
+  }
+
+  const guildTable = registerTable(mock, 'guild');
+  guildTable.limit.mockReturnThis();
+  guildTable.maybeSingle.mockResolvedValue({
+    data: options.guildDetected === false ? null : { id: 'guild-1', name: 'Somni Guild' },
+    error: null,
+  });
+
+  const diagnosticsTable = registerTable(mock, 'bot_diagnostics');
+  diagnosticsTable.limit.mockReturnThis();
+  diagnosticsTable.order.mockReturnThis();
+  diagnosticsTable.maybeSingle.mockResolvedValue({
+    data: options.botOnline === false ? null : { snapshot_at: new Date().toISOString() },
+    error: null,
+  });
+}
 
 describe('POST /api/setup finalize', () => {
   const originalEnv = { ...process.env };
@@ -37,6 +93,11 @@ describe('POST /api/setup finalize', () => {
     delete process.env.DASHBOARD_URL;
     delete process.env.NEXT_PUBLIC_APP_URL;
     delete process.env.PAYPAL_WEBHOOK_URL;
+    delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_CLIENT_SECRET;
+    delete process.env.PAYPAL_WEBHOOK_ID;
+    delete process.env.DISCORD_GUILD_ID;
+    delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     mock = createMockSupabase();
@@ -61,6 +122,7 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('does not lock setup when Discord auth auto-config fails', async () => {
+    configureReadyPayPalEnv();
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: 'SUPABASE_ACCESS_TOKEN not set',
@@ -84,6 +146,8 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('locks setup only after Discord auth is configured', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: true,
@@ -109,9 +173,64 @@ describe('POST /api/setup finalize', () => {
       }),
       { onConflict: 'key' },
     );
+    expect(mock._tables.bot_diagnostics.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
+    expect(mock._tables.bot_diagnostics.eq).toHaveBeenCalledWith('type', 'health');
+  });
+
+  it('checks bot health against the saved Discord guild before locking setup', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'discord_guild_id', value: 'configured-guild,secondary-guild' },
+        { key: 'paypal_client_id', value: 'saved-paypal-client-id' },
+        { key: 'paypal_client_secret', value: 'saved-paypal-client-secret' },
+        { key: 'paypal_webhook_id', value: 'WH-SAVED' },
+        { key: 'paypal_webhook_url', value: 'https://dashboard.example.com/api/paypal/webhook' },
+      ],
+      error: null,
+    });
+
+    const guildTable = registerTable(mock, 'guild');
+    guildTable.limit.mockReturnThis();
+    guildTable.maybeSingle.mockResolvedValue({
+      data: { id: 'configured-guild', name: 'Configured Guild' },
+      error: null,
+    });
+
+    const diagnosticsTable = registerTable(mock, 'bot_diagnostics');
+    diagnosticsTable.limit.mockReturnThis();
+    diagnosticsTable.order.mockReturnThis();
+    diagnosticsTable.maybeSingle.mockResolvedValue({
+      data: { snapshot_at: new Date().toISOString() },
+      error: null,
+    });
+
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(guildTable.eq).toHaveBeenCalledWith('id', 'configured-guild');
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('guild_id', 'configured-guild');
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('type', 'health');
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
   });
 
   it('does not lock setup when Discord provider is enabled without the dashboard callback allow-list', async () => {
+    configureReadyPayPalEnv();
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: false,
       error: 'Discord auth provider is enabled, but the dashboard callback URL is missing from Supabase URI_ALLOW_LIST.',
@@ -135,6 +254,8 @@ describe('POST /api/setup finalize', () => {
   });
 
   it('passes a submitted Supabase access token into auth auto-config before locking setup', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -178,6 +299,7 @@ describe('POST /api/setup finalize', () => {
     process.env.PAYPAL_WEBHOOK_ID = 'OLD-WH';
     process.env.PAYPAL_WEBHOOK_URL = 'https://old.example.com/api/paypal/webhook';
     process.env.PAYPAL_SANDBOX = 'true';
+    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -227,6 +349,10 @@ describe('POST /api/setup finalize', () => {
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
     vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://old.example.com/api/paypal/webhook');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
+    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -274,6 +400,10 @@ describe('POST /api/setup finalize', () => {
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.example.com/');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.example.com/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
+    configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
       alreadyConfigured: false,
@@ -311,6 +441,152 @@ describe('POST /api/setup finalize', () => {
     );
   });
 
+  it('does not lock setup when the PayPal webhook ID is missing', async () => {
+    process.env.PAYPAL_CLIENT_ID = 'paypal-client-id';
+    process.env['PAYPAL_CLIENT_SECRET'] = 'paypal-client-secret';
+    process.env.PAYPAL_WEBHOOK_URL = 'https://dashboard.example.com/api/paypal/webhook';
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'PayPal Webhook ID is required before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
+  it('locks setup with previously saved PayPal values after a blocked retry or restart', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'paypal_client_id', value: 'saved-paypal-client-id' },
+        { key: 'paypal_client_secret', value: 'saved-paypal-client-secret' },
+        { key: 'paypal_webhook_id', value: 'WH-SAVED' },
+        { key: 'paypal_webhook_url', value: 'https://dashboard.example.com/api/paypal/webhook' },
+      ],
+      error: null,
+    });
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('does not lock setup when no Discord guild is detected', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { guildDetected: false });
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Invite SomniBot to a Discord server before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+    expect(mock._tables.bot_diagnostics.maybeSingle).not.toHaveBeenCalled();
+  });
+
+  it('does not use an arbitrary guild row when no Discord guild is configured', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { configuredGuildId: null });
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Invite SomniBot to a Discord server before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(mock._tables.guild.select).not.toHaveBeenCalled();
+    expect(mock._tables.bot_diagnostics.maybeSingle).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('does not lock setup when the bot health heartbeat is missing', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { botOnline: false });
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Start SomniBot and wait for a fresh bot health heartbeat before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
   it('does not lock setup with an invalid submitted PayPal webhook URL', async () => {
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
@@ -332,6 +608,37 @@ describe('POST /api/setup finalize', () => {
     expect(body).toEqual({
       ok: false,
       error: 'PayPal webhook URL must use HTTPS before it can be marked ready.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+    expect(process.env.PAYPAL_WEBHOOK_URL).toBeUndefined();
+  });
+
+  it.each([
+    ['trailing slash', 'https://dashboard.example.com/api/paypal/webhook/', 'PayPal webhook URL must point at /api/paypal/webhook.'],
+    ['query string', 'https://dashboard.example.com/api/paypal/webhook?debug=1', 'PayPal webhook URL must not include query parameters or fragments.'],
+    ['fragment', 'https://dashboard.example.com/api/paypal/webhook#secret', 'PayPal webhook URL must not include query parameters or fragments.'],
+    ['suffix path', 'https://dashboard.example.com/api/paypal/webhook/extra', 'PayPal webhook URL must point at /api/paypal/webhook.'],
+  ])('does not lock setup with a non-exact submitted PayPal webhook URL: %s', async (_label, url, error) => {
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: {
+          paypal_client_id: 'paypal-client-id',
+          paypal_client_secret: 'paypal-client-secret',
+          paypal_webhook_id: 'WH-123',
+          paypal_webhook_url: url,
+        },
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error,
       setupLocked: false,
     });
     expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
@@ -424,6 +731,143 @@ describe('POST /api/setup finalize', () => {
   });
 });
 
+describe('POST /api/setup verify-discord before Supabase is configured', () => {
+  const originalEnv = { ...process.env };
+  let mock: ReturnType<typeof createMockSupabase>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = { ...originalEnv };
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SECRET_KEY;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
+    delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
+    delete process.env.PAYPAL_WEBHOOK_URL;
+    delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_CLIENT_SECRET;
+    delete process.env.PAYPAL_WEBHOOK_ID;
+
+    mock = createMockSupabase();
+    (createClient as ReturnType<typeof vi.fn>).mockReturnValue(mock);
+    mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ username: 'SomniBot', id: 'bot-1', avatar: null }),
+    }));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
+  });
+
+  it('does not claim local Discord credentials were saved, then accepts them during finalize', async () => {
+    const verifyResponse = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'verify-discord',
+        token: 'discord-bot-token',
+        clientId: '123456789012345678',
+        clientSecret: 'discord-client-secret',
+      },
+    }));
+    const verifyBody = await verifyResponse.json();
+
+    expect(verifyResponse.status).toBe(200);
+    expect(verifyBody).toEqual({
+      valid: true,
+      botUsername: 'SomniBot',
+      botId: 'bot-1',
+      botAvatar: null,
+      credentialsSaved: false,
+    });
+    expect(createClient).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalled();
+
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_SECRET_KEY = 'sb_secret_test';
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: false,
+    });
+
+    const finalizeResponse = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: {
+          discord_bot_token: 'discord-bot-token',
+          discord_application_id: '123456789012345678',
+          discord_client_secret: 'discord-client-secret',
+          paypal_client_id: 'paypal-client-id',
+          paypal_client_secret: 'paypal-client-secret',
+          paypal_webhook_id: 'WH-123',
+          paypal_webhook_url: 'https://dashboard.example.com/api/paypal/webhook',
+        },
+      },
+    }));
+
+    expect(finalizeResponse.status).toBe(200);
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'discord_bot_token',
+        value: 'discord-bot-token',
+        section: 'discord',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'discord_application_id',
+        value: '123456789012345678',
+        section: 'discord',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'discord_client_secret',
+        value: 'discord-client-secret',
+        section: 'discord',
+      }),
+      { onConflict: 'key' },
+    );
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'setup_completed_at',
+        section: 'system',
+      }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('rejects Discord verification without a client secret before calling Discord', async () => {
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'verify-discord',
+        token: 'discord-bot-token',
+        clientId: '123456789012345678',
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({ error: 'Missing token, clientId, or clientSecret' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(createClient).not.toHaveBeenCalled();
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+});
+
 describe('GET /api/setup status', () => {
   const originalEnv = { ...process.env };
   let mock: ReturnType<typeof createMockSupabase>;
@@ -438,10 +882,15 @@ describe('GET /api/setup status', () => {
     delete process.env.DASHBOARD_URL;
     delete process.env.NEXT_PUBLIC_APP_URL;
     delete process.env.PAYPAL_WEBHOOK_URL;
+    delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_CLIENT_SECRET;
+    delete process.env.PAYPAL_WEBHOOK_ID;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     delete process.env.DISCORD_APPLICATION_ID;
     delete process.env.DISCORD_CLIENT_SECRET;
+    delete process.env.DISCORD_GUILD_ID;
+    delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
 
     mock = createMockSupabase();
     (createClient as ReturnType<typeof vi.fn>).mockReturnValue(mock);
@@ -563,6 +1012,9 @@ describe('GET /api/setup status', () => {
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
     vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://old.example.com/api/paypal/webhook');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
 
     const res = await GET(buildRequest('/api/setup'));
     const body = await res.json();
@@ -573,6 +1025,7 @@ describe('GET /api/setup status', () => {
     expect(body.publicCallbackBaseUrl).toBe('https://somnibot.tailnet.ts.net');
     expect(body.supabaseProjectRef).toBe('abcdefghijklmnopqrst');
     expect(body.paypalWebhookUrl).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
     expect(body.paypalWebhookReady).toBe(true);
     expect(body.paypalWebhookError).toBeNull();
     expect(body.publicCallbackRequired).toBe(true);
@@ -584,6 +1037,9 @@ describe('GET /api/setup status', () => {
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.tailnet.ts.net/');
     vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://old.example.com/api/paypal/webhook');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
 
     const res = await GET(buildRequest('/api/setup'));
     const body = await res.json();
@@ -591,6 +1047,7 @@ describe('GET /api/setup status', () => {
     expect(res.status).toBe(200);
     expect(body.publicCallbackBaseUrl).toBe('https://somnibot.tailnet.ts.net');
     expect(body.paypalWebhookUrl).toBe('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
     expect(body.paypalWebhookReady).toBe(true);
     expect(body.paypalWebhookError).toBeNull();
   });
@@ -603,6 +1060,7 @@ describe('GET /api/setup status', () => {
 
     expect(res.status).toBe(200);
     expect(body.paypalWebhookUrl).toBeNull();
+    expect(body.paypalWebhookUrlReady).toBe(false);
     expect(body.paypalWebhookReady).toBe(false);
     expect(body.paypalWebhookError).toBe('PayPal webhook URL must use HTTPS before it can be marked ready.');
   });
@@ -610,6 +1068,9 @@ describe('GET /api/setup status', () => {
   it('uses a valid explicit PayPal webhook URL when the optional app URL is local', async () => {
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'http://localhost:3000');
     vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://webhooks.example.com/api/paypal/webhook');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
 
     const res = await GET(buildRequest('/api/setup'));
     const body = await res.json();
@@ -618,8 +1079,67 @@ describe('GET /api/setup status', () => {
     expect(body.publicCallbackRequired).toBe(false);
     expect(body.publicCallbackBaseUrl).toBe('http://localhost:3000');
     expect(body.paypalWebhookUrl).toBe('https://webhooks.example.com/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
     expect(body.paypalWebhookReady).toBe(true);
     expect(body.paypalWebhookError).toBeNull();
+  });
+
+  it('reports a valid PayPal webhook URL as incomplete until PayPal credentials and webhook ID are configured', async () => {
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'http://localhost:3000');
+    vi.stubEnv('PAYPAL_WEBHOOK_URL', 'https://webhooks.example.com/api/paypal/webhook');
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.paypalWebhookUrl).toBe('https://webhooks.example.com/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
+    expect(body.paypalWebhookReady).toBe(false);
+    expect(body.paypalWebhookError).toBe('PayPal Client ID and Client Secret are required before setup can finalize.');
+  });
+
+  it('reports saved PayPal values as ready after a setup retry or restart', async () => {
+    vi.stubEnv('DISCORD_GUILD_ID', 'guild-1');
+
+    const guildTable = registerTable(mock, 'guild');
+    guildTable.limit
+      .mockResolvedValueOnce({ error: null })
+      .mockReturnThis();
+    guildTable.maybeSingle.mockResolvedValue({
+      data: { id: 'guild-1', name: 'Somni Guild' },
+      error: null,
+    });
+
+    const diagnosticsTable = registerTable(mock, 'bot_diagnostics');
+    diagnosticsTable.maybeSingle.mockResolvedValue({
+      data: { snapshot_at: new Date().toISOString() },
+      error: null,
+    });
+
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'paypal_client_id', value: 'saved-paypal-client-id' },
+        { key: 'paypal_client_secret', value: 'saved-paypal-client-secret' },
+        { key: 'paypal_webhook_id', value: 'WH-SAVED' },
+        { key: 'paypal_webhook_url', value: 'https://dashboard.example.com/api/paypal/webhook' },
+      ],
+      error: null,
+    });
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.paypalWebhookUrl).toBe('https://dashboard.example.com/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
+    expect(body.paypalCredentialsConfigured).toBe(true);
+    expect(body.paypalWebhookIdConfigured).toBe(true);
+    expect(body.paypalWebhookReady).toBe(true);
+    expect(body.paypalWebhookError).toBeNull();
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
+    expect(diagnosticsTable.eq).toHaveBeenCalledWith('type', 'health');
   });
 
   it('reports VPS callback and webhook URLs for the setup wizard', async () => {
@@ -627,6 +1147,9 @@ describe('GET /api/setup status', () => {
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.example.com/');
     vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://somnibot.example.com/');
     vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_REQUIRED', 'true');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
 
     const res = await GET(buildRequest('/api/setup'));
     const body = await res.json();
@@ -636,6 +1159,7 @@ describe('GET /api/setup status', () => {
     expect(body.operatorDashboardUrl).toBe('https://somnibot.example.com');
     expect(body.publicCallbackBaseUrl).toBe('https://somnibot.example.com');
     expect(body.paypalWebhookUrl).toBe('https://somnibot.example.com/api/paypal/webhook');
+    expect(body.paypalWebhookUrlReady).toBe(true);
     expect(body.paypalWebhookReady).toBe(true);
     expect(body.paypalWebhookError).toBeNull();
     expect(body.publicCallbackRequired).toBe(true);
