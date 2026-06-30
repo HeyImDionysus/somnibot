@@ -12,12 +12,24 @@ const READY_STATUS = {
   publicCallbackBaseUrl: 'https://somnibot.tailnet.test',
   paypalWebhookUrl: 'https://somnibot.tailnet.test/api/paypal/webhook',
   paypalWebhookReady: true,
+  paypalWebhookUrlReady: true,
   paypalWebhookError: null,
+  paypalCredentialsConfigured: true,
+  paypalWebhookIdConfigured: true,
   publicCallbackRequired: true,
   publicCallbackReady: true,
   publicCallbackError: null,
   discordClientId: '123456789012345678',
   discordCredentialsPresent: true,
+  discordAuthProviderReady: true,
+  discordAuthConfigured: true,
+  discordAuthProviderStatus: {
+    ready: true,
+    providerEnabled: true,
+    callbackAllowListReady: true,
+    missingCallbackUrls: [],
+    manualConfigured: false,
+  },
   setupCompleted: false,
 };
 
@@ -32,6 +44,9 @@ async function mockCsrf(page: Page) {
 }
 
 test.describe('Owner setup browser readiness', () => {
+  test.describe.configure({ mode: 'serial' });
+  test.setTimeout(120_000);
+
   test('walks the regular-local ready path and finalizes with PayPal values', async ({ page }) => {
     const finalizeRequests: unknown[] = [];
 
@@ -126,14 +141,15 @@ test.describe('Owner setup browser readiness', () => {
 
     await page.goto('/setup');
 
-    await expect(page.getByText('Public callback blocked')).toBeVisible();
-    await expect(page.getByText('Public callback URL must use HTTPS before setup can finalize.')).toBeVisible();
-    await expect(page.getByText('PayPal webhook waiting on callback')).toBeVisible();
-    await expect(page.getByText('Bot runtime waiting')).toBeVisible();
-    await expect(page.getByText('Somni Test Guild detected')).toBeVisible();
+    const readinessRegion = page.getByRole('region', { name: 'Setup readiness' });
+    await expect(readinessRegion.getByText('Public callback blocked')).toBeVisible();
+    await expect(readinessRegion.getByText('Public callback URL must use HTTPS before setup can finalize.')).toBeVisible();
+    await expect(readinessRegion.getByText('PayPal webhook waiting on callback')).toBeVisible();
+    await expect(readinessRegion.getByText('Bot runtime waiting')).toBeVisible();
+    await expect(readinessRegion.getByText('Somni Test Guild detected')).toBeVisible();
 
     await expect(page.getByRole('heading', { name: 'Invite Bot to Your Server' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Finalize Setup' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Save Credentials' })).toBeDisabled();
     await expect(page.getByRole('heading', { name: 'SomniBot is Ready!' })).not.toBeVisible();
   });
 
