@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   readEnvSupabaseConfig,
+  readRuntimePublicSupabaseConfig,
   requireAdminSupabaseConfig,
   requireBrowserSupabaseConfig,
   SupabaseRuntimeConfigError,
@@ -83,6 +84,21 @@ describe('Supabase runtime config', () => {
       publishableKey: 'sb_publishable_new',
       secretKey: 'new-secret-value',
       sources: { url: 'env', publishableKey: 'env', secretKey: 'env' },
+    });
+  });
+
+  it('reads runtime public Supabase config without using build-inlined direct env references', () => {
+    process.env = {
+      ...originalEnv,
+      NEXT_PUBLIC_SUPABASE_URL: 'https://runtimepublic.supabase.co',
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_runtime',
+    };
+
+    expect(readRuntimePublicSupabaseConfig()).toEqual({
+      url: 'https://runtimepublic.supabase.co',
+      publishableKey: 'sb_publishable_runtime',
+      secretKey: '',
+      sources: { url: 'env', publishableKey: 'env', secretKey: 'missing' },
     });
   });
 

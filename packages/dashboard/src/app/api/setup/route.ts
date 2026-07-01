@@ -17,7 +17,7 @@ import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/s
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { applyRuntimeSupabaseEnv, readBuildBrowserSupabaseConfig, readEnvSupabaseConfig, requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { applyRuntimeSupabaseEnv, readBuildBrowserSupabaseConfig, readEnvSupabaseConfig, readRuntimePublicSupabaseConfig, requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
 import {
   SETUP_PAYPAL_WEBHOOK_PATH,
@@ -205,7 +205,7 @@ async function readSetupInstanceSettings(
 }
 
 function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
-  const rawUrl = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '';
+  const rawUrl = env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '';
   if (!rawUrl.trim()) return null;
 
   try {
@@ -402,8 +402,9 @@ function validateBrowserSupabaseConfigForFinalize(
     return 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.';
   }
 
-  const runtimePublicUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
-  const runtimePublicPublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
+  const runtimePublicConfig = readRuntimePublicSupabaseConfig();
+  const runtimePublicUrl = runtimePublicConfig.url.trim();
+  const runtimePublicPublishableKey = runtimePublicConfig.publishableKey.trim();
   const normalizedBrowserUrl = normalizeRuntimeBaseUrl(browserConfig.url);
 
   if (!normalizedBrowserUrl) {
@@ -423,13 +424,13 @@ function validateBrowserSupabaseConfigForFinalize(
 
   const expectedUrl = credentials.supabase_url?.trim()
     || process.env.SUPABASE_URL?.trim()
-    || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
+    || runtimePublicUrl
     || savedSettings.get('supabase_url')?.trim()
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
     || credentials.supabase_anon_key?.trim()
     || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
-    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
+    || runtimePublicPublishableKey
     || savedSettings.get('supabase_anon_key')?.trim()
     || savedSettings.get('supabase_publishable_key')?.trim()
     || process.env.SUPABASE_ANON_KEY?.trim()

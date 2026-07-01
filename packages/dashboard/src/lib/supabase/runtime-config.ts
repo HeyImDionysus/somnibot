@@ -28,6 +28,25 @@ export const SUPABASE_RUNTIME_SETTING_KEYS = [
   'supabase_secret_key',
 ] as const;
 
+const RUNTIME_PUBLIC_SUPABASE_URL_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'URL'].join('_');
+const RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'PUBLISHABLE', 'KEY'].join('_');
+
+export function readRuntimePublicSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
+  const url = env[RUNTIME_PUBLIC_SUPABASE_URL_ENV] || '';
+  const publishableKey = env[RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV] || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
 export function readEnvSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
   return {
     url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '',
