@@ -70,7 +70,10 @@ COPY --from=builder /app/packages/dashboard/.next/static ./packages/dashboard/.n
 COPY --from=builder /app/packages/dashboard/public ./packages/dashboard/public
 
 # Non-root user
-RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+RUN addgroup --system --gid 1001 nodejs \
+    && adduser --system --uid 1001 --ingroup nodejs nextjs \
+    && mkdir -p /app/packages/dashboard/.next/cache \
+    && chown -R nextjs:nodejs /app/packages/dashboard/.next/cache
 USER nextjs
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
