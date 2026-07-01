@@ -86,17 +86,17 @@ export function applyRuntimeSupabaseEnv(config: {
   secretKey?: string;
 }) {
   if (config.url) {
-    process.env.SUPABASE_URL ||= config.url;
+    process.env.SUPABASE_URL = config.url;
   }
 
   if (config.publishableKey) {
-    process.env.SUPABASE_ANON_KEY ||= config.publishableKey;
-    process.env.SUPABASE_PUBLISHABLE_KEY ||= config.publishableKey;
+    process.env.SUPABASE_ANON_KEY = config.publishableKey;
+    process.env.SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
   }
 
   if (config.secretKey) {
-    process.env.SUPABASE_SECRET_KEY ||= config.secretKey;
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||= config.secretKey;
+    process.env.SUPABASE_SECRET_KEY = config.secretKey;
+    process.env.SUPABASE_SERVICE_ROLE_KEY = config.secretKey;
   }
 }
 

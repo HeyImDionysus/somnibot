@@ -409,14 +409,17 @@ function validateBrowserSupabaseConfigForFinalize(
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
     || credentials.supabase_anon_key?.trim()
-    || savedSettings.get('supabase_anon_key')?.trim()
-    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
     || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
+    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
+    || savedSettings.get('supabase_anon_key')?.trim()
     || savedSettings.get('supabase_publishable_key')?.trim()
     || process.env.SUPABASE_ANON_KEY?.trim()
     || browserConfig.publishableKey;
 
-  if (normalizeRuntimeBaseUrl(expectedUrl) !== normalizeRuntimeBaseUrl(browserConfig.url)) {
+  const normalizedExpectedUrl = normalizeRuntimeBaseUrl(expectedUrl);
+  const normalizedBrowserUrl = normalizeRuntimeBaseUrl(browserConfig.url);
+
+  if (!normalizedExpectedUrl || !normalizedBrowserUrl || normalizedExpectedUrl !== normalizedBrowserUrl) {
     return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
   }
 
