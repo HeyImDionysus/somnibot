@@ -88,7 +88,7 @@ services:
       # Do not pass LAVALINK_PASSWORD on the healthcheck command line. A 401/403
       # from /version still proves the HTTP listener is up without exposing auth
       # material through process arguments.
-      test: ["CMD-SHELL", "wget -q -S --spider http://127.0.0.1:2333/version 2>&1 | grep -Eq 'HTTP/[0-9.]+ (200|401|403)'"]
+      test: ["CMD-SHELL", "wget -S --spider http://127.0.0.1:2333/version 2>&1 | grep -Eq 'HTTP/[0-9.]+ (200|401|403)'"]
       interval: 30s
       timeout: 10s
       retries: 3

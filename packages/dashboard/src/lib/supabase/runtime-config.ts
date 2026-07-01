@@ -61,6 +61,25 @@ export function readBrowserSupabaseConfig(): SupabaseRuntimeConfig {
   };
 }
 
+export function readBuildBrowserSupabaseConfig(): SupabaseRuntimeConfig {
+  // Values emitted by next.config.ts at dashboard build time. Setup finalization
+  // must validate what the browser bundle was built with, not a later runtime
+  // .env edit that would require rebuilding the image.
+  const url = process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL || '';
+  const publishableKey = process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
 export function applyRuntimeSupabaseEnv(config: {
   url?: string;
   publishableKey?: string;

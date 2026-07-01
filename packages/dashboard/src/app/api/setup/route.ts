@@ -17,7 +17,7 @@ import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/s
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { applyRuntimeSupabaseEnv, readBrowserSupabaseConfig, readEnvSupabaseConfig, requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { applyRuntimeSupabaseEnv, readBuildBrowserSupabaseConfig, readEnvSupabaseConfig, requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
 import {
   SETUP_PAYPAL_WEBHOOK_PATH,
@@ -386,9 +386,9 @@ function validateBrowserSupabaseConfigForFinalize(
 ): string | null {
   let browserConfig: ReturnType<typeof requireBrowserSupabaseConfig>;
   try {
-    browserConfig = requireBrowserSupabaseConfig(readBrowserSupabaseConfig());
+    browserConfig = requireBrowserSupabaseConfig(readBuildBrowserSupabaseConfig());
   } catch {
-    return 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build/runtime before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.';
+    return 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.';
   }
 
   const expectedUrl = credentials.supabase_url?.trim()
@@ -396,14 +396,12 @@ function validateBrowserSupabaseConfigForFinalize(
     || savedSettings.get('supabase_url')?.trim()
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
-    || credentials.supabase_anon_key?.trim()
+    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
     || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
-    || process.env.SUPABASE_ANON_KEY?.trim()
     || savedSettings.get('supabase_publishable_key')?.trim()
-    || savedSettings.get('supabase_anon_key')?.trim()
     || browserConfig.publishableKey;
 
-  if (expectedUrl !== browserConfig.url) {
+  if (normalizeRuntimeBaseUrl(expectedUrl) !== normalizeRuntimeBaseUrl(browserConfig.url)) {
     return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
   }
 
