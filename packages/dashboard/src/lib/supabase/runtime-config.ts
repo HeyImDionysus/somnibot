@@ -28,6 +28,9 @@ export const SUPABASE_RUNTIME_SETTING_KEYS = [
   'supabase_secret_key',
 ] as const;
 
+const RUNTIME_PUBLIC_SUPABASE_URL_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'URL'].join('_');
+const RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'PUBLISHABLE', 'KEY'].join('_');
+
 export function readEnvSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
   return {
     url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '',
@@ -87,13 +90,13 @@ export function applyRuntimeSupabaseEnv(config: {
 }) {
   if (config.url) {
     process.env.SUPABASE_URL = config.url;
-    process.env.NEXT_PUBLIC_SUPABASE_URL = config.url;
+    process.env[RUNTIME_PUBLIC_SUPABASE_URL_ENV] = config.url;
   }
 
   if (config.publishableKey) {
     process.env.SUPABASE_ANON_KEY = config.publishableKey;
     process.env.SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
+    process.env[RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV] = config.publishableKey;
   }
 
   if (config.secretKey) {
