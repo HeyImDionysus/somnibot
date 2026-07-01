@@ -384,7 +384,10 @@ function validateBrowserSupabaseConfigForFinalize(
   credentials: Record<string, string | undefined>,
   savedSettings: SetupSettingMap,
 ): string | null {
-  if (process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1') {
+  const launcherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1'
+    && typeof process.env.SESSION_TOKEN === 'string'
+    && process.env.SESSION_TOKEN.length > 0;
+  if (launcherLocalMode) {
     return null;
   }
 
@@ -402,8 +405,8 @@ function validateBrowserSupabaseConfigForFinalize(
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
     || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
-    || savedSettings.get('supabase_publishable_key')?.trim()
     || credentials.supabase_anon_key?.trim()
+    || savedSettings.get('supabase_publishable_key')?.trim()
     || savedSettings.get('supabase_anon_key')?.trim()
     || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
     || process.env.SUPABASE_ANON_KEY?.trim()

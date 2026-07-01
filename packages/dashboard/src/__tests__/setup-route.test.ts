@@ -107,6 +107,7 @@ describe('POST /api/setup finalize', () => {
     delete process.env.DISCORD_GUILD_ID;
     delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
+    delete process.env.SESSION_TOKEN;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     mock = createMockSupabase();
@@ -311,6 +312,7 @@ describe('POST /api/setup finalize', () => {
 
   it('allows launcher local mode to finalize without build-time browser Supabase env', async () => {
     process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'local-session-token';
     process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
     process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -327,6 +329,77 @@ describe('POST /api/setup finalize', () => {
     const res = await POST(buildRequest('/api/setup', {
       method: 'POST',
       body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('does not treat launcher local mode as active without a session token', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.SESSION_TOKEN;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('prefers a submitted Supabase anon alias over a stale saved publishable alias', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://abcdefghijklmnopqrst.supabase.co' },
+        { key: 'supabase_publishable_key', value: 'sb_publishable_stale' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: {
+          supabase_anon_key: 'sb_publishable_test',
+        },
+      },
     }));
     const body = await res.json();
 
