@@ -36,6 +36,11 @@ services:
       valkey:
         condition: service_healthy
     env_file: .env
+    environment:
+      # Standalone Next.js currently emits nonce-less inline bootstrap scripts.
+      # Keep this as an explicit compatibility switch until nonce propagation is
+      # browser-proven for the standalone image.
+      SOMNIBOT_CSP_INLINE_COMPAT: ${SOMNIBOT_CSP_INLINE_COMPAT:-1}
     # V5 Audit §4.P2 — memory/CPU limits prevent runaway processes
     deploy:
       resources:
@@ -43,7 +48,7 @@ services:
           memory: 512m
           cpus: '1.0'
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"const { hostname } = require('node:os'); fetch('http://' + hostname() + ':3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -80,7 +85,10 @@ services:
           memory: 768m
           cpus: '1.0'
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --header=\"Authorization: $${LAVALINK_PASSWORD}\" --spider http://localhost:2333/version || exit 1"]
+      # Do not pass LAVALINK_PASSWORD on the healthcheck command line. A 401/403
+      # from /version still proves the HTTP listener is up without exposing auth
+      # material through process arguments.
+      test: ["CMD-SHELL", "wget -q -S --spider http://127.0.0.1:2333/version 2>&1 | grep -Eq 'HTTP/[0-9.]+ (200|401|403)'"]
       interval: 30s
       timeout: 10s
       retries: 3

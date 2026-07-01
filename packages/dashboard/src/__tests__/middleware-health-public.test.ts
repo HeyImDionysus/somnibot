@@ -14,6 +14,7 @@ describe('middleware health access', () => {
     vi.clearAllMocks();
     delete process.env.SESSION_TOKEN;
     delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
+    delete process.env.SOMNIBOT_CSP_INLINE_COMPAT;
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'test-key';
 
@@ -58,8 +59,19 @@ describe('middleware health access', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('location')).toBeNull();
     expect(res.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(res.headers.get('content-security-policy')).toMatch(/script-src 'self' 'nonce-[^']+' 'strict-dynamic'/);
+    expect(res.headers.get('content-security-policy')).not.toContain("'unsafe-inline'");
     expect(res.headers.get('x-frame-options')).toBe('DENY');
     expect(mockCreateServerClient).not.toHaveBeenCalled();
+  });
+
+  it('only allows unsafe inline CSP in explicit standalone compatibility mode', async () => {
+    process.env.SOMNIBOT_CSP_INLINE_COMPAT = '1';
+    const { middleware } = await import('../middleware');
+    const res = await middleware(new NextRequest('http://localhost:3000/api/health'));
+
+    expect(res.headers.get('content-security-policy')).toContain("script-src 'self' 'unsafe-inline'");
+    expect(res.headers.get('content-security-policy')).toContain("style-src 'self' 'unsafe-inline'");
   });
 
   it('allows first-run setup page without public Supabase env', async () => {

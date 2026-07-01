@@ -14,16 +14,22 @@ function generateNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
-function buildCspHeader(_nonce: string): string {
+function buildCspHeader(nonce: string): string {
+  const inlineCompat = process.env.SOMNIBOT_CSP_INLINE_COMPAT === '1';
+  const scriptSrc = inlineCompat
+    ? "script-src 'self' 'unsafe-inline'"
+    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`;
+  const styleSrc = inlineCompat
+    ? "style-src 'self' 'unsafe-inline'"
+    : `style-src 'self' 'nonce-${nonce}'`;
+
   return [
     "default-src 'self'",
-    // Standalone Next.js emits framework/bootstrap scripts without the middleware
-    // nonce in this deployment path. Keep execution constrained to same-origin
-    // files, but allow Next's required inline bootstrap scripts so the app can
-    // hydrate. Re-tightening to strict nonce belongs behind a browser-verified
-    // CSP test.
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline'",
+    // Production default is nonce-based. Standalone deployments that cannot yet
+    // propagate nonces into Next's framework/bootstrap scripts must opt into the
+    // narrower compatibility mode with SOMNIBOT_CSP_INLINE_COMPAT=1.
+    scriptSrc,
+    styleSrc,
     "img-src 'self' data: https:",
     "font-src 'self'",
     // connect-src: External API calls (Discord, PayPal) go through server-side
