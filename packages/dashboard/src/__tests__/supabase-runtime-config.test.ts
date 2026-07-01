@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   readEnvSupabaseConfig,
+  readRuntimePublicSupabaseConfig,
   requireAdminSupabaseConfig,
   requireBrowserSupabaseConfig,
   SupabaseRuntimeConfigError,
@@ -26,6 +27,19 @@ describe('Supabase runtime config', () => {
       publishableKey: 'sb_publishable_test',
       sources: { url: 'env', publishableKey: 'env' },
     });
+  });
+
+  it('does not rely on server-only Supabase env for browser auth', () => {
+    process.env = {
+      ...originalEnv,
+      SUPABASE_URL: 'https://serveronly.supabase.co',
+      SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_server_only',
+      SUPABASE_ANON_KEY: 'sb_publishable_anon_only',
+    };
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    expect(() => requireBrowserSupabaseConfig()).toThrow(SupabaseRuntimeConfigError);
   });
 
   it('throws a clear browser-auth block when public env is missing', () => {
@@ -55,6 +69,39 @@ describe('Supabase runtime config', () => {
     });
   });
 
+  it('prefers server Supabase aliases over stale public aliases for server runtime config', () => {
+    process.env = {
+      ...originalEnv,
+      NEXT_PUBLIC_SUPABASE_URL: 'https://oldproject.supabase.co',
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_old',
+      SUPABASE_URL: 'https://newproject.supabase.co',
+      SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_new',
+      SUPABASE_SECRET_KEY: 'new-secret-value',
+    };
+
+    expect(readEnvSupabaseConfig()).toEqual({
+      url: 'https://newproject.supabase.co',
+      publishableKey: 'sb_publishable_new',
+      secretKey: 'new-secret-value',
+      sources: { url: 'env', publishableKey: 'env', secretKey: 'env' },
+    });
+  });
+
+  it('reads runtime public Supabase config without using build-inlined direct env references', () => {
+    process.env = {
+      ...originalEnv,
+      NEXT_PUBLIC_SUPABASE_URL: 'https://runtimepublic.supabase.co',
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_runtime',
+    };
+
+    expect(readRuntimePublicSupabaseConfig()).toEqual({
+      url: 'https://runtimepublic.supabase.co',
+      publishableKey: 'sb_publishable_runtime',
+      secretKey: '',
+      sources: { url: 'env', publishableKey: 'env', secretKey: 'missing' },
+    });
+  });
+
   it('can apply setup-verified Supabase config to the current server process', async () => {
     const { applyRuntimeSupabaseEnv } = await import('@/lib/supabase/runtime-config');
 
@@ -75,5 +122,32 @@ describe('Supabase runtime config', () => {
       secretKey: 'sb_secret_saved',
       sources: { url: 'env', publishableKey: 'env', secretKey: 'env' },
     });
+  });
+
+  it('updates stale setup-applied server Supabase env without masking public env drift evidence', async () => {
+    const { applyRuntimeSupabaseEnv } = await import('@/lib/supabase/runtime-config');
+
+    process.env = { ...originalEnv };
+    process.env.SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://oldpublic.supabase.co';
+    process.env.SUPABASE_ANON_KEY = 'sb_publishable_old';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_public_old';
+    process.env.SUPABASE_SECRET_KEY = 'old-secret-value';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'old-secret-value';
+
+    applyRuntimeSupabaseEnv({
+      url: 'https://savedproject.supabase.co',
+      publishableKey: 'sb_publishable_saved',
+      secretKey: 'saved-secret-value',
+    });
+
+    expect(process.env.SUPABASE_URL).toBe('https://savedproject.supabase.co');
+    expect(process.env.NEXT_PUBLIC_SUPABASE_URL).toBe('https://oldpublic.supabase.co');
+    expect(process.env.SUPABASE_ANON_KEY).toBe('sb_publishable_saved');
+    expect(process.env.SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_saved');
+    expect(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_public_old');
+    expect(process.env.SUPABASE_SECRET_KEY).toBe('saved-secret-value');
+    expect(process.env.SUPABASE_SERVICE_ROLE_KEY).toBe('saved-secret-value');
   });
 });

@@ -44,7 +44,7 @@ interface AutoConfigOptions {
  * e.g. "https://YOUR_PROJECT.supabase.co" → "YOUR_PROJECT_REF"
  */
 function getProjectRef(): string | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const match = url.match(/https:\/\/([a-z0-9]+)\.supabase\.co/);
   return match ? match[1] : null;
 }
@@ -144,7 +144,8 @@ async function fetchAuthConfig(projectRef: string, accessToken: string, options?
 }
 
 function getAllowListEntries(config: Record<string, unknown>): string[] {
-  const allowList = typeof config.URI_ALLOW_LIST === 'string' ? config.URI_ALLOW_LIST : '';
+  const rawAllowList = config.uri_allow_list ?? config.URI_ALLOW_LIST;
+  const allowList = typeof rawAllowList === 'string' ? rawAllowList : '';
   return allowList
     ? allowList.split(',').map((entry) => entry.trim()).filter(Boolean)
     : [];
@@ -212,7 +213,8 @@ export async function getDiscordAuthProviderStatus(options?: AutoConfigOptions):
       };
     }
 
-    const providerEnabled = current.config.EXTERNAL_DISCORD_ENABLED === true;
+    const providerEnabled = current.config.external_discord_enabled === true
+      || current.config.EXTERNAL_DISCORD_ENABLED === true;
     const missingCallbackUrls = getMissingCallbackUrls(current.config);
     const callbackAllowListReady = missingCallbackUrls.length === 0;
 
@@ -300,7 +302,10 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
   try {
     const current = await fetchAuthConfig(projectRef, accessToken, options);
     const currentConfig = current.ok ? current.config : {};
-    const providerEnabled = current.ok && currentConfig.EXTERNAL_DISCORD_ENABLED === true;
+    const providerEnabled = current.ok && (
+      currentConfig.external_discord_enabled === true
+      || currentConfig.EXTERNAL_DISCORD_ENABLED === true
+    );
     const allowListReady = current.ok && getMissingCallbackUrls(currentConfig).length === 0;
 
     if (providerEnabled && allowListReady) {
@@ -308,7 +313,7 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
     }
 
     const patchBody: Record<string, string | boolean> = {
-      URI_ALLOW_LIST: buildAllowList(currentConfig),
+      uri_allow_list: buildAllowList(currentConfig),
     };
 
     if (!providerEnabled) {
@@ -320,9 +325,9 @@ export async function ensureDiscordAuthProvider(options?: AutoConfigOptions): Pr
         };
       }
 
-      patchBody.EXTERNAL_DISCORD_ENABLED = true;
-      patchBody.EXTERNAL_DISCORD_CLIENT_ID = clientId;
-      patchBody.EXTERNAL_DISCORD_SECRET = clientSecret;
+      patchBody.external_discord_enabled = true;
+      patchBody.external_discord_client_id = clientId;
+      patchBody.external_discord_secret = clientSecret;
     }
 
     const res = await fetch(

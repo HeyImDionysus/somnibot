@@ -23,6 +23,7 @@ COPY packages/dashboard/package.json packages/dashboard/tsconfig.json ./packages
 # Copy source code
 COPY packages/shared/src ./packages/shared/src
 COPY packages/dashboard/src ./packages/dashboard/src
+COPY scripts/clean.mjs ./scripts/clean.mjs
 COPY packages/dashboard/tailwind.config.ts ./packages/dashboard/
 COPY packages/dashboard/postcss.config.mjs ./packages/dashboard/
 COPY packages/dashboard/next.config.ts ./packages/dashboard/
@@ -71,9 +72,10 @@ COPY --from=builder /app/packages/dashboard/public ./packages/dashboard/public
 # Non-root user
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 USER nextjs
-
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 
 EXPOSE 3000
 

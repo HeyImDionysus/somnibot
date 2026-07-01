@@ -15,13 +15,21 @@ function generateNonce(): string {
 }
 
 function buildCspHeader(nonce: string): string {
+  const inlineCompat = process.env.SOMNIBOT_CSP_INLINE_COMPAT === '1';
+  const scriptSrc = inlineCompat
+    ? "script-src 'self' 'unsafe-inline'"
+    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`;
+  const styleSrc = inlineCompat
+    ? "style-src 'self' 'unsafe-inline'"
+    : `style-src 'self' 'nonce-${nonce}'`;
+
   return [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    // V5 Audit §1.1: Removed 'unsafe-inline' fallback. Safari 15.4+ (released
-    // March 2022) supports nonce on style-src, and all current browsers handle
-    // nonce correctly. Keeping unsafe-inline weakened CSP on legacy clients.
-    `style-src 'self' 'nonce-${nonce}'`,
+    // Production default is nonce-based. Standalone deployments that cannot yet
+    // propagate nonces into Next's framework/bootstrap scripts must opt into the
+    // narrower compatibility mode with SOMNIBOT_CSP_INLINE_COMPAT=1.
+    scriptSrc,
+    styleSrc,
     "img-src 'self' data: https:",
     "font-src 'self'",
     // connect-src: External API calls (Discord, PayPal) go through server-side
@@ -31,6 +39,21 @@ function buildCspHeader(nonce: string): string {
     "base-uri 'self'",
     "form-action 'self'",
   ].join('; ');
+}
+
+function requestWithNonce(request: NextRequest, nonce: string): { headers: Headers } {
+  const headers = new Headers(request.headers);
+  headers.set('x-nonce', nonce);
+  // Next.js reads the request CSP header during render to nonce framework
+  // scripts. The response CSP is still set separately by applyCspHeaders.
+  headers.set('Content-Security-Policy', buildCspHeader(nonce));
+  return { headers };
+}
+
+function nextWithNonce(request: NextRequest, nonce: string): NextResponse {
+  return NextResponse.next({
+    request: requestWithNonce(request, nonce),
+  });
 }
 
 /**
@@ -75,7 +98,7 @@ function isLocalMode(): boolean {
  * Handle auth for local-mode (Electron launcher).
  * Returns a response if handled, or null to fall through to remote auth.
  */
-function handleLocalAuth(request: NextRequest): NextResponse | null {
+function handleLocalAuth(request: NextRequest, nonce: string): NextResponse | null {
   if (!isLocalMode()) return null;
 
   // I-2: Only allow local-mode auth for actual localhost requests.
@@ -117,13 +140,13 @@ function handleLocalAuth(request: NextRequest): NextResponse | null {
 
   // Already authenticated — pass through
   if (sessionCookie === LOCAL_SESSION_TOKEN) {
-    return NextResponse.next({ request });
+    return nextWithNonce(request, nonce);
   }
 
   // First visit or mismatched token — set the cookie and continue
   // The launcher sets SESSION_TOKEN and only serves on localhost,
   // so anyone who can reach the server IS the operator.
-  const response = NextResponse.next({ request });
+  const response = nextWithNonce(request, nonce);
   response.cookies.set(COOKIE_NAME, LOCAL_SESSION_TOKEN!, {
     httpOnly: true,
     sameSite: 'lax',
@@ -164,7 +187,7 @@ export async function middleware(request: NextRequest) {
   const nonce = generateNonce();
 
   // ── Local mode: bypass Supabase entirely ──
-  const localResponse = handleLocalAuth(request);
+  const localResponse = handleLocalAuth(request, nonce);
   if (localResponse) {
     applyCspHeaders(localResponse, nonce);
     return localResponse;
@@ -177,7 +200,7 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname === '/api/health' &&
     (request.method === 'GET' || request.method === 'HEAD')
   ) {
-    const healthResponse = NextResponse.next({ request });
+    const healthResponse = nextWithNonce(request, nonce);
     applyCspHeaders(healthResponse, nonce);
     return healthResponse;
   }
@@ -189,15 +212,13 @@ export async function middleware(request: NextRequest) {
       return csrfError;
     }
 
-    const publicResponse = NextResponse.next({ request });
+    const publicResponse = nextWithNonce(request, nonce);
     applyCspHeaders(publicResponse, nonce);
     return publicResponse;
   }
 
   // ── Remote mode: Supabase session refresh + Discord OAuth ──
-  let supabaseResponse = NextResponse.next({
-    request,
-  });
+  let supabaseResponse = nextWithNonce(request, nonce);
 
   const { url, publishableKey } = requireBrowserSupabaseConfig();
   const supabase = createServerClient(
@@ -212,9 +233,7 @@ export async function middleware(request: NextRequest) {
           cookiesToSet.forEach(({ name, value }) =>
             request.cookies.set(name, value),
           );
-          supabaseResponse = NextResponse.next({
-            request,
-          });
+          supabaseResponse = nextWithNonce(request, nonce);
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options as Parameters<typeof supabaseResponse.cookies.set>[2]),
           );
@@ -288,10 +307,9 @@ export async function middleware(request: NextRequest) {
     });
   }
 
-  // Apply CSP nonce to the response + pass nonce via header for layout
+  // Apply CSP nonce to the response. The matching x-nonce request header is
+  // attached via nextWithNonce so Next.js can nonce framework/client scripts.
   applyCspHeaders(supabaseResponse, nonce);
-  // Set nonce as a request header so server components can access it
-  request.headers.set('x-nonce', nonce);
   return supabaseResponse;
 }
 

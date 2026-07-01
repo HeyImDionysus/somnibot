@@ -116,6 +116,36 @@ describe('Supabase Discord auth auto-config', () => {
     );
   });
 
+  it('uses the server Supabase URL project ref when public Supabase env is stale', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://oldpublicproject.supabase.co';
+    process.env.SUPABASE_URL = 'https://newserverproject.supabase.co';
+    process.env.DISCORD_APPLICATION_ID = '123456789012345678';
+    process.env.DISCORD_CLIENT_SECRET = 'discord-client-secret';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          EXTERNAL_DISCORD_ENABLED: true,
+          URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
+        }),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({ accessToken: 'setup-provided-token' });
+
+    expect(result).toEqual({ success: true, alreadyConfigured: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.supabase.com/v1/projects/newserverproject/config/auth',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer setup-provided-token',
+        }),
+      }),
+    );
+  });
+
   it('passes a timeout signal to Supabase Management API status reads', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
 
@@ -158,8 +188,8 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          EXTERNAL_DISCORD_ENABLED: true,
-          URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
+          external_discord_enabled: true,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
       .mockResolvedValueOnce({
@@ -182,11 +212,11 @@ describe('Supabase Discord auth auto-config', () => {
 
     const body = JSON.parse(String(patchRequest[1]?.body));
     expect(body).toEqual({
-      URI_ALLOW_LIST: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
+      uri_allow_list: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
     });
-    expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
-    expect(body.EXTERNAL_DISCORD_CLIENT_ID).toBeUndefined();
-    expect(body.EXTERNAL_DISCORD_SECRET).toBeUndefined();
+    expect(body.uri_allow_list).toContain('https://existing.example.com/api/auth/callback');
+    expect(body.external_discord_client_id).toBeUndefined();
+    expect(body.external_discord_secret).toBeUndefined();
   });
 
   it('patches Supabase auth config with the configured dashboard callback URL', async () => {
@@ -202,8 +232,8 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          EXTERNAL_DISCORD_ENABLED: false,
-          URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
+          external_discord_enabled: false,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
       .mockResolvedValueOnce({
@@ -225,9 +255,12 @@ describe('Supabase Discord auth auto-config', () => {
     expect(patchRequest[1]?.method).toBe('PATCH');
 
     const body = JSON.parse(String(patchRequest[1]?.body));
-    expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).toContain('https://dashboard.example.com/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).toContain('http://localhost:3000/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).not.toContain('https://undefined');
+    expect(body.uri_allow_list).toContain('https://existing.example.com/api/auth/callback');
+    expect(body.uri_allow_list).toContain('https://dashboard.example.com/api/auth/callback');
+    expect(body.uri_allow_list).toContain('http://localhost:3000/api/auth/callback');
+    expect(body.uri_allow_list).not.toContain('https://undefined');
+    expect(body.external_discord_enabled).toBe(true);
+    expect(body.external_discord_client_id).toBe('123456789012345678');
+    expect(body.external_discord_secret).toBe('discord-client-secret');
   });
 });

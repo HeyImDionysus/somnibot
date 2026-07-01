@@ -8,8 +8,9 @@
  * Writes to Valkey every 30s (key: somnibot:heartbeat:bot).
  * Writes to Supabase every 60s as fallback (guild_id = primary guild).
  *
- * Payload includes guildCount, uptime, memoryUsageMB so the dashboard
- * can assess bot health from a single read.
+ * Payload includes guildCount, guildIds, uptime, memoryUsageMB so the dashboard
+ * can assess bot health and setup can prove membership in the configured guild
+ * from a single read.
  *
  * Dashboard reads:
  *   - Stale >90s: yellow banner "⚠️ Bot appears offline"
@@ -99,6 +100,7 @@ export class HeartbeatService {
         timestamp: Date.now(),
         uptimeSeconds: Math.floor((Date.now() - this.startedAt) / 1000),
         guildCount: this.client?.guilds.cache.size ?? 0,
+        guildIds: this.client ? Array.from(this.client.guilds.cache.keys()) : [],
         memoryUsageMB: Math.round(memUsage.rss / 1024 / 1024),
       });
 
@@ -144,13 +146,13 @@ export async function readHeartbeat(
   valkey: Valkey,
   /** @deprecated guildId is no longer used — kept for API compat. */
   _guildId?: string,
-): Promise<{ timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number } | null> {
+): Promise<{ timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number } | null> {
   try {
     // V11 Audit M-8: Read bot-level key only — per-guild fallback removed
     // since per-guild keys are no longer written.
     const raw = await valkey.get(VALKEY_HEARTBEAT_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number; guildCount?: number; memoryUsageMB?: number };
+    return JSON.parse(raw) as { timestamp: number; uptimeSeconds: number; guildCount?: number; guildIds?: string[]; memoryUsageMB?: number };
   } catch {
     return null;
   }

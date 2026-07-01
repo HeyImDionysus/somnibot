@@ -17,7 +17,7 @@ import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/s
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { applyRuntimeSupabaseEnv, readEnvSupabaseConfig } from '@/lib/supabase/runtime-config';
+import { applyRuntimeSupabaseEnv, readBuildBrowserSupabaseConfig, readEnvSupabaseConfig, readRuntimePublicSupabaseConfig, requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 import { applyRuntimePayPalEnv } from '@/lib/paypal';
 import {
   SETUP_PAYPAL_WEBHOOK_PATH,
@@ -28,6 +28,8 @@ import {
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
+const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
+const BOT_HEARTBEAT_STALE_MS = 120_000;
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -203,7 +205,7 @@ async function readSetupInstanceSettings(
 }
 
 function getSupabaseProjectRef(env: NodeJS.ProcessEnv = process.env): string | null {
-  const rawUrl = env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '';
+  const rawUrl = env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '';
   if (!rawUrl.trim()) return null;
 
   try {
@@ -378,6 +380,75 @@ function getRequiredPayPalReadinessError(
   return null;
 }
 
+function validateBrowserSupabaseConfigForFinalize(
+  credentials: Record<string, string | undefined>,
+  savedSettings: SetupSettingMap,
+  request: NextRequest,
+): string | null {
+  const host = request.headers.get('host') ?? new URL(request.url).host;
+  const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
+  const launcherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1'
+    && typeof process.env.SESSION_TOKEN === 'string'
+    && process.env.SESSION_TOKEN.length > 0
+    && isLocalhost;
+  if (launcherLocalMode) {
+    return null;
+  }
+
+  let browserConfig: ReturnType<typeof requireBrowserSupabaseConfig>;
+  try {
+    browserConfig = requireBrowserSupabaseConfig(readBuildBrowserSupabaseConfig());
+  } catch {
+    return 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.';
+  }
+
+  const runtimePublicConfig = readRuntimePublicSupabaseConfig();
+  const runtimePublicUrl = runtimePublicConfig.url.trim();
+  const runtimePublicPublishableKey = runtimePublicConfig.publishableKey.trim();
+  const normalizedBrowserUrl = normalizeRuntimeBaseUrl(browserConfig.url);
+
+  if (!normalizedBrowserUrl) {
+    return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
+  }
+
+  if (runtimePublicUrl) {
+    const normalizedRuntimePublicUrl = normalizeRuntimeBaseUrl(runtimePublicUrl);
+    if (!normalizedRuntimePublicUrl || normalizedRuntimePublicUrl !== normalizedBrowserUrl) {
+      return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
+    }
+  }
+
+  if (runtimePublicPublishableKey && runtimePublicPublishableKey !== browserConfig.publishableKey) {
+    return 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.';
+  }
+
+  const expectedUrl = credentials.supabase_url?.trim()
+    || process.env.SUPABASE_URL?.trim()
+    || runtimePublicUrl
+    || savedSettings.get('supabase_url')?.trim()
+    || browserConfig.url;
+  const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
+    || credentials.supabase_anon_key?.trim()
+    || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
+    || runtimePublicPublishableKey
+    || savedSettings.get('supabase_anon_key')?.trim()
+    || savedSettings.get('supabase_publishable_key')?.trim()
+    || process.env.SUPABASE_ANON_KEY?.trim()
+    || browserConfig.publishableKey;
+
+  const normalizedExpectedUrl = normalizeRuntimeBaseUrl(expectedUrl);
+
+  if (!normalizedExpectedUrl || normalizedExpectedUrl !== normalizedBrowserUrl) {
+    return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
+  }
+
+  if (expectedPublishableKey !== browserConfig.publishableKey) {
+    return 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.';
+  }
+
+  return null;
+}
+
 async function getOwnerRuntimeReadiness(
   supabase: SupabaseClient,
   configuredGuildId: string | null = null,
@@ -422,12 +493,39 @@ async function getOwnerRuntimeReadiness(
     botOnline = Number.isFinite(lastSnapshot) && Date.now() - lastSnapshot < 5 * 60 * 1000;
   }
 
+  if (!botOnline) {
+    botOnline = await isBotLevelHeartbeatOnline(guild.id);
+  }
+
   return {
     botOnline,
     guildDetected: true,
     guildId: guild.id,
     guildName: guild.name,
   };
+}
+
+async function isBotLevelHeartbeatOnline(configuredGuildId: string): Promise<boolean> {
+  try {
+    const { readValkeyKey } = await import('@/lib/api/rate-limit');
+    const heartbeatRaw = await readValkeyKey(BOT_HEARTBEAT_KEY);
+    if (!heartbeatRaw) return false;
+
+    const heartbeat = JSON.parse(heartbeatRaw) as { timestamp?: unknown; guildIds?: unknown };
+    const timestamp = typeof heartbeat.timestamp === 'number'
+      ? heartbeat.timestamp
+      : Number(heartbeat.timestamp);
+
+    const guildIds = Array.isArray(heartbeat.guildIds)
+      ? heartbeat.guildIds.filter((id): id is string => typeof id === 'string')
+      : [];
+
+    return Number.isFinite(timestamp)
+      && Date.now() - timestamp < BOT_HEARTBEAT_STALE_MS
+      && guildIds.includes(configuredGuildId);
+  } catch {
+    return false;
+  }
 }
 
 function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {
@@ -842,6 +940,9 @@ export async function POST(request: NextRequest) {
 
     const savedSetupSettings = await readSetupInstanceSettings(supabase, [
       'discord_guild_id',
+      'supabase_url',
+      'supabase_anon_key',
+      'supabase_publishable_key',
       'paypal_client_id',
       'paypal_client_secret',
       'paypal_webhook_id',
@@ -911,6 +1012,18 @@ export async function POST(request: NextRequest) {
 
       applyRuntimeSupabaseEnv(submittedRuntimeConfig);
       applyRuntimePayPalEnv(submittedPayPalConfig);
+    }
+
+    const browserSupabaseError = validateBrowserSupabaseConfigForFinalize(credentials, savedSetupSettings, request);
+    if (browserSupabaseError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: browserSupabaseError,
+          setupLocked: false,
+        },
+        { status: 400 },
+      );
     }
 
     // Ensure Discord auth provider is configured

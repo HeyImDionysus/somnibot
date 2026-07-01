@@ -10,11 +10,13 @@ vi.mock('@/lib/supabase/auto-config', () => ({
 }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
+vi.mock('@/lib/api/rate-limit', () => ({ readValkeyKey: vi.fn() }));
 
 import { createClient } from '@supabase/supabase-js';
 import { GET, POST } from '@/app/api/setup/route';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { readValkeyKey } from '@/lib/api/rate-limit';
 import {
   getSetupPayPalWebhookUrlError,
   isSetupPayPalWebhookUrl,
@@ -88,16 +90,24 @@ describe('POST /api/setup finalize', () => {
     process.env = {
       ...originalEnv,
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
+      SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+      SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
       SUPABASE_SECRET_KEY: 'sb_secret_test',
     };
     delete process.env.DASHBOARD_URL;
     delete process.env.NEXT_PUBLIC_APP_URL;
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SUPABASE_ANON_KEY;
     delete process.env.PAYPAL_WEBHOOK_URL;
     delete process.env.PAYPAL_CLIENT_ID;
     delete process.env.PAYPAL_CLIENT_SECRET;
     delete process.env.PAYPAL_WEBHOOK_ID;
     delete process.env.DISCORD_GUILD_ID;
     delete process.env.NEXT_PUBLIC_DISCORD_GUILD_ID;
+    delete process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE;
+    delete process.env.SESSION_TOKEN;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_BASE_URL;
     delete process.env.SOMNIBOT_PUBLIC_CALLBACK_REQUIRED;
     mock = createMockSupabase();
@@ -110,6 +120,7 @@ describe('POST /api/setup finalize', () => {
       manualConfigured: false,
     });
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    (readValkeyKey as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -143,6 +154,546 @@ describe('POST /api/setup finalize', () => {
       setupLocked: false,
     });
     expect(mock._query.upsert).not.toHaveBeenCalled();
+  });
+
+  it('does not lock setup when browser Supabase public env is missing', async () => {
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('does not lock setup when browser Supabase public env targets a different project', async () => {
+    process.env.SUPABASE_URL = 'https://serverproject.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_server';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://browserproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_server';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://browserproject.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_server';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not lock setup when runtime public env changed without rebuilding the browser bundle', async () => {
+    process.env.SUPABASE_URL = 'https://newproject.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_new';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://newproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_new';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not lock setup when runtime NEXT_PUBLIC Supabase URL changed without rebuilding the browser bundle', async () => {
+    delete process.env.SUPABASE_URL;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://newproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_same';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_same';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not let server-only Supabase URL aliases hide runtime public URL drift', async () => {
+    process.env.SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://newproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not let server-only Supabase key aliases hide runtime public key drift', async () => {
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_new';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not lock setup when saved Supabase client key rotated without rebuilding the browser bundle', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://abcdefghijklmnopqrst.supabase.co' },
+        { key: 'supabase_anon_key', value: 'sb_publishable_rotated' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_rotated';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('allows launcher local mode to finalize without build-time browser Supabase env', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'local-session-token';
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('does not treat launcher local mode as active without a session token', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.SESSION_TOKEN;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not treat launcher local mode as active for non-localhost hosts', async () => {
+    process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
+    process.env.SESSION_TOKEN = 'launcher-session';
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      headers: { host: 'dashboard.example.com' },
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('prefers a submitted Supabase anon alias over a stale saved publishable alias', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://abcdefghijklmnopqrst.supabase.co' },
+        { key: 'supabase_publishable_key', value: 'sb_publishable_stale' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: {
+          supabase_anon_key: 'sb_publishable_test',
+        },
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('prefers a submitted Supabase anon alias over a stale runtime publishable env', async () => {
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_stale';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: {
+        action: 'finalize',
+        credentials: {
+          supabase_anon_key: 'sb_publishable_test',
+        },
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('prefers a saved Supabase anon alias over stale saved publishable aliases', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://abcdefghijklmnopqrst.supabase.co' },
+        { key: 'supabase_publishable_key', value: 'sb_publishable_stale' },
+        { key: 'supabase_anon_key', value: 'sb_publishable_test' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('prefers current public Supabase env over a stale saved anon alias', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://abcdefghijklmnopqrst.supabase.co' },
+        { key: 'supabase_anon_key', value: 'sb_publishable_stale' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('prefers the runtime Supabase URL over a stale saved URL before locking setup', async () => {
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    instanceSettingsTable.limit.mockResolvedValueOnce({
+      data: [
+        { key: 'supabase_url', value: 'https://oldprojectabcdefghijkl.supabase.co' },
+      ],
+      error: null,
+    });
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://newprojectabcdefghijkl.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://oldprojectabcdefghijkl.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('allows equivalent Supabase URLs and legacy anon env alongside the build-time publishable browser key', async () => {
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co/';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    delete process.env.SUPABASE_PUBLISHABLE_KEY;
+    process.env.SUPABASE_ANON_KEY = 'legacy-anon-jwt';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+  });
+
+  it('rejects malformed build-time public Supabase URLs before locking setup', async () => {
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
   });
 
   it('locks setup only after Discord auth is configured', async () => {
@@ -587,6 +1138,69 @@ describe('POST /api/setup finalize', () => {
     );
   });
 
+  it('accepts a fresh bot-level Valkey heartbeat only when it includes the configured guild', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { botOnline: false });
+    (readValkeyKey as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify({
+      timestamp: Date.now(),
+      guildIds: ['guild-1'],
+    }));
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+    expect(readValkeyKey).toHaveBeenCalledWith('somnibot:heartbeat:bot');
+    expect(mock._query.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('does not accept bot-level heartbeat without configured guild membership proof', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { botOnline: false });
+    (readValkeyKey as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify({
+      timestamp: Date.now(),
+      guildIds: ['other-guild'],
+    }));
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Start SomniBot and wait for a fresh bot health heartbeat before setup can finalize.',
+      setupLocked: false,
+    });
+    expect(readValkeyKey).toHaveBeenCalledWith('somnibot:heartbeat:bot');
+    expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
   it('does not lock setup with an invalid submitted PayPal webhook URL', async () => {
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
       success: true,
@@ -739,6 +1353,9 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
     vi.clearAllMocks();
     process.env = { ...originalEnv };
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
     delete process.env.SUPABASE_URL;
     delete process.env.SUPABASE_SECRET_KEY;
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -792,6 +1409,9 @@ describe('POST /api/setup verify-discord before Supabase is configured', () => {
     expect(mock._query.upsert).not.toHaveBeenCalled();
 
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_test';
     process.env.SUPABASE_SECRET_KEY = 'sb_secret_test';
     configureFinalizeOwnerProof(mock);
     (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -877,6 +1497,9 @@ describe('GET /api/setup status', () => {
     process.env = {
       ...originalEnv,
       NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
+      SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+      SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
       SUPABASE_SECRET_KEY: 'sb_secret_test',
     };
     delete process.env.DASHBOARD_URL;

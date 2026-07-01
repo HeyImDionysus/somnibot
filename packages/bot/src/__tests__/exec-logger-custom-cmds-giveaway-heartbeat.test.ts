@@ -186,6 +186,11 @@ describe('HeartbeatService deeper', () => {
     await new Promise(r => setTimeout(r, 100));
     hb.stop();
     expect(v.set).toHaveBeenCalled();
+    const [, payload] = v.set.mock.calls[0];
+    expect(JSON.parse(payload)).toMatchObject({
+      guildCount: 1,
+      guildIds: ['g1'],
+    });
   });
 
   it('stop clears timers', async () => {

@@ -28,15 +28,73 @@ export const SUPABASE_RUNTIME_SETTING_KEYS = [
   'supabase_secret_key',
 ] as const;
 
+const RUNTIME_PUBLIC_SUPABASE_URL_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'URL'].join('_');
+const RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV = ['NEXT', 'PUBLIC', 'SUPABASE', 'PUBLISHABLE', 'KEY'].join('_');
+
+export function readRuntimePublicSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
+  const url = env[RUNTIME_PUBLIC_SUPABASE_URL_ENV] || '';
+  const publishableKey = env[RUNTIME_PUBLIC_SUPABASE_PUBLISHABLE_KEY_ENV] || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
 export function readEnvSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
   return {
-    url: env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '',
-    publishableKey: env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '',
+    url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '',
+    publishableKey: env.SUPABASE_PUBLISHABLE_KEY || env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '',
     secretKey: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '',
     sources: {
-      url: env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL ? 'env' : 'missing',
-      publishableKey: env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY ? 'env' : 'missing',
+      url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL ? 'env' : 'missing',
+      publishableKey: env.SUPABASE_PUBLISHABLE_KEY || env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY ? 'env' : 'missing',
       secretKey: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY ? 'env' : 'missing',
+    },
+  };
+}
+
+export function readBrowserSupabaseConfig(): SupabaseRuntimeConfig {
+  // Next.js only inlines public env vars in client bundles when they are
+  // referenced directly as process.env.NEXT_PUBLIC_*. Do not route this
+  // through readEnvSupabaseConfig(process.env), because dynamic env object
+  // property reads compile to an empty browser env and break Discord login.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
+export function readBuildBrowserSupabaseConfig(): SupabaseRuntimeConfig {
+  // Values emitted by next.config.ts at dashboard build time. Setup finalization
+  // must validate what the browser bundle was built with, not a later runtime
+  // .env edit that would require rebuilding the image.
+  const url = process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL || '';
+  const publishableKey = process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
     },
   };
 }
@@ -47,22 +105,22 @@ export function applyRuntimeSupabaseEnv(config: {
   secretKey?: string;
 }) {
   if (config.url) {
-    process.env.SUPABASE_URL ||= config.url;
+    process.env.SUPABASE_URL = config.url;
   }
 
   if (config.publishableKey) {
-    process.env.SUPABASE_ANON_KEY ||= config.publishableKey;
-    process.env.SUPABASE_PUBLISHABLE_KEY ||= config.publishableKey;
+    process.env.SUPABASE_ANON_KEY = config.publishableKey;
+    process.env.SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
   }
 
   if (config.secretKey) {
-    process.env.SUPABASE_SECRET_KEY ||= config.secretKey;
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||= config.secretKey;
+    process.env.SUPABASE_SECRET_KEY = config.secretKey;
+    process.env.SUPABASE_SERVICE_ROLE_KEY = config.secretKey;
   }
 }
 
 export function requireBrowserSupabaseConfig(
-  config: SupabaseRuntimeConfig = readEnvSupabaseConfig(),
+  config: SupabaseRuntimeConfig = readBrowserSupabaseConfig(),
 ) {
   if (!config.url || !config.publishableKey) {
     throw new SupabaseRuntimeConfigError(
