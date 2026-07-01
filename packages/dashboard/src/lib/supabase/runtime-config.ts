@@ -41,6 +41,26 @@ export function readEnvSupabaseConfig(env: NodeJS.ProcessEnv = process.env): Sup
   };
 }
 
+export function readBrowserSupabaseConfig(): SupabaseRuntimeConfig {
+  // Next.js only inlines public env vars in client bundles when they are
+  // referenced directly as process.env.NEXT_PUBLIC_*. Do not route this
+  // through readEnvSupabaseConfig(process.env), because dynamic env object
+  // property reads compile to an empty browser env and break Discord login.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || '';
+
+  return {
+    url,
+    publishableKey,
+    secretKey: '',
+    sources: {
+      url: url ? 'env' : 'missing',
+      publishableKey: publishableKey ? 'env' : 'missing',
+      secretKey: 'missing',
+    },
+  };
+}
+
 export function applyRuntimeSupabaseEnv(config: {
   url?: string;
   publishableKey?: string;
@@ -62,7 +82,7 @@ export function applyRuntimeSupabaseEnv(config: {
 }
 
 export function requireBrowserSupabaseConfig(
-  config: SupabaseRuntimeConfig = readEnvSupabaseConfig(),
+  config: SupabaseRuntimeConfig = readBrowserSupabaseConfig(),
 ) {
   if (!config.url || !config.publishableKey) {
     throw new SupabaseRuntimeConfigError(

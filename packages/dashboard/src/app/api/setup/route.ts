@@ -28,6 +28,8 @@ import {
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
+const BOT_HEARTBEAT_KEY = 'somnibot:heartbeat:bot';
+const BOT_HEARTBEAT_STALE_MS = 120_000;
 
 interface RuntimeCallbackConfig {
   operatorDashboardUrl: string | null;
@@ -422,12 +424,33 @@ async function getOwnerRuntimeReadiness(
     botOnline = Number.isFinite(lastSnapshot) && Date.now() - lastSnapshot < 5 * 60 * 1000;
   }
 
+  if (!botOnline) {
+    botOnline = await isBotLevelHeartbeatOnline();
+  }
+
   return {
     botOnline,
     guildDetected: true,
     guildId: guild.id,
     guildName: guild.name,
   };
+}
+
+async function isBotLevelHeartbeatOnline(): Promise<boolean> {
+  try {
+    const { readValkeyKey } = await import('@/lib/api/rate-limit');
+    const heartbeatRaw = await readValkeyKey(BOT_HEARTBEAT_KEY);
+    if (!heartbeatRaw) return false;
+
+    const heartbeat = JSON.parse(heartbeatRaw) as { timestamp?: unknown };
+    const timestamp = typeof heartbeat.timestamp === 'number'
+      ? heartbeat.timestamp
+      : Number(heartbeat.timestamp);
+
+    return Number.isFinite(timestamp) && Date.now() - timestamp < BOT_HEARTBEAT_STALE_MS;
+  } catch {
+    return false;
+  }
 }
 
 function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {

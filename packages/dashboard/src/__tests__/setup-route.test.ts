@@ -10,11 +10,13 @@ vi.mock('@/lib/supabase/auto-config', () => ({
 }));
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
+vi.mock('@/lib/api/rate-limit', () => ({ readValkeyKey: vi.fn() }));
 
 import { createClient } from '@supabase/supabase-js';
 import { GET, POST } from '@/app/api/setup/route';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { readValkeyKey } from '@/lib/api/rate-limit';
 import {
   getSetupPayPalWebhookUrlError,
   isSetupPayPalWebhookUrl,
@@ -110,6 +112,7 @@ describe('POST /api/setup finalize', () => {
       manualConfigured: false,
     });
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    (readValkeyKey as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
@@ -582,6 +585,37 @@ describe('POST /api/setup finalize', () => {
       setupLocked: false,
     });
     expect(mock._query.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
+  });
+
+  it('accepts a fresh bot-level Valkey heartbeat when guild diagnostics are stale', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock, { botOnline: false });
+    (readValkeyKey as ReturnType<typeof vi.fn>).mockResolvedValue(JSON.stringify({
+      timestamp: Date.now(),
+    }));
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      ok: true,
+      authConfigured: true,
+      authError: null,
+      setupLocked: true,
+    });
+    expect(readValkeyKey).toHaveBeenCalledWith('somnibot:heartbeat:bot');
+    expect(mock._query.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ key: 'setup_completed_at' }),
       { onConflict: 'key' },
     );

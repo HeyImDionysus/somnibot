@@ -158,8 +158,8 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          EXTERNAL_DISCORD_ENABLED: true,
-          URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
+          external_discord_enabled: true,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
       .mockResolvedValueOnce({
@@ -182,11 +182,11 @@ describe('Supabase Discord auth auto-config', () => {
 
     const body = JSON.parse(String(patchRequest[1]?.body));
     expect(body).toEqual({
-      URI_ALLOW_LIST: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
+      uri_allow_list: expect.stringContaining('https://dashboard.example.com/api/auth/callback'),
     });
-    expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
-    expect(body.EXTERNAL_DISCORD_CLIENT_ID).toBeUndefined();
-    expect(body.EXTERNAL_DISCORD_SECRET).toBeUndefined();
+    expect(body.uri_allow_list).toContain('https://existing.example.com/api/auth/callback');
+    expect(body.external_discord_client_id).toBeUndefined();
+    expect(body.external_discord_secret).toBeUndefined();
   });
 
   it('patches Supabase auth config with the configured dashboard callback URL', async () => {
@@ -202,8 +202,8 @@ describe('Supabase Discord auth auto-config', () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          EXTERNAL_DISCORD_ENABLED: false,
-          URI_ALLOW_LIST: 'https://existing.example.com/api/auth/callback',
+          external_discord_enabled: false,
+          uri_allow_list: 'https://existing.example.com/api/auth/callback',
         }),
       })
       .mockResolvedValueOnce({
@@ -225,9 +225,12 @@ describe('Supabase Discord auth auto-config', () => {
     expect(patchRequest[1]?.method).toBe('PATCH');
 
     const body = JSON.parse(String(patchRequest[1]?.body));
-    expect(body.URI_ALLOW_LIST).toContain('https://existing.example.com/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).toContain('https://dashboard.example.com/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).toContain('http://localhost:3000/api/auth/callback');
-    expect(body.URI_ALLOW_LIST).not.toContain('https://undefined');
+    expect(body.uri_allow_list).toContain('https://existing.example.com/api/auth/callback');
+    expect(body.uri_allow_list).toContain('https://dashboard.example.com/api/auth/callback');
+    expect(body.uri_allow_list).toContain('http://localhost:3000/api/auth/callback');
+    expect(body.uri_allow_list).not.toContain('https://undefined');
+    expect(body.external_discord_enabled).toBe(true);
+    expect(body.external_discord_client_id).toBe('123456789012345678');
+    expect(body.external_discord_secret).toBe('discord-client-secret');
   });
 });

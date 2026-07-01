@@ -28,6 +28,19 @@ describe('Supabase runtime config', () => {
     });
   });
 
+  it('does not rely on server-only Supabase env for browser auth', () => {
+    process.env = {
+      ...originalEnv,
+      SUPABASE_URL: 'https://serveronly.supabase.co',
+      SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_server_only',
+      SUPABASE_ANON_KEY: 'sb_publishable_anon_only',
+    };
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
+    expect(() => requireBrowserSupabaseConfig()).toThrow(SupabaseRuntimeConfigError);
+  });
+
   it('throws a clear browser-auth block when public env is missing', () => {
     process.env = { ...originalEnv };
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;

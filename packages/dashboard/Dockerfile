@@ -23,6 +23,7 @@ COPY packages/dashboard/package.json packages/dashboard/tsconfig.json ./packages
 # Copy source code
 COPY packages/shared/src ./packages/shared/src
 COPY packages/dashboard/src ./packages/dashboard/src
+COPY scripts/clean.mjs ./scripts/clean.mjs
 COPY packages/dashboard/tailwind.config.ts ./packages/dashboard/
 COPY packages/dashboard/postcss.config.mjs ./packages/dashboard/
 COPY packages/dashboard/next.config.ts ./packages/dashboard/
