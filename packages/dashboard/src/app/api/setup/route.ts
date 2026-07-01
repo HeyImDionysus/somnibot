@@ -384,6 +384,10 @@ function validateBrowserSupabaseConfigForFinalize(
   credentials: Record<string, string | undefined>,
   savedSettings: SetupSettingMap,
 ): string | null {
+  if (process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1') {
+    return null;
+  }
+
   let browserConfig: ReturnType<typeof requireBrowserSupabaseConfig>;
   try {
     browserConfig = requireBrowserSupabaseConfig(readBuildBrowserSupabaseConfig());
@@ -392,13 +396,17 @@ function validateBrowserSupabaseConfigForFinalize(
   }
 
   const expectedUrl = credentials.supabase_url?.trim()
-    || process.env.SUPABASE_URL?.trim()
     || savedSettings.get('supabase_url')?.trim()
+    || process.env.SUPABASE_URL?.trim()
+    || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
-    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
     || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
     || savedSettings.get('supabase_publishable_key')?.trim()
+    || credentials.supabase_anon_key?.trim()
+    || savedSettings.get('supabase_anon_key')?.trim()
+    || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
+    || process.env.SUPABASE_ANON_KEY?.trim()
     || browserConfig.publishableKey;
 
   if (normalizeRuntimeBaseUrl(expectedUrl) !== normalizeRuntimeBaseUrl(browserConfig.url)) {
@@ -903,6 +911,9 @@ export async function POST(request: NextRequest) {
 
     const savedSetupSettings = await readSetupInstanceSettings(supabase, [
       'discord_guild_id',
+      'supabase_url',
+      'supabase_anon_key',
+      'supabase_publishable_key',
       'paypal_client_id',
       'paypal_client_secret',
       'paypal_webhook_id',
