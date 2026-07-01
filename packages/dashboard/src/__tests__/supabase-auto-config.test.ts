@@ -116,6 +116,36 @@ describe('Supabase Discord auth auto-config', () => {
     );
   });
 
+  it('uses the server Supabase URL project ref when public Supabase env is stale', async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://oldpublicproject.supabase.co';
+    process.env.SUPABASE_URL = 'https://newserverproject.supabase.co';
+    process.env.DISCORD_APPLICATION_ID = '123456789012345678';
+    process.env.DISCORD_CLIENT_SECRET = 'discord-client-secret';
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          EXTERNAL_DISCORD_ENABLED: true,
+          URI_ALLOW_LIST: 'http://localhost:3000/api/auth/callback',
+        }),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await ensureDiscordAuthProvider({ accessToken: 'setup-provided-token' });
+
+    expect(result).toEqual({ success: true, alreadyConfigured: true });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.supabase.com/v1/projects/newserverproject/config/auth',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer setup-provided-token',
+        }),
+      }),
+    );
+  });
+
   it('passes a timeout signal to Supabase Management API status reads', async () => {
     process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
 

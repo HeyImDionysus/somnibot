@@ -108,13 +108,15 @@ describe('Supabase runtime config', () => {
     });
   });
 
-  it('updates stale setup-applied Supabase env with the latest verified values', async () => {
+  it('updates stale setup-applied server Supabase env without masking public env drift evidence', async () => {
     const { applyRuntimeSupabaseEnv } = await import('@/lib/supabase/runtime-config');
 
     process.env = { ...originalEnv };
     process.env.SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://oldpublic.supabase.co';
     process.env.SUPABASE_ANON_KEY = 'sb_publishable_old';
     process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_public_old';
     process.env.SUPABASE_SECRET_KEY = 'old-secret-value';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'old-secret-value';
 
@@ -125,10 +127,10 @@ describe('Supabase runtime config', () => {
     });
 
     expect(process.env.SUPABASE_URL).toBe('https://savedproject.supabase.co');
-    expect(process.env.NEXT_PUBLIC_SUPABASE_URL).toBe('https://savedproject.supabase.co');
+    expect(process.env.NEXT_PUBLIC_SUPABASE_URL).toBe('https://oldpublic.supabase.co');
     expect(process.env.SUPABASE_ANON_KEY).toBe('sb_publishable_saved');
     expect(process.env.SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_saved');
-    expect(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_saved');
+    expect(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY).toBe('sb_publishable_public_old');
     expect(process.env.SUPABASE_SECRET_KEY).toBe('saved-secret-value');
     expect(process.env.SUPABASE_SERVICE_ROLE_KEY).toBe('saved-secret-value');
   });

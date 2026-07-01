@@ -44,7 +44,7 @@ interface AutoConfigOptions {
  * e.g. "https://YOUR_PROJECT.supabase.co" → "YOUR_PROJECT_REF"
  */
 function getProjectRef(): string | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || '';
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '';
   const match = url.match(/https:\/\/([a-z0-9]+)\.supabase\.co/);
   return match ? match[1] : null;
 }
