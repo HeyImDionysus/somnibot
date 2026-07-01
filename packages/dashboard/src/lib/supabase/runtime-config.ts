@@ -30,12 +30,12 @@ export const SUPABASE_RUNTIME_SETTING_KEYS = [
 
 export function readEnvSupabaseConfig(env: NodeJS.ProcessEnv = process.env): SupabaseRuntimeConfig {
   return {
-    url: env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || '',
-    publishableKey: env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '',
+    url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL || '',
+    publishableKey: env.SUPABASE_PUBLISHABLE_KEY || env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '',
     secretKey: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || '',
     sources: {
-      url: env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL ? 'env' : 'missing',
-      publishableKey: env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY ? 'env' : 'missing',
+      url: env.SUPABASE_URL || env.NEXT_PUBLIC_SUPABASE_URL ? 'env' : 'missing',
+      publishableKey: env.SUPABASE_PUBLISHABLE_KEY || env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY ? 'env' : 'missing',
       secretKey: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY ? 'env' : 'missing',
     },
   };
@@ -87,11 +87,13 @@ export function applyRuntimeSupabaseEnv(config: {
 }) {
   if (config.url) {
     process.env.SUPABASE_URL = config.url;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = config.url;
   }
 
   if (config.publishableKey) {
     process.env.SUPABASE_ANON_KEY = config.publishableKey;
     process.env.SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = config.publishableKey;
   }
 
   if (config.secretKey) {

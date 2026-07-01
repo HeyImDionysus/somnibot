@@ -402,6 +402,25 @@ function validateBrowserSupabaseConfigForFinalize(
     return 'Remote dashboard auth requires NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY at build time before setup can finalize. Rebuild/redeploy with public Supabase env, then finalize setup.';
   }
 
+  const runtimePublicUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const runtimePublicPublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
+  const normalizedBrowserUrl = normalizeRuntimeBaseUrl(browserConfig.url);
+
+  if (!normalizedBrowserUrl) {
+    return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
+  }
+
+  if (runtimePublicUrl) {
+    const normalizedRuntimePublicUrl = normalizeRuntimeBaseUrl(runtimePublicUrl);
+    if (!normalizedRuntimePublicUrl || normalizedRuntimePublicUrl !== normalizedBrowserUrl) {
+      return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
+    }
+  }
+
+  if (runtimePublicPublishableKey && runtimePublicPublishableKey !== browserConfig.publishableKey) {
+    return 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.';
+  }
+
   const expectedUrl = credentials.supabase_url?.trim()
     || process.env.SUPABASE_URL?.trim()
     || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
@@ -417,9 +436,8 @@ function validateBrowserSupabaseConfigForFinalize(
     || browserConfig.publishableKey;
 
   const normalizedExpectedUrl = normalizeRuntimeBaseUrl(expectedUrl);
-  const normalizedBrowserUrl = normalizeRuntimeBaseUrl(browserConfig.url);
 
-  if (!normalizedExpectedUrl || !normalizedBrowserUrl || normalizedExpectedUrl !== normalizedBrowserUrl) {
+  if (!normalizedExpectedUrl || normalizedExpectedUrl !== normalizedBrowserUrl) {
     return 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.';
   }
 

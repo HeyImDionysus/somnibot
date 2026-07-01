@@ -275,6 +275,64 @@ describe('POST /api/setup finalize', () => {
     expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
   });
 
+  it('does not let server-only Supabase URL aliases hide runtime public URL drift', async () => {
+    process.env.SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://newproject.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://oldproject.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase URL does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_URL before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
+  it('does not let server-only Supabase key aliases hide runtime public key drift', async () => {
+    process.env.SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_new';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_URL = 'https://abcdefghijklmnopqrst.supabase.co';
+    process.env.SOMNIBOT_BUILD_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_old';
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body).toEqual({
+      ok: false,
+      error: 'Remote dashboard auth public Supabase publishable key does not match the configured Supabase project. Rebuild/redeploy with matching NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before finalizing setup.',
+      setupLocked: false,
+    });
+    expect(ensureDiscordAuthProvider).not.toHaveBeenCalled();
+  });
+
   it('does not lock setup when saved Supabase client key rotated without rebuilding the browser bundle', async () => {
     const instanceSettingsTable = registerTable(mock, 'instance_settings');
     instanceSettingsTable.limit.mockResolvedValueOnce({
