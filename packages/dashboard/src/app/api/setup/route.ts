@@ -383,10 +383,14 @@ function getRequiredPayPalReadinessError(
 function validateBrowserSupabaseConfigForFinalize(
   credentials: Record<string, string | undefined>,
   savedSettings: SetupSettingMap,
+  request: NextRequest,
 ): string | null {
+  const host = request.headers.get('host') ?? new URL(request.url).host;
+  const isLocalhost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(:\d+)?$/.test(host);
   const launcherLocalMode = process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE === '1'
     && typeof process.env.SESSION_TOKEN === 'string'
-    && process.env.SESSION_TOKEN.length > 0;
+    && process.env.SESSION_TOKEN.length > 0
+    && isLocalhost;
   if (launcherLocalMode) {
     return null;
   }
@@ -399,16 +403,16 @@ function validateBrowserSupabaseConfigForFinalize(
   }
 
   const expectedUrl = credentials.supabase_url?.trim()
-    || savedSettings.get('supabase_url')?.trim()
     || process.env.SUPABASE_URL?.trim()
     || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
+    || savedSettings.get('supabase_url')?.trim()
     || browserConfig.url;
   const expectedPublishableKey = credentials.supabase_publishable_key?.trim()
-    || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
     || credentials.supabase_anon_key?.trim()
-    || savedSettings.get('supabase_publishable_key')?.trim()
     || savedSettings.get('supabase_anon_key')?.trim()
     || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim()
+    || process.env.SUPABASE_PUBLISHABLE_KEY?.trim()
+    || savedSettings.get('supabase_publishable_key')?.trim()
     || process.env.SUPABASE_ANON_KEY?.trim()
     || browserConfig.publishableKey;
 
@@ -988,7 +992,7 @@ export async function POST(request: NextRequest) {
       applyRuntimePayPalEnv(submittedPayPalConfig);
     }
 
-    const browserSupabaseError = validateBrowserSupabaseConfigForFinalize(credentials, savedSetupSettings);
+    const browserSupabaseError = validateBrowserSupabaseConfigForFinalize(credentials, savedSetupSettings, request);
     if (browserSupabaseError) {
       return NextResponse.json(
         {
