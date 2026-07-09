@@ -296,9 +296,9 @@ const FRAUD_ALERT_TYPE = 'fraud_check_failure';
 
 /**
  * Minimum time between alert write attempts per guild (per instance).
- * The alert row itself is deduped in the DB (one unresolved row per guild,
- * mirroring the bot's AlertManager pattern); this throttle keeps a sustained
- * outage from adding alert-write DB load on every validation.
+ * The alert row itself is deduped atomically in the DB (partial unique
+ * index: one unresolved row per guild); this throttle only keeps a
+ * sustained outage from adding alert-write DB load on every validation.
  */
 const FRAUD_ALERT_MIN_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -368,8 +368,13 @@ async function runFraudChecks(
 /**
  * Persist an operator-visible alert for fraud check failures.
  *
- * Mirrors the bot AlertManager dedupe pattern: at most one unresolved
- * `fraud_check_failure` alert per guild (refresh it if it already exists).
+ * At most one unresolved `fraud_check_failure` alert per guild. The dedupe
+ * is atomic at the database via the partial unique index
+ * `uniq_alerts_unresolved_fraud_check_failure` (guild_id WHERE alert_type =
+ * 'fraud_check_failure' AND resolved = false): an existing alert is
+ * refreshed in place with a single UPDATE, otherwise we INSERT and treat a
+ * 23505 unique violation as "another instance already raised it" — so
+ * concurrent instances during the same outage cannot create duplicates.
  * Additionally throttled in-memory so a sustained outage attempts at most
  * one alert write per guild per FRAUD_ALERT_MIN_INTERVAL_MS per instance.
  */
@@ -396,32 +401,27 @@ async function raiseFraudCheckAlert(
   const metadata = { failures, source: 'license_validate' };
 
   try {
-    // DB-side dedupe (same pattern as the bot's AlertManager): reuse the
-    // existing unresolved alert for this guild instead of inserting a new row.
-    const { data: existing, error: selectError } = await supabase
+    // Refresh the existing unresolved alert in place — a single atomic
+    // UPDATE, no read-then-write window.
+    const { data: refreshed, error: updateError } = await supabase
       .from('alerts')
-      .select('id')
+      .update({ message, metadata, updated_at: new Date().toISOString() })
       .eq('guild_id', guildId)
       .eq('alert_type', FRAUD_ALERT_TYPE)
       .eq('resolved', false)
-      .maybeSingle();
+      .select('id');
 
-    if (selectError) {
-      console.error('[License] Failed to look up existing fraud check alert:', selectError.message);
+    if (updateError) {
+      console.error('[License] Failed to refresh fraud check alert:', updateError.message);
       return;
     }
+    if (refreshed && refreshed.length > 0) return;
 
-    if (existing) {
-      const { error: updateError } = await supabase
-        .from('alerts')
-        .update({ message, metadata, updated_at: new Date().toISOString() })
-        .eq('id', existing.id);
-      if (updateError) {
-        console.error('[License] Failed to update fraud check alert:', updateError.message);
-      }
-      return;
-    }
-
+    // No unresolved alert yet — insert one. The partial unique index
+    // `uniq_alerts_unresolved_fraud_check_failure` makes the dedupe atomic
+    // across instances: if another instance raced us past the UPDATE above,
+    // exactly one INSERT commits and the loser sees a 23505 unique
+    // violation, which means the alert exists — success, not an error.
     const { error: insertError } = await supabase.from('alerts').insert({
       guild_id: guildId,
       alert_type: FRAUD_ALERT_TYPE,
@@ -430,7 +430,7 @@ async function raiseFraudCheckAlert(
       message,
       metadata,
     });
-    if (insertError) {
+    if (insertError && insertError.code !== '23505') {
       console.error('[License] Failed to insert fraud check alert:', insertError.message);
     }
   } catch (err) {

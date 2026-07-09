@@ -64,6 +64,11 @@ function setupMocks(guildId: string) {
   const fraudSignalsQuery = registerTable(mock, 'fraud_signals');
   const alertsQuery = registerTable(mock, 'alerts');
 
+  // Terminal `.select('id')` of the alert refresh UPDATE chain. Default: no
+  // existing unresolved alert (0 rows updated) → the route falls through to
+  // the INSERT path.
+  alertsQuery.select.mockResolvedValue({ data: [], error: null });
+
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
   return { mock, sessionsQuery, fraudSignalsQuery, alertsQuery };
 }
@@ -147,10 +152,11 @@ describe('POST /api/license/validate — fraud check observability', () => {
     );
   });
 
-  it('updates the existing unresolved alert instead of inserting a duplicate row', async () => {
+  it('refreshes the existing unresolved alert in place instead of inserting a duplicate row', async () => {
     const { sessionsQuery, alertsQuery } = setupMocks('guild-dedupe');
     failSessions(sessionsQuery);
-    alertsQuery.maybeSingle.mockResolvedValue({ data: { id: 'alert-1' }, error: null });
+    // The atomic UPDATE matches the existing unresolved alert (1 row).
+    alertsQuery.select.mockResolvedValue({ data: [{ id: 'alert-1' }], error: null });
 
     const res = await POST(makeReq() as never);
     expect(res.status).toBe(200);
@@ -160,7 +166,70 @@ describe('POST /api/license/validate — fraud check observability', () => {
     expect(alertsQuery.update).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.any(String), updated_at: expect.any(String) }),
     );
+    // The UPDATE targets exactly the unresolved alert for this guild + type.
+    expect(alertsQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-dedupe');
+    expect(alertsQuery.eq).toHaveBeenCalledWith('alert_type', 'fraud_check_failure');
+    expect(alertsQuery.eq).toHaveBeenCalledWith('resolved', false);
     expect(alertsQuery.insert).not.toHaveBeenCalled();
+  });
+
+  it('dedupes concurrent inserts across instances via the unique index (23505 is success)', async () => {
+    const { sessionsQuery, alertsQuery } = setupMocks('guild-race');
+    failSessions(sessionsQuery);
+
+    // Simulate the racing interleaving codex flagged: both "instances"
+    // observe no unresolved alert (their refresh UPDATE matches 0 rows —
+    // the setupMocks default) before either INSERT commits, so BOTH attempt
+    // the INSERT. The partial unique index lets exactly one row through and
+    // hands the loser a 23505 unique violation.
+    alertsQuery.insert
+      .mockResolvedValueOnce({ error: null })
+      .mockResolvedValueOnce({
+        error: {
+          code: '23505',
+          message: 'duplicate key value violates unique constraint "uniq_alerts_unresolved_fraud_check_failure"',
+        },
+      });
+
+    const res1 = await POST(makeReq() as never);
+    expect(res1.status).toBe(200);
+    await vi.waitFor(() => expect(alertsQuery.insert).toHaveBeenCalledTimes(1));
+
+    // Second instance: production instances have separate throttle maps, but
+    // this test process shares one module instance — step past the throttle.
+    const nowSpy = vi.spyOn(Date, 'now');
+    nowSpy.mockReturnValue(new Date('2100-01-01T00:00:00Z').getTime());
+    try {
+      const res2 = await POST(makeReq() as never);
+      expect(res2.status).toBe(200);
+      await vi.waitFor(() => expect(alertsQuery.insert).toHaveBeenCalledTimes(2));
+      await flushAsync();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    // Both inserts were attempted, one row results, and the losing 23505 is
+    // dedupe working — nothing is logged and nothing surfaces to validation.
+    const insertFailureLogs = errorSpy.mock.calls.filter(
+      (call) => call[0] === '[License] Failed to insert fraud check alert:',
+    );
+    expect(insertFailureLogs).toHaveLength(0);
+  });
+
+  it('still logs genuine insert failures — only unique violations are treated as dedupe', async () => {
+    const { sessionsQuery, alertsQuery } = setupMocks('guild-insert-fail');
+    failSessions(sessionsQuery);
+    alertsQuery.insert.mockResolvedValue({ error: { code: '42501', message: 'permission denied for table alerts' } });
+
+    const res = await POST(makeReq() as never);
+    expect(res.status).toBe(200);
+
+    await vi.waitFor(() =>
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[License] Failed to insert fraud check alert:',
+        'permission denied for table alerts',
+      ),
+    );
   });
 
   it('throttles alert writes during a sustained outage', async () => {
@@ -178,6 +247,7 @@ describe('POST /api/license/validate — fraud check observability', () => {
 
     // ...but does not touch the alerts table again within the throttle window.
     expect(alertsQuery.insert).toHaveBeenCalledTimes(1);
+    expect(alertsQuery.update).toHaveBeenCalledTimes(1);
     expect(alertsQuery.select).toHaveBeenCalledTimes(1);
   });
 
