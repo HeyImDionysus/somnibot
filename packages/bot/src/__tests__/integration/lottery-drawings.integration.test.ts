@@ -339,3 +339,230 @@ describe('lottery_buy_tickets status guard', () => {
     expect(error!.message).toContain('is not active');
   });
 });
+
+/**
+ * 20260709200000_lottery_cancel_empty_drawing: the scheduler's "no entries"
+ * reset happens atomically inside lottery_cancel_drawing_if_empty — status
+ * check, emptiness check and cancellation under one FOR UPDATE of the
+ * drawing row — so it serialises against lottery_buy_tickets (same row
+ * lock). The bot-side probe-then-UPDATE it replaces let a buy charge coins
+ * into a drawing that was cancelled an instant later.
+ */
+describe('lottery_cancel_drawing_if_empty RPC', () => {
+  it('cancels an empty active drawing and reports cancelled', async () => {
+    const empty = await createDrawing(0);
+
+    const { data: outcome, error } = await supa.rpc('lottery_cancel_drawing_if_empty', {
+      p_drawing_id: empty,
+    });
+
+    expect(error).toBeNull();
+    expect(outcome).toBe('cancelled');
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, drawn_at')
+      .eq('id', empty)
+      .single();
+    expect(row!.status).toBe('cancelled');
+    expect(row!.drawn_at).not.toBeNull();
+  });
+
+  it('never cancels a drawing that has tickets', async () => {
+    const ticketed = await createDrawing(100);
+    await insertTickets(ticketed, USER_A, [81]);
+
+    const { data: outcome, error } = await supa.rpc('lottery_cancel_drawing_if_empty', {
+      p_drawing_id: ticketed,
+    });
+
+    expect(error).toBeNull();
+    expect(outcome).toBe('has_tickets');
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, jackpot')
+      .eq('id', ticketed)
+      .single();
+    expect(row!.status).toBe('active');
+    expect(row!.jackpot).toBe(100);
+  });
+
+  it('refuses a claimed drawing, leaving its stored winner untouched', async () => {
+    const claimedDrawing = await createDrawing(200);
+    await insertTickets(claimedDrawing, USER_B, [91]);
+    const { data: claimed } = await supa.rpc('lottery_claim_drawing', {
+      p_drawing_id: claimedDrawing,
+    });
+    expect((Array.isArray(claimed) ? claimed : []).length).toBe(1);
+
+    const { data: outcome, error } = await supa.rpc('lottery_cancel_drawing_if_empty', {
+      p_drawing_id: claimedDrawing,
+    });
+
+    expect(error).toBeNull();
+    expect(outcome).toBe('not_active');
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, winner_user_id')
+      .eq('id', claimedDrawing)
+      .single();
+    expect(row!.status).toBe('drawing');
+    expect(row!.winner_user_id).toBe(USER_B);
+  });
+
+  it('is idempotent: a second cancel and an unknown id both report not_active', async () => {
+    const empty = await createDrawing(0);
+    await supa.rpc('lottery_cancel_drawing_if_empty', { p_drawing_id: empty });
+
+    const { data: again, error: againErr } = await supa.rpc('lottery_cancel_drawing_if_empty', {
+      p_drawing_id: empty,
+    });
+    expect(againErr).toBeNull();
+    expect(again).toBe('not_active');
+
+    const { data: missing, error: missingErr } = await supa.rpc('lottery_cancel_drawing_if_empty', {
+      p_drawing_id: '00000000-0000-0000-0000-000000000000',
+    });
+    expect(missingErr).toBeNull();
+    expect(missing).toBe('not_active');
+  });
+
+  it('serialises against a racing purchase — the buyer can never lose coins into a cancelled drawing', async () => {
+    const contested = await createDrawing(0);
+
+    // Fire the cancel and a buy concurrently. The row lock forces one of two
+    // serialisations; the interleaving that motivated this RPC (tickets sold
+    // into a drawing cancelled an instant later) must be impossible.
+    const [cancelRes, buyRes] = await Promise.all([
+      supa.rpc('lottery_cancel_drawing_if_empty', { p_drawing_id: contested }),
+      supa.rpc('lottery_buy_tickets', {
+        p_drawing_id: contested,
+        p_guild_id: GUILD_ID,
+        p_user_id: USER_A,
+        p_count: 1,
+        p_max: 10,
+        p_cost: 100,
+      }),
+    ]);
+
+    expect(cancelRes.error).toBeNull();
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, jackpot')
+      .eq('id', contested)
+      .single();
+    const { data: tickets } = await supa
+      .from('economy_lottery_tickets')
+      .select('id')
+      .eq('drawing_id', contested);
+
+    if (cancelRes.data === 'cancelled') {
+      // Cancel won the lock: the buy must have been rejected by the
+      // post-lock status guard — no tickets, no jackpot money captured.
+      expect(buyRes.error).not.toBeNull();
+      expect(buyRes.error!.message).toContain('is not active');
+      expect(row!.status).toBe('cancelled');
+      expect(tickets!.length).toBe(0);
+      expect(row!.jackpot).toBe(0);
+    } else {
+      // Buy won the lock: the cancel must have seen the tickets and backed
+      // off — the drawing stays live with the purchase intact.
+      expect(cancelRes.data).toBe('has_tickets');
+      expect(buyRes.error).toBeNull();
+      expect(row!.status).toBe('active');
+      expect(tickets!.length).toBe(1);
+      expect(row!.jackpot).toBe(100);
+    }
+
+    // The lost-coins interleaving is impossible in EITHER serialisation.
+    expect(row!.status === 'cancelled' && tickets!.length > 0).toBe(false);
+  });
+});
+
+/**
+ * Legacy recovery (codex round 2): a v48-era crash could leave a drawing at
+ * status='drawing' with NO stored winner. The award RPC must refuse such a
+ * row (it is proof no payout ever happened), and once the bot reverts it to
+ * 'active' the normal claim path settles it exactly once.
+ */
+describe('legacy drawing rows without stored winners', () => {
+  it('award refuses a NULL-winner claimed row; reverting to active re-enters the normal pipeline', async () => {
+    // Simulate the v48 crash artifact directly.
+    const { data: inserted, error: insertErr } = await supa
+      .from('economy_lottery_drawings')
+      .insert({ guild_id: GUILD_ID, status: 'drawing', jackpot: 400 })
+      .select()
+      .single();
+    expect(insertErr).toBeNull();
+    const legacyId = inserted!.id as string;
+    await insertTickets(legacyId, USER_A, [95, 96]);
+
+    // No stored winner ⇒ lottery_award_jackpot must not pay anything.
+    const beforeWallet = await walletOf(USER_A);
+    const { data: awarded, error: awardErr } = await supa.rpc('lottery_award_jackpot', {
+      p_drawing_id: legacyId,
+    });
+    expect(awardErr).toBeNull();
+    expect((Array.isArray(awarded) ? awarded : []).length).toBe(0);
+    expect(await walletOf(USER_A)).toBe(beforeWallet);
+
+    // The bot's recovery: guarded revert to 'active' (only while the winner
+    // is still NULL), then the atomic claim decides the winner exactly once.
+    const { error: revertErr } = await supa
+      .from('economy_lottery_drawings')
+      .update({ status: 'active' })
+      .eq('id', legacyId)
+      .eq('status', 'drawing')
+      .is('winner_user_id', null);
+    expect(revertErr).toBeNull();
+
+    const { data: claimed, error: claimErr } = await supa.rpc('lottery_claim_drawing', {
+      p_drawing_id: legacyId,
+    });
+    expect(claimErr).toBeNull();
+    const claimedRows = Array.isArray(claimed) ? claimed : [];
+    expect(claimedRows.length).toBe(1);
+    expect(claimedRows[0].winner_user_id).toBe(USER_A);
+
+    // Settle it fully: exactly one payout to the stored winner.
+    const preAward = await walletOf(USER_A);
+    const { data: paid, error: paidErr } = await supa.rpc('lottery_award_jackpot', {
+      p_drawing_id: legacyId,
+    });
+    expect(paidErr).toBeNull();
+    expect((Array.isArray(paid) ? paid : []).length).toBe(1);
+    expect(await walletOf(USER_A)).toBe(preAward + 400);
+  });
+
+  it('the guarded revert is a no-op once a winner is stored', async () => {
+    const settled = await createDrawing(150);
+    await insertTickets(settled, USER_B, [97]);
+    const { data: claimed } = await supa.rpc('lottery_claim_drawing', {
+      p_drawing_id: settled,
+    });
+    expect((Array.isArray(claimed) ? claimed : []).length).toBe(1);
+
+    // The recovery guard (winner_user_id IS NULL) must not match a row with
+    // a decided winner — reverting it would re-roll the winner.
+    const { data: reverted, error } = await supa
+      .from('economy_lottery_drawings')
+      .update({ status: 'active' })
+      .eq('id', settled)
+      .eq('status', 'drawing')
+      .is('winner_user_id', null)
+      .select('id');
+    expect(error).toBeNull();
+    expect(reverted!.length).toBe(0);
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, winner_user_id')
+      .eq('id', settled)
+      .single();
+    expect(row!.status).toBe('drawing');
+    expect(row!.winner_user_id).toBe(USER_B);
+  });
+});
