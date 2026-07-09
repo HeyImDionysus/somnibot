@@ -34,7 +34,7 @@ import { LotteryManager, registerLotteryManager, invalidateLotteryCache } from '
 
 // ── Helpers ───────────────────────────────────────────────
 
-function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<string, any> = {}) {
+function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<string, any> = {}, tableErrors: Record<string, any> = {}) {
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
     const chain: Record<string, any> = {};
@@ -42,8 +42,9 @@ function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<st
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
-    const data = tableData[table] ?? null;
-    chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
+    const error = tableErrors[table] ?? null;
+    const data = error ? null : (tableData[table] ?? null);
+    chain.then = (resolve: (v: any) => void) => resolve({ data, error });
     (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
@@ -233,6 +234,37 @@ describe('LotteryManager', () => {
       await mgr.buyTickets(interaction as any, 1);
       expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
         content: expect.stringContaining('maximum'),
+      }));
+    });
+
+    it('refunds and explains when the drawing closed while the buy was in flight', async () => {
+      supabase = makeSupabase(
+        {
+          guild_config: { economy_lottery_enabled: true, economy_lottery_max_tickets: 10, economy_lottery_ticket_price: 100 },
+          economy_wallets: { wallet: 1000 },
+          economy_lottery_drawings: { id: 'd1', jackpot: 500, status: 'active', created_at: new Date().toISOString() },
+        },
+        {
+          economy_subtract_balance: { data: true, error: null },
+          // Typed guard from 20260709190000: the scheduler claimed the
+          // drawing while this purchase waited on the row lock.
+          lottery_buy_tickets: { error: { message: 'lottery_buy_tickets: drawing d1 is not active (status=drawing)' } },
+          economy_add_balance: { data: true, error: null },
+        },
+      );
+      mgr = new LotteryManager(supabase as any);
+      const interaction = makeInteraction();
+      await mgr.buyTickets(interaction as any, 1);
+      // The debit must be refunded — the user cannot silently lose coins.
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_add_balance', expect.objectContaining({
+        p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100,
+      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('just closed'),
+        ephemeral: true,
+      }));
+      expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({
+        content: expect.stringContaining('refunded'),
       }));
     });
 
@@ -438,7 +470,9 @@ describe('LotteryManager', () => {
       supabase = makeSupabase(
         {
           economy_lottery_drawings: { id: 'd1', jackpot: 0, status: 'active' },
-          economy_lottery_tickets: null,
+          // A successful zero-row select resolves to [] (never null) — the
+          // reset requires this genuine "succeeded with zero rows" shape.
+          economy_lottery_tickets: [],
         },
         { lottery_claim_drawing: { data: [], error: null } },
       );
@@ -474,6 +508,108 @@ describe('LotteryManager', () => {
       // A drawing with tickets is never a "no entries" reset.
       expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
       expect(send).not.toHaveBeenCalled();
+    });
+
+    it('does not cancel the drawing when the ticket lookup errors', async () => {
+      supabase = makeSupabase(
+        { economy_lottery_drawings: { id: 'd1', jackpot: 0, status: 'active' } },
+        { lottery_claim_drawing: { data: [], error: null } },
+        // Transient DB failure on the entries check: data comes back null,
+        // which must NOT be mistaken for "zero entries" — that destroyed a
+        // live lottery.
+        { economy_lottery_tickets: { message: 'connection reset by peer' } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config);
+
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('does not cancel when the ticket lookup yields no result set at all', async () => {
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'd1', jackpot: 0, status: 'active' },
+          economy_lottery_tickets: null, // no rowset — NOT a confirmed zero-row result
+        },
+        { lottery_claim_drawing: { data: [], error: null } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config);
+
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('resets exactly the drawing that was selected for drawing', async () => {
+      // The scheduler selected this (oldest, empty) drawing; a NEWER active
+      // drawing with tickets also exists. The reset must target the selected
+      // row by id — re-fetching "the newest active drawing" here inspected
+      // the other row, skipped the cancel, and the scheduler re-selected the
+      // same empty row forever while the ticketed drawing was never drawn.
+      const selected = { id: 'old-1', jackpot: 0, status: 'active', created_at: '2026-01-01T00:00:00Z' };
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'old-1', status: 'active' },
+          economy_lottery_tickets: [],
+        },
+        { lottery_claim_drawing: { data: [], error: null } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config, selected);
+
+      const chainsFor = (table: string) => supabase.from.mock.calls
+        .map((args: any[], i: number) => ({ table: args[0], chain: supabase.from.mock.results[i].value }))
+        .filter((e: any) => e.table === table)
+        .map((e: any) => e.chain);
+
+      // The entries check ran against the SELECTED drawing…
+      const ticketChains = chainsFor('economy_lottery_tickets');
+      expect(ticketChains).toHaveLength(1);
+      expect(ticketChains[0].eq.mock.calls).toContainEqual(['drawing_id', 'old-1']);
+
+      // …and the cancel targeted the SELECTED drawing, guarded on status.
+      const cancelChains = chainsFor('economy_lottery_drawings')
+        .filter((c: any) => c.update.mock.calls.length > 0);
+      expect(cancelChains).toHaveLength(1);
+      expect(cancelChains[0].update.mock.calls[0][0]).toEqual(expect.objectContaining({ status: 'cancelled' }));
+      expect(cancelChains[0].eq.mock.calls).toContainEqual(['id', 'old-1']);
+      expect(cancelChains[0].eq.mock.calls).toContainEqual(['status', 'active']);
+      expect(send).toHaveBeenCalled();
+    });
+
+    it('checkAndDraw hands the drawing it selected to drawWinner', async () => {
+      const selected = {
+        id: 'old-1', jackpot: 0, status: 'active',
+        created_at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+      };
+      supabase = makeSupabase(
+        {
+          guild_config: { economy_lottery_enabled: true, economy_lottery_schedule: 'daily' },
+          economy_lottery_drawings: selected,
+          economy_lottery_tickets: [],
+        },
+        { lottery_claim_drawing: { data: [], error: null } },
+      );
+      mgr = new LotteryManager(supabase as any);
+      const spy = vi.spyOn(mgr, 'drawWinner');
+
+      await (mgr as any).checkAndDraw('g1');
+
+      // Selection happens once, up front — the whole tick acts on that row.
+      expect(spy).toHaveBeenCalledWith('g1', expect.objectContaining({ id: 'old-1' }));
     });
 
     it('pays out to exactly one of two racing workers', async () => {

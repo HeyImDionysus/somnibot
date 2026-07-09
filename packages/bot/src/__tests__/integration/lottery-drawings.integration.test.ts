@@ -239,3 +239,103 @@ describe('lottery_award_jackpot RPC', () => {
     expect(await walletOf(USER_B)).toBe(before + 250);
   });
 });
+
+/**
+ * 20260709190000_lottery_buy_reject_closed_drawing: lottery_buy_tickets
+ * re-checks status AFTER acquiring the drawing row lock, so a purchase that
+ * was blocked on the lock while lottery_claim_drawing claimed the drawing
+ * aborts instead of appending tickets that can never win. (The function is
+ * re-created from the 20260709160000 definition, so the schema-qualified
+ * extensions.gen_random_bytes fix is exercised here too.)
+ */
+describe('lottery_buy_tickets status guard', () => {
+  it('sells tickets for an ACTIVE drawing (qualified pgcrypto randomness intact)', async () => {
+    const active = await createDrawing(0);
+
+    const { data: newJackpot, error } = await supa.rpc('lottery_buy_tickets', {
+      p_drawing_id: active,
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_A,
+      p_count: 2,
+      p_max: 10,
+      p_cost: 200,
+    });
+
+    expect(error).toBeNull();
+    expect(newJackpot).toBe(200);
+
+    const { data: tickets } = await supa
+      .from('economy_lottery_tickets')
+      .select('ticket_number')
+      .eq('drawing_id', active)
+      .eq('user_id', USER_A);
+    expect(tickets!.length).toBe(2);
+    for (const t of tickets!) {
+      expect(t.ticket_number).toBeGreaterThanOrEqual(0);
+      expect(t.ticket_number).toBeLessThanOrEqual(9999);
+    }
+  });
+
+  it('rejects a purchase once the drawing is claimed, leaving no partial state', async () => {
+    const claimedDrawing = await createDrawing(100);
+    await insertTickets(claimedDrawing, USER_A, [71]);
+
+    // Scheduler claims the drawing — winner is now selected and stored.
+    const { data: claimed } = await supa.rpc('lottery_claim_drawing', {
+      p_drawing_id: claimedDrawing,
+    });
+    expect((Array.isArray(claimed) ? claimed : []).length).toBe(1);
+
+    // A buy that resumes after the claim must be rejected with the typed
+    // 'is not active' error the bot maps to a refund + "drawing just closed".
+    const { error } = await supa.rpc('lottery_buy_tickets', {
+      p_drawing_id: claimedDrawing,
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_B,
+      p_count: 2,
+      p_max: 10,
+      p_cost: 200,
+    });
+
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('is not active');
+
+    // Transaction rolled back: no tickets appended, jackpot untouched, and
+    // the stored winner is unaffected.
+    const { data: lateTickets } = await supa
+      .from('economy_lottery_tickets')
+      .select('id')
+      .eq('drawing_id', claimedDrawing)
+      .eq('user_id', USER_B);
+    expect(lateTickets!.length).toBe(0);
+
+    const { data: row } = await supa
+      .from('economy_lottery_drawings')
+      .select('status, jackpot, winner_user_id')
+      .eq('id', claimedDrawing)
+      .single();
+    expect(row!.status).toBe('drawing');
+    expect(row!.jackpot).toBe(100);
+    expect(row!.winner_user_id).toBe(USER_A);
+  });
+
+  it('rejects a purchase for a cancelled drawing', async () => {
+    const cancelled = await createDrawing(0);
+    await supa
+      .from('economy_lottery_drawings')
+      .update({ status: 'cancelled', drawn_at: new Date().toISOString() })
+      .eq('id', cancelled);
+
+    const { error } = await supa.rpc('lottery_buy_tickets', {
+      p_drawing_id: cancelled,
+      p_guild_id: GUILD_ID,
+      p_user_id: USER_B,
+      p_count: 1,
+      p_max: 10,
+      p_cost: 100,
+    });
+
+    expect(error).not.toBeNull();
+    expect(error!.message).toContain('is not active');
+  });
+});

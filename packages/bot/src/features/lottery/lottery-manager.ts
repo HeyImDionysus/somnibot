@@ -110,15 +110,26 @@ export class LotteryManager {
 
       if (elapsed < intervalMs) return; // Not time yet
 
-      // Time to draw!
-      await this.executeDrawAndAnnounce(guildId, config);
+      // Time to draw! Pass the selected drawing through so the draw, the
+      // payout and any no-entries reset all act on this exact row.
+      await this.executeDrawAndAnnounce(guildId, config, drawing);
     } catch (err) {
       log.error('checkAndDraw error:', { error: String(err) });
     }
   }
 
-  private async executeDrawAndAnnounce(guildId: string, config: DbGuildConfig): Promise<void> {
-    const result = await this.drawWinner(guildId);
+  private async executeDrawAndAnnounce(guildId: string, config: DbGuildConfig, pending?: any): Promise<void> {
+    // One tick acts on ONE drawing: the row selected here is the row that
+    // gets drawn AND the row the no-entries branch may reset. Re-selecting
+    // independently in each step picks DIFFERENT rows when several drawings
+    // are pending (the draw path is oldest-first across active+drawing, the
+    // old reset path was newest-first active-only), which left an old empty
+    // drawing uncancelled and re-selected forever while a newer ticketed
+    // drawing was never drawn.
+    const selected = pending ?? await this.getPendingDrawing(guildId);
+    if (!selected) return;
+
+    const result = await this.drawWinner(guildId, selected);
 
     const logChannelId = config.economy_log_channel_id;
     const channel = logChannelId && this.client
@@ -145,22 +156,35 @@ export class LotteryManager {
       // can also mean a payout retry is pending ('drawing' status with a
       // stored winner) or another worker claimed the row, so only a still-
       // ACTIVE drawing is treated as a true "no entries" reset — and only
-      // then is the reset announced. The status guard on the update keeps a
+      // then is the reset announced. Re-fetch the SELECTED row by id (never
+      // "the newest active drawing" — that can be a different row) to read
+      // its current status; the status guard on the update keeps a
       // concurrent claim from being cancelled (which would strand its stored
       // winner unpaid).
-      const drawing = await this.getActiveDrawing(guildId);
-      if (!drawing || drawing.status !== 'active') return;
+      const { data: drawing, error: drawingErr } = await this.supabase
+        .from('economy_lottery_drawings')
+        .select('id, status')
+        .eq('id', selected.id)
+        .single();
+      if (drawingErr || !drawing || drawing.status !== 'active') return;
 
       // Never treat a drawing that has tickets as a "no entries" reset — a
       // null draw result alongside a ticketed ACTIVE drawing means this tick
       // simply didn't settle it (e.g. it retried an older stuck payout, or
-      // another worker won the claim race).
-      const { data: entries } = await this.supabase
+      // another worker won the claim race). Cancel ONLY when the lookup
+      // genuinely succeeded with zero rows: on a query error data is null
+      // too, and treating that as "no entries" would let a transient DB
+      // error cancel a live lottery.
+      const { data: entries, error: entriesErr } = await this.supabase
         .from('economy_lottery_tickets')
         .select('id')
         .eq('drawing_id', drawing.id)
         .limit(1);
-      if (entries && entries.length > 0) return;
+      if (entriesErr) {
+        log.error(`Skipping no-entries reset of ${drawing.id} — ticket lookup failed:`, entriesErr.message);
+        return;
+      }
+      if (!Array.isArray(entries) || entries.length > 0) return;
 
       await this.supabase
         .from('economy_lottery_drawings')
@@ -301,6 +325,11 @@ export class LotteryManager {
       // RPC failed — entire transaction rolled back, no tickets inserted,
       // no jackpot changed. Just refund the balance debit.
       const isLimitExceeded = buyErr.message?.includes('would exceed max tickets');
+      // Typed guard from 20260709190000: the drawing was claimed for its
+      // draw (or finalised/cancelled) between ensureActiveDrawing and the
+      // RPC's row lock, so tickets sold now could never win. The RPC rejects
+      // instead of appending unwinnable tickets; refund and say so.
+      const isDrawingClosed = buyErr.message?.includes('is not active');
       log.error('lottery_buy_tickets failed, refunding user:', buyErr.message);
       const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: totalCost,
@@ -313,7 +342,9 @@ export class LotteryManager {
       await interaction.reply({
         content: isLimitExceeded
           ? `❌ You already have the maximum number of tickets for this drawing (max ${maxTickets}).`
-          : '❌ Failed to record your tickets — your coins were refunded.',
+          : isDrawingClosed
+            ? '⏰ That drawing just closed — its winner is being drawn. Your coins were refunded; buy tickets again once the next drawing starts!'
+            : '❌ Failed to record your tickets — your coins were refunded.',
         ephemeral: true,
       });
       return;
@@ -374,8 +405,10 @@ export class LotteryManager {
     });
   }
 
-  async drawWinner(guildId: string): Promise<{ winnerId: string; jackpot: number; winningNumber: number } | null> {
-    const drawing = await this.getPendingDrawing(guildId);
+  async drawWinner(guildId: string, pending?: any): Promise<{ winnerId: string; jackpot: number; winningNumber: number } | null> {
+    // The scheduler passes the drawing it already selected so this call, the
+    // payout and the caller's no-entries reset all act on the same row.
+    const drawing = pending ?? await this.getPendingDrawing(guildId);
     if (!drawing) return null;
 
     // V49: stable winner + idempotent payout. lottery_claim_drawing picks
