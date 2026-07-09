@@ -152,18 +152,19 @@ describe('Dead-letter queue', () => {
   });
 });
 
+const expectPermissionDenied = (error: { code?: string; message?: string } | null) => {
+  expect(error).not.toBeNull();
+  const denied =
+    error!.code === '42501' || /permission denied/i.test(error!.message ?? '');
+  expect(denied, `expected permission denied, got: ${JSON.stringify(error)}`).toBe(true);
+};
+
 describe('Dead-letter queue lockdown (20260709210000_dlq_rls_lockdown)', () => {
   // The DLQ preserves full action payloads — including
   // license_key_plaintext for failed deliver_receipt actions — so it
   // must be readable/writable only via service_role. Grants for
   // anon/authenticated are revoked, so PostgREST must return a
   // permission-denied error (42501), not an empty RLS-filtered result.
-  const expectPermissionDenied = (error: { code?: string; message?: string } | null) => {
-    expect(error).not.toBeNull();
-    const denied =
-      error!.code === '42501' || /permission denied/i.test(error!.message ?? '');
-    expect(denied, `expected permission denied, got: ${JSON.stringify(error)}`).toBe(true);
-  };
 
   it('denies anon reads on action_queue_dlq', async () => {
     const anon = getAnonTestClient();
@@ -206,4 +207,124 @@ describe('Dead-letter queue lockdown (20260709210000_dlq_rls_lockdown)', () => {
     // The row dead-lettered in the previous suite is still visible.
     expect((data ?? []).length).toBeGreaterThanOrEqual(1);
   });
+});
+
+describe('Live queue lockdown (20260709230000_bot_action_queue_rls_lockdown)', () => {
+  // bot_action_queue retry rows for deliver_receipt / fulfill_* carry
+  // license_key_plaintext in payload, so the live queue must be
+  // service_role-only, same posture as the DLQ. Phase A's
+  // SELECT/INSERT grants to authenticated (and any legacy anon default
+  // grants) are revoked — PostgREST must return permission denied
+  // (42501), not an empty RLS-filtered result.
+
+  it('denies anon reads on bot_action_queue', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('bot_action_queue').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies anon inserts into bot_action_queue', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('bot_action_queue').insert({
+      guild_id: GUILD_ID,
+      action: 'deliver_receipt',
+      payload: {},
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated reads on bot_action_queue', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('bot_action_queue').select('id, payload').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated inserts into bot_action_queue (Phase A grant revoked)', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('bot_action_queue').insert({
+      guild_id: GUILD_ID,
+      action: 'config_reload',
+      payload: { section: 'all' },
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('still allows service-role reads including retry payloads', async () => {
+    const { data, error } = await supa
+      .from('bot_action_queue')
+      .select('id, action, payload, status')
+      .eq('guild_id', GUILD_ID);
+
+    expect(error).toBeNull();
+    // Rows enqueued by the suites above are still visible.
+    expect((data ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it(
+    'still delivers Realtime INSERT events to the service-role listener (bot flow)',
+    { timeout: 45_000 },
+    async () => {
+      // The bot subscribes to postgres_changes INSERTs on
+      // bot_action_queue with the service key
+      // (packages/bot/src/services/action-queue.ts). Realtime applies
+      // RLS per subscriber, so revoking authenticated must not break
+      // service-role delivery — this guards the dashboard-insert →
+      // bot-notification flow end to end.
+      const channelName = `test-baq-lockdown-${Date.now()}`;
+
+      const received = new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Timed out waiting for Realtime INSERT event')),
+          40_000,
+        );
+
+        supa
+          .channel(channelName)
+          .on(
+            'postgres_changes',
+            {
+              event: 'INSERT',
+              schema: 'public',
+              table: 'bot_action_queue',
+              filter: `guild_id=eq.${GUILD_ID}`,
+            },
+            (payload) => {
+              clearTimeout(timer);
+              resolve(payload.new as Record<string, unknown>);
+            },
+          )
+          .subscribe((status, err) => {
+            if (status === 'SUBSCRIBED') {
+              // Insert only after the subscription is live — Realtime
+              // does not replay events from before SUBSCRIBED.
+              supa
+                .from('bot_action_queue')
+                .insert({
+                  guild_id: GUILD_ID,
+                  action: 'realtime_lockdown_probe',
+                  payload: { probe: true },
+                  status: 'pending',
+                })
+                .then(({ error }) => {
+                  if (error) {
+                    clearTimeout(timer);
+                    reject(new Error(`Probe insert failed: ${error.message}`));
+                  }
+                });
+            } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+              clearTimeout(timer);
+              reject(new Error(`Realtime subscription failed: ${status} ${err ?? ''}`));
+            }
+          });
+      });
+
+      try {
+        const row = await received;
+        expect(row.action).toBe('realtime_lockdown_probe');
+        expect(row.guild_id).toBe(GUILD_ID);
+      } finally {
+        await supa.removeAllChannels();
+      }
+    },
+  );
 });
