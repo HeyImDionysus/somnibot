@@ -472,6 +472,15 @@ async function handleDeliverReceipt(
     };
   }
 
+  // A retried/DLQ-redelivered receipt must show the ORDER date, not the
+  // date the retry finally succeeded. order_date is stamped into the payload
+  // when the redelivery is queued; fall back to "now" only for legacy rows
+  // queued before the field existed (where "now" is at most the retry lag
+  // wrong, same as the old behavior).
+  const parsedOrderDate = p.order_date ? new Date(p.order_date) : null;
+  const orderDate =
+    parsedOrderDate && !Number.isNaN(parsedOrderDate.getTime()) ? parsedOrderDate : new Date();
+
   try {
     const user = await guild.client.users.fetch(p.discord_id);
     await deliverReceiptDM(user, {
@@ -480,7 +489,7 @@ async function handleDeliverReceipt(
       amountCents: p.amount_cents ?? 0,
       currency: p.currency ?? 'USD',
       licenseKey: p.license_key_plaintext ?? null,
-      date: new Date(),
+      date: orderDate,
     });
     return { success: true, data: { orderNumber: p.order_number, delivered: true } };
   } catch (err) {
@@ -1007,6 +1016,33 @@ const ACTION_HANDLERS: Record<
 // (exponential backoff 30s → 60s → 120s — see processAction below).
 const HANDLER_MAX_RETRIES = 3;
 
+// Payload fields that must never be copied into audit_logs. Queue and DLQ
+// rows intentionally keep the plaintext license key so a failed delivery
+// stays retryable (license_keys stores only hash/prefix/suffix at rest),
+// but audit_logs has long, guild-configurable retention (default 180 days)
+// — the audit trail only needs to know the field was present, not its value.
+const SENSITIVE_AUDIT_PAYLOAD_FIELDS = ['license_key_plaintext'] as const;
+
+/**
+ * Return a copy of the action payload safe for the audit trail: sensitive
+ * fields (currently the plaintext license key carried by deliver_receipt and
+ * fulfill_* payloads) are replaced with '[REDACTED]'. Never mutates the
+ * original — the live payload must keep the key for retries.
+ */
+export function redactPayloadForAudit(
+  payload: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  if (payload == null || typeof payload !== 'object') return {};
+  let redacted: Record<string, unknown> = payload;
+  for (const field of SENSITIVE_AUDIT_PAYLOAD_FIELDS) {
+    if (field in redacted && redacted[field] !== undefined) {
+      if (redacted === payload) redacted = { ...payload };
+      redacted[field] = '[REDACTED]';
+    }
+  }
+  return redacted;
+}
+
 /**
  * Final-failure handling for receipt/license-key delivery: a paid customer
  * has not received their goods, so this must never disappear silently.
@@ -1024,6 +1060,7 @@ async function deadLetterReceiptDelivery(
   const payload = action.payload as unknown as Partial<ReceiptDeliveryPayload>;
   const kind: DeliveryFailureKind = result.retryable === false ? 'permanent' : 'transient';
 
+  let payloadPreserved = false;
   try {
     const { error } = await supabase.from('action_queue_dlq').insert({
       guild_id: guild.id,
@@ -1035,6 +1072,7 @@ async function deadLetterReceiptDelivery(
       original_id: action.id,
     });
     if (error) throw new Error(error.message);
+    payloadPreserved = true;
   } catch (dlqErr) {
     log.error(`Failed to write DLQ entry for ${action.id}:`, dlqErr);
   }
@@ -1047,6 +1085,7 @@ async function deadLetterReceiptDelivery(
     kind,
     attempts,
     lastError: result.error ?? 'unknown',
+    payloadPreserved,
   });
 }
 
@@ -1118,12 +1157,17 @@ async function processAction(
       const backoffMs = Math.min(30_000 * Math.pow(2, retryCount - 1), 120_000);
       log.info(`Scheduling retry #${retryCount} for ${action.id} in ${backoffMs / 1000}s`);
 
+      // next_retry_at persists the backoff schedule: the row goes back to
+      // 'pending' for crash-safety, but sweeps must not pick it up before
+      // the backoff elapses (the in-process setTimeout below is the primary
+      // retry path; the periodic sweep is the catch-up if the process dies).
       await supabase
         .from('bot_action_queue')
         .update({
           status: 'pending',
           retry_count: retryCount,
           error_message: result.error ?? null,
+          next_retry_at: new Date(Date.now() + backoffMs).toISOString(),
         })
         .eq('id', action.id);
 
@@ -1159,7 +1203,9 @@ async function processAction(
     })
     .eq('id', action.id);
 
-  // Audit log
+  // Audit log. The payload is redacted first: deliver_receipt / fulfill_*
+  // payloads carry the plaintext license key (by design, for retryability),
+  // and audit_logs retention is far too long to hold a copy of it.
   await writeAuditLog(supabase, {
     guildId: guild.id,
     actorType: 'dashboard',
@@ -1167,7 +1213,7 @@ async function processAction(
     action: `bot.${action.action}`,
     details: {
       actionId: action.id,
-      payload: action.payload,
+      payload: redactPayloadForAudit(action.payload),
       result: result.data,
     },
     success: result.success,
@@ -1237,6 +1283,7 @@ async function recoverStaleActions(
         error_message: string | null;
         retry_count: number | null;
       } | null = null;
+      let payloadPreserved = false;
       try {
         // Fetch full action row for payload + error
         const { data } = await supabase
@@ -1246,7 +1293,7 @@ async function recoverStaleActions(
           .maybeSingle();
         fullRow = data;
         if (fullRow) {
-          await supabase.from('action_queue_dlq').insert({
+          const { error: dlqInsertError } = await supabase.from('action_queue_dlq').insert({
             guild_id: guild.id,
             action: fullRow.action,
             payload: fullRow.payload ?? {},
@@ -1255,6 +1302,7 @@ async function recoverStaleActions(
             max_retries: ACTION_QUEUE_MAX_RETRIES,
             original_id: row.id,
           });
+          payloadPreserved = !dlqInsertError;
         }
       } catch (dlqErr) {
         log.error(`Failed to write DLQ entry for ${row.id}:`, dlqErr);
@@ -1275,6 +1323,7 @@ async function recoverStaleActions(
           attempts: fullRow?.retry_count ?? ACTION_QUEUE_MAX_RETRIES,
           lastError:
             fullRow?.error_message ?? 'Stale processing recovery: retry budget exhausted',
+          payloadPreserved,
         });
       }
     }
@@ -1300,10 +1349,18 @@ async function recoverStaleActions(
 }
 
 /**
- * Fetch and process every row currently in 'pending' for this guild.
- * Used for the startup backlog sweep and re-run after the Realtime
- * subscription activates (see startActionQueueListener) — the atomic claim
- * in processAction makes overlapping sweeps/Realtime deliveries safe.
+ * Fetch and process every row currently in 'pending' and due for this guild.
+ * Used for the startup backlog sweep, re-run after the Realtime subscription
+ * activates, and the periodic catch-up sweep (see startActionQueueListener)
+ * — the atomic claim in processAction makes overlapping sweeps/Realtime
+ * deliveries safe.
+ *
+ * Rows parked for backoff are excluded: processAction returns transiently
+ * failed rows to 'pending' with next_retry_at set to the end of their
+ * 30/60/120s backoff window, and sweeping those immediately (e.g. on every
+ * Realtime reconnect) would defeat the backoff. They are retried by the
+ * in-process timer, or — if the process died before it fired — by the
+ * periodic sweep once next_retry_at has passed, so they never strand.
  */
 async function sweepPendingActions(
   guild: Guild,
@@ -1314,6 +1371,7 @@ async function sweepPendingActions(
     .select('*')
     .eq('guild_id', guild.id)
     .eq('status', 'pending')
+    .or(`next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`)
     .order('created_at', { ascending: true })
     .limit(1000);
 
@@ -1344,11 +1402,20 @@ export async function startActionQueueListener(
   // Process any pending actions from while the bot was offline
   await sweepPendingActions(guild, supabase);
 
-  // Periodic stale-row sweep (runs in addition to the startup pass so
-  // long-running deployments don't accumulate stuck rows).
+  // Periodic sweep (runs in addition to the startup pass so long-running
+  // deployments don't accumulate stuck rows). Two jobs:
+  // 1. recoverStaleActions — rows stuck in 'processing' after a crash.
+  // 2. sweepPendingActions — 'pending' rows whose backoff (next_retry_at)
+  //    has elapsed. The in-process retry timer normally handles these, but
+  //    it dies with the process; without this catch-up, a restart during a
+  //    backoff window would strand the row (the startup/subscribe sweeps
+  //    intentionally skip rows still inside their backoff window).
   const staleRecoveryTimer = setInterval(() => {
     recoverStaleActions(guild, supabase).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
+    });
+    sweepPendingActions(guild, supabase).catch((err) => {
+      log.error('Due-retry sweep error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();

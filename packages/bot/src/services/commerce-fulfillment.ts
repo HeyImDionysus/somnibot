@@ -78,6 +78,12 @@ export interface ReceiptDeliveryPayload {
   amount_cents: number;
   currency: string;
   license_key_plaintext?: string;
+  /**
+   * ISO timestamp of the order (captured at fulfillment time — the same
+   * date the initial receipt DM would have shown). A delayed redelivery
+   * must render this, not the time the retry finally succeeded.
+   */
+  order_date?: string;
 }
 
 export type DeliveryFailureKind = 'permanent' | 'transient';
@@ -114,9 +120,12 @@ export function classifyDeliveryError(err: unknown): DeliveryFailureKind {
 
 /**
  * Write the operator-visible alert for a receipt delivery failure. The
- * dashboard surfaces `alerts` rows; the message tells the operator what to
- * do (customer-portal pickup for DMs-disabled users, manual delivery / DLQ
- * retry for exhausted transient failures).
+ * dashboard surfaces `alerts` rows; the message tells the operator the
+ * recovery path that actually works: the full delivery payload (including
+ * the plaintext license key) is preserved in the dead-letter queue, so the
+ * delivery can be retried from the dashboard or the key resent manually.
+ * The customer portal is NOT a recovery path — license_keys stores only
+ * hash/prefix/suffix, and the portal displays only the masked key.
  */
 export async function writeReceiptDeliveryAlert(
   supabase: SupabaseClient,
@@ -128,15 +137,30 @@ export async function writeReceiptDeliveryAlert(
     kind: DeliveryFailureKind;
     attempts: number;
     lastError: string;
+    /**
+     * Whether the delivery payload (with the plaintext key) made it into
+     * action_queue_dlq. Defaults to true — every caller writes the DLQ row
+     * before alerting; pass false only when that write itself failed, so
+     * the operator isn't sent to an empty DLQ.
+     */
+    payloadPreserved?: boolean;
   },
 ): Promise<void> {
+  const payloadPreserved = opts.payloadPreserved ?? true;
+  const recovery = payloadPreserved
+    ? 'The full delivery payload (including the license key) is preserved in the dead-letter queue — ' +
+      'retry the delivery from the dashboard DLQ, or use the preserved key to deliver it through ' +
+      'another channel. Note: the customer portal shows only a masked key, so it cannot be used for recovery.'
+    : 'The delivery payload could NOT be preserved in the dead-letter queue (database write failed), ' +
+      'so the plaintext key is unrecoverable — revoke the license key for this order and reissue it manually.';
   const message =
     opts.kind === 'permanent'
       ? `Could not DM the receipt/license key for **${opts.productName}** (order ${opts.orderNumber}): ` +
-        'the customer has DMs disabled or is unreachable, so retrying will not help. ' +
-        'The license key remains available through the customer portal — consider contacting the customer another way.'
+        'the customer has DMs disabled or is unreachable, so automatic retries will not help. ' +
+        recovery
       : `Could not DM the receipt/license key for **${opts.productName}** (order ${opts.orderNumber}) ` +
-        `after ${opts.attempts} attempt(s). Deliver it manually or retry it from the dead-letter queue.`;
+        `after ${opts.attempts} attempt(s). ` +
+        recovery;
 
   const { error } = await supabase.from('alerts').insert({
     guild_id: opts.guildId,
@@ -151,6 +175,7 @@ export async function writeReceiptDeliveryAlert(
       kind: opts.kind,
       attempts: opts.attempts,
       lastError: opts.lastError,
+      payloadPreserved,
     },
   });
   if (error) {
@@ -471,6 +496,10 @@ export class CommerceFulfillmentService {
    * action would double-grant it. Only the delivery is retried.
    */
   private async sendReceipt(payload: FulfillmentPayload, result: FulfillmentResult): Promise<void> {
+    // Fulfillment runs immediately after payment, so "now" is the order
+    // date. Captured once so a queued redelivery renders the same date the
+    // initial DM would have shown, not the date the retry succeeded.
+    const orderDate = new Date();
     try {
       const user = await this.guild.client.users.fetch(payload.discord_id);
       await deliverReceiptDM(user, {
@@ -479,14 +508,14 @@ export class CommerceFulfillmentService {
         amountCents: payload.amount_cents,
         currency: payload.currency,
         licenseKey: payload.license_key_plaintext ?? null,
-        date: new Date(),
+        date: orderDate,
       });
       result.receiptSent = true;
     } catch (err) {
       const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
       log.error('Failed to send receipt', { user: redacted, detail: err });
       result.receiptSent = false;
-      result.receiptRetryQueued = await this.queueReceiptRedelivery(payload, err);
+      result.receiptRetryQueued = await this.queueReceiptRedelivery(payload, err, orderDate);
     }
   }
 
@@ -505,6 +534,7 @@ export class CommerceFulfillmentService {
   private async queueReceiptRedelivery(
     payload: FulfillmentPayload,
     deliveryError: unknown,
+    orderDate: Date,
   ): Promise<boolean> {
     const deliveryPayload: ReceiptDeliveryPayload = {
       guild_id: payload.guild_id,
@@ -515,6 +545,7 @@ export class CommerceFulfillmentService {
       amount_cents: payload.amount_cents,
       currency: payload.currency,
       license_key_plaintext: payload.license_key_plaintext,
+      order_date: orderDate.toISOString(),
     };
 
     let lastQueueError: unknown;
@@ -550,6 +581,7 @@ export class CommerceFulfillmentService {
     // Preserve the full delivery payload (including the plaintext key) in
     // the dead-letter queue so the operator can retry the delivery from the
     // dashboard instead of the key being unrecoverable.
+    let payloadPreserved = false;
     try {
       const queueMsg =
         lastQueueError instanceof Error ? lastQueueError.message : String(lastQueueError);
@@ -563,6 +595,7 @@ export class CommerceFulfillmentService {
         max_retries: 0,
       });
       if (error) throw new Error(error.message);
+      payloadPreserved = true;
       log.info('Dead-lettered receipt re-delivery payload', { order: payload.order_number });
     } catch (dlqErr) {
       // Last resort is the alert below: it references the order, and the
@@ -581,6 +614,7 @@ export class CommerceFulfillmentService {
       kind: classifyDeliveryError(deliveryError),
       attempts: 1,
       lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+      payloadPreserved,
     });
     return false;
   }

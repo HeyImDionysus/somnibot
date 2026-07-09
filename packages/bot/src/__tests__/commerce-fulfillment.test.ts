@@ -220,9 +220,15 @@ describe('CommerceFulfillmentService', () => {
     /**
      * `queueInsertError` makes bot_action_queue inserts fail; combine with
      * `queueInsertFailures: n` to fail only the first n attempts.
+     * `dlqInsertError` makes action_queue_dlq inserts fail too (the
+     * worst-case path where the key cannot be preserved anywhere).
      */
     function makeRecordingSupa(
-      opts: { queueInsertError?: { message: string }; queueInsertFailures?: number } = {},
+      opts: {
+        queueInsertError?: { message: string };
+        queueInsertFailures?: number;
+        dlqInsertError?: { message: string };
+      } = {},
     ) {
       const inserts: Record<string, any[]> = {};
       let queueInsertAttempts = 0;
@@ -243,6 +249,9 @@ describe('CommerceFulfillmentService', () => {
                 opts.queueInsertFailures === undefined ||
                 queueInsertAttempts <= opts.queueInsertFailures;
               if (stillFailing) result = { data: null, error: opts.queueInsertError };
+            }
+            if (table === 'action_queue_dlq' && opts.dlqInsertError) {
+              result = { data: null, error: opts.dlqInsertError };
             }
             const insertChain: any = { ...chain };
             insertChain.then = (resolve: Function) => resolve(result);
@@ -301,6 +310,9 @@ describe('CommerceFulfillmentService', () => {
         product_name: 'VIP Pass',
         license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
       });
+      // The order date rides along so a delayed redelivery renders the
+      // date of the order, not the date the retry finally succeeded.
+      expect(new Date(queued[0].payload.order_date).getTime()).not.toBeNaN();
       // Alerting is handled by the queue's final-failure path, not here
       expect(supa.__inserts['alerts']).toBeUndefined();
     });
@@ -364,7 +376,10 @@ describe('CommerceFulfillmentService', () => {
         });
         expect(dlq[0].error_message).toContain('db unavailable');
 
-        // Operator alert written — and it never contains the plaintext key
+        // Operator alert written — and it never contains the plaintext key.
+        // It directs the operator to the recovery path that actually works
+        // (DLQ retry / manual resend from the preserved payload) — NOT the
+        // customer portal, which only shows a masked prefix…suffix key.
         const alerts = supa.__inserts['alerts'];
         expect(alerts).toHaveLength(1);
         expect(alerts[0]).toMatchObject({
@@ -372,10 +387,42 @@ describe('CommerceFulfillmentService', () => {
           alert_type: 'receipt_delivery_failed',
           severity: 'critical',
         });
+        expect(alerts[0].message).toContain('dead-letter queue');
+        expect(alerts[0].message).not.toContain('remains available through the customer portal');
         expect(alerts[0].metadata).toMatchObject({
           kind: 'permanent',
           orderNumber: 'ORD-001',
+          payloadPreserved: true,
         });
+        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('tells the operator the key is unrecoverable when even the DLQ write fails', async () => {
+      vi.useFakeTimers();
+      try {
+        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+        const supa = makeRecordingSupa({
+          queueInsertError: { message: 'db unavailable' },
+          dlqInsertError: { message: 'db unavailable' },
+        });
+        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+        const resultPromise = service.fulfill(keyedPayload);
+        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
+        const result = await resultPromise;
+
+        expect(result.receiptRetryQueued).toBe(false);
+
+        // The alert must NOT claim the payload sits in the DLQ — it never
+        // made it there. The remaining remediation is revoke + reissue.
+        const alerts = supa.__inserts['alerts'];
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0].message).toContain('could NOT be preserved');
+        expect(alerts[0].message).toContain('revoke');
+        expect(alerts[0].metadata).toMatchObject({ payloadPreserved: false });
         expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
       } finally {
         vi.useRealTimers();

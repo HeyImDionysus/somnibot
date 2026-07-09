@@ -42,6 +42,22 @@ vi.mock('discord.js', () => {
       static Flags = { ViewChannel: 1n };
     },
     Collection: C,
+    // Components v2 builders used by receipt-builder.ts (imported by
+    // action-queue.ts). receipt-builder only dereferences these inside a
+    // try/catch fallback, so the suite passed without them — but keep the
+    // partial mock complete so it can't break if that code moves.
+    ContainerBuilder: class {
+      setAccentColor() { return this; }
+      addTextDisplayComponents() { return this; }
+      addSeparatorComponents() { return this; }
+    },
+    SectionBuilder: class {
+      addTextDisplayComponents() { return this; }
+      setButtonAccessory() { return this; }
+    },
+    SeparatorBuilder: class { setSpacing() { return this; } },
+    SeparatorSpacingSize: { Small: 1, Large: 2 },
+    TextDisplayBuilder: class { setContent() { return this; } },
   };
 });
 

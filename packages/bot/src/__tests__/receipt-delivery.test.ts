@@ -11,6 +11,10 @@
  * - transient failure → retried with the queue's exponential backoff
  * - permanent failure (DMs disabled) → no retry burn, dead-letter + alert
  * - exhausted retries → dead-letter + operator alert
+ * - audit log never contains the plaintext key (queue/DLQ rows keep it)
+ * - sweeps respect the next_retry_at backoff window; the periodic sweep
+ *   retries due rows so they never strand across restarts
+ * - redelivered receipts render the original order date
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
@@ -47,6 +51,7 @@ vi.mock('../features/commerce/receipt-builder.js', () => ({
 }));
 
 import { startActionQueueListener } from '../services/action-queue.js';
+import { writeAuditLog } from '../services/audit.js';
 
 // ── Mocks ──────────────────────────────────────────────────
 
@@ -57,7 +62,10 @@ import { startActionQueueListener } from '../services/action-queue.js';
  * bot_action_queue_recover_stale returning crash-exhausted rows and the
  * follow-up full-row lookup used for DLQ + alert writes. `secondSweep`
  * is returned by the SECOND pending-rows query — i.e. rows that appeared
- * between the startup sweep and the Realtime subscription going live.
+ * between the startup sweep and the Realtime subscription going live —
+ * and `laterSweeps` by subsequent queries (e.g. the periodic catch-up
+ * sweep). Sweep queries honor the `next_retry_at` .or() filter the way
+ * the real DB would: rows still inside their backoff window are excluded.
  */
 function makeSupa(
   pendingActions: any[] = [],
@@ -66,15 +74,18 @@ function makeSupa(
     staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
     staleRow?: Record<string, unknown> | null;
     secondSweep?: any[];
+    laterSweeps?: any[][];
   } = {},
 ) {
   const inserts: Record<string, any[]> = {};
   const queueUpdates: Record<string, unknown>[] = [];
+  const sweepOrFilters: string[] = [];
+  const sweepBatches: any[][] = [pendingActions, opts.secondSweep ?? [], ...(opts.laterSweeps ?? [])];
   let sweepCalls = 0;
 
   const makeChain = () => {
     const chain: any = {};
-    for (const m of ['select', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'order', 'limit']) {
+    for (const m of ['select', 'update', 'upsert', 'delete', 'eq', 'neq', 'in', 'or', 'order', 'limit']) {
       chain[m] = vi.fn(() => chain);
     }
     chain.single = vi.fn().mockResolvedValue({ data: null, error: null });
@@ -105,15 +116,24 @@ function makeSupa(
               error: null,
             });
           }
+          let dueOnly = false;
+          inner.or = vi.fn((expr: string) => {
+            if (typeof expr === 'string' && expr.includes('next_retry_at')) {
+              dueOnly = true;
+              sweepOrFilters.push(expr);
+            }
+            return inner;
+          });
           inner.then = (resolve: Function) => {
-            const batch =
-              sweepCalls === 0
-                ? pendingActions
-                : sweepCalls === 1
-                  ? (opts.secondSweep ?? [])
-                  : [];
+            const batch = sweepBatches[sweepCalls] ?? [];
             sweepCalls++;
-            return resolve({ data: batch, error: null });
+            const rows = dueOnly
+              ? batch.filter(
+                  (r: any) =>
+                    !r.next_retry_at || new Date(r.next_retry_at).getTime() <= Date.now(),
+                )
+              : batch;
+            return resolve({ data: rows, error: null });
           };
           return inner;
         });
@@ -138,6 +158,7 @@ function makeSupa(
   };
   supa.__inserts = inserts;
   supa.__queueUpdates = queueUpdates;
+  supa.__sweepOrFilters = sweepOrFilters;
   return supa;
 }
 
@@ -221,10 +242,15 @@ describe('deliver_receipt action', () => {
 
     await startActionQueueListener(guild, supa);
 
-    // Re-queued as pending with retry_count bumped, retry scheduled at 30s
-    expect(supa.__queueUpdates).toContainEqual(
-      expect.objectContaining({ status: 'pending', retry_count: 1 }),
+    // Re-queued as pending with retry_count bumped, retry scheduled at 30s.
+    // next_retry_at persists the backoff window so sweeps (startup, post-
+    // subscribe, periodic) don't retry the row early.
+    const retryUpdate = supa.__queueUpdates.find(
+      (u: any) => u.status === 'pending' && u.retry_count === 1,
     );
+    expect(retryUpdate).toBeDefined();
+    expect(retryUpdate.next_retry_at).toEqual(expect.any(String));
+    expect(new Date(retryUpdate.next_retry_at).getTime() - Date.now()).toBe(30_000);
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
     // Not dead-lettered yet — retries still available
     expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
@@ -262,7 +288,9 @@ describe('deliver_receipt action', () => {
       }),
     );
 
-    // Operator alert with the actionable alternative (portal pickup / manual contact)
+    // Operator alert with the actionable alternative (DLQ retry / manual
+    // resend). The portal is NOT a recovery path — it shows only a masked
+    // key — so the guidance must not point there.
     const alerts = supa.__inserts['alerts'];
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({
@@ -270,6 +298,8 @@ describe('deliver_receipt action', () => {
       alert_type: 'receipt_delivery_failed',
       severity: 'critical',
     });
+    expect(alerts[0].message).toContain('dead-letter queue');
+    expect(alerts[0].message).not.toContain('remains available through the customer portal');
     expect(alerts[0].metadata).toMatchObject({
       kind: 'permanent',
       orderNumber: 'ORD-001',
@@ -422,5 +452,118 @@ describe('deliver_receipt action', () => {
     );
     expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
     expect(supa.__inserts['alerts']).toBeUndefined();
+  });
+
+  it('redacts the plaintext license key from the audit log while the live payload keeps it', async () => {
+    // audit_logs has long, guild-configurable retention (default 180 days) —
+    // the plaintext key must never be copied there. The queue/DLQ payload
+    // keeping the key is intentional (retryability); only the audit copy is
+    // redacted, and redaction must not mutate the payload the handler uses.
+    const guild = makeGuild();
+    const action = deliveryAction();
+    const supa = makeSupa([action]);
+
+    await startActionQueueListener(guild, supa);
+
+    // Delivery itself used the real key…
+    expect(mockDeliverReceiptDM).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ licenseKey: 'SMNI-AAAA-BBBB-CCCC-DDDD' }),
+    );
+    // …and the queue row's payload still carries it (not mutated by redaction)
+    expect(action.payload.license_key_plaintext).toBe('SMNI-AAAA-BBBB-CCCC-DDDD');
+
+    // But the audit entry never sees the plaintext key
+    const auditCalls = vi.mocked(writeAuditLog).mock.calls
+      .filter(([, entry]) => entry.action === 'bot.deliver_receipt');
+    expect(auditCalls).toHaveLength(1);
+    const auditEntry = auditCalls[0][1];
+    expect((auditEntry.details?.payload as any).license_key_plaintext).toBe('[REDACTED]');
+    expect(JSON.stringify(auditEntry)).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
+    // Non-sensitive payload fields are preserved for the audit trail
+    expect(auditEntry.details?.payload).toMatchObject({ order_number: 'ORD-001' });
+  });
+
+  it('sweeps skip rows still inside their retry backoff window', async () => {
+    // processAction returns transiently-failed rows to 'pending' with
+    // next_retry_at at the end of their 30/60/120s backoff. The post-
+    // subscribe sweep (which fires on every Realtime reconnect) must not
+    // retry them early — that would defeat the backoff.
+    const guild = makeGuild();
+    const parked = deliveryAction({
+      retry_count: 1,
+      next_retry_at: new Date(Date.now() + 20_000).toISOString(), // still backing off
+    });
+    const supa = makeSupa([], { secondSweep: [parked] });
+
+    await startActionQueueListener(guild, supa);
+
+    // Wait for the fire-and-forget post-subscribe sweep to run its query…
+    await vi.waitFor(() => {
+      expect(supa.__sweepOrFilters.length).toBeGreaterThanOrEqual(2);
+    });
+    // …every sweep filtered on the backoff schedule, and the parked row was
+    // not retried early.
+    expect(supa.__sweepOrFilters[0]).toMatch(/next_retry_at\.is\.null,next_retry_at\.lte\./);
+    expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+  });
+
+  it('the periodic sweep picks up rows whose backoff elapsed, so they never strand', async () => {
+    // If the bot restarts during a backoff window, the in-process retry
+    // timer is lost and the startup/subscribe sweeps skip the row (still
+    // inside its window). The periodic sweep must retry it once due —
+    // otherwise the original P1 (stranded redelivery) comes back.
+    vi.useFakeTimers();
+    try {
+      const guild = makeGuild();
+      const due = deliveryAction({
+        retry_count: 1,
+        next_retry_at: new Date(Date.now() - 1_000).toISOString(), // backoff elapsed
+      });
+      // Sweeps: startup → [], post-subscribe → [], periodic (60s) → [due]
+      const supa = makeSupa([], { secondSweep: [], laterSweeps: [[due]] });
+
+      await startActionQueueListener(guild, supa);
+      expect(mockDeliverReceiptDM).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+      expect(supa.__queueUpdates).toContainEqual(
+        expect.objectContaining({ status: 'completed' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('renders a delayed redelivery with the original order date, not the retry time', async () => {
+    const guild = makeGuild();
+    const orderDate = '2026-07-01T15:30:00.000Z';
+    const supa = makeSupa([
+      deliveryAction({
+        payload: { ...deliveryAction().payload, order_date: orderDate },
+      }),
+    ]);
+
+    await startActionQueueListener(guild, supa);
+
+    expect(mockDeliverReceiptDM).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ date: new Date(orderDate) }),
+    );
+  });
+
+  it('falls back to now for legacy queued rows without order_date', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa([deliveryAction()]); // fixture has no order_date
+
+    const before = Date.now();
+    await startActionQueueListener(guild, supa);
+    const after = Date.now();
+
+    const [, receipt] = mockDeliverReceiptDM.mock.calls[0] as unknown as [unknown, { date: Date }];
+    expect(receipt.date.getTime()).toBeGreaterThanOrEqual(before);
+    expect(receipt.date.getTime()).toBeLessThanOrEqual(after);
   });
 });

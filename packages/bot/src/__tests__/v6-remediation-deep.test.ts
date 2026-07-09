@@ -96,14 +96,24 @@ vi.mock('discord.js', () => {
     random() { return this.first(); }
     sort(fn?: (a: V, b: V) => number) { const e = [...this.entries()]; if (fn) e.sort(([, a], [, b]) => fn(a, b)); const c = new Collection<K, V>(); for (const [k, v] of e) c.set(k, v); return c; }
   }
-  class ContainerBuilder { addComponents(..._c: any[]) { return this; } toJSON() { return {}; } }
-  class SectionBuilder { addTextDisplay() { return this; } setButtonAccessory() { return this; } }
+  // ContainerBuilder covers both generic use (addComponents) and the
+  // Components v2 receipt path in receipt-builder.ts (setAccentColor /
+  // addTextDisplayComponents / addSeparatorComponents).
+  class ContainerBuilder {
+    addComponents(..._c: any[]) { return this; }
+    setAccentColor() { return this; }
+    addTextDisplayComponents(..._c: any[]) { return this; }
+    addSeparatorComponents(..._c: any[]) { return this; }
+    toJSON() { return {}; }
+  }
+  class SectionBuilder { addTextDisplay() { return this; } addTextDisplayComponents(..._c: any[]) { return this; } setButtonAccessory() { return this; } }
   class TextDisplayBuilder { setContent() { return this; } }
   class SeparatorBuilder { setSpacing() { return this; } }
   return {
     EmbedBuilder, ActionRowBuilder, ButtonBuilder, StringSelectMenuBuilder,
     ModalBuilder, TextInputBuilder, SlashCommandBuilder, Collection,
     ContainerBuilder, SectionBuilder, TextDisplayBuilder, SeparatorBuilder,
+    SeparatorSpacingSize: { Small: 1, Large: 2 },
     ButtonStyle: { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 },
     TextInputStyle: { Short: 1, Paragraph: 2 },
     ChannelType: { GuildText: 0, GuildVoice: 2, GuildCategory: 4, GuildAnnouncement: 5, GuildForum: 15, GuildStageVoice: 13 },
