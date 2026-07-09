@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { requireSupabase } from './helpers.js';
+import { requireSupabase, getAnonTestClient, getAuthenticatedTestClient } from './helpers.js';
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-queue-guild-${Date.now()}`;
@@ -149,5 +149,61 @@ describe('Dead-letter queue', () => {
     expect(dlqEntry!.action).toBe('SEND_NOTIFICATION');
     expect(dlqEntry!.error_message).toContain('Missing Permissions');
     expect(dlqEntry!.retry_count).toBe(3);
+  });
+});
+
+describe('Dead-letter queue lockdown (20260709210000_dlq_rls_lockdown)', () => {
+  // The DLQ preserves full action payloads — including
+  // license_key_plaintext for failed deliver_receipt actions — so it
+  // must be readable/writable only via service_role. Grants for
+  // anon/authenticated are revoked, so PostgREST must return a
+  // permission-denied error (42501), not an empty RLS-filtered result.
+  const expectPermissionDenied = (error: { code?: string; message?: string } | null) => {
+    expect(error).not.toBeNull();
+    const denied =
+      error!.code === '42501' || /permission denied/i.test(error!.message ?? '');
+    expect(denied, `expected permission denied, got: ${JSON.stringify(error)}`).toBe(true);
+  };
+
+  it('denies anon reads on action_queue_dlq', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('action_queue_dlq').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies anon inserts into action_queue_dlq', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('action_queue_dlq').insert({
+      guild_id: GUILD_ID,
+      action: 'deliver_receipt',
+      payload: {},
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated reads on action_queue_dlq', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('action_queue_dlq').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated updates on action_queue_dlq', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed
+      .from('action_queue_dlq')
+      .update({ acknowledged: true })
+      .eq('guild_id', GUILD_ID);
+    expectPermissionDenied(error);
+  });
+
+  it('still allows service-role reads (bot + dashboard admin path)', async () => {
+    const { data, error } = await supa
+      .from('action_queue_dlq')
+      .select('id, action, payload')
+      .eq('guild_id', GUILD_ID);
+
+    expect(error).toBeNull();
+    // The row dead-lettered in the previous suite is still visible.
+    expect((data ?? []).length).toBeGreaterThanOrEqual(1);
   });
 });
