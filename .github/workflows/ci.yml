@@ -551,6 +551,7 @@ jobs:
             "dashboard_roles" "dashboard_user_roles"
             "automations" "automation_executions"
             "dead_letter_queue" "workflow_events"
+            "health_metrics"
           )
 
           ERRORS=0
