@@ -5933,8 +5933,8 @@ Peer-to-peer item trading marketplace. Players list inventory items for sale, ot
 
 ### 42.1 Listing Flow
 
-1. `/market list <item> <quantity> <price>` — checks inventory, atomically decrements via `economy_decrement_inventory` RPC (prevents listing same item twice), creates `economy_market_listings` row with expiration date.
-2. If listing insert fails, items are refunded to inventory.
+1. `/market list <item> <quantity> <price>` — checks inventory, then calls the `economy_market_atomic_create_listing` RPC, which verifies + decrements inventory AND inserts the `economy_market_listings` row (with expiration date) in one row-locked transaction. Either the listing exists with the items escrowed in it, or inventory is untouched — there is no client-side refund path.
+2. The inventory row lock (`FOR UPDATE`) serializes concurrent listings of the same stack, so double-listing cannot oversell; the loser receives a typed `insufficient_inventory` error.
 3. Max active listings per user is configurable (`economy_market_max_listings`).
 
 ### 42.2 Buy Flow (Atomic Multi-Step)
