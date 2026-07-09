@@ -1227,13 +1227,20 @@ async function recoverStaleActions(
     log.warn(`DLQ: ${failedCount} action(s) failed after exhausting retries`);
     // V53 Phase 2: Write failed actions to DLQ table for dashboard visibility
     for (const row of failedRows) {
+      let fullRow: {
+        action: string;
+        payload: unknown;
+        error_message: string | null;
+        retry_count: number | null;
+      } | null = null;
       try {
         // Fetch full action row for payload + error
-        const { data: fullRow } = await supabase
+        const { data } = await supabase
           .from('bot_action_queue')
           .select('action, payload, error_message, retry_count')
           .eq('id', row.id)
           .maybeSingle();
+        fullRow = data;
         if (fullRow) {
           await supabase.from('action_queue_dlq').insert({
             guild_id: guild.id,
@@ -1247,6 +1254,24 @@ async function recoverStaleActions(
         }
       } catch (dlqErr) {
         log.error(`Failed to write DLQ entry for ${row.id}:`, dlqErr);
+      }
+
+      // Receipt/license-key delivery must never fail silently: exhaustion can
+      // also happen through THIS crash-recovery path (bot died mid-delivery
+      // repeatedly), not just the in-process retry path in processAction —
+      // surface the same operator alert here.
+      if (row.action === RECEIPT_DELIVERY_ACTION) {
+        const payload = (fullRow?.payload ?? {}) as Partial<ReceiptDeliveryPayload>;
+        await writeReceiptDeliveryAlert(supabase, {
+          guildId: guild.id,
+          orderNumber: payload.order_number ?? 'unknown',
+          productName: payload.product_name ?? 'unknown',
+          discordId: payload.discord_id ?? 'unknown',
+          kind: 'transient',
+          attempts: fullRow?.retry_count ?? ACTION_QUEUE_MAX_RETRIES,
+          lastError:
+            fullRow?.error_message ?? 'Stale processing recovery: retry budget exhausted',
+        });
       }
     }
   }

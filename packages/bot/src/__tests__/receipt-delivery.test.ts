@@ -53,9 +53,18 @@ import { startActionQueueListener } from '../services/action-queue.js';
 /**
  * Recording Supabase mock: captures inserts per table and status updates on
  * bot_action_queue. `retryCount` controls what the pre-retry
- * select('retry_count') lookup returns.
+ * select('retry_count') lookup returns. `staleFailed`/`staleRow` simulate
+ * bot_action_queue_recover_stale returning crash-exhausted rows and the
+ * follow-up full-row lookup used for DLQ + alert writes.
  */
-function makeSupa(pendingActions: any[] = [], opts: { retryCount?: number } = {}) {
+function makeSupa(
+  pendingActions: any[] = [],
+  opts: {
+    retryCount?: number;
+    staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
+    staleRow?: Record<string, unknown> | null;
+  } = {},
+) {
   const inserts: Record<string, any[]> = {};
   const queueUpdates: Record<string, unknown>[] = [];
   let pendingReturned = false;
@@ -87,6 +96,12 @@ function makeSupa(pendingActions: any[] = [], opts: { retryCount?: number } = {}
               error: null,
             });
           }
+          if (cols === 'action, payload, error_message, retry_count') {
+            inner.maybeSingle = vi.fn().mockResolvedValue({
+              data: opts.staleRow ?? null,
+              error: null,
+            });
+          }
           inner.then = (resolve: Function) => {
             if (!pendingReturned) {
               pendingReturned = true;
@@ -104,7 +119,9 @@ function makeSupa(pendingActions: any[] = [], opts: { retryCount?: number } = {}
       return chain;
     }),
     rpc: vi.fn(async (name: string) => {
-      if (name === 'bot_action_queue_recover_stale') return { data: [], error: null };
+      if (name === 'bot_action_queue_recover_stale') {
+        return { data: opts.staleFailed ?? [], error: null };
+      }
       if (name === 'bot_action_queue_claim') return { data: [{ id: 'claimed' }], error: null };
       return { data: null, error: null };
     }),
@@ -295,6 +312,64 @@ describe('deliver_receipt action', () => {
 
     setTimeoutSpy.mockRestore();
     vi.useRealTimers();
+  });
+
+  it('alerts when a deliver_receipt row exhausts retries via stale crash recovery', async () => {
+    // Exhaustion has a second path: the bot repeatedly crashed mid-delivery,
+    // so bot_action_queue_recover_stale (not the in-process retry loop)
+    // flipped the row to failed. That path must ALSO dead-letter + alert —
+    // a paid customer's license key must never disappear silently.
+    const guild = makeGuild();
+    const supa = makeSupa([], {
+      staleFailed: [{ id: 'act-stale-1', action: 'deliver_receipt', was_failed: true }],
+      staleRow: {
+        action: 'deliver_receipt',
+        payload: { discord_id: 'user-1', order_number: 'ORD-001', product_name: 'VIP Pass' },
+        error_message: 'Stale processing recovery: retry budget exhausted',
+        retry_count: 5,
+      },
+    });
+
+    await startActionQueueListener(guild, supa);
+
+    expect(supa.__inserts['action_queue_dlq']).toContainEqual(
+      expect.objectContaining({ action: 'deliver_receipt', original_id: 'act-stale-1' }),
+    );
+
+    const alerts = supa.__inserts['alerts'];
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      guild_id: 'guild-1',
+      alert_type: 'receipt_delivery_failed',
+      severity: 'critical',
+    });
+    expect(alerts[0].metadata).toMatchObject({
+      orderNumber: 'ORD-001',
+      discordId: 'user-1',
+      attempts: 5,
+    });
+  });
+
+  it('does not alert when a non-receipt action exhausts retries via stale recovery', async () => {
+    const guild = makeGuild();
+    const supa = makeSupa([], {
+      staleFailed: [{ id: 'act-stale-2', action: 'channel_create', was_failed: true }],
+      staleRow: {
+        action: 'channel_create',
+        payload: { name: 'general' },
+        error_message: 'Stale processing recovery: retry budget exhausted',
+        retry_count: 5,
+      },
+    });
+
+    await startActionQueueListener(guild, supa);
+
+    // DLQ write is pre-existing behavior for all stale-exhausted actions...
+    expect(supa.__inserts['action_queue_dlq']).toContainEqual(
+      expect.objectContaining({ action: 'channel_create', original_id: 'act-stale-2' }),
+    );
+    // ...but the receipt alert is only for deliver_receipt
+    expect(supa.__inserts['alerts']).toBeUndefined();
   });
 
   it('does not dead-letter or alert other failing actions', async () => {
