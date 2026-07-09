@@ -9,7 +9,6 @@ import { EmbedBuilder, type ChatInputCommandInteraction, type Client, type TextC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { DbGuildConfig } from '@somnibot/shared';
 import { getQuestsManager } from '../quests/quests-manager.js';
-import { randomPick } from '../../utils/random.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Lottery');
@@ -100,9 +99,10 @@ export class LotteryManager {
       const schedule = config.economy_lottery_schedule ?? 'weekly';
       const intervalMs = SCHEDULE_MS[schedule] ?? SCHEDULE_MS['weekly'];
 
-      // Find the active drawing
-      const drawing = await this.getActiveDrawing(guildId);
-      if (!drawing) return; // No active drawing
+      // Find the active drawing — or one stuck in 'drawing' (claimed but
+      // payout pending), which must be retried until the stored winner is paid.
+      const drawing = await this.getPendingDrawing(guildId);
+      if (!drawing) return; // No pending drawing
 
       // Check if enough time has passed since the drawing was created
       const createdAt = new Date(drawing.created_at).getTime();
@@ -141,14 +141,32 @@ export class LotteryManager {
         });
       }
     } else {
-      // No entries — reset (cancel the drawing, start fresh)
+      // No entries — reset (cancel the drawing, start fresh). A null result
+      // can also mean a payout retry is pending ('drawing' status with a
+      // stored winner) or another worker claimed the row, so only a still-
+      // ACTIVE drawing is treated as a true "no entries" reset — and only
+      // then is the reset announced. The status guard on the update keeps a
+      // concurrent claim from being cancelled (which would strand its stored
+      // winner unpaid).
       const drawing = await this.getActiveDrawing(guildId);
-      if (drawing) {
-        await this.supabase
-          .from('economy_lottery_drawings')
-          .update({ status: 'cancelled', drawn_at: new Date().toISOString() })
-          .eq('id', drawing.id);
-      }
+      if (!drawing || drawing.status !== 'active') return;
+
+      // Never treat a drawing that has tickets as a "no entries" reset — a
+      // null draw result alongside a ticketed ACTIVE drawing means this tick
+      // simply didn't settle it (e.g. it retried an older stuck payout, or
+      // another worker won the claim race).
+      const { data: entries } = await this.supabase
+        .from('economy_lottery_tickets')
+        .select('id')
+        .eq('drawing_id', drawing.id)
+        .limit(1);
+      if (entries && entries.length > 0) return;
+
+      await this.supabase
+        .from('economy_lottery_drawings')
+        .update({ status: 'cancelled', drawn_at: new Date().toISOString() })
+        .eq('id', drawing.id)
+        .eq('status', 'active');
 
       if (channel) {
         await channel.send({
@@ -179,6 +197,24 @@ export class LotteryManager {
       .eq('guild_id', guildId)
       .eq('status', 'active')
       .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    return data;
+  }
+
+  /**
+   * V49: The drawing the scheduler should act on — the active drawing, or one
+   * stuck in the claimed-but-unpaid 'drawing' state whose stored winner still
+   * needs the jackpot payout retried. Oldest first, so a stuck drawing is
+   * settled before a newer active one is drawn.
+   */
+  private async getPendingDrawing(guildId: string): Promise<any | null> {
+    const { data } = await this.supabase
+      .from('economy_lottery_drawings')
+      .select('*')
+      .eq('guild_id', guildId)
+      .in('status', ['active', 'drawing'])
+      .order('created_at', { ascending: true })
       .limit(1)
       .single();
     return data;
@@ -339,83 +375,54 @@ export class LotteryManager {
   }
 
   async drawWinner(guildId: string): Promise<{ winnerId: string; jackpot: number; winningNumber: number } | null> {
-    const drawing = await this.getActiveDrawing(guildId);
+    const drawing = await this.getPendingDrawing(guildId);
     if (!drawing) return null;
 
-    // V48-L1: atomic active→drawing claim. The previous flow flipped
-    // status to 'drawn' unconditionally and only *logged* a failed
-    // payout — so a failed `economy_add_balance` left the winner unpaid
-    // and the drawing closed, with no recovery. It was also non-
-    // idempotent: a manual /lottery draw racing the scheduler could
-    // award two payouts. The RPC returns the drawing iff it was still
-    // 'active', so exactly one caller will proceed.
-    const { data: claimed, error: claimErr } = await this.supabase.rpc(
-      'lottery_claim_drawing',
+    // V49: stable winner + idempotent payout. lottery_claim_drawing picks
+    // AND persists the winning ticket inside the atomic active→'drawing'
+    // claim; lottery_award_jackpot credits the STORED winner and finalises
+    // to 'drawn' in a single transaction. A failed payout leaves the row in
+    // 'drawing' with its winner recorded, so the next tick retries the SAME
+    // winner — the previous revert-to-'active' re-rolled the winner and
+    // could double-pay when the "failed" payout had landed server-side.
+    if (drawing.status === 'active') {
+      const { data: claimed, error: claimErr } = await this.supabase.rpc(
+        'lottery_claim_drawing',
+        { p_drawing_id: drawing.id },
+      );
+      if (claimErr) {
+        log.error('lottery_claim_drawing failed:', claimErr.message);
+        return null;
+      }
+      const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
+      if (!claimedRow) {
+        // Another worker claimed it, or the drawing has no tickets (the RPC
+        // leaves it 'active' so the caller's "no entries" path can reset it).
+        log.info(`Skipping draw of ${drawing.id} — already claimed or no tickets`);
+        return null;
+      }
+    }
+
+    // Pay the stored winner. Returns the drawing iff THIS call performed the
+    // payout; no rows means it was already finalised — never pay twice.
+    const { data: awarded, error: awardErr } = await this.supabase.rpc(
+      'lottery_award_jackpot',
       { p_drawing_id: drawing.id },
     );
-    if (claimErr) {
-      log.error('lottery_claim_drawing failed:', claimErr.message);
+    if (awardErr) {
+      log.error(`Failed to award lottery jackpot for ${drawing.id} (stored winner will be retried next tick):`, awardErr.message);
       return null;
     }
-    const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
-    if (!claimedRow) {
-      log.info(`Skipping draw of ${drawing.id} — already claimed by another worker`);
-      return null;
-    }
-
-    const jackpotSnapshot: number = claimedRow.jackpot ?? drawing.jackpot ?? 0;
-
-    const { data: tickets } = await this.supabase
-      .from('economy_lottery_tickets')
-      .select('*')
-      .eq('drawing_id', drawing.id)
-      .limit(1000);
-
-    if (!tickets || tickets.length === 0) {
-      // No tickets — revert the claim so the scheduled "no entries"
-      // path can flip it to 'cancelled' (the executeDrawAndAnnounce
-      // caller expects status='active' to update).
-      await this.supabase
-        .from('economy_lottery_drawings')
-        .update({ status: 'active' })
-        .eq('id', drawing.id);
+    const awardedRow = Array.isArray(awarded) ? awarded[0] : awarded;
+    if (!awardedRow) {
+      log.info(`Skipping payout of ${drawing.id} — already finalised`);
       return null;
     }
 
-    // V7 Audit §4.4: CSPRNG for winner selection (matches giveaway-manager)
-    const winnerTicket = randomPick(tickets);
-
-    // Award jackpot BEFORE flipping to 'drawn' so a payout failure
-    // doesn't leave the winner unpaid + the drawing permanently closed.
-    const { error: jackpotErr } = await this.supabase.rpc('economy_add_balance', {
-      p_guild_id: guildId,
-      p_user_id: winnerTicket.user_id,
-      p_amount: jackpotSnapshot,
-    });
-    if (jackpotErr) {
-      log.error(`Failed to award jackpot to ${winnerTicket.user_id}:`, jackpotErr.message);
-      // Revert to 'active' so the next scheduled tick retries the draw
-      // (and the same winner won't necessarily be picked, but the pool
-      // is preserved and no one is silently shortchanged).
-      await this.supabase
-        .from('economy_lottery_drawings')
-        .update({ status: 'active' })
-        .eq('id', drawing.id);
-      return null;
-    }
-
-    // Close drawing — finalize from 'drawing' to 'drawn'.
-    await this.supabase
-      .from('economy_lottery_drawings')
-      .update({
-        status: 'drawn',
-        winner_user_id: winnerTicket.user_id,
-        winning_number: winnerTicket.ticket_number,
-        drawn_at: new Date().toISOString(),
-      })
-      .eq('id', drawing.id)
-      .eq('status', 'drawing');
-
-    return { winnerId: winnerTicket.user_id, jackpot: jackpotSnapshot, winningNumber: winnerTicket.ticket_number };
+    return {
+      winnerId: awardedRow.winner_user_id,
+      jackpot: awardedRow.jackpot ?? 0,
+      winningNumber: awardedRow.winning_number,
+    };
   }
 }

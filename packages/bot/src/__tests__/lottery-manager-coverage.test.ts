@@ -42,7 +42,7 @@ function makeSupabase(tableData: Record<string, any> = {}, rpcResults: Record<st
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
     const chain: Record<string, any> = {};
-    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
+    const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'order', 'limit', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
@@ -297,7 +297,19 @@ describe('LotteryManager', () => {
   });
 
   describe('drawWinner', () => {
-    it('returns null when no active drawing', async () => {
+    /** Collect update() payloads sent to a given table across all from() calls. */
+    function updatePayloads(supa: ReturnType<typeof makeSupabase>, table: string): any[] {
+      return supa.from.mock.calls
+        .map((args: any[], i: number) => ({ table: args[0], chain: supa.from.mock.results[i].value }))
+        .filter((e: any) => e.table === table)
+        .flatMap((e: any) => e.chain.update.mock.calls.map((c: any[]) => c[0]));
+    }
+
+    function rpcNames(supa: ReturnType<typeof makeSupabase>): string[] {
+      return supa.rpc.mock.calls.map((c: any[]) => c[0]);
+    }
+
+    it('returns null when no pending drawing', async () => {
       supabase = makeSupabase({ economy_lottery_drawings: null });
       mgr = new LotteryManager(supabase as any);
       const result = await mgr.drawWinner('g1');
@@ -322,53 +334,175 @@ describe('LotteryManager', () => {
       mgr = new LotteryManager(supabase as any);
       const result = await mgr.drawWinner('g1');
       expect(result).toBeNull();
+      // Never attempts a payout for a drawing it did not claim.
+      expect(rpcNames(supabase)).not.toContain('lottery_award_jackpot');
     });
 
-    it('returns null when no tickets and reverts to active', async () => {
+    it('returns null when claim returns no row for an empty drawing (left active for reset)', async () => {
       supabase = makeSupabase(
-        {
-          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' },
-          economy_lottery_tickets: null,
-        },
-        {
-          lottery_claim_drawing: { data: [{ id: 'd1', jackpot: 1000 }], error: null },
-        },
+        { economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' } },
+        { lottery_claim_drawing: { data: [], error: null } },
       );
       mgr = new LotteryManager(supabase as any);
       const result = await mgr.drawWinner('g1');
       expect(result).toBeNull();
+      // The RPC leaves ticketless drawings 'active'; the manager must not
+      // flip status itself (the scheduler's reset path handles cancellation).
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
     });
 
-    it('draws winner and pays out successfully', async () => {
+    it('draws winner and pays out via lottery_award_jackpot', async () => {
+      const row = { id: 'd1', guild_id: 'g1', jackpot: 1000, winner_user_id: 'u1', winning_number: 42 };
       supabase = makeSupabase(
+        { economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' } },
         {
-          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' },
-          economy_lottery_tickets: [{ user_id: 'u1', ticket_number: 42 }],
-        },
-        {
-          lottery_claim_drawing: { data: [{ id: 'd1', jackpot: 1000 }], error: null },
-          economy_add_balance: { data: true, error: null },
+          lottery_claim_drawing: { data: [row], error: null },
+          lottery_award_jackpot: { data: [row], error: null },
         },
       );
       mgr = new LotteryManager(supabase as any);
       const result = await mgr.drawWinner('g1');
       expect(result).toEqual({ winnerId: 'u1', jackpot: 1000, winningNumber: 42 });
+      // Payout and finalisation happen inside lottery_award_jackpot — the
+      // manager must not credit the wallet or flip status itself.
+      expect(rpcNames(supabase)).not.toContain('economy_add_balance');
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
     });
 
-    it('reverts on jackpot payout failure', async () => {
+    it('payout failure keeps the claim and stored winner (no revert to active)', async () => {
+      const row = { id: 'd1', guild_id: 'g1', jackpot: 1000, winner_user_id: 'u1', winning_number: 42 };
       supabase = makeSupabase(
+        { economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' } },
         {
-          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' },
-          economy_lottery_tickets: [{ user_id: 'u1', ticket_number: 42 }],
-        },
-        {
-          lottery_claim_drawing: { data: [{ id: 'd1', jackpot: 1000 }], error: null },
-          economy_add_balance: { error: { message: 'payout failed' } },
+          lottery_claim_drawing: { data: [row], error: null },
+          lottery_award_jackpot: { data: null, error: { message: 'payout failed' } },
         },
       );
       mgr = new LotteryManager(supabase as any);
       const result = await mgr.drawWinner('g1');
       expect(result).toBeNull();
+      // The drawing must stay in 'drawing' with its stored winner so the next
+      // tick retries the SAME winner — reverting to 'active' re-rolled it.
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
+    });
+
+    it('retry tick pays the SAME stored winner without re-picking', async () => {
+      const stored = { id: 'd1', guild_id: 'g1', jackpot: 1000, winner_user_id: 'u2', winning_number: 77 };
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'drawing', winner_user_id: 'u2', winning_number: 77 },
+          economy_lottery_tickets: [{ user_id: 'u9', ticket_number: 1 }],
+        },
+        { lottery_award_jackpot: { data: [stored], error: null } },
+      );
+      mgr = new LotteryManager(supabase as any);
+      const result = await mgr.drawWinner('g1');
+      expect(result).toEqual({ winnerId: 'u2', jackpot: 1000, winningNumber: 77 });
+      // Already claimed with a stored winner: no re-claim, no re-pick.
+      expect(rpcNames(supabase)).not.toContain('lottery_claim_drawing');
+      expect(supabase.from).not.toHaveBeenCalledWith('economy_lottery_tickets');
+    });
+
+    it('does not repeat a payout that already succeeded on a second tick', async () => {
+      supabase = makeSupabase(
+        { economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'drawing', winner_user_id: 'u2', winning_number: 77 } },
+        { lottery_award_jackpot: { data: [], error: null } },
+      );
+      mgr = new LotteryManager(supabase as any);
+      const result = await mgr.drawWinner('g1');
+      expect(result).toBeNull();
+      // The award RPC is the idempotency gate: it was consulted exactly once
+      // and returned no row, so no wallet credit may happen.
+      expect(rpcNames(supabase).filter((n: string) => n === 'lottery_award_jackpot')).toHaveLength(1);
+      expect(rpcNames(supabase)).not.toContain('economy_add_balance');
+    });
+
+    it('does not cancel or announce a reset while a payout retry is pending', async () => {
+      supabase = makeSupabase(
+        {
+          guild_config: { economy_lottery_enabled: true, economy_lottery_schedule: 'daily', economy_log_channel_id: 'ch1' },
+          economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'drawing', winner_user_id: 'u2', winning_number: 77 },
+        },
+        { lottery_award_jackpot: { data: null, error: { message: 'payout failed' } } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config);
+
+      // The claimed drawing (stored winner, payout pending) must not be
+      // cancelled as "no entries", and no reset may be announced.
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('cancels and announces the reset for a ticketless active drawing', async () => {
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'd1', jackpot: 0, status: 'active' },
+          economy_lottery_tickets: null,
+        },
+        { lottery_claim_drawing: { data: [], error: null } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config);
+
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([
+        expect.objectContaining({ status: 'cancelled' }),
+      ]);
+      expect(send).toHaveBeenCalled();
+    });
+
+    it('does not cancel a ticketed active drawing it did not evaluate', async () => {
+      supabase = makeSupabase(
+        {
+          economy_lottery_drawings: { id: 'd2', jackpot: 300, status: 'active' },
+          economy_lottery_tickets: [{ id: 't1', user_id: 'u1', ticket_number: 5 }],
+        },
+        // Another worker won the claim race — this tick gets no row back.
+        { lottery_claim_drawing: { data: [], error: null } },
+      );
+      const send = vi.fn().mockResolvedValue(undefined);
+      const client = { channels: { cache: new Map([['ch1', { send }]]) } };
+      mgr = new LotteryManager(supabase as any, client as any);
+
+      const config = { economy_lottery_enabled: true, economy_log_channel_id: 'ch1' };
+      await (mgr as any).executeDrawAndAnnounce('g1', config);
+
+      // A drawing with tickets is never a "no entries" reset.
+      expect(updatePayloads(supabase, 'economy_lottery_drawings')).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+    });
+
+    it('pays out to exactly one of two racing workers', async () => {
+      const row = { id: 'd1', guild_id: 'g1', jackpot: 1000, winner_user_id: 'u1', winning_number: 42 };
+      let claims = 0;
+      let awards = 0;
+      const fromFactory = makeSupabase({ economy_lottery_drawings: { id: 'd1', jackpot: 1000, status: 'active' } });
+      const racingSupabase = {
+        from: fromFactory.from,
+        rpc: vi.fn().mockImplementation((name: string) => {
+          // First caller wins the claim and the award; the loser gets no rows.
+          if (name === 'lottery_claim_drawing') {
+            return Promise.resolve({ data: ++claims === 1 ? [row] : [], error: null });
+          }
+          if (name === 'lottery_award_jackpot') {
+            return Promise.resolve({ data: ++awards === 1 ? [row] : [], error: null });
+          }
+          return Promise.resolve({ data: null, error: null });
+        }),
+      };
+      mgr = new LotteryManager(racingSupabase as any);
+      const [first, second] = await Promise.all([mgr.drawWinner('g1'), mgr.drawWinner('g1')]);
+      const winners = [first, second].filter((r) => r !== null);
+      expect(winners).toHaveLength(1);
+      expect(winners[0]).toEqual({ winnerId: 'u1', jackpot: 1000, winningNumber: 42 });
     });
   });
 });
