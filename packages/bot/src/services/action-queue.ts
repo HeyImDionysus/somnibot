@@ -22,7 +22,16 @@ import { ChannelType, EmbedBuilder, PermissionsBitField, type Guild, type GuildC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
-import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
+import {
+  CommerceFulfillmentService,
+  RECEIPT_DELIVERY_ACTION,
+  classifyDeliveryError,
+  writeReceiptDeliveryAlert,
+  type DeliveryFailureKind,
+  type FulfillmentPayload,
+  type ReceiptDeliveryPayload,
+} from './commerce-fulfillment.js';
+import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
@@ -437,6 +446,50 @@ async function handleFulfillment(
     return {
       success: false,
       error: result.errors.join('; '),
+    };
+  }
+}
+
+// ── Receipt Delivery Handler ──────────────────────────
+// Persistent re-delivery of a paid customer's receipt/license-key DM, queued
+// by CommerceFulfillmentService when the initial DM attempt fails. Transient
+// errors (network blips, Discord 5xx) are retryable and go through the
+// queue's exponential backoff; permanent errors (DMs disabled, unknown user)
+// fail immediately so retries aren't burned on a hopeless delivery. Final
+// failures are dead-lettered + alerted in processAction below.
+
+async function handleDeliverReceipt(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const p = payload as unknown as Partial<ReceiptDeliveryPayload>;
+  if (!p.discord_id || !p.order_number || !p.product_name) {
+    return {
+      success: false,
+      error: 'Missing required fields: discord_id, order_number, product_name',
+      retryable: false,
+    };
+  }
+
+  try {
+    const user = await guild.client.users.fetch(p.discord_id);
+    await deliverReceiptDM(user, {
+      orderNumber: p.order_number,
+      productName: p.product_name,
+      amountCents: p.amount_cents ?? 0,
+      currency: p.currency ?? 'USD',
+      licenseKey: p.license_key_plaintext ?? null,
+      date: new Date(),
+    });
+    return { success: true, data: { orderNumber: p.order_number, delivered: true } };
+  } catch (err) {
+    const kind = classifyDeliveryError(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Receipt delivery ${kind === 'permanent' ? 'permanently ' : ''}failed: ${msg}`,
+      retryable: kind === 'transient',
     };
   }
 }
@@ -932,6 +985,7 @@ const ACTION_HANDLERS: Record<
   fulfill_subscription: handleFulfillment,
   fulfill_cancellation: handleFulfillment,
   fulfill_suspension: handleFulfillment,
+  [RECEIPT_DELIVERY_ACTION]: handleDeliverReceipt,
   config_reload: handleConfigReload,
   send_embed: handleSendEmbed,
   test_welcome: handleTestWelcome,
@@ -948,6 +1002,53 @@ const ACTION_HANDLERS: Record<
   sync_ignore_drift: handleSyncIgnoreDrift,
   sync_clear_all_drift: handleSyncClearAllDrift,
 };
+
+// V5 Audit §6.5: in-process retry budget for transient handler failures
+// (exponential backoff 30s → 60s → 120s — see processAction below).
+const HANDLER_MAX_RETRIES = 3;
+
+/**
+ * Final-failure handling for receipt/license-key delivery: a paid customer
+ * has not received their goods, so this must never disappear silently.
+ * Dead-letters the action to `action_queue_dlq` (dashboard-visible, manually
+ * retryable — same shape as the stale-recovery DLQ writes below) and raises
+ * an operator alert with the actionable next step.
+ */
+async function deadLetterReceiptDelivery(
+  guild: Guild,
+  supabase: SupabaseClient,
+  action: ActionRow,
+  result: ActionResult,
+  attempts: number,
+): Promise<void> {
+  const payload = action.payload as unknown as Partial<ReceiptDeliveryPayload>;
+  const kind: DeliveryFailureKind = result.retryable === false ? 'permanent' : 'transient';
+
+  try {
+    const { error } = await supabase.from('action_queue_dlq').insert({
+      guild_id: guild.id,
+      action: action.action,
+      payload: action.payload ?? {},
+      error_message: result.error ?? 'Receipt delivery failed',
+      retry_count: attempts,
+      max_retries: HANDLER_MAX_RETRIES,
+      original_id: action.id,
+    });
+    if (error) throw new Error(error.message);
+  } catch (dlqErr) {
+    log.error(`Failed to write DLQ entry for ${action.id}:`, dlqErr);
+  }
+
+  await writeReceiptDeliveryAlert(supabase, {
+    guildId: guild.id,
+    orderNumber: payload.order_number ?? 'unknown',
+    productName: payload.product_name ?? 'unknown',
+    discordId: payload.discord_id ?? 'unknown',
+    kind,
+    attempts,
+    lastError: result.error ?? 'unknown',
+  });
+}
 
 async function processAction(
   guild: Guild,
@@ -1013,7 +1114,7 @@ async function processAction(
                         !result.error?.includes('Unknown action') &&
                         !result.error?.includes('Missing required');
 
-    if (isTransient && retryCount <= 3) {
+    if (isTransient && retryCount <= HANDLER_MAX_RETRIES) {
       const backoffMs = Math.min(30_000 * Math.pow(2, retryCount - 1), 120_000);
       log.info(`Scheduling retry #${retryCount} for ${action.id} in ${backoffMs / 1000}s`);
 
@@ -1036,6 +1137,14 @@ async function processAction(
       }, backoffMs);
 
       return; // Don't mark as failed yet — retry scheduled
+    }
+
+    // This failure is FINAL (permanent error or retry budget exhausted).
+    // Receipt/license-key delivery means a paid customer has not received
+    // their goods — dead-letter it and alert the operator instead of
+    // dropping it silently.
+    if (action.action === RECEIPT_DELIVERY_ACTION) {
+      await deadLetterReceiptDelivery(guild, supabase, action, result, retryCount);
     }
   }
 

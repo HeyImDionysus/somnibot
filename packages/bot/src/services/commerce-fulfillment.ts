@@ -17,7 +17,7 @@ import type { Guild, User } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
-import { sendReceiptDM } from '../features/commerce/receipt-builder.js';
+import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Fulfillment');
@@ -51,8 +51,100 @@ export interface FulfillmentResult {
   success: boolean;
   entitlementId?: string;
   receiptSent?: boolean;
+  /** Set when the receipt DM failed and a persistent re-delivery was queued. */
+  receiptRetryQueued?: boolean;
   eventEmitted?: boolean;
   errors: string[];
+}
+
+// ── Receipt Delivery Retry ─────────────────────────────────
+// A paid customer's receipt/license-key DM must never fail silently. When
+// the initial DM attempt fails, delivery is re-queued through
+// `bot_action_queue` (the existing persistent retry infrastructure: backoff,
+// max attempts, stale recovery). The queue handler classifies failures —
+// transient ones retry, permanent ones (DMs disabled) don't burn retries —
+// and final failures are dead-lettered to `action_queue_dlq` plus surfaced
+// via an `alerts` row so the dashboard shows "delivery failed, act manually".
+
+/** bot_action_queue action used for persistent receipt re-delivery. */
+export const RECEIPT_DELIVERY_ACTION = 'deliver_receipt';
+
+export interface ReceiptDeliveryPayload {
+  guild_id: string;
+  discord_id: string;
+  order_id: string;
+  order_number: string;
+  product_name: string;
+  amount_cents: number;
+  currency: string;
+  license_key_plaintext?: string;
+}
+
+export type DeliveryFailureKind = 'permanent' | 'transient';
+
+// Discord REST error codes for which retrying a DM can never succeed:
+// 50007 = Cannot send messages to this user (DMs disabled / bot blocked)
+// 10013 = Unknown User
+const PERMANENT_DELIVERY_ERROR_CODES = new Set([50007, 10013]);
+
+/**
+ * Classify a receipt DM delivery error. Permanent failures (user has DMs
+ * disabled, unknown user) should not be retried; everything else (network
+ * blips, Discord 5xx, rate limits) is assumed transient and retryable.
+ */
+export function classifyDeliveryError(err: unknown): DeliveryFailureKind {
+  const rawCode = (err as { code?: unknown } | null)?.code;
+  const code = typeof rawCode === 'string' ? Number(rawCode) : rawCode;
+  if (typeof code === 'number' && PERMANENT_DELIVERY_ERROR_CODES.has(code)) {
+    return 'permanent';
+  }
+  return 'transient';
+}
+
+/**
+ * Write the operator-visible alert for a receipt delivery failure. The
+ * dashboard surfaces `alerts` rows; the message tells the operator what to
+ * do (customer-portal pickup for DMs-disabled users, manual delivery / DLQ
+ * retry for exhausted transient failures).
+ */
+export async function writeReceiptDeliveryAlert(
+  supabase: SupabaseClient,
+  opts: {
+    guildId: string;
+    orderNumber: string;
+    productName: string;
+    discordId: string;
+    kind: DeliveryFailureKind;
+    attempts: number;
+    lastError: string;
+  },
+): Promise<void> {
+  const message =
+    opts.kind === 'permanent'
+      ? `Could not DM the receipt/license key for **${opts.productName}** (order ${opts.orderNumber}): ` +
+        'the customer has DMs disabled or is unreachable, so retrying will not help. ' +
+        'The license key remains available through the customer portal — consider contacting the customer another way.'
+      : `Could not DM the receipt/license key for **${opts.productName}** (order ${opts.orderNumber}) ` +
+        `after ${opts.attempts} attempt(s). Deliver it manually or retry it from the dead-letter queue.`;
+
+  const { error } = await supabase.from('alerts').insert({
+    guild_id: opts.guildId,
+    alert_type: 'receipt_delivery_failed',
+    severity: 'critical',
+    title: `Receipt delivery failed — order ${opts.orderNumber}`,
+    message,
+    metadata: {
+      orderNumber: opts.orderNumber,
+      productName: opts.productName,
+      discordId: opts.discordId,
+      kind: opts.kind,
+      attempts: opts.attempts,
+      lastError: opts.lastError,
+    },
+  });
+  if (error) {
+    log.error('Failed to write receipt delivery alert', { order: opts.orderNumber, detail: error.message });
+  }
 }
 
 // ── Service ────────────────────────────────────────────────
@@ -155,7 +247,7 @@ export class CommerceFulfillmentService {
     result.eventEmitted = true;
 
     // 3. Send receipt DM
-    result.receiptSent = await this.sendReceipt(payload);
+    await this.sendReceipt(payload, result);
 
     // 4. Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
@@ -199,7 +291,7 @@ export class CommerceFulfillmentService {
     result.eventEmitted = true;
 
     // 3. Send receipt DM
-    result.receiptSent = await this.sendReceipt(payload);
+    await this.sendReceipt(payload, result);
 
     // Run fraud checks (non-blocking — don't fail fulfillment)
     this.runFraudChecks(payload).catch((err) =>
@@ -357,10 +449,20 @@ export class CommerceFulfillmentService {
 
   // ── Receipt DM ───────────────────────────────────────────
 
-  private async sendReceipt(payload: FulfillmentPayload): Promise<boolean> {
+  /**
+   * Deliver the receipt/license-key DM. Failures are never dropped silently:
+   * the delivery is re-queued through `bot_action_queue` for persistent retry
+   * (see handleDeliverReceipt in action-queue.ts for backoff, permanent-vs-
+   * transient classification, and dead-letter + alert on final failure).
+   *
+   * A delivery failure intentionally does NOT fail the fulfillment itself —
+   * the entitlement is already granted, and retrying the whole fulfillment
+   * action would double-grant it. Only the delivery is retried.
+   */
+  private async sendReceipt(payload: FulfillmentPayload, result: FulfillmentResult): Promise<void> {
     try {
       const user = await this.guild.client.users.fetch(payload.discord_id);
-      return await sendReceiptDM(user, {
+      await deliverReceiptDM(user, {
         orderNumber: payload.order_number,
         productName: payload.product_name,
         amountCents: payload.amount_cents,
@@ -368,9 +470,56 @@ export class CommerceFulfillmentService {
         licenseKey: payload.license_key_plaintext ?? null,
         date: new Date(),
       });
+      result.receiptSent = true;
     } catch (err) {
       const redacted = payload.discord_id ? `***${payload.discord_id.slice(-4)}` : 'unknown';
       log.error('Failed to send receipt', { user: redacted, detail: err });
+      result.receiptSent = false;
+      result.receiptRetryQueued = await this.queueReceiptRedelivery(payload, err);
+    }
+  }
+
+  /**
+   * Queue a persistent re-delivery of the receipt DM via `bot_action_queue`.
+   * If even the queueing fails, fall back to writing the operator alert
+   * directly so the failed delivery is always operator-visible.
+   */
+  private async queueReceiptRedelivery(
+    payload: FulfillmentPayload,
+    deliveryError: unknown,
+  ): Promise<boolean> {
+    const deliveryPayload: ReceiptDeliveryPayload = {
+      guild_id: payload.guild_id,
+      discord_id: payload.discord_id,
+      order_id: payload.order_id,
+      order_number: payload.order_number,
+      product_name: payload.product_name,
+      amount_cents: payload.amount_cents,
+      currency: payload.currency,
+      license_key_plaintext: payload.license_key_plaintext,
+    };
+
+    try {
+      const { error } = await this.supabase.from('bot_action_queue').insert({
+        guild_id: payload.guild_id,
+        action: RECEIPT_DELIVERY_ACTION,
+        payload: deliveryPayload,
+        status: 'pending',
+      });
+      if (error) throw new Error(error.message);
+      log.info('Queued receipt re-delivery', { order: payload.order_number });
+      return true;
+    } catch (queueErr) {
+      log.error('Failed to queue receipt re-delivery', { order: payload.order_number, detail: queueErr });
+      await writeReceiptDeliveryAlert(this.supabase, {
+        guildId: payload.guild_id,
+        orderNumber: payload.order_number,
+        productName: payload.product_name,
+        discordId: payload.discord_id,
+        kind: classifyDeliveryError(deliveryError),
+        attempts: 1,
+        lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+      });
       return false;
     }
   }
@@ -397,6 +546,7 @@ export class CommerceFulfillmentService {
           amountCents: payload.amount_cents,
           entitlementId: result.entitlementId,
           receiptSent: result.receiptSent,
+          receiptRetryQueued: result.receiptRetryQueued,
           eventEmitted: result.eventEmitted,
           success: result.success,
           errors: result.errors,

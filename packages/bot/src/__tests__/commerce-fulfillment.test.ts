@@ -36,8 +36,13 @@ vi.mock('../features/commerce/entitlement-service.js', () => ({
   },
 }));
 
+const { mockDeliverReceiptDM } = vi.hoisted(() => ({
+  mockDeliverReceiptDM: vi.fn(async () => {}),
+}));
+
 vi.mock('../features/commerce/receipt-builder.js', () => ({
   sendReceiptDM: vi.fn(async () => true),
+  deliverReceiptDM: mockDeliverReceiptDM,
 }));
 
 vi.mock('../services/fraud-detection.js', () => ({
@@ -201,6 +206,114 @@ describe('CommerceFulfillmentService', () => {
       const result = await service.fulfill(basePayload);
       expect(result.success).toBe(false);
       expect(result.errors[0]).toContain('Boom');
+    });
+  });
+
+  describe('receipt delivery failure handling', () => {
+    // Defect fix: a failed receipt/license-key DM must never be dropped
+    // silently — it is queued for persistent re-delivery via bot_action_queue
+    // (and if even that fails, an operator alert is written directly).
+
+    function makeRecordingSupa(opts: { queueInsertError?: { message: string } } = {}) {
+      const inserts: Record<string, any[]> = {};
+      const supa: any = {
+        from: vi.fn((table: string) => {
+          const chain: any = {};
+          for (const m of ['select', 'update', 'delete', 'upsert', 'eq', 'in', 'order', 'limit']) {
+            chain[m] = vi.fn(() => chain);
+          }
+          chain.single = vi.fn().mockResolvedValue({ data: null, error: null });
+          chain.maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
+          chain.insert = vi.fn((row: any) => {
+            (inserts[table] ??= []).push(row);
+            const result =
+              table === 'bot_action_queue' && opts.queueInsertError
+                ? { data: null, error: opts.queueInsertError }
+                : { data: null, error: null };
+            const insertChain: any = { ...chain };
+            insertChain.then = (resolve: Function) => resolve(result);
+            return insertChain;
+          });
+          chain.then = (resolve: Function) => resolve({ data: null, error: null });
+          return chain;
+        }),
+        rpc: vi.fn(async () => ({ data: null, error: null })),
+      };
+      supa.__inserts = inserts;
+      return supa;
+    }
+
+    const keyedPayload: FulfillmentPayload = {
+      ...basePayload,
+      license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+    };
+
+    it('does not queue re-delivery when the receipt sends successfully', async () => {
+      const supa = makeRecordingSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+      const result = await service.fulfill(keyedPayload);
+
+      expect(result.success).toBe(true);
+      expect(result.receiptSent).toBe(true);
+      expect(result.receiptRetryQueued).toBeUndefined();
+      expect(supa.__inserts['bot_action_queue']).toBeUndefined();
+      expect(supa.__inserts['alerts']).toBeUndefined();
+    });
+
+    it('queues persistent re-delivery when the receipt DM fails, without failing fulfillment', async () => {
+      mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+      const supa = makeRecordingSupa();
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+      const result = await service.fulfill(keyedPayload);
+
+      // Entitlement was granted — the fulfillment itself must NOT be retried
+      // (that would double-grant); only the delivery is re-queued.
+      expect(result.success).toBe(true);
+      expect(result.receiptSent).toBe(false);
+      expect(result.receiptRetryQueued).toBe(true);
+
+      const queued = supa.__inserts['bot_action_queue'];
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject({
+        guild_id: 'guild-1',
+        action: 'deliver_receipt',
+        status: 'pending',
+      });
+      expect(queued[0].payload).toMatchObject({
+        discord_id: 'user-1',
+        order_number: 'ORD-001',
+        product_name: 'VIP Pass',
+        license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+      });
+      // Alerting is handled by the queue's final-failure path, not here
+      expect(supa.__inserts['alerts']).toBeUndefined();
+    });
+
+    it('writes an operator alert directly when re-delivery cannot be queued', async () => {
+      mockDeliverReceiptDM.mockRejectedValueOnce(
+        Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
+      );
+      const supa = makeRecordingSupa({ queueInsertError: { message: 'db unavailable' } });
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+      const result = await service.fulfill(keyedPayload);
+
+      expect(result.receiptSent).toBe(false);
+      expect(result.receiptRetryQueued).toBe(false);
+
+      const alerts = supa.__inserts['alerts'];
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]).toMatchObject({
+        guild_id: 'guild-1',
+        alert_type: 'receipt_delivery_failed',
+        severity: 'critical',
+      });
+      expect(alerts[0].metadata).toMatchObject({
+        kind: 'permanent',
+        orderNumber: 'ORD-001',
+      });
     });
   });
 });

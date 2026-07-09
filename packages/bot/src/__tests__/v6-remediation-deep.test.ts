@@ -158,6 +158,9 @@ vi.mock('../services/event-bus.js', () => ({
 
 vi.mock('../services/commerce-fulfillment.js', () => ({
   CommerceFulfillmentService: class { async fulfill() { return { success: true }; } },
+  RECEIPT_DELIVERY_ACTION: 'deliver_receipt',
+  classifyDeliveryError: vi.fn(() => 'transient'),
+  writeReceiptDeliveryAlert: vi.fn(async () => {}),
 }));
 
 vi.mock('../guild-init.js', () => ({

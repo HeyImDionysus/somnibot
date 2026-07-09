@@ -56,6 +56,9 @@ vi.mock('../services/commerce-fulfillment.js', () => ({
   CommerceFulfillmentService: class {
     fulfill = vi.fn(async () => ({ success: true, entitlementId: 'ent1', receiptSent: true, eventEmitted: true, errors: [] }));
   },
+  RECEIPT_DELIVERY_ACTION: 'deliver_receipt',
+  classifyDeliveryError: vi.fn(() => 'transient'),
+  writeReceiptDeliveryAlert: vi.fn(async () => {}),
 }));
 vi.mock('../services/event-bus.js', () => {
   const bus = { emit: vi.fn(), on: vi.fn(), off: vi.fn() };
