@@ -205,10 +205,10 @@ export async function POST(req: NextRequest) {
   if (device_fingerprint && result.config_max_devices && result.product_guild_id) {
     const guildId = result.product_guild_id;
     const maxDevices = result.config_max_devices || 3;
-    Promise.allSettled([
-      checkDeviceAbuse(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null),
-      checkIPMismatch(supabase, guildId, result.key_id!, result.customer_discord_id ?? null),
-    ]).then(() => checkCriticalFraudThreshold(supabase, guildId)).catch(() => {});
+    runFraudChecks(supabase, guildId, result.key_id!, maxDevices, result.customer_discord_id ?? null)
+      .catch((err) => {
+        console.error('[License] Fraud check pipeline crashed:', err instanceof Error ? err.message : err);
+      });
   }
 
   // Log validation
@@ -291,6 +291,153 @@ async function incrementFailedAttempts(
 
 // ── Fraud Signal Checks ────────────────────────────────────
 
+/** Operator-visible alert type for fraud check outages (see `alerts` table). */
+const FRAUD_ALERT_TYPE = 'fraud_check_failure';
+
+/**
+ * Minimum time between alert write attempts per guild (per instance).
+ * The alert row itself is deduped atomically in the DB (partial unique
+ * index: one unresolved row per guild); this throttle only keeps a
+ * sustained outage from adding alert-write DB load on every validation.
+ */
+const FRAUD_ALERT_MIN_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Bounded per-instance throttle: guild_id → last alert write attempt (epoch ms). */
+const FRAUD_ALERT_THROTTLE_MAX_ENTRIES = 1000;
+const fraudAlertLastAttempt = new Map<string, number>();
+
+interface FraudCheckFailure {
+  check: string;
+  error: string;
+}
+
+/**
+ * Run all fraud checks and surface any failures.
+ *
+ * Fire-and-forget from the caller's perspective — validation latency is
+ * unaffected — but failures are no longer invisible: each failed check is
+ * logged and an operator-visible `alerts` row is written (deduped/throttled)
+ * so a fraud-detection outage is detectable.
+ */
+async function runFraudChecks(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  licenseKeyId: string,
+  maxDevices: number,
+  discordId: string | null,
+): Promise<void> {
+  const checks = [
+    { name: 'device_abuse', run: () => checkDeviceAbuse(supabase, guildId, licenseKeyId, maxDevices, discordId) },
+    { name: 'ip_mismatch', run: () => checkIPMismatch(supabase, guildId, licenseKeyId, discordId) },
+  ];
+
+  const settled = await Promise.allSettled(checks.map((c) => c.run()));
+
+  const failures: FraudCheckFailure[] = [];
+  settled.forEach((outcome, i) => {
+    if (outcome.status === 'rejected') {
+      failures.push({
+        check: checks[i].name,
+        error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
+      });
+    }
+  });
+
+  try {
+    await checkCriticalFraudThreshold(supabase, guildId);
+  } catch (err) {
+    failures.push({
+      check: 'critical_fraud_threshold',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  if (failures.length === 0) return;
+
+  for (const failure of failures) {
+    console.error('[License] Fraud check failed:', {
+      guild_id: guildId,
+      check: failure.check,
+      error: failure.error,
+    });
+  }
+
+  await raiseFraudCheckAlert(supabase, guildId, failures);
+}
+
+/**
+ * Persist an operator-visible alert for fraud check failures.
+ *
+ * At most one unresolved `fraud_check_failure` alert per guild. The dedupe
+ * is atomic at the database via the partial unique index
+ * `uniq_alerts_unresolved_fraud_check_failure` (guild_id WHERE alert_type =
+ * 'fraud_check_failure' AND resolved = false): an existing alert is
+ * refreshed in place with a single UPDATE, otherwise we INSERT and treat a
+ * 23505 unique violation as "another instance already raised it" — so
+ * concurrent instances during the same outage cannot create duplicates.
+ * Additionally throttled in-memory so a sustained outage attempts at most
+ * one alert write per guild per FRAUD_ALERT_MIN_INTERVAL_MS per instance.
+ */
+async function raiseFraudCheckAlert(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  guildId: string,
+  failures: FraudCheckFailure[],
+): Promise<void> {
+  const now = Date.now();
+  const last = fraudAlertLastAttempt.get(guildId);
+  if (last !== undefined && now - last < FRAUD_ALERT_MIN_INTERVAL_MS) return;
+
+  // Record the attempt up front so a failing alert write is throttled too,
+  // and bound the map so it cannot grow without limit.
+  if (fraudAlertLastAttempt.size >= FRAUD_ALERT_THROTTLE_MAX_ENTRIES && !fraudAlertLastAttempt.has(guildId)) {
+    fraudAlertLastAttempt.clear();
+  }
+  fraudAlertLastAttempt.set(guildId, now);
+
+  const failedChecks = failures.map((f) => f.check).join(', ');
+  const message =
+    `License validation fraud checks are failing (${failedChecks}). ` +
+    'Fraud signals may not be recorded until this is resolved.';
+  const metadata = { failures, source: 'license_validate' };
+
+  try {
+    // Refresh the existing unresolved alert in place — a single atomic
+    // UPDATE, no read-then-write window.
+    const { data: refreshed, error: updateError } = await supabase
+      .from('alerts')
+      .update({ message, metadata, updated_at: new Date().toISOString() })
+      .eq('guild_id', guildId)
+      .eq('alert_type', FRAUD_ALERT_TYPE)
+      .eq('resolved', false)
+      .select('id');
+
+    if (updateError) {
+      console.error('[License] Failed to refresh fraud check alert:', updateError.message);
+      return;
+    }
+    if (refreshed && refreshed.length > 0) return;
+
+    // No unresolved alert yet — insert one. The partial unique index
+    // `uniq_alerts_unresolved_fraud_check_failure` makes the dedupe atomic
+    // across instances: if another instance raced us past the UPDATE above,
+    // exactly one INSERT commits and the loser sees a 23505 unique
+    // violation, which means the alert exists — success, not an error.
+    const { error: insertError } = await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: FRAUD_ALERT_TYPE,
+      severity: 'critical',
+      title: 'Fraud detection checks failing',
+      message,
+      metadata,
+    });
+    if (insertError && insertError.code !== '23505') {
+      console.error('[License] Failed to insert fraud check alert:', insertError.message);
+    }
+  } catch (err) {
+    console.error('[License] Failed to write fraud check alert:', err instanceof Error ? err.message : err);
+  }
+}
+
 async function checkDeviceAbuse(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
@@ -298,30 +445,34 @@ async function checkDeviceAbuse(
   maxDevices: number,
   discordId: string | null,
 ): Promise<void> {
-  try {
-    const { count } = await supabase
-      .from('license_sessions')
-      .select('*', { count: 'exact', head: true })
-      .eq('license_key_id', licenseKeyId)
-      .eq('active', true);
+  const { count, error: countError } = await supabase
+    .from('license_sessions')
+    .select('*', { count: 'exact', head: true })
+    .eq('license_key_id', licenseKeyId)
+    .eq('active', true);
 
-    const activeDevices = count || 0;
+  if (countError) {
+    throw new Error(`session count query failed: ${countError.message}`);
+  }
 
-    if (activeDevices > maxDevices * 3) {
-      await supabase.from('fraud_signals').insert({
-        guild_id: guildId,
-        signal_type: 'device_abuse',
-        severity: activeDevices > maxDevices * 5 ? 'critical' : 'high',
-        entity_type: 'license_key',
-        entity_id: licenseKeyId,
-        discord_id: discordId,
-        description: `${activeDevices} active device sessions on a ${maxDevices}-device license`,
-        evidence: { active_sessions: activeDevices, max_devices: maxDevices, ratio: activeDevices / maxDevices },
-        status: 'open',
-      });
+  const activeDevices = count || 0;
+
+  if (activeDevices > maxDevices * 3) {
+    const { error: insertError } = await supabase.from('fraud_signals').insert({
+      guild_id: guildId,
+      signal_type: 'device_abuse',
+      severity: activeDevices > maxDevices * 5 ? 'critical' : 'high',
+      entity_type: 'license_key',
+      entity_id: licenseKeyId,
+      discord_id: discordId,
+      description: `${activeDevices} active device sessions on a ${maxDevices}-device license`,
+      evidence: { active_sessions: activeDevices, max_devices: maxDevices, ratio: activeDevices / maxDevices },
+      status: 'open',
+    });
+
+    if (insertError) {
+      throw new Error(`fraud signal insert failed: ${insertError.message}`);
     }
-  } catch {
-    // Non-fatal
   }
 }
 
@@ -331,33 +482,37 @@ async function checkIPMismatch(
   licenseKeyId: string,
   discordId: string | null,
 ): Promise<void> {
-  try {
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    const { data: sessions } = await supabase
-      .from('license_sessions')
-      .select('ip_address')
-      .eq('license_key_id', licenseKeyId)
-      .gte('first_seen_at', since)
-      .limit(1000);
+  const { data: sessions, error: sessionsError } = await supabase
+    .from('license_sessions')
+    .select('ip_address')
+    .eq('license_key_id', licenseKeyId)
+    .gte('first_seen_at', since)
+    .limit(1000);
 
-    const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
+  if (sessionsError) {
+    throw new Error(`session IP query failed: ${sessionsError.message}`);
+  }
 
-    if (uniqueIPs.size >= 5) {
-      await supabase.from('fraud_signals').insert({
-        guild_id: guildId,
-        signal_type: 'ip_mismatch',
-        severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
-        entity_type: 'license_key',
-        entity_id: licenseKeyId,
-        discord_id: discordId,
-        description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
-        evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
-        status: 'open',
-      });
+  const uniqueIPs = new Set((sessions || []).map(s => s.ip_address).filter(Boolean));
+
+  if (uniqueIPs.size >= 5) {
+    const { error: insertError } = await supabase.from('fraud_signals').insert({
+      guild_id: guildId,
+      signal_type: 'ip_mismatch',
+      severity: uniqueIPs.size >= 10 ? 'critical' : 'medium',
+      entity_type: 'license_key',
+      entity_id: licenseKeyId,
+      discord_id: discordId,
+      description: `${uniqueIPs.size} unique IPs in the last 24 hours`,
+      evidence: { unique_ips: uniqueIPs.size, window_hours: 24 },
+      status: 'open',
+    });
+
+    if (insertError) {
+      throw new Error(`fraud signal insert failed: ${insertError.message}`);
     }
-  } catch {
-    // Non-fatal
   }
 }
 
@@ -372,59 +527,76 @@ async function checkCriticalFraudThreshold(
   supabase: ReturnType<typeof createAdminSupabase>,
   guildId: string,
 ): Promise<void> {
-  try {
-    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  // Errors are thrown to the caller (runFraudChecks), which logs and alerts —
+  // still fire-and-forget, so incident creation cannot break license validation.
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-    const { count } = await supabase
-      .from('fraud_signals')
-      .select('*', { count: 'exact', head: true })
-      .eq('guild_id', guildId)
-      .eq('status', 'open')
-      .eq('severity', 'critical')
-      .gte('created_at', since);
+  const { count, error: countError } = await supabase
+    .from('fraud_signals')
+    .select('*', { count: 'exact', head: true })
+    .eq('guild_id', guildId)
+    .eq('status', 'open')
+    .eq('severity', 'critical')
+    .gte('created_at', since);
 
-    if (!count || count < 3) return;
+  if (countError) {
+    throw new Error(`fraud signal count query failed: ${countError.message}`);
+  }
 
-    // Check if we already created an incident for this burst
-    const { data: existing } = await supabase
-      .from('incidents')
-      .select('id')
-      .eq('guild_id', guildId)
-      .eq('source', 'fraud_auto')
-      .not('status', 'eq', 'resolved')
-      .gte('created_at', since)
-      .limit(1);
+  if (!count || count < 3) return;
 
-    if (existing && existing.length > 0) return;
+  // Check if we already created an incident for this burst
+  const { data: existing, error: existingError } = await supabase
+    .from('incidents')
+    .select('id')
+    .eq('guild_id', guildId)
+    .eq('source', 'fraud_auto')
+    .not('status', 'eq', 'resolved')
+    .gte('created_at', since)
+    .limit(1);
 
-    const { data: seqVal } = await supabase.rpc('nextval_incident');
-    const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
+  if (existingError) {
+    throw new Error(`incident lookup failed: ${existingError.message}`);
+  }
 
-    const { data: incident } = await supabase
-      .from('incidents')
-      .insert({
-        guild_id: guildId,
-        incident_number: nextNumber,
-        title: `Fraud alert: ${count} critical signals in the last hour`,
-        description: 'Auto-created incident due to elevated critical fraud signals during license validation.',
-        severity: 'critical',
-        status: 'open',
-        source: 'fraud_auto',
-        created_by: 'system:fraud',
-      })
-      .select()
-      .single();
+  if (existing && existing.length > 0) return;
 
-    if (incident) {
-      await supabase.from('incident_events').insert({
-        incident_id: incident.id,
-        event_type: 'auto_created',
-        actor_id: 'system:fraud',
-        message: `${count} critical fraud signals detected in the last hour. Automatic incident created.`,
-        metadata: { signal_count: count },
-      });
+  const { data: seqVal, error: seqError } = await supabase.rpc('nextval_incident');
+  if (seqError) {
+    throw new Error(`nextval_incident RPC failed: ${seqError.message}`);
+  }
+  const nextNumber = typeof seqVal === 'number' ? seqVal : 1;
+
+  const { data: incident, error: incidentError } = await supabase
+    .from('incidents')
+    .insert({
+      guild_id: guildId,
+      incident_number: nextNumber,
+      title: `Fraud alert: ${count} critical signals in the last hour`,
+      description: 'Auto-created incident due to elevated critical fraud signals during license validation.',
+      severity: 'critical',
+      status: 'open',
+      source: 'fraud_auto',
+      created_by: 'system:fraud',
+    })
+    .select()
+    .single();
+
+  if (incidentError) {
+    throw new Error(`incident insert failed: ${incidentError.message}`);
+  }
+
+  if (incident) {
+    const { error: eventError } = await supabase.from('incident_events').insert({
+      incident_id: incident.id,
+      event_type: 'auto_created',
+      actor_id: 'system:fraud',
+      message: `${count} critical fraud signals detected in the last hour. Automatic incident created.`,
+      metadata: { signal_count: count },
+    });
+
+    if (eventError) {
+      throw new Error(`incident event insert failed: ${eventError.message}`);
     }
-  } catch {
-    // Non-fatal — don't let incident creation break license validation
   }
 }
