@@ -24,10 +24,6 @@ vi.mock('@somnibot/shared', () => ({
   }),
 }));
 
-vi.mock('../../utils/random.js', () => ({
-  randomPick: (arr: any[]) => arr[0],
-}));
-
 vi.mock('../quests/quests-manager.js', () => ({
   getQuestsManager: () => ({
     trackProgress: vi.fn().mockResolvedValue(undefined),
