@@ -211,11 +211,21 @@ describe('CommerceFulfillmentService', () => {
 
   describe('receipt delivery failure handling', () => {
     // Defect fix: a failed receipt/license-key DM must never be dropped
-    // silently — it is queued for persistent re-delivery via bot_action_queue
-    // (and if even that fails, an operator alert is written directly).
+    // silently — it is queued for persistent re-delivery via bot_action_queue.
+    // The queue insert itself is retried with backoff (the queue row is the
+    // only at-rest copy of the plaintext key); if it keeps failing, the
+    // payload is preserved in the retryable DLQ and an operator alert
+    // (never containing the key) is written.
 
-    function makeRecordingSupa(opts: { queueInsertError?: { message: string } } = {}) {
+    /**
+     * `queueInsertError` makes bot_action_queue inserts fail; combine with
+     * `queueInsertFailures: n` to fail only the first n attempts.
+     */
+    function makeRecordingSupa(
+      opts: { queueInsertError?: { message: string }; queueInsertFailures?: number } = {},
+    ) {
       const inserts: Record<string, any[]> = {};
+      let queueInsertAttempts = 0;
       const supa: any = {
         from: vi.fn((table: string) => {
           const chain: any = {};
@@ -226,10 +236,14 @@ describe('CommerceFulfillmentService', () => {
           chain.maybeSingle = vi.fn().mockResolvedValue({ data: null, error: null });
           chain.insert = vi.fn((row: any) => {
             (inserts[table] ??= []).push(row);
-            const result =
-              table === 'bot_action_queue' && opts.queueInsertError
-                ? { data: null, error: opts.queueInsertError }
-                : { data: null, error: null };
+            let result: any = { data: null, error: null };
+            if (table === 'bot_action_queue' && opts.queueInsertError) {
+              queueInsertAttempts++;
+              const stillFailing =
+                opts.queueInsertFailures === undefined ||
+                queueInsertAttempts <= opts.queueInsertFailures;
+              if (stillFailing) result = { data: null, error: opts.queueInsertError };
+            }
             const insertChain: any = { ...chain };
             insertChain.then = (resolve: Function) => resolve(result);
             return insertChain;
@@ -291,29 +305,81 @@ describe('CommerceFulfillmentService', () => {
       expect(supa.__inserts['alerts']).toBeUndefined();
     });
 
-    it('writes an operator alert directly when re-delivery cannot be queued', async () => {
-      mockDeliverReceiptDM.mockRejectedValueOnce(
-        Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
-      );
-      const supa = makeRecordingSupa({ queueInsertError: { message: 'db unavailable' } });
-      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+    it('retries the queue insert with backoff and recovers on a later attempt', async () => {
+      vi.useFakeTimers();
+      try {
+        mockDeliverReceiptDM.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+        const supa = makeRecordingSupa({
+          queueInsertError: { message: 'transient db blip' },
+          queueInsertFailures: 1,
+        });
+        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
 
-      const result = await service.fulfill(keyedPayload);
+        const resultPromise = service.fulfill(keyedPayload);
+        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
+        const result = await resultPromise;
 
-      expect(result.receiptSent).toBe(false);
-      expect(result.receiptRetryQueued).toBe(false);
+        expect(result.success).toBe(true);
+        expect(result.receiptRetryQueued).toBe(true);
+        // Failed once, then queued successfully — no DLQ, no alert
+        expect(supa.__inserts['bot_action_queue']).toHaveLength(2);
+        expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
+        expect(supa.__inserts['alerts']).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
-      const alerts = supa.__inserts['alerts'];
-      expect(alerts).toHaveLength(1);
-      expect(alerts[0]).toMatchObject({
-        guild_id: 'guild-1',
-        alert_type: 'receipt_delivery_failed',
-        severity: 'critical',
-      });
-      expect(alerts[0].metadata).toMatchObject({
-        kind: 'permanent',
-        orderNumber: 'ORD-001',
-      });
+    it('preserves the payload in the DLQ and alerts when the queue insert keeps failing', async () => {
+      vi.useFakeTimers();
+      try {
+        mockDeliverReceiptDM.mockRejectedValueOnce(
+          Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
+        );
+        const supa = makeRecordingSupa({ queueInsertError: { message: 'db unavailable' } });
+        service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+        const resultPromise = service.fulfill(keyedPayload);
+        await vi.advanceTimersByTimeAsync(10_000); // flush insert backoff sleeps
+        const result = await resultPromise;
+
+        expect(result.receiptSent).toBe(false);
+        expect(result.receiptRetryQueued).toBe(false);
+
+        // Queue insert retried before giving up
+        expect(supa.__inserts['bot_action_queue']).toHaveLength(3);
+
+        // The delivery payload — the only remaining copy of the plaintext
+        // key — is preserved in the dashboard-retryable DLQ, not dropped
+        const dlq = supa.__inserts['action_queue_dlq'];
+        expect(dlq).toHaveLength(1);
+        expect(dlq[0]).toMatchObject({
+          guild_id: 'guild-1',
+          action: 'deliver_receipt',
+        });
+        expect(dlq[0].payload).toMatchObject({
+          discord_id: 'user-1',
+          order_number: 'ORD-001',
+          license_key_plaintext: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+        });
+        expect(dlq[0].error_message).toContain('db unavailable');
+
+        // Operator alert written — and it never contains the plaintext key
+        const alerts = supa.__inserts['alerts'];
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]).toMatchObject({
+          guild_id: 'guild-1',
+          alert_type: 'receipt_delivery_failed',
+          severity: 'critical',
+        });
+        expect(alerts[0].metadata).toMatchObject({
+          kind: 'permanent',
+          orderNumber: 'ORD-001',
+        });
+        expect(JSON.stringify(alerts[0])).not.toContain('SMNI-AAAA-BBBB-CCCC-DDDD');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

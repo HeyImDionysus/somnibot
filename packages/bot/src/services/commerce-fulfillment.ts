@@ -82,6 +82,17 @@ export interface ReceiptDeliveryPayload {
 
 export type DeliveryFailureKind = 'permanent' | 'transient';
 
+// Bounded in-process retry for the bot_action_queue insert in
+// queueReceiptRedelivery. The queue row is what carries the plaintext
+// license key into the retry pipeline — only its hash is stored at rest in
+// `license_keys` — so losing the insert loses the key. Worth a few quick
+// attempts before falling back to the dead-letter queue.
+const QUEUE_INSERT_MAX_ATTEMPTS = 3;
+const QUEUE_INSERT_BACKOFF_MS = [500, 2_000];
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 // Discord REST error codes for which retrying a DM can never succeed:
 // 50007 = Cannot send messages to this user (DMs disabled / bot blocked)
 // 10013 = Unknown User
@@ -481,8 +492,15 @@ export class CommerceFulfillmentService {
 
   /**
    * Queue a persistent re-delivery of the receipt DM via `bot_action_queue`.
-   * If even the queueing fails, fall back to writing the operator alert
-   * directly so the failed delivery is always operator-visible.
+   *
+   * The queue row is the only at-rest copy of the plaintext license key
+   * (`license_keys` stores hash/prefix/suffix only), so the insert itself is
+   * retried with a short backoff. If it still fails, the delivery payload is
+   * preserved in `action_queue_dlq` — dashboard-visible and manually
+   * retryable via the existing DLQ retry flow, and the same table/shape the
+   * queue's own final-failure path writes, so this adds no new exposure
+   * surface — and an operator alert is written. The alert itself never
+   * contains the key.
    */
   private async queueReceiptRedelivery(
     payload: FulfillmentPayload,
@@ -499,29 +517,72 @@ export class CommerceFulfillmentService {
       license_key_plaintext: payload.license_key_plaintext,
     };
 
+    let lastQueueError: unknown;
+    for (let attempt = 1; attempt <= QUEUE_INSERT_MAX_ATTEMPTS; attempt++) {
+      try {
+        const { error } = await this.supabase.from('bot_action_queue').insert({
+          guild_id: payload.guild_id,
+          action: RECEIPT_DELIVERY_ACTION,
+          payload: deliveryPayload,
+          status: 'pending',
+        });
+        if (error) throw new Error(error.message);
+        log.info('Queued receipt re-delivery', { order: payload.order_number });
+        return true;
+      } catch (queueErr) {
+        lastQueueError = queueErr;
+        log.warn('Receipt re-delivery queue insert failed', {
+          order: payload.order_number,
+          attempt,
+          detail: queueErr,
+        });
+        if (attempt < QUEUE_INSERT_MAX_ATTEMPTS) {
+          await sleep(QUEUE_INSERT_BACKOFF_MS[attempt - 1] ?? 2_000);
+        }
+      }
+    }
+
+    log.error('Failed to queue receipt re-delivery', {
+      order: payload.order_number,
+      detail: lastQueueError,
+    });
+
+    // Preserve the full delivery payload (including the plaintext key) in
+    // the dead-letter queue so the operator can retry the delivery from the
+    // dashboard instead of the key being unrecoverable.
     try {
-      const { error } = await this.supabase.from('bot_action_queue').insert({
+      const queueMsg =
+        lastQueueError instanceof Error ? lastQueueError.message : String(lastQueueError);
+      const { error } = await this.supabase.from('action_queue_dlq').insert({
         guild_id: payload.guild_id,
         action: RECEIPT_DELIVERY_ACTION,
         payload: deliveryPayload,
-        status: 'pending',
+        error_message:
+          `Failed to queue receipt re-delivery after ${QUEUE_INSERT_MAX_ATTEMPTS} attempts: ${queueMsg}`,
+        retry_count: 0,
+        max_retries: 0,
       });
       if (error) throw new Error(error.message);
-      log.info('Queued receipt re-delivery', { order: payload.order_number });
-      return true;
-    } catch (queueErr) {
-      log.error('Failed to queue receipt re-delivery', { order: payload.order_number, detail: queueErr });
-      await writeReceiptDeliveryAlert(this.supabase, {
-        guildId: payload.guild_id,
-        orderNumber: payload.order_number,
-        productName: payload.product_name,
-        discordId: payload.discord_id,
-        kind: classifyDeliveryError(deliveryError),
-        attempts: 1,
-        lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+      log.info('Dead-lettered receipt re-delivery payload', { order: payload.order_number });
+    } catch (dlqErr) {
+      // Last resort is the alert below: it references the order, and the
+      // hashed key for that order can still be manually revoked + reissued.
+      log.error('Failed to dead-letter receipt re-delivery', {
+        order: payload.order_number,
+        detail: dlqErr,
       });
-      return false;
     }
+
+    await writeReceiptDeliveryAlert(this.supabase, {
+      guildId: payload.guild_id,
+      orderNumber: payload.order_number,
+      productName: payload.product_name,
+      discordId: payload.discord_id,
+      kind: classifyDeliveryError(deliveryError),
+      attempts: 1,
+      lastError: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+    });
+    return false;
   }
 
   // ── Audit ────────────────────────────────────────────────

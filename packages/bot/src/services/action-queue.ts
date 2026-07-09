@@ -1194,6 +1194,10 @@ async function processAction(
  *
  * 1. Process any existing pending actions (in case we missed them while offline)
  * 2. Subscribe to Realtime INSERT events on bot_action_queue
+ * 3. Once the subscription is SUBSCRIBED, sweep pending rows again — rows
+ *    inserted between step 1's snapshot and the subscription going live
+ *    (e.g. deliver_receipt re-delivery rows queued by step 1 itself) are
+ *    invisible to both step 1 and Realtime.
  */
 // V48-C3: how long an action can be stuck in 'processing' before we
 // assume the worker crashed and re-queue it (or fail it if the retry
@@ -1295,6 +1299,32 @@ async function recoverStaleActions(
   }
 }
 
+/**
+ * Fetch and process every row currently in 'pending' for this guild.
+ * Used for the startup backlog sweep and re-run after the Realtime
+ * subscription activates (see startActionQueueListener) — the atomic claim
+ * in processAction makes overlapping sweeps/Realtime deliveries safe.
+ */
+async function sweepPendingActions(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<void> {
+  const { data: pending } = await supabase
+    .from('bot_action_queue')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(1000);
+
+  if (pending && pending.length > 0) {
+    log.info(`Processing ${pending.length} pending action(s)`);
+    for (const action of pending) {
+      await processAction(guild, supabase, action as ActionRow);
+    }
+  }
+}
+
 export interface ActionQueueHandle {
   staleRecoveryTimer: ReturnType<typeof setInterval>;
 }
@@ -1312,20 +1342,7 @@ export async function startActionQueueListener(
   await recoverStaleActions(guild, supabase);
 
   // Process any pending actions from while the bot was offline
-  const { data: pending } = await supabase
-    .from('bot_action_queue')
-    .select('*')
-    .eq('guild_id', guild.id)
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1000);
-
-  if (pending && pending.length > 0) {
-    log.info(`Processing ${pending.length} pending action(s)`);
-    for (const action of pending) {
-      await processAction(guild, supabase, action as ActionRow);
-    }
-  }
+  await sweepPendingActions(guild, supabase);
 
   // Periodic stale-row sweep (runs in addition to the startup pass so
   // long-running deployments don't accumulate stuck rows).
@@ -1365,6 +1382,19 @@ export async function startActionQueueListener(
         if (status === 'SUBSCRIBED') {
           log.info('Realtime subscription: SUBSCRIBED');
           reconnectDelay = 1_000; // reset backoff on success
+          // Rows inserted after the startup sweep read its snapshot but
+          // before this subscription became active are invisible to both
+          // paths — Realtime only fires for future INSERTs. The startup
+          // sweep itself creates such rows: a fulfill_purchase processed
+          // from the offline backlog whose receipt DM fails inserts a new
+          // pending deliver_receipt row, which would otherwise sit pending
+          // until the next restart. Re-sweep now that the subscription is
+          // live; the atomic claim in processAction makes any overlap with
+          // Realtime deliveries safe. This also heals INSERTs missed while
+          // a dropped subscription was reconnecting.
+          sweepPendingActions(guild, supabase).catch((sweepErr) => {
+            log.error('Post-subscribe pending sweep failed:', { error: String(sweepErr) });
+          });
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           log.warn(`Realtime subscription ${status}, reconnecting in ${reconnectDelay}ms`, {
             error: err ? String(err) : undefined,

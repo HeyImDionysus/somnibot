@@ -55,7 +55,9 @@ import { startActionQueueListener } from '../services/action-queue.js';
  * bot_action_queue. `retryCount` controls what the pre-retry
  * select('retry_count') lookup returns. `staleFailed`/`staleRow` simulate
  * bot_action_queue_recover_stale returning crash-exhausted rows and the
- * follow-up full-row lookup used for DLQ + alert writes.
+ * follow-up full-row lookup used for DLQ + alert writes. `secondSweep`
+ * is returned by the SECOND pending-rows query — i.e. rows that appeared
+ * between the startup sweep and the Realtime subscription going live.
  */
 function makeSupa(
   pendingActions: any[] = [],
@@ -63,11 +65,12 @@ function makeSupa(
     retryCount?: number;
     staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
     staleRow?: Record<string, unknown> | null;
+    secondSweep?: any[];
   } = {},
 ) {
   const inserts: Record<string, any[]> = {};
   const queueUpdates: Record<string, unknown>[] = [];
-  let pendingReturned = false;
+  let sweepCalls = 0;
 
   const makeChain = () => {
     const chain: any = {};
@@ -103,11 +106,14 @@ function makeSupa(
             });
           }
           inner.then = (resolve: Function) => {
-            if (!pendingReturned) {
-              pendingReturned = true;
-              return resolve({ data: pendingActions, error: null });
-            }
-            return resolve({ data: [], error: null });
+            const batch =
+              sweepCalls === 0
+                ? pendingActions
+                : sweepCalls === 1
+                  ? (opts.secondSweep ?? [])
+                  : [];
+            sweepCalls++;
+            return resolve({ data: batch, error: null });
           };
           return inner;
         });
@@ -312,6 +318,36 @@ describe('deliver_receipt action', () => {
 
     setTimeoutSpy.mockRestore();
     vi.useRealTimers();
+  });
+
+  it('processes deliver_receipt rows queued during the startup sweep once Realtime subscribes', async () => {
+    // Startup race: the startup pending sweep runs BEFORE the Realtime
+    // subscription exists. Processing a backlogged fulfill_purchase whose
+    // receipt DM fails inserts a NEW pending deliver_receipt row — after the
+    // sweep's snapshot, before the subscription — so Realtime never fires
+    // for it. The listener must re-sweep pending rows once the subscription
+    // reports SUBSCRIBED, or the redelivery sits stuck until next restart.
+    const guild = makeGuild();
+    const supa = makeSupa([], { secondSweep: [deliveryAction()] });
+
+    await startActionQueueListener(guild, supa);
+
+    // The post-subscribe sweep is fire-and-forget — wait for it to land.
+    await vi.waitFor(() => {
+      expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+    });
+    expect(mockDeliverReceiptDM).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'user-1' }),
+      expect.objectContaining({
+        orderNumber: 'ORD-001',
+        licenseKey: 'SMNI-AAAA-BBBB-CCCC-DDDD',
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(supa.__queueUpdates).toContainEqual(
+        expect.objectContaining({ status: 'completed' }),
+      );
+    });
   });
 
   it('alerts when a deliver_receipt row exhausts retries via stale crash recovery', async () => {
