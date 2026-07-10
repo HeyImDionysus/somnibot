@@ -138,6 +138,18 @@ export interface OverrideDiff {
 export interface StateDiff {
   everyoneDrift: boolean;
   everyoneCurrentPermissions: string;
+  /**
+   * True when the mapped roles' actual Discord positions are not in the same
+   * relative order as the desired `position` field. Role position is not part
+   * of the per-role `changes` (positions are relative in desired state and
+   * absolute in Discord), so hierarchy drift is surfaced as its own signal and
+   * classified into a single HIERARCHY_DRIFT item.
+   */
+  roleHierarchyDrift: boolean;
+  /** Discord ID of a representative out-of-order role (for the drift item). */
+  roleHierarchyDriftId?: string;
+  /** Template key of a representative out-of-order role (for repair lookup). */
+  roleHierarchyDriftKey?: string;
   roles: RoleDiff[];
   categories: CategoryDiff[];
   channels: ChannelDiff[];
@@ -189,13 +201,45 @@ export interface DriftItem {
 // ============================================================
 
 /**
+ * True when `discordId` is registered in `entityIdMap` under an entity type
+ * OTHER than `entityType`. Used to reject a bare-key flat-map resolution that
+ * actually belongs to a different entity (e.g. a channel row keyed `staff`
+ * whose ID would otherwise be mistaken for a role of the same bare key).
+ */
+function isForeignEntityId(
+  entityIdMap: Map<string, string> | undefined,
+  entityType: 'role' | 'channel' | 'category',
+  discordId: string,
+): boolean {
+  if (!entityIdMap) return false;
+  for (const [key, id] of entityIdMap) {
+    if (id !== discordId) continue;
+    const type = key.includes(':') ? key.slice(0, key.indexOf(':')) : key;
+    if (type !== entityType) return true;
+  }
+  return false;
+}
+
+/**
  * Compute the diff between desired and actual state.
  * ID mapping is provided by the discord_id_map table.
+ *
+ * `idMap` is the historical flat map (template key → discord ID). The
+ * `discord_id_map` table's real primary key is (guild, entity_type, template
+ * key), so the same bare `template_key` (e.g. `staff`) can legitimately exist
+ * for BOTH a role and a channel/category. Flattening those rows into a single
+ * `Map<string, string>` loses that entity dimension: whichever row is inserted
+ * last wins, so a bare-key lookup for a role can silently resolve to a
+ * channel's Discord ID (and vice-versa). To keep the hierarchy comparison from
+ * dropping a role on such a collision, callers may additionally pass
+ * `entityIdMap`, keyed by `${entityType}:${bareKey}`, which preserves the
+ * entity type and is consulted first for role resolution.
  */
 export function computeStateDiff(
   desired: DesiredState,
   actual: ActualState,
   idMap: Map<string, string>, // template key → discord ID
+  entityIdMap?: Map<string, string>, // `${entity_type}:${bareKey}` → discord ID
 ): StateDiff {
   const roleDiffs: RoleDiff[] = [];
   const categoryDiffs: CategoryDiff[] = [];
@@ -288,6 +332,79 @@ export function computeStateDiff(
         name: actualRole.name,
         discordId: actualRole.id,
       });
+    }
+  }
+
+  // --- Role hierarchy drift ---
+  // Compare the desired relative ordering of mapped roles against their actual
+  // Discord positions. Only roles that resolve to a live, non-managed actual
+  // role participate. Drift is a genuine *inversion*: a role that should sit
+  // higher (greater desired position) actually sits strictly lower than the one
+  // below it. Discord role positions are NOT guaranteed unique, so two adjacent
+  // desired roles can legitimately share the same numeric position — a tie is
+  // not an inversion and must not be reported as drift (otherwise the signal
+  // fires forever and the auto-repair can never clear it).
+  let roleHierarchyDrift = false;
+  let roleHierarchyDriftId: string | undefined;
+  let roleHierarchyDriftKey: string | undefined;
+  {
+    const mapped: Array<{ key: string; discordId: string; desiredPos: number; actualPos: number }> = [];
+    for (const desiredRole of desired.roles) {
+      // Guilds store the template key variantly (`key` / `template_key` /
+      // `templateKey`), and the ID map keys it prefixed (`role:mod`) or bare
+      // (`mod`). Try every combination so hierarchy drift is detected regardless.
+      const rawKey =
+        desiredRole.key ??
+        (desiredRole as { template_key?: string }).template_key ??
+        (desiredRole as { templateKey?: string }).templateKey;
+      if (!rawKey) continue;
+      const bareKey = rawKey.includes(':') ? rawKey.slice(rawKey.indexOf(':') + 1) : rawKey;
+      // Resolve to a Discord ID, disambiguating by entity type so a bare-key
+      // lookup cannot collide with a channel/category mapping of the same key.
+      // Priority:
+      //   1. Prefixed flat-map key (`role:staff`) — already entity-scoped.
+      //   2. Entity-typed map (`role:staff`), when the caller supplies one — the
+      //      only source that survives a bare-key collision, since it is keyed
+      //      by entity type at construction from the real table primary key.
+      //   3. Bare / raw flat-map keys — last-resort fallback, but ONLY accepted
+      //      when the resolved ID is not claimed by a different entity type, so
+      //      a channel row keyed `staff` can never masquerade as a role here.
+      let discordId = idMap.get(`role:${bareKey}`);
+      if (!discordId && entityIdMap) {
+        discordId =
+          entityIdMap.get(`role:${bareKey}`) ??
+          entityIdMap.get(`role:${rawKey}`) ??
+          undefined;
+      }
+      if (!discordId) {
+        const bareCandidate = idMap.get(bareKey) ?? idMap.get(rawKey);
+        if (bareCandidate && !isForeignEntityId(entityIdMap, 'role', bareCandidate)) {
+          discordId = bareCandidate;
+        }
+      }
+      if (!discordId) continue;
+      const actualRole = actual.roles.find(r => r.id === discordId);
+      if (!actualRole || actualRole.managed) continue;
+      mapped.push({
+        key: bareKey,
+        discordId,
+        desiredPos: desiredRole.position,
+        actualPos: actualRole.position,
+      });
+    }
+    if (mapped.length >= 2) {
+      const sorted = [...mapped].sort((a, b) => a.desiredPos - b.desiredPos);
+      for (let i = 1; i < sorted.length; i++) {
+        // Strict inversion only: equal actual positions (a tie) are treated as
+        // correctly ordered, since Discord does not guarantee unique positions.
+        if (sorted[i].actualPos < sorted[i - 1].actualPos) {
+          roleHierarchyDrift = true;
+          // Report the higher-desired role as the representative target.
+          roleHierarchyDriftId = sorted[i].discordId;
+          roleHierarchyDriftKey = sorted[i].key;
+          break;
+        }
+      }
     }
   }
 
@@ -446,13 +563,16 @@ export function computeStateDiff(
     channelsToUpdate: channelDiffs.filter(d => d.action === 'update').length,
     channelsToDelete: channelDiffs.filter(d => d.action === 'delete').length,
     overrideChanges: overrideDiffs.length,
-    totalChanges: roleDiffs.length + categoryDiffs.length + channelDiffs.length + overrideDiffs.length + (everyoneDrift ? 1 : 0),
+    totalChanges: roleDiffs.length + categoryDiffs.length + channelDiffs.length + overrideDiffs.length + (everyoneDrift ? 1 : 0) + (roleHierarchyDrift ? 1 : 0),
     hasBreakingChanges: roleDiffs.some(d => d.action === 'delete') || channelDiffs.some(d => d.action === 'delete'),
   };
 
   return {
     everyoneDrift,
     everyoneCurrentPermissions: actual.everyonePermissions,
+    roleHierarchyDrift,
+    roleHierarchyDriftId,
+    roleHierarchyDriftKey,
     roles: roleDiffs,
     categories: categoryDiffs,
     channels: channelDiffs,
@@ -519,6 +639,22 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         suggestedAction: 'accept',
       });
     }
+  }
+
+  // Role hierarchy drift — the mapped roles are no longer in their desired
+  // relative order. Surfaced as a single repairable item; the sync engine
+  // reorders the whole set back to the desired hierarchy.
+  if (diff.roleHierarchyDrift) {
+    items.push({
+      type: 'HIERARCHY_DRIFT',
+      severity: 'warning',
+      entityType: 'role',
+      entityName: 'Role hierarchy',
+      entityDiscordId: diff.roleHierarchyDriftId,
+      templateKey: diff.roleHierarchyDriftKey,
+      description: 'Role hierarchy positions no longer match the desired ordering',
+      suggestedAction: 'repair',
+    });
   }
 
   // Category drifts
