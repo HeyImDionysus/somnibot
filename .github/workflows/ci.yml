@@ -552,6 +552,7 @@ jobs:
             "automations" "automation_executions"
             "dead_letter_queue" "workflow_events"
             "action_queue_dlq" "bot_action_queue"
+            "health_metrics"
           )
 
           ERRORS=0

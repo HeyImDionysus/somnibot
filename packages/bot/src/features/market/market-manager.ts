@@ -157,47 +157,34 @@ export class MarketManager {
         .setColor(0xff0000);
     }
 
-    // Remove from inventory atomically (prevents TOCTOU — listing same item twice)
-    const { data: decremented } = await this.supabase.rpc('economy_decrement_inventory', {
+    // Verify+decrement inventory AND insert the listing in ONE row-locked
+    // transaction. Replaces the old decrement→insert→refund dance where a
+    // failed insert plus a failed refund destroyed the seller's items.
+    const expiresAt = new Date(Date.now() + config.economy_market_listing_days * 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: created, error: createErr } = await this.supabase.rpc('economy_market_atomic_create_listing', {
       p_guild_id: this.guild.id,
-      p_user_id: userId,
+      p_seller_id: userId,
       p_item_id: invEntry.item_id,
       p_quantity: quantity,
+      p_price_per_unit: pricePerUnit,
+      p_item_name: invEntry.economy_items.name,
+      p_expires_at: expiresAt,
     });
-    if (!decremented) {
+
+    if (createErr) {
+      // The transaction rolled back server-side — nothing was decremented.
+      log.error('listItem atomic create failed:', createErr.message);
       return new EmbedBuilder()
-        .setDescription(`❌ You don't have enough **${itemName}** in your inventory.`)
+        .setDescription('❌ Failed to create listing. Your items are still in your inventory.')
         .setColor(0xff0000);
     }
 
-    // Create listing — V49-C4: check insert result; refund items on failure
-    const expiresAt = new Date(Date.now() + config.economy_market_listing_days * 24 * 60 * 60 * 1000).toISOString();
-
-    const { error: insertErr } = await this.supabase.from('economy_market_listings').insert({
-      guild_id: this.guild.id,
-      seller_id: userId,
-      item_id: invEntry.economy_items.id,
-      item_name: invEntry.economy_items.name,
-      quantity,
-      remaining: quantity,
-      price_per_unit: pricePerUnit,
-      status: 'active',
-      expires_at: expiresAt,
-    });
-
-    if (insertErr) {
-      log.error('Listing insert failed — refunding inventory:', insertErr.message);
-      await Promise.resolve(this.supabase.rpc('economy_upsert_inventory', {
-        p_guild_id: this.guild.id,
-        p_user_id: userId,
-        p_item_id: invEntry.item_id,
-        p_quantity: quantity,
-      })).catch((err: unknown) => {
-        // V53-L1: Log inventory refund failures — if this fails, items are permanently lost
-        log.error(`CRITICAL: createListing refund failed for user ${userId}, item ${invEntry.item_id} qty ${quantity}:`, err);
-      });
+    const result = created as { error?: string; listing?: MarketListing } | null;
+    if (!result?.listing) {
+      // Typed 'insufficient_inventory' — a concurrent listing consumed the stack
       return new EmbedBuilder()
-        .setDescription('❌ Failed to create listing. Your items have been returned.')
+        .setDescription(`❌ You don't have enough **${itemName}** in your inventory.`)
         .setColor(0xff0000);
     }
 

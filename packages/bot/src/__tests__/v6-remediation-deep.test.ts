@@ -620,6 +620,10 @@ describe('LotteryManager deep', () => {
   it('drawWinner with no active lottery returns null', async () => {
     const { LotteryManager } = await import('../features/lottery/lottery-manager.js');
     const supa = makeSupa({ singleData: FULL_CONFIG, maybeData: null });
+    // "No pending drawing" means the drawings .single() lookup yields null —
+    // makeSupa's `??` fallback would otherwise hand back FULL_CONFIG, which
+    // the pre-V49 code only rejected by accident via its no-tickets branch.
+    supa._chain.single = vi.fn(async () => ({ data: null, error: null }));
     const mgr = new LotteryManager(supa as any, makeClient());
     const result = await mgr.drawWinner('g1');
     expect(result).toBeNull();
