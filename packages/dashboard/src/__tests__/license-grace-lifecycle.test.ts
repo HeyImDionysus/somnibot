@@ -211,12 +211,26 @@ describe('POST /api/license/heartbeat — lapsed grace window is rejected', () =
     });
   }
 
-  it('keeps sessions alive while the grace window is still open', async () => {
+  it('keeps sessions alive while the grace window is still open and surfaces the grace status + deadline', async () => {
     setupHeartbeatMocks({ status: 'grace_period', grace_period_ends_at: FUTURE_DEADLINE });
 
     const res = await heartbeatPost(heartbeatReq() as never);
     const body = await res.json();
     expect(body.valid).toBe(true);
+    // W2: a grace period entered mid-session must be visible on the heartbeat
+    // response, not masked as 'active', so heartbeat-only monitors see it.
+    expect(body.status).toBe('grace_period');
+    expect(body.grace_period_ends_at).toBe(FUTURE_DEADLINE);
+  });
+
+  it('reports a healthy active session as active with no grace deadline', async () => {
+    setupHeartbeatMocks({ status: 'active', grace_period_ends_at: null });
+
+    const res = await heartbeatPost(heartbeatReq() as never);
+    const body = await res.json();
+    expect(body.valid).toBe(true);
+    expect(body.status).toBe('active');
+    expect(body.grace_period_ends_at).toBeNull();
   });
 
   it('rejects heartbeats once the grace window has lapsed, even if the row is unreconciled', async () => {

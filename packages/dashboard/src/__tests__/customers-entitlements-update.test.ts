@@ -213,6 +213,43 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
     expect(res.status).toBe(200);
   });
 
+  it('refreshes the existing unresolved alert on a 23505 so operators see the new deadline (not the stale one)', async () => {
+    // Codex W2: re-entering grace (or racing the bot's suspend) writes a NEW
+    // grace_period_ends_at on the entitlement but the alert insert dedupes
+    // (23505). The pre-existing alert would keep the OLD deadline in its
+    // message/metadata unless we refresh it in place.
+    const { alertsQuery } = setup();
+    alertsQuery.insert.mockResolvedValue({
+      error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+    });
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
+
+    const newDeadline = new Date(NOW.getTime() + THREE_DAYS_MS).toISOString();
+    // The existing alert is refreshed in place with the CURRENT deadline.
+    expect(alertsQuery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(newDeadline),
+        metadata: expect.objectContaining({ grace_period_ends_at: newDeadline }),
+      }),
+    );
+    // Same entitlement-scoped, unresolved-only filter as the resolve path.
+    expect(alertsQuery.eq).toHaveBeenCalledWith('alert_type', 'entitlement_grace_period');
+    expect(alertsQuery.eq).toHaveBeenCalledWith('metadata->>entitlement_id', ENTITLEMENT_ID);
+    expect(alertsQuery.eq).toHaveBeenCalledWith('resolved', false);
+  });
+
+  it('does NOT refresh (or touch update) when the alert insert succeeds cleanly', async () => {
+    const { alertsQuery } = setup();
+    alertsQuery.insert.mockResolvedValue({ error: null });
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
+    // A fresh insert means there was no pre-existing alert to refresh.
+    expect(alertsQuery.update).not.toHaveBeenCalled();
+  });
+
   it('a genuine alert-insert failure is non-fatal — the committed status change still returns 200', async () => {
     const { alertsQuery } = setup();
     alertsQuery.insert.mockResolvedValue({

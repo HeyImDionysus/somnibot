@@ -13,6 +13,7 @@ import { createHash } from 'crypto';
 import { verifySignedDownloadUrl } from '@/lib/api/signed-url';
 import { consumeDownloadNonce } from '@/lib/api/download-nonce';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -94,10 +95,15 @@ export async function GET(
     }
   }
 
-  // ── Entitlement check: customer must own the product ──
+  // ── Entitlement check: customer must own the product AND access must be
+  // live. W2 codex: a `grace_period` row whose deadline lapsed but which
+  // reconciliation has not yet expired must NOT serve the file — recompute the
+  // grace window here with the same predicate license/validate + heartbeat use,
+  // so a signed URL minted while still in grace stops working once the deadline
+  // passes rather than trusting the stale status. ──
   const { data: entitlement } = await supabase
     .from('entitlements')
-    .select('id')
+    .select('id, status, grace_period_ends_at')
     .eq('customer_id', customerId)
     .eq('product_id', productId)
     .eq('guild_id', guildId)
@@ -105,7 +111,7 @@ export async function GET(
     .limit(1)
     .maybeSingle();
 
-  if (!entitlement) {
+  if (!entitlement || !isEntitlementAccessLive(entitlement)) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
 

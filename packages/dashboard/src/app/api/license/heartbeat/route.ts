@@ -115,9 +115,18 @@ export async function POST(req: NextRequest) {
     .eq('product_id', licenseKey.product_id)
     .maybeSingle();
 
+  // W2 codex round 3: an entitlement can enter grace AFTER the initial
+  // validation (payment fails mid-session). The lapsed-deadline branch above
+  // already rejects an EXPIRED grace window; here the window is still open, so
+  // the session stays valid — but surface `grace_period` (and the deadline)
+  // instead of masking it as 'active'. Apps that monitor license health via
+  // heartbeats would otherwise never see the payment-failure warning until a
+  // separate validation happened.
+  const inGracePeriod = entitlement.status === 'grace_period';
   return NextResponse.json({
     valid: true,
-    status: 'active',
+    status: inGracePeriod ? 'grace_period' : 'active',
+    grace_period_ends_at: inGracePeriod ? entitlement.grace_period_ends_at : null,
     next_heartbeat_seconds: config?.heartbeat_interval_seconds ?? 300,
   });
 }

@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -57,10 +58,15 @@ export async function POST(request: NextRequest) {
 
     const { productId, fileId } = parsed.data;
 
-    // Verify entitlement exists
+    // Verify entitlement exists AND is currently live. W2 codex: a
+    // `grace_period` row whose deadline has lapsed but which reconciliation
+    // (runs every ~6h) has not yet expired must NOT mint a download link —
+    // otherwise the portal keeps serving a customer whose license the SDK
+    // already rejects. Recompute the grace window here with the same predicate
+    // license/validate + heartbeat use.
     const { data: entitlement } = await admin
       .from('entitlements')
-      .select('id')
+      .select('id, status, grace_period_ends_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
@@ -68,7 +74,7 @@ export async function POST(request: NextRequest) {
       .limit(1)
       .maybeSingle();
 
-    if (!entitlement) {
+    if (!entitlement || !isEntitlementAccessLive(entitlement)) {
       return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
     }
 

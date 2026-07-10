@@ -454,6 +454,47 @@ describe('action-queue deep routing', () => {
     expect(guild.members.fetch).toHaveBeenCalledWith('user-1');
   });
 
+  it('marks revoke_roles FAILED (retryable) when a role removal fails, so the queue retries', async () => {
+    // This is the durable fallback reconciliation queues after its inline
+    // removal failed and the entitlement is already 'expired'. If the handler
+    // reported success despite a failed removal, the queue would complete the
+    // action and the paid role would stay granted forever. It must fail so the
+    // queue's backoff re-runs it.
+    const actions = [{
+      id: 'act-17b', guild_id: 'guild-1', action: 'revoke_roles', status: 'pending',
+      payload: {
+        discord_id: 'user-1',
+        role_ids: ['role-1', 'role-2'],
+        reason: 'grace_period_expired',
+        entitlement_id: 'ent-9',
+      },
+      created_at: new Date().toISOString(), retry_count: 0,
+    }];
+    const guild = makeGuild();
+    const remove = vi
+      .fn()
+      .mockResolvedValueOnce({})                       // role-1 removed
+      .mockRejectedValueOnce(new Error('Missing Permissions')); // role-2 fails
+    guild.members.fetch = vi.fn().mockResolvedValue({
+      id: 'user-1',
+      roles: {
+        cache: new Map([['role-1', { id: 'role-1' }], ['role-2', { id: 'role-2' }]]),
+        remove,
+      },
+    });
+    const supa = makeSupa(actions);
+    await startActionQueueListener(guild, supa);
+
+    // Both roles attempted (removal is per-role, not all-or-nothing).
+    expect(remove).toHaveBeenCalledTimes(2);
+    // A retry was scheduled: the row was flipped back to 'pending' with an
+    // incremented retry_count (NOT 'completed'), which is how the queue retries
+    // a transient failure. It must never be marked 'completed'.
+    const statuses = (supa.__queueUpdates as Record<string, unknown>[]).map((u) => u.status);
+    expect(statuses).toContain('pending');
+    expect(statuses).not.toContain('completed');
+  });
+
   it('processes run_reconciliation action', async () => {
     const actions = [{
       id: 'act-18', guild_id: 'guild-1', action: 'run_reconciliation', status: 'pending',

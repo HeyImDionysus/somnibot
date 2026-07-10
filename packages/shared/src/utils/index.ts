@@ -116,6 +116,38 @@ interface GraceConfigQuery {
 }
 
 /**
+ * Whether an entitlement row grants access RIGHT NOW, accounting for a lapsed
+ * payment-grace window.
+ *
+ * `grace_period` entitlements are a paying customer whose payment failed:
+ * access ends at `grace_period_ends_at`. Reconciliation only sweeps every few
+ * hours, so between the deadline and the next sweep a stale `grace_period` row
+ * still reads as entitled. License validation and heartbeat both recompute the
+ * window at request time and reject a lapsed-but-unreconciled grace row; this
+ * shared predicate lets every OTHER entitlement-gated access check (portal
+ * download-link minting, protected file downloads) apply the exact same rule,
+ * so those surfaces cannot keep serving a customer the SDK already rejects.
+ *
+ * `active` rows are always entitled. A `grace_period` row is entitled only
+ * while its deadline is still in the future (a missing deadline is treated as
+ * open — reconciliation owns the transition, matching the validate/heartbeat
+ * routes). Every other status is not entitled.
+ */
+export function isEntitlementAccessLive(
+  entitlement: { status?: string | null; grace_period_ends_at?: string | null } | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!entitlement) return false;
+  if (entitlement.status === 'active') return true;
+  if (entitlement.status === 'grace_period') {
+    const deadline = entitlement.grace_period_ends_at;
+    if (!deadline) return true; // no recorded deadline — reconciliation owns it
+    return new Date(deadline) >= now;
+  }
+  return false;
+}
+
+/**
  * Read a guild's configured payment-failure grace window
  * (`guild_config.grace_period_days`), falling back to
  * DEFAULT_GRACE_PERIOD_DAYS when unset.

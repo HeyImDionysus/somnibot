@@ -217,29 +217,56 @@ export async function PUT(req: NextRequest) {
   // strands the 'entitlement_grace_period' alert unresolved forever. Alert
   // writes are non-fatal: the status change above has already committed.
   if (status === 'grace_period') {
+    const alertMessage =
+      `Entitlement ${entitlement_id} was manually moved into a grace period ending ` +
+      `${updateData.grace_period_ends_at}. If payment is not recovered by then, ` +
+      'access will be revoked automatically.';
+    const alertMetadata = {
+      entitlement_id,
+      customer_id: data?.customer_id ?? null,
+      product_id: data?.product_id ?? null,
+      order_id: data?.order_id ?? null,
+      grace_period_ends_at: updateData.grace_period_ends_at,
+      source: 'dashboard.entitlements.update',
+    };
+
     // Same deduped raise as EntitlementService.suspend: the partial unique
     // index uniq_alerts_unresolved_entitlement_grace permits one unresolved
-    // alert per entitlement, so a 23505 means it already exists (dedupe
-    // success — e.g. re-entering grace, or racing the bot's suspend()).
+    // alert per entitlement, so a 23505 means one already exists (e.g. the
+    // entitlement was already in grace, or this races the bot's suspend()).
     const { error: alertError } = await supabase.from('alerts').insert({
       guild_id: guildId,
       alert_type: 'entitlement_grace_period',
       severity: 'warning',
       title: 'Paid entitlement entered payment grace period',
-      message:
-        `Entitlement ${entitlement_id} was manually moved into a grace period ending ` +
-        `${updateData.grace_period_ends_at}. If payment is not recovered by then, ` +
-        'access will be revoked automatically.',
-      metadata: {
-        entitlement_id,
-        customer_id: data?.customer_id ?? null,
-        product_id: data?.product_id ?? null,
-        order_id: data?.order_id ?? null,
-        grace_period_ends_at: updateData.grace_period_ends_at,
-        source: 'dashboard.entitlements.update',
-      },
+      message: alertMessage,
+      metadata: alertMetadata,
     });
-    if (alertError && alertError.code !== '23505') {
+    if (alertError && alertError.code === '23505') {
+      // Codex W2: the PUT above already wrote a NEW grace_period_ends_at, so the
+      // pre-existing unresolved alert now carries a stale deadline in its
+      // message/metadata. Refresh it in place (same entitlement-scoped filter as
+      // the resolve branch) so operators see the current revocation time rather
+      // than the old one. Non-fatal — the status change has already committed.
+      const { error: refreshError } = await supabase
+        .from('alerts')
+        .update({
+          message: alertMessage,
+          metadata: alertMetadata,
+          severity: 'warning',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('guild_id', guildId)
+        .eq('alert_type', 'entitlement_grace_period')
+        .eq('metadata->>entitlement_id', entitlement_id)
+        .eq('resolved', false);
+      if (refreshError) {
+        console.error(
+          '[customers/entitlements] Failed to refresh duplicate grace-period alert:',
+          refreshError.message,
+        );
+      }
+    } else if (alertError) {
       console.error(
         '[customers/entitlements] Failed to write grace-period alert:',
         alertError.message,
