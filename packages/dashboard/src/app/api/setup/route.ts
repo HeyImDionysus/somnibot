@@ -25,6 +25,7 @@ import {
   isSetupLocalHostname,
   normalizeSetupPayPalWebhookUrl,
 } from '@/lib/setup-paypal-webhook';
+import { getSetupWebhookReachability, type SetupWebhookReachability } from '@/lib/setup-webhook-probe';
 
 const MAINTENANCE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_STATUS_AUTH_PROVIDER_TIMEOUT_MS = 3_000;
@@ -528,6 +529,29 @@ async function isBotLevelHeartbeatOnline(configuredGuildId: string): Promise<boo
   }
 }
 
+/**
+ * Attach the webhook reachability probe outcome to the setup status payload.
+ *
+ * Probes only run once a *validated* public webhook URL exists (HTTPS,
+ * non-localhost, exact /api/paypal/webhook path), and results are cached
+ * inside getSetupWebhookReachability so status polling cannot turn into a
+ * self-inflicted request storm. The probe is advisory evidence about the
+ * dashboard's own path to the URL — it does NOT prove PayPal's delivery
+ * path; see @/lib/setup-webhook-probe for the full honesty notes.
+ */
+async function applySetupWebhookReachability(status: {
+  paypalWebhookUrl: string | null;
+  paypalWebhookUrlReady: boolean;
+  paypalWebhookReachable: boolean;
+  paypalWebhookReachability: SetupWebhookReachability | null;
+}): Promise<void> {
+  const reachability = await getSetupWebhookReachability(
+    status.paypalWebhookUrlReady ? status.paypalWebhookUrl : null,
+  );
+  status.paypalWebhookReachable = reachability.status === 'reachable';
+  status.paypalWebhookReachability = reachability;
+}
+
 function publicCallbackNotReadyResponse(runtimeCallbacks: RuntimeCallbackConfig) {
   return NextResponse.json(
     {
@@ -561,6 +585,8 @@ export async function GET(req: NextRequest) {
     paypalWebhookReady: paypalWebhookStatus.ready,
     paypalWebhookUrlReady: paypalWebhookStatus.urlReady,
     paypalWebhookError: paypalWebhookStatus.error,
+    paypalWebhookReachable: false,
+    paypalWebhookReachability: null as SetupWebhookReachability | null,
     paypalCredentialsConfigured: Boolean(process.env['PAYPAL_CLIENT_ID']?.trim() && process.env['PAYPAL_CLIENT_SECRET']?.trim()),
     paypalWebhookIdConfigured: Boolean(process.env['PAYPAL_WEBHOOK_ID']?.trim()),
     publicCallbackRequired: runtimeCallbacks.publicCallbackRequired,
@@ -576,6 +602,7 @@ export async function GET(req: NextRequest) {
   };
 
   if (!supabase) {
+    await applySetupWebhookReachability(status);
     return NextResponse.json(status);
   }
 
@@ -647,6 +674,10 @@ export async function GET(req: NextRequest) {
   status.discordAuthProviderReady = authProviderStatus.ready;
   status.discordAuthConfigured = authProviderStatus.ready;
   status.discordAuthProviderStatus = toPublicDiscordAuthProviderStatus(authProviderStatus);
+
+  // Probe the final effective webhook URL (saved settings may have refined it
+  // above), so readiness reflects the URL PayPal would actually be calling.
+  await applySetupWebhookReachability(status);
 
   return NextResponse.json(status);
 }
@@ -1069,6 +1100,47 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 },
       );
+    }
+
+    // ── Webhook reachability probe (advisory, recorded, non-blocking) ──
+    // Probe the effective webhook URL and persist the outcome so a silently
+    // unreachable webhook is diagnosable after setup instead of surfacing
+    // as "orders never fulfill". This intentionally does NOT block finalize:
+    // the probe only proves the dashboard's own path to the URL, and some
+    // NAT setups cannot hairpin to their own public address even though
+    // PayPal can reach it (see @/lib/setup-webhook-probe).
+    const effectivePayPalWebhookUrl = normalizeSetupPayPalWebhookUrl(
+      credentials.paypal_webhook_url?.trim()
+      || process.env['PAYPAL_WEBHOOK_URL']?.trim()
+      || savedSetupSettings.get('paypal_webhook_url'),
+    );
+    // forceFresh: finalize records a durable verdict in instance_settings, so
+    // it must not consume a result cached up to 30s ago by page polling — an
+    // operator who just fixed DNS/TLS and immediately finalized would get the
+    // stale pre-fix verdict recorded. Polling keeps using the cache.
+    const webhookReachability = await getSetupWebhookReachability(effectivePayPalWebhookUrl, {
+      forceFresh: true,
+    });
+    if (webhookReachability.status !== 'reachable') {
+      console.warn(
+        '[Setup] ⚠ PayPal webhook URL was not proven reachable during finalize:',
+        webhookReachability.failureReason ?? webhookReachability.status,
+        '-', webhookReachability.detail,
+      );
+    }
+    const { error: reachabilityRecordError } = await supabase
+      .from('instance_settings')
+      .upsert(
+        {
+          key: 'paypal_webhook_reachability',
+          value: JSON.stringify(webhookReachability),
+          section: 'paypal',
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' },
+      );
+    if (reachabilityRecordError) {
+      console.warn('[Setup] Could not record webhook reachability outcome:', reachabilityRecordError.message);
     }
 
     // ── LOCK: Mark setup as completed ──
