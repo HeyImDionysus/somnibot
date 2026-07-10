@@ -553,6 +553,36 @@ jobs:
             "dead_letter_queue" "workflow_events"
             "action_queue_dlq" "bot_action_queue"
             "health_metrics"
+            # 20260710010000_rls_pattern_sweep_lockdown — wave-2 sweep.
+            # Tier 1: role-unscoped USING(true) + legacy anon grant
+            "button_roles" "starboard_entries"
+            "polls" "poll_options" "poll_votes"
+            "predictions" "prediction_options" "prediction_bets"
+            "economy_trivia_questions" "economy_lottery_drawings"
+            "economy_lottery_tickets" "economy_daily_losses"
+            # Tier 2: role-unscoped GUC-conditional policy + legacy anon grant
+            "economy_adventures" "economy_adventure_scenes"
+            "economy_adventure_sessions" "economy_fish_species"
+            "economy_fish_catches" "economy_market_listings"
+            "feature_embed_overrides" "tutorial_configs"
+            "tutorial_steps" "tutorial_progress"
+            "sync_reports" "level_unlock_configs"
+            "member_feature_unlocks" "temp_role_grants"
+            # Tier 3: auth-conditional policies + surviving client grants
+            "active_temp_channels" "alerts" "audit_logs" "automod_rules"
+            "bot_diagnostics" "channel_templates" "custom_commands"
+            "customers" "discord_id_map" "embed_configs" "entitlements"
+            "giveaways" "guild" "guild_config" "guild_desired_state"
+            "guild_live_state" "infractions" "instance_settings"
+            "level_rewards" "license_keys" "license_sessions"
+            "license_validations" "member_levels" "member_rank_settings"
+            "members" "message_reports" "orders" "payments" "plans"
+            "product_files" "product_license_config" "products"
+            "promotions" "reaction_roles" "reconciliation_runs"
+            "role_templates" "scheduled_messages" "schema_migrations"
+            "stats_channels" "sync_actions" "temp_channel_hubs"
+            "ticket_metrics" "ticket_panels" "ticket_transcripts"
+            "tickets" "users" "webhook_events" "xp_multipliers"
           )
 
           ERRORS=0
