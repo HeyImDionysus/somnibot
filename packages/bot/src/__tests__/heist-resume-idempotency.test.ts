@@ -78,10 +78,25 @@ function makeStatefulDb(opts: {
   // models a transient reconcile failure that must be retryable, NOT a terminal
   // flip that strands a late joiner's fee. Cleared by a test to heal it.
   failReconcile?: { on: boolean };
+  // When set, heist_claim_for_resolution errors while the flag holds — models a
+  // transient claim failure at expiry that must RE-ARM resolution (in-process
+  // retry), NOT strand the recruiting heist until the next restart (codex :617).
+  failClaim?: { on: boolean };
+  // When set, the heist-row single() re-read errors while the flag holds — models
+  // the claim-lost re-read failing transiently, which must schedule a retry, NOT
+  // return terminally (codex :631).
+  failHeistRead?: { on: boolean };
+  // When set, heist_claim_for_resolution returns claimed:false (a concurrent
+  // resolver won the claim) even though our stale read saw 'recruiting' — drives
+  // the claim-lost re-read path so failHeistRead can fail that re-read.
+  loseClaim?: { on: boolean };
 }) {
   const failCreditFor = opts.failCreditFor ?? new Set<string>();
   const failCrewRead = opts.failCrewRead ?? { on: false };
   const failReconcile = opts.failReconcile ?? { on: false };
+  const failClaim = opts.failClaim ?? { on: false };
+  const failHeistRead = opts.failHeistRead ?? { on: false };
+  const loseClaim = opts.loseClaim ?? { on: false };
   const heist: any = {
     id: 'h1',
     guild_id: 'g1',
@@ -105,13 +120,30 @@ function makeStatefulDb(opts: {
     heist_id: 'h1', user_id: uid, role: 'Hacker', payout: 0,
     paid_at: null as string | null, payout_failed: false,
     claimed_at: (preClaimed ? new Date().toISOString() : null) as string | null,
+    // Frozen fee this member paid at join time. The bot stamps it on insert; the
+    // stranded-join reconcile refunds THIS per-row value on any outcome. Default
+    // to the config entry fee (100) so existing tests keep their amounts.
+    entry_fee_paid: 100 as number | null,
   }));
 
   // Ledger of every wallet credit that actually landed.
   const credits: Array<{ user_id: string; amount: number }> = [];
 
+  // Set true once a claim was LOST (returned claimed:false). The claim-lost
+  // re-read that follows is the ONLY economy_heists single() we let failHeistRead
+  // fail — the initial resolveHeist read must still succeed so we reach the claim.
+  const claimState = { lostClaim: false };
+
   function heistChain() {
     let selecting = false;
+    const readHeist = () => {
+      // Fail ONLY the claim-lost re-read (after a lost claim), never the initial
+      // read — models a transient re-read error that must schedule a retry.
+      if (selecting && failHeistRead.on && claimState.lostClaim) {
+        return Promise.resolve({ data: null, error: { message: 'injected heist re-read failure' } });
+      }
+      return Promise.resolve({ data: selecting ? { ...heist } : null, error: null });
+    };
     const chain: any = {
       select: () => { selecting = true; return chain; },
       eq: () => chain,
@@ -119,8 +151,8 @@ function makeStatefulDb(opts: {
       order: () => chain,
       limit: () => chain,
       update: (patch: Record<string, unknown>) => { Object.assign(heist, patch); return chain; },
-      single: () => Promise.resolve({ data: selecting ? { ...heist } : null, error: null }),
-      maybeSingle: () => Promise.resolve({ data: selecting ? { ...heist } : null, error: null }),
+      single: () => readHeist(),
+      maybeSingle: () => readHeist(),
       then: (res: (v: unknown) => void) => Promise.resolve({ data: [{ ...heist }], error: null }).then(res),
     };
     return chain;
@@ -183,8 +215,19 @@ function makeStatefulDb(opts: {
     }),
     rpc: vi.fn().mockImplementation((fn: string, args: any) => {
       if (fn === 'heist_claim_for_resolution') {
-        // Single-shot: only the caller that observes 'recruiting' claims.
-        if (heist.status !== 'recruiting') {
+        // Transient claim error (codex :617): the bot must re-arm resolution, not
+        // strand the recruiting heist.
+        if (failClaim.on) {
+          return Promise.resolve({ data: null, error: { message: 'injected claim failure' } });
+        }
+        // Single-shot: only the caller that observes 'recruiting' claims. Model a
+        // lost claim (a concurrent resolver already claimed) so the claim-lost
+        // re-read path runs — failHeistRead can then fail that re-read (codex :631).
+        // loseClaim forces claimed:false even against a 'recruiting' snapshot to
+        // model the race where another resolver flipped the row between our stale
+        // read and the claim.
+        if (heist.status !== 'recruiting' || loseClaim.on) {
+          claimState.lostClaim = true;
           return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null, refund_each: null }], error: null });
         }
         // Freeze the crew: stamp claimed_at on unstamped rows, then count only
@@ -215,10 +258,13 @@ function makeStatefulDb(opts: {
       }
       if (fn === 'heist_reconcile_stranded_joins') {
         // Sweep every crash-stranded late-join row (claimed_at NULL AND paid_at
-        // NULL): delete it, drop its participants[] slot, refund the frozen
-        // per-member amount — mirrors heist_reconcile_stranded_joins under the
-        // heist-row lock. A frozen crew member (claimed_at set) is untouched; a
-        // re-run finds nothing (rows already deleted) so it is idempotent.
+        // NULL): delete it, drop its participants[] slot, refund the row's OWN
+        // frozen entry_fee_paid (fallback p_refund_amount for legacy rows) —
+        // mirrors heist_reconcile_stranded_joins under the heist-row lock. Using
+        // the per-row frozen fee (not a per-heist value) is what makes the refund
+        // correct on a success/failed heist and immune to a config edit. A frozen
+        // crew member (claimed_at set) is untouched; a re-run finds nothing (rows
+        // already deleted) so it is idempotent.
         if (failReconcile.on) {
           return Promise.resolve({ data: null, error: { message: 'injected reconcile failure' } });
         }
@@ -227,7 +273,8 @@ function makeStatefulDb(opts: {
           const idx = parts.indexOf(p);
           if (idx >= 0) parts.splice(idx, 1);
           heist.participants = heist.participants.filter((u: string) => u !== p.user_id);
-          if (args.p_refund_amount > 0) credits.push({ user_id: p.user_id, amount: args.p_refund_amount });
+          const refund = p.entry_fee_paid ?? args.p_refund_amount;
+          if (refund > 0) credits.push({ user_id: p.user_id, amount: refund });
         }
         return Promise.resolve({ data: stranded.length, error: null });
       }
@@ -441,7 +488,7 @@ describe('heist resume idempotency', () => {
     // but its stranded entry fee must still be reconciled (refunded) rather than
     // lost — it is not part of the FROZEN crew's cancel refund.
     const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 100 });
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
     // Mark the late row so the claim fake does not stamp it (models an insert
     // that commits after the claim's freeze).
     (db.parts[1] as any).__late = true;
@@ -776,7 +823,7 @@ describe('heist resume idempotency', () => {
     });
     // u1,u2 are the frozen crew (in_progress preseeds claimed_at). Add the
     // stranded 'late' row: unstamped + unpaid, and present in participants[].
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
     db.heist.participants.push('late');
     const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
@@ -802,7 +849,7 @@ describe('heist resume idempotency', () => {
       status: 'in_progress', resolution: 'success', payoutEach: 125,
       participants: ['u1', 'u2'], targetPayout: 250,
     });
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
     db.heist.participants.push('late');
     const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
@@ -829,7 +876,7 @@ describe('heist resume idempotency', () => {
       participants: ['u1', 'u2'], targetPayout: 250,
     });
     // Add an unstamped-but-already-settled row; it must NOT be swept/refunded.
-    db.parts.push({ heist_id: 'h1', user_id: 'settled', role: 'Hacker', payout: 100, paid_at: new Date().toISOString(), payout_failed: false, claimed_at: null });
+    db.parts.push({ heist_id: 'h1', user_id: 'settled', role: 'Hacker', payout: 100, paid_at: new Date().toISOString(), payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
     const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
@@ -842,6 +889,73 @@ describe('heist resume idempotency', () => {
     expect(db.parts.some((p) => p.user_id === 'settled')).toBe(true);
   });
 
+  // ── Newest finding (codex :704): stranded join is refunded the DEBITED fee,
+  //    frozen per-row, on a SUCCESS heist (where refund_each is NULL) and immune
+  //    to a config edit after the debit. ──────────────────────────────────────
+  it('a stranded join on a SUCCESS heist is refunded its OWN frozen fee, not the drifted config value', async () => {
+    // Success heist: refund_each is NULL (only cancelled heists freeze it). A late
+    // join that raced past the claim was charged 150 (frozen on its row), but the
+    // guild has since re-read entry_fee=100 in this resolve attempt. The refund
+    // must be the 150 the joiner actually paid — read from entry_fee_paid — NOT
+    // the 100 the config now reports. This is the exact over/under-refund codex
+    // flagged: for success/failed heists the old code fell back to the live config
+    // entry fee.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    db.parts.push({
+      heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0,
+      paid_at: null, payout_failed: false, claimed_at: null,
+      entry_fee_paid: 150, // charged 150 at join time — before an admin lowered the fee
+    } as any);
+    db.heist.participants.push('late');
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('success');
+    // Frozen crew paid their success share; the stranded joiner refunded EXACTLY
+    // the 150 they were charged (their frozen entry_fee_paid), not the config 100.
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 150 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 125 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
+  });
+
+  it('a stranded join on a FAILED heist is still refunded its frozen fee (forfeit applies only to the frozen crew)', async () => {
+    // A failed heist forfeits the FROZEN crew's fees (nothing credited), but a
+    // stranded late join was never in the crew — it must get its debited fee back
+    // on a failed outcome too. refund_each is NULL on a failed heist, so this only
+    // works because the refund reads the per-row frozen entry_fee_paid.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'failed', payoutEach: 0,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    db.parts.push({
+      heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0,
+      paid_at: null, payout_failed: false, claimed_at: null,
+      entry_fee_paid: 100,
+    } as any);
+    db.heist.participants.push('late');
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('failed');
+    // Frozen crew forfeit (no credit)…
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toHaveLength(0);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toHaveLength(0);
+    // …but the stranded joiner is refunded its frozen fee, never forfeited.
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
+    // Failure still announced once.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Failed'))).toHaveLength(1);
+  });
+
   it('a failed stranded-join reconcile leaves the heist in_progress and retries (never strands a fee)', async () => {
     // A transient reconcile RPC error must be treated like the frozen-crew read
     // failure: retryable, NEVER a terminal flip that would strand the late
@@ -852,7 +966,7 @@ describe('heist resume idempotency', () => {
       status: 'in_progress', resolution: 'success', payoutEach: 125,
       participants: ['u1', 'u2'], targetPayout: 250, failReconcile,
     });
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
     db.heist.participants.push('late');
     const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
@@ -876,5 +990,93 @@ describe('heist resume idempotency', () => {
     expect(db.credits.filter((c) => c.user_id === 'u2')).toHaveLength(1);
     expect(send.mock.calls.filter(
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+  });
+
+  // ── Newest finding (codex :617): a transient claim error re-arms resolution ──
+  it('a transient claim error schedules an in-process retry that then claims and settles', async () => {
+    vi.useFakeTimers();
+    try {
+      // The expiry timer fires, but heist_claim_for_resolution errors transiently.
+      // The row is still 'recruiting' and expired, and resolveHeist already deleted
+      // the only scheduled resolve timer — so without a re-arm the guild is blocked
+      // until the next restart. The bot must schedule an in-process retry that
+      // re-enters resolveHeist and claims once the blip heals.
+      const failClaim = { on: true };
+      const db = makeStatefulDb({
+        status: 'recruiting', participants: ['u1', 'u2'], successChance: 100,
+        targetPayout: 250, failClaim,
+      });
+      const { client, send } = makeClient();
+      const mgr = new HeistManager(db.supabase as any, client as any);
+
+      await resolve(mgr); // claim errors → still recruiting, in-process retry scheduled
+
+      expect(db.heist.status).toBe('recruiting'); // NOT terminalized, NOT guessed
+      expect(db.credits).toHaveLength(0);
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist'))).toHaveLength(0);
+
+      // The blip heals; advancing past the backoff fires the retry, which claims,
+      // pays both, and finalises — no restart needed.
+      failClaim.on = false;
+      await vi.advanceTimersByTimeAsync(1_500); // first backoff is 1s
+
+      expect(db.heist.status).toBe('success');
+      expect(db.credits).toHaveLength(2);
+      expect(db.credits.map((c) => c.user_id).sort()).toEqual(['u1', 'u2']);
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Newest finding (codex :631): a transient claim-lost re-read error retries ──
+  it('a transient claim-lost re-read error schedules a retry instead of stranding an in_progress heist', async () => {
+    vi.useFakeTimers();
+    try {
+      // Our stale read saw 'recruiting', but a concurrent resolver won the claim
+      // (loseClaim → claimed:false). We must re-read to learn whether the winner
+      // finished or crashed mid-resolution (in_progress). That re-read errors
+      // transiently. If the winner then dies after claiming, the row is left
+      // in_progress and /heist start treats it as active — so the bot must schedule
+      // a retry, not return terminally. The winner's frozen success decision is
+      // already stamped on the row.
+      const failHeistRead = { on: true };
+      const loseClaim = { on: true };
+      const db = makeStatefulDb({
+        status: 'in_progress', resolution: 'success', payoutEach: 125,
+        participants: ['u1', 'u2'], targetPayout: 250, failHeistRead, loseClaim,
+      });
+      // Present a 'recruiting' snapshot to resolveHeist's INITIAL read so it takes
+      // the claim path (then loses the claim). The underlying row's frozen success
+      // decision is what a retry will read once the re-read heals.
+      db.heist.status = 'recruiting';
+      const { client, send } = makeClient();
+      const mgr = new HeistManager(db.supabase as any, client as any);
+
+      await resolve(mgr); // claim lost → re-read errors → retry scheduled, no finalise
+
+      // Neither finalised nor credited on a read we could not perform.
+      expect(db.credits).toHaveLength(0);
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist'))).toHaveLength(0);
+
+      // The read heals and the winner "committed" the in_progress row (stop losing
+      // the claim so the retry takes the direct in_progress branch); the retry
+      // re-reads it, finishes the frozen success payout, and finalises once.
+      failHeistRead.on = false;
+      loseClaim.on = false;
+      db.heist.status = 'in_progress';
+      await vi.advanceTimersByTimeAsync(1_500); // first backoff is 1s
+
+      expect(db.heist.status).toBe('success');
+      expect(db.credits).toHaveLength(2);
+      expect(db.credits.map((c) => c.user_id).sort()).toEqual(['u1', 'u2']);
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -452,8 +452,8 @@ describe('HeistManager', () => {
       // The join reads the heist as recruiting, charges the fee and inserts the
       // participant — but resolution froze the crew before the insert committed.
       // heist_settle_missed_join deletes the stranded row AND refunds the entry
-      // fee atomically, returning true only once the credit has committed; the
-      // join path must confirm the refund and tell the user recruiting closed
+      // fee atomically, returning 'refunded' only once the credit has committed;
+      // the join path must confirm the refund and tell the user recruiting closed
       // instead of announcing a false "Joined".
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
@@ -473,7 +473,7 @@ describe('HeistManager', () => {
       const rpcCalls: Array<{ fn: string; args: any }> = [];
       supabase.rpc.mockImplementation((fn: string, args: any) => {
         rpcCalls.push({ fn, args });
-        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: true, error: null });
+        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'refunded', error: null });
         return Promise.resolve({ data: null, error: null });
       });
       const interaction = makeInteraction();
@@ -522,7 +522,7 @@ describe('HeistManager', () => {
         if (fn === 'heist_settle_missed_join') {
           attempts++;
           if (attempts === 1) return Promise.resolve({ data: null, error: { message: 'transient' } });
-          return Promise.resolve({ data: true, error: null });
+          return Promise.resolve({ data: 'refunded', error: null });
         }
         return Promise.resolve({ data: null, error: null });
       });
@@ -576,8 +576,8 @@ describe('HeistManager', () => {
     });
 
     it('does not refund a join that made it into the frozen crew', async () => {
-      // heist_settle_missed_join returns false — the participant is either still
-      // recruiting or already stamped into the crew. The normal "Joined" flow runs.
+      // heist_settle_missed_join returns 'in_crew' — the participant is stamped
+      // into the frozen crew. The normal "Joined" flow runs.
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
@@ -599,7 +599,7 @@ describe('HeistManager', () => {
         return chainBuilder();
       });
       supabase.rpc.mockImplementation((fn: string) => {
-        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: false, error: null });
+        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'in_crew', error: null });
         return Promise.resolve({ data: null, error: null });
       });
       const interaction = makeInteraction();
@@ -611,6 +611,47 @@ describe('HeistManager', () => {
       );
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ embeds: expect.any(Array) }),
+      );
+    });
+
+    it('does not announce "Joined" when a racing resolver already reconciled the join', async () => {
+      // Codex :482 — the resolver's bulk heist_reconcile_stranded_joins won the
+      // race and already deleted + refunded this just-inserted row, so
+      // heist_settle_missed_join finds no row and returns 'reconciled'. The old
+      // boolean=false collapsed this into the "still in crew" path and the command
+      // mis-announced "Joined the Heist!" to an already-refunded, removed user.
+      // The command must instead tell the user recruiting closed and their fee is
+      // back — never a "Joined" embed.
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'reconciled', error: null });
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // Must NOT send a "Joined the Heist!" embed to a reconciled/removed user.
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('already got underway');
+      expect(replyArg.content).toContain('refunded');
+      // The reconcile already refunded — the command issues no separate credit.
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_add_balance', expect.anything(),
       );
     });
   });

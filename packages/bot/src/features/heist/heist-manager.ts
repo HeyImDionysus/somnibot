@@ -303,6 +303,11 @@ export class HeistManager {
       guild_id: guildId,
       user_id: userId,
       role,
+      // Freeze the exact fee this member paid on the row. A stranded late-join
+      // (which this initiator never is) is refunded its own entry_fee_paid on any
+      // outcome; freezing it here keeps the column uniformly populated so no
+      // reconcile ever has to fall back to mutable config for a post-migration row.
+      entry_fee_paid: entryFee,
     });
     if (initInsertErr) {
       log.error('Failed to insert initiator participant:', initInsertErr.message);
@@ -413,6 +418,12 @@ export class HeistManager {
       guild_id: guildId,
       user_id: userId,
       role,
+      // Freeze the exact debited fee on the row. If this join races past the
+      // atomic claim (claimed_at stays NULL), the stranded-join reconcile refunds
+      // THIS amount on any outcome — success/failed included, where the per-heist
+      // refund_each is NULL — and immune to a later config edit. The value is what
+      // was actually charged above, not a fresh read of guild_config.
+      entry_fee_paid: entryFee,
     });
     if (partInsertErr) {
       log.error('Failed to insert participant:', partInsertErr.message);
@@ -442,28 +453,38 @@ export class HeistManager {
     // under the heist-row lock. If our participant insert committed AFTER that
     // freeze, our row is unstamped and would be excluded from BOTH payout and
     // refund — we would have charged the entry fee for a seat that is never
-    // settled. heist_settle_missed_join detects that (heist no longer
-    // recruiting AND our row unstamped/unsettled) under the same lock; the
-    // refund now happens INSIDE that RPC, in the same transaction as the delete,
-    // so a `true` return means the entry fee is actually back in the wallet.
-    // We therefore only confirm "refunded" to the user AFTER the credit commits.
+    // settled. heist_settle_missed_join classifies our row under the same lock and
+    // returns a STATUS:
+    //   'recruiting' | 'in_crew'  — we made it into the (soon-to-be) frozen crew;
+    //                               settle normally, fall through to the "Joined"
+    //                               embed below.
+    //   'refunded'                — THIS call deleted our stranded row and refunded
+    //                               the FROZEN entry fee (entry_fee_paid) inside
+    //                               the RPC transaction; safe to confirm the refund.
+    //   'reconciled'              — our row was already deleted + refunded by a
+    //                               concurrent bulk heist_reconcile_stranded_joins
+    //                               (the resolver won the race). We are NOT in the
+    //                               crew and must NOT announce "Joined"; tell the
+    //                               user the heist started and their fee is back.
+    // The refund happens INSIDE the RPC (same transaction as the delete), so a
+    // 'refunded'/'reconciled' status means the fee is actually back in the wallet.
     //
     // If the RPC errors the transaction rolled back — the row is NOT deleted and
     // no partial credit landed — but we must NOT confirm a refund that did not
     // happen (the previous bug), and no resume/resolve path settles a stranded
     // unstamped row, so we cannot leave it for "later". The RPC is atomic and
-    // idempotent (a repeat after a committed refund returns false because the
-    // row is gone), so we retry it inline a few times to actually land the
+    // idempotent (a repeat after a committed refund returns 'reconciled' because
+    // the row is gone), so we retry it inline a few times to actually land the
     // refund before responding. Only if every attempt fails do we surface an
     // error WITHOUT falsely claiming the fee was returned.
-    let missedJoin: boolean | null = null;
+    let missedStatus: string | null = null;
     let missedErr: { message: string } | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await this.supabase.rpc('heist_settle_missed_join', {
         p_heist_id: heist.id, p_user_id: userId, p_refund_amount: entryFee,
       });
       missedErr = res.error;
-      missedJoin = res.data as boolean | null;
+      missedStatus = res.data as string | null;
       if (!res.error) break;
       log.warn(`heist_settle_missed_join attempt ${attempt + 1} failed:`, res.error.message);
     }
@@ -479,8 +500,13 @@ export class HeistManager {
       });
       return;
     }
-    if (missedJoin === true) {
-      // Refund already committed atomically inside the RPC — safe to confirm.
+    // 'refunded' (we settled it) OR 'reconciled' (a racing resolver already
+    // settled + refunded us): in BOTH cases the fee is back and we are NOT in the
+    // crew, so we must not fall through to the "Joined the Heist!" embed. This is
+    // the fix for the resolver-vs-join race where the old boolean=false collapsed
+    // 'reconciled' into the "Joined" path and mis-told a refunded, removed user
+    // that they were in the crew.
+    if (missedStatus === 'refunded' || missedStatus === 'reconciled') {
       await interaction.reply({
         content: '❌ The heist already got underway before you could join. Your entry fee was refunded.',
         ephemeral: true,
@@ -613,8 +639,17 @@ export class HeistManager {
         p_entry_fee: entryFee,
       });
       if (claimErr) {
-        log.error(`heist_claim_for_resolution failed for ${heistId}:`, claimErr.message);
-        return;  // transient — leave the heist for a later resume; never guess
+        // Transient claim error. resolveHeist already deleted this heist's only
+        // scheduled resolve timer (top of the method), and the row is still
+        // 'recruiting' + expired — but /heist start treats 'recruiting' as an
+        // active heist and resumePendingHeists only revisits it on the NEXT bot
+        // restart, so a single blip at expiry would block the guild from running
+        // heists indefinitely. Re-arm the same bounded in-process retry the
+        // settle/finalise error paths use (it re-enters resolveHeist, which
+        // re-reads and re-attempts the claim). We NEVER guess an outcome here.
+        log.error(`heist_claim_for_resolution failed for ${heistId} — scheduling retry:`, claimErr.message);
+        this.scheduleResolveRetry(guildId, heistId, channelId);
+        return;
       }
       const claim = Array.isArray(claimData) ? claimData[0] : claimData;
       if (!claim?.claimed) {
@@ -623,14 +658,25 @@ export class HeistManager {
         // a crashed payout idempotently; otherwise it is already terminal.
         const { data: fresh, error: freshErr } = await this.supabase
           .from('economy_heists').select('*').eq('id', heistId).single();
-        // A failed re-read is transient, not "already terminal": returning here
-        // just leaves the heist in_progress for a later resume — never finalise
-        // or settle on a read we could not perform.
+        // A failed re-read is transient, not "already terminal". We lost the claim
+        // to a concurrent resolver and must re-read to learn whether it finished
+        // or crashed mid-resolution (in_progress). If that read errors and the
+        // winner then dies after claiming, the row is left in_progress and
+        // /heist start treats it as active, so nothing resolves it until a full
+        // restart runs resumePendingHeists. Re-arm the same bounded in-process
+        // retry the settle/finalise paths use so a transient blip does not block
+        // the guild — never finalise or settle on a read we could not perform.
         if (freshErr) {
-          log.error(`Re-read of claim-lost heist ${heistId} failed:`, freshErr.message);
+          log.error(`Re-read of claim-lost heist ${heistId} failed — scheduling retry:`, freshErr.message);
+          this.scheduleResolveRetry(guildId, heistId, channelId);
           return;
         }
-        if (!fresh || fresh.status !== 'in_progress') return;
+        if (!fresh || fresh.status !== 'in_progress') {
+          // The winner already drove the heist terminal — nothing left to do and
+          // no retry needed. Drop any retry bookkeeping we may have accumulated.
+          this.clearRetryState(heistId);
+          return;
+        }
         Object.assign(heist, fresh);
         outcome = (fresh.resolution as typeof outcome) ?? null;
       } else {
@@ -697,13 +743,20 @@ export class HeistManager {
     // heist-row lock. Idempotent: a frozen member (claimed_at set) is never
     // touched, an already-settled join is already gone, and a re-run finds
     // nothing — so this composes with retry/resume without double-refunding.
-    // The refund amount is the frozen refund_each on a cancelled heist, else the
-    // entry fee, consistent with the frozen-amount design. A failed reconcile is
-    // treated exactly like the frozen-crew read failure: retryable, NEVER a
-    // terminal flip — a stranded fee must not be lost to a transient error.
-    const strandedRefundEach = heist.refund_each ?? entryFee;
+    //
+    // Refund amount: a stranded late-join must get back exactly the fee IT paid,
+    // on ANY outcome — including success/failed, where the per-heist refund_each
+    // is NULL. So the RPC refunds each stranded row's OWN frozen entry_fee_paid
+    // (stamped on the participant at join time), which is correct per-row and
+    // immune to a config edit after the debit. p_refund_amount below is only a
+    // legacy fallback for pre-freeze rows whose entry_fee_paid is NULL; it must
+    // NOT be re-derived from a per-heist value that is wrong for a success/failed
+    // outcome, so we pass the current entry fee (the best available approximation
+    // for a legacy row), NOT refund_each. A failed reconcile is treated exactly
+    // like the frozen-crew read failure: retryable, NEVER a terminal flip — a
+    // stranded fee must not be lost to a transient error.
     const { error: reconcileErr } = await this.supabase.rpc('heist_reconcile_stranded_joins', {
-      p_heist_id: heistId, p_refund_amount: strandedRefundEach,
+      p_heist_id: heistId, p_refund_amount: entryFee,
     });
     if (reconcileErr) {
       log.error(`Stranded-join reconcile failed for heist ${heistId} (outcome=${outcome}) — leaving in_progress for retry:`, reconcileErr.message);
