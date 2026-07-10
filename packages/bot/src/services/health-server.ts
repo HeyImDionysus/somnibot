@@ -46,10 +46,16 @@ export function setAwaitingSetup(state: { reason: string; dashboardUrl: string }
  * Checks:
  * 1. Discord WebSocket is open (client.ws.status === 0)
  * 2. Valkey is reachable (PING → PONG)
+ *
+ * Returns the created Server so callers/tests can read the actually-bound port
+ * via server.address() — set HEALTH_PORT=0 to request an OS-assigned ephemeral
+ * port and avoid fixed-port contention between parallel tests. Production
+ * callers ignore the return value.
  */
-export function startHealthServer(client: SomniClient | null): void {
+export function startHealthServer(client: SomniClient | null): Server {
   // HEALTH_PORT takes priority (explicit override), then PORT (some hosted
-  // platforms inject this), then 3001 as a safe local default.
+  // platforms inject this), then 3001 as a safe local default. A value of 0
+  // requests an OS-assigned ephemeral port (read back via server.address()).
   const port = parseInt(process.env.HEALTH_PORT ?? process.env.PORT ?? '3001', 10);
 
   server = createServer(async (req, res) => {
@@ -107,12 +113,18 @@ export function startHealthServer(client: SomniClient | null): void {
   server.requestTimeout = 10_000;
 
   server.listen(port, '0.0.0.0', () => {
-    log.info(`Listening on :${port}/health`);
+    // Log the ACTUAL bound port. With HEALTH_PORT=0 the requested port is 0 but
+    // the OS assigns a real ephemeral port, which server.address() reports.
+    const addr = server?.address();
+    const boundPort = addr && typeof addr === 'object' ? addr.port : port;
+    log.info(`Listening on :${boundPort}/health`);
   });
 
   server.on('error', (err) => {
     log.warn(`Failed to start health server: ${err.message}`);
   });
+
+  return server;
 }
 
 /**
