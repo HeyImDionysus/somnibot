@@ -29,6 +29,8 @@ vi.mock('@/lib/paypal', () => ({
     webhookId: 'test-webhook-id',
   }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
+  getPayPalTokenResult: vi.fn().mockResolvedValue({ ok: true, token: 'test-token' }),
+  isRetriablePayPalStatus: (status: number) => status >= 500 || status === 429 || status === 408,
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
 vi.mock('@/lib/api/rate-limit', () => ({
@@ -39,6 +41,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 
 import { POST } from '@/app/api/paypal/webhook/route';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import { getPayPalTokenResult } from '@/lib/paypal';
 
 function makeReplay(body: unknown, headers: Record<string, string> = {}) {
   return new Request('http://localhost/api/paypal/webhook', {
@@ -1400,6 +1403,86 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
       });
     } finally {
       global.fetch = originalFetch;
+    }
+  });
+
+  it('verification outage (503) on a redelivery leaves the errored event untouched — a later redelivery still resumes it', async () => {
+    // W2 × PR #270 composition: an event that VERIFIED on its first delivery
+    // can hold result='error' in webhook_events while a later redelivery hits
+    // a verify-infrastructure outage. The 503 outage response must return
+    // BEFORE any webhook_events access, so the errored row is neither claimed
+    // nor rewritten — it stays resumable for the redelivery after recovery,
+    // and the event-id-stamped queue probe still enforces exactly-once.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    const tokenResultMock = getPayPalTokenResult as ReturnType<typeof vi.fn>;
+    try {
+      const { inserts, updates, upserts } = useResumedSubscriptionRows({
+        eventId: 'EVT-SUB-CANCEL-OUTAGE',
+        orderId: 'order-cancel-outage',
+        queueProbe: { data: [], error: null }, // failed attempt queued nothing
+      });
+
+      const makeRedelivery = () =>
+        makeSignedWebhook({
+          event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+          resource: { id: 'SUB-CANCEL-OUTAGE' },
+          id: 'EVT-SUB-CANCEL-OUTAGE',
+        });
+
+      // Redelivery 1 arrives during a verify-infrastructure outage: every
+      // token fetch fails retriably, so verification ends 'unavailable'.
+      tokenResultMock.mockResolvedValue({
+        ok: false,
+        retriable: true,
+        reason: 'token endpoint returned 503',
+      });
+
+      const outageRes = await POST(makeRedelivery() as never);
+      expect(outageRes.status).toBe(503);
+      expect(outageRes.headers.get('Retry-After')).toBe('60');
+      // No database access at all on the outage path — in particular the
+      // errored webhook_events row is not claimed (result left as 'error').
+      expect(mockSb.from).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+      expect(upserts).toEqual([]);
+
+      // Redelivery 2 after the verify infrastructure recovers.
+      tokenResultMock.mockResolvedValue({ ok: true, token: 'test-token' });
+
+      const resumedRes = await POST(makeRedelivery() as never);
+      expect(resumedRes.status).toBe(200);
+      const fulfillmentInserts = inserts.filter(
+        (i) =>
+          i.table === 'bot_action_queue' &&
+          (i.payload as { action?: string }).action === 'fulfill_cancellation',
+      );
+      expect(fulfillmentInserts).toHaveLength(1);
+      expect(fulfillmentInserts[0]!.payload).toEqual(
+        expect.objectContaining({
+          guild_id: 'guild-1',
+          action: 'fulfill_cancellation',
+          payload: expect.objectContaining({
+            order_id: 'order-cancel-outage',
+            webhook_event_id: 'EVT-SUB-CANCEL-OUTAGE',
+          }),
+          status: 'pending',
+        }),
+      );
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ result: 'success' }),
+      });
+    } finally {
+      tokenResultMock.mockResolvedValue({ ok: true, token: 'test-token' });
+      global.fetch = originalFetch;
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
     }
   });
 });
