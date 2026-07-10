@@ -370,7 +370,7 @@ All scripts are in the `scripts/` folder. On Mac/Linux, prefix with `./` (e.g., 
 | `stop.sh` / `stop.bat` | Stops all running services |
 | `rebuild.sh` | Pulls latest code, reinstalls deps, and rebuilds |
 | `build-launcher.mjs` | Builds the Electron launcher package |
-| `generate-db-types.py` | Generates TypeScript types from the Supabase database schema |
+| `generate-db-types.py` | Regenerates the DB-schema drift snapshot (`database.generated.ts`) from the SQL migrations; `--check` fails CI on drift |
 
 ### Common Workflows
 

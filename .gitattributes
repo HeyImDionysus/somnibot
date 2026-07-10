@@ -1,0 +1,4 @@
+# The generated DB-type snapshot is byte-compared in CI (type-drift gate).
+# Pin it to LF so a Windows checkout with core.autocrlf=true cannot rewrite its
+# line endings and produce a false drift against the Linux CI regeneration.
+packages/shared/src/types/database.generated.ts text eol=lf
