@@ -263,64 +263,106 @@ describe('HeistManager', () => {
       );
     });
 
-    it('handles heist insert unique violation (concurrent start)', async () => {
-      let heistCallCount = 0;
+    it('handles concurrent-start rejection from heist_start (duplicate_active)', async () => {
+      // Row-derived-crew: startHeist creates the heist + initiator row atomically
+      // via the heist_start RPC. A concurrent start loses the unique-active-heist
+      // index race, so heist_start returns status='duplicate_active' (the whole tx
+      // rolled back — nothing half-inserted). The bot refunds and surfaces the
+      // "just started a heist" reply.
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
         }
         if (table === 'economy_heists') {
-          heistCallCount++;
-          if (heistCallCount <= 2) return chainBuilder({ data: null, error: null }); // no recent/active
-          // Insert fails with unique violation
-          return chainBuilder({ data: null, error: { code: '23505', message: 'dup' } });
+          return chainBuilder({ data: null, error: null }); // no recent/active
         }
         if (table === 'economy_wallets') {
           return chainBuilder({ data: { wallet: 500 }, error: null });
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: null, error: null }); // fee deduct + refund
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: [{ status: 'duplicate_active', heist_id: null }], error: null });
+        }
+        return Promise.resolve({ data: null, error: null }); // fee deduct + refund
+      });
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('just started a heist') }),
       );
+      // No separate participant insert — the initiator row is inserted inside the
+      // atomic RPC, not a second statement.
+      expect(
+        supabase.from.mock.calls.some((c: any[]) => c[0] === 'economy_heist_participants'),
+      ).toBe(false);
     });
 
-    it('starts heist successfully', async () => {
-      let heistCallCount = 0;
+    it('starts heist successfully via the atomic heist_start RPC', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
         }
         if (table === 'economy_heists') {
-          heistCallCount++;
-          if (heistCallCount <= 2) return chainBuilder({ data: null, error: null }); // no recent/active
-          // Insert success
-          return chainBuilder({
-            data: { id: 'h1', success_chance: 40, target_name: 'Corner Store', target_payout: 250 },
-            error: null,
-          });
+          return chainBuilder({ data: null, error: null }); // no recent/active
         }
         if (table === 'economy_wallets') {
           return chainBuilder({ data: { wallet: 500 }, error: null });
         }
-        if (table === 'economy_heist_participants') {
-          return chainBuilder({ data: null, error: null }); // insert participant
-        }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: null, error: null });
+      // heist_start returns 'started' with the new heist id; the initiator
+      // participant row is inserted inside the SAME transaction (no second insert).
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: [{ status: 'started', heist_id: 'h1' }], error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ embeds: expect.any(Array) }),
       );
+      // The initiator row is NOT a separate table insert — the atomic RPC owns it.
+      expect(
+        supabase.from.mock.calls.some((c: any[]) => c[0] === 'economy_heist_participants'),
+      ).toBe(false);
+      expect(
+        supabase.rpc.mock.calls.some((c: any[]) => c[0] === 'heist_start'),
+      ).toBe(true);
     });
   });
 
   describe('joinHeist', () => {
+    // Helper: the /heist join path now delegates the ENTIRE join to one atomic
+    // heist_join RPC. Set up the recruiting-heist read + the heist_join result.
+    function setupJoin(joinResult: unknown, opts: { configOverrides?: Record<string, unknown> } = {}) {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig, ...opts.configOverrides }, error: null });
+        }
+        if (table === 'economy_heists') {
+          // The recruiting-heist read used only for target_name + a fast "no heist"
+          // UX check. It no longer carries participants[] or a success_chance
+          // counter — the join RPC derives count + chance from the rows.
+          return chainBuilder({
+            data: { id: 'h1', base_success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        return chainBuilder();
+      });
+      const rpcCalls: Array<{ fn: string; args: any }> = [];
+      supabase.rpc.mockImplementation((fn: string, args: any) => {
+        rpcCalls.push({ fn, args });
+        if (fn === 'heist_join') return Promise.resolve(joinResult);
+        return Promise.resolve({ data: null, error: null });
+      });
+      return rpcCalls;
+    }
+
     it('rejects when heists disabled', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
@@ -352,100 +394,100 @@ describe('HeistManager', () => {
       );
     });
 
-    it('rejects when already joined', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u1'], success_chance: 40, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        return chainBuilder();
+    it('joins atomically via heist_join and announces the derived crew/chance', async () => {
+      // The happy path: heist_join returns 'joined' with the post-join member
+      // count and DERIVED success_chance (base 40 + (3-1)*7 = 54). The command
+      // renders those directly from the RPC result — no separate debit/insert/
+      // append/settle calls.
+      const rpcCalls = setupJoin({
+        data: [{ status: 'joined', member_count: 3, success_chance: 54, role: 'Hacker' }],
+        error: null,
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('already in') }),
-      );
+
+      // The whole join is one atomic RPC — no legacy debit / append / settle.
+      expect(rpcCalls.some((c) => c.fn === 'heist_join')).toBe(true);
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'array_append_heist_participant')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'heist_settle_missed_join')).toBe(false);
+      // heist_join was passed the derived-chance anchor (base + difficulty) and role.
+      expect(rpcCalls).toContainEqual({
+        fn: 'heist_join',
+        args: expect.objectContaining({
+          p_heist_id: 'h1', p_user_id: 'u1', p_entry_fee: 100,
+          p_max: 8, p_base_chance: 40, p_role: 'Hacker',
+        }),
+      });
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeDefined();
+      expect(String(replyArg.embeds[0].data.description)).toContain('3/8');
+      expect(String(replyArg.embeds[0].data.description)).toContain('54%');
     });
 
-    it('rejects when crew is full', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({
-            data: { ...defaultConfig, economy_heist_max_participants: 2 },
-            error: null,
-          });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2', 'u3'], success_chance: 47, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        return chainBuilder();
-      });
+    it('rejects when already joined (RPC status already_joined)', async () => {
+      setupJoin({ data: [{ status: 'already_joined', member_count: 2, success_chance: 47, role: null }], error: null });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('full') }),
-      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('already in');
     });
 
-    it('joins heist successfully', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        if (table === 'economy_heist_participants') {
-          const c = chainBuilder({ data: null, error: null });
-          // For select count
-          (c as any).count = 2;
-          return c;
-        }
-        return chainBuilder();
-      });
-      supabase.rpc.mockResolvedValue({ data: null, error: null });
+    it('rejects when crew is full (RPC status crew_full)', async () => {
+      setupJoin({ data: [{ status: 'crew_full', member_count: 8, success_chance: 89, role: null }], error: null });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ embeds: expect.any(Array) }),
-      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('full');
     });
 
-    it('rejects insufficient balance for join', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 5 }, error: null });
-        }
-        return chainBuilder();
+    it('rejects insufficient balance (RPC status insufficient_funds)', async () => {
+      setupJoin({ data: [{ status: 'insufficient_funds', member_count: 1, success_chance: 40, role: null }], error: null });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('coins to join');
+    });
+
+    // ── Root serialization fix (codex heist-manager.ts:797) ─────────────────
+    it('a join that loses the row lock to resolution is rejected without any charge', async () => {
+      // The claim won the heist-row lock first, so heist_join re-checked the
+      // status under the lock, saw it was no longer 'recruiting', and returned
+      // 'not_recruiting' having debited NOTHING. A post-recruiting insert is
+      // structurally impossible — no fee can be stranded, and the command tells the
+      // user plainly that nothing was charged (never a false "Joined", never a
+      // "we refunded you" for a debit that never happened).
+      const rpcCalls = setupJoin({
+        data: [{ status: 'not_recruiting', member_count: 2, success_chance: 0, role: null }],
+        error: null,
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('coins to join') }),
-      );
+
+      // No separate debit and no refund — the RPC never charged the fee.
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'economy_add_balance')).toBe(false);
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('already got underway');
+      expect(replyArg.content).toContain('No coins were charged');
+    });
+
+    it('surfaces a clean error and confirms no charge when heist_join errors (tx rolled back)', async () => {
+      // The RPC transaction errored — debit and insert commit together or not at
+      // all, so nothing was charged. The command must not claim a charge or a
+      // refund; the user simply retries.
+      const rpcCalls = setupJoin({ data: null, error: { message: 'transient' } });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      expect(rpcCalls.some((c) => c.fn === 'economy_add_balance')).toBe(false);
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('No coins were charged');
     });
   });
 
@@ -459,7 +501,7 @@ describe('HeistManager', () => {
       );
     });
 
-    it('shows last completed heist when no active', async () => {
+    it('shows last completed heist with crew derived from participant rows', async () => {
       let callCount = 0;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
@@ -468,42 +510,55 @@ describe('HeistManager', () => {
           return chainBuilder({
             data: {
               id: 'h1', target_name: 'Bank', status: 'success',
-              participants: ['u1', 'u2'], target_payout: 500,
-              resolved_at: new Date().toISOString(),
+              target_payout: 500, resolved_at: new Date().toISOString(),
             },
             error: null,
           });
+        }
+        if (table === 'economy_heist_participants') {
+          // Crew is derived from the rows (single source of truth) — no
+          // participants[] array on the heist row anymore.
+          return chainBuilder({ data: [{ user_id: 'u1' }, { user_id: 'u2' }], error: null });
         }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalled();
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // Crew mentions come from the participant rows.
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u2>');
     });
 
-    it('shows active heist', async () => {
+    it('shows active heist with crew + chance derived from rows and base_success_chance', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
           return chainBuilder({
             data: {
               id: 'h1', target_name: 'Museum', status: 'recruiting',
-              participants: ['u1', 'u2'], success_chance: 47,
+              // The immutable base anchor; success_chance is derived, not stored.
+              base_success_chance: 40,
               target_payout: 750,
               expires_at: new Date(Date.now() + 30000).toISOString(),
             },
             error: null,
           });
         }
+        if (table === 'economy_heist_participants') {
+          return chainBuilder({ data: [{ user_id: 'u1' }, { user_id: 'u2' }], error: null });
+        }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ embeds: expect.any(Array) }),
-      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // 2-member crew → derived chance = min(95, 40 + (2-1)*7) = 47.
+      expect(String(replyArg.embeds[0].data.description)).toContain('47%');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u2>');
     });
 
-    it('shows last failed heist', async () => {
+    it('shows last failed heist with crew derived from participant rows', async () => {
       let callCount = 0;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
@@ -512,17 +567,20 @@ describe('HeistManager', () => {
           return chainBuilder({
             data: {
               id: 'h2', target_name: 'Vault', status: 'failed',
-              participants: ['u1'], target_payout: 1000,
-              resolved_at: new Date().toISOString(),
+              target_payout: 1000, resolved_at: new Date().toISOString(),
             },
             error: null,
           });
+        }
+        if (table === 'economy_heist_participants') {
+          return chainBuilder({ data: [{ user_id: 'u1' }], error: null });
         }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalled();
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
     });
   });
 
