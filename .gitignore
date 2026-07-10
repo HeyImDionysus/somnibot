@@ -53,6 +53,10 @@ pnpm-debug.log*
 /run-log*.md
 /run-log*.txt
 
+# Python bytecode (compiled test/linter artifacts)
+__pycache__/
+*.pyc
+
 # TypeScript build info
 *.tsbuildinfo
 
