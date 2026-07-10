@@ -88,13 +88,15 @@ describe('GET /api/csrf', () => {
 
   const SESSION_ID = '1234567890abcdef'; // user-id-1234567890abcdef.slice(-16)
 
-  it('reuses the existing nonce (byte-stable, no prev) for a same-session cookie that is NOT due for rotation', async () => {
-    // [security] Regression for the residual gap: when a same-session cookie is
-    // still fresh, /api/csrf must re-sign the EXISTING nonce and keep the cookie
-    // byte-identical. Previously it derived a NEW nonce on every fetch without a
-    // prev cookie, so a tab still holding the pre-fetch token was rejected once
-    // another tab refreshed. Re-signing the existing nonce keeps every holder of
-    // that nonce valid and never rotates on a mere refresh.
+  it('re-signs the existing nonce and writes NO cookie for a same-session cookie that is NOT due for rotation', async () => {
+    // [security] ROOT FIX: when a same-session cookie is still fresh, /api/csrf
+    // must re-sign the EXISTING nonce and NOT write the CSRF cookie at all. The
+    // refresh re-emits a byte-identical value, so writing it can only ever lose a
+    // last-write race and clobber a concurrent rotation/invalidation. Skipping the
+    // write means a refresh can never roll back a rotation nor resurrect a cookie
+    // an RBAC invalidation just deleted. The token still validates against the
+    // cookie the browser already holds (unchanged nonce), so every holder stays
+    // valid without a grace window.
     const freshIssuedAt = Date.now() - 60_000; // 1 min old → NOT rotation-due
     const existingNonce = 'a'.repeat(32);
     const existing = `${existingNonce}:${SESSION_ID}!${freshIssuedAt}`;
@@ -109,15 +111,13 @@ describe('GET /api/csrf', () => {
     // Same token issued to both tabs.
     expect(bodyA.token).toBe(bodyB.token);
 
-    // Cookie value is byte-identical to the incoming cookie — nonce and
-    // timestamp preserved, so no rotation clock reset and no cookie soup.
-    const cookieA = csrfCookieFromResponse(resA.headers.get('set-cookie') ?? '');
-    const cookieB = csrfCookieFromResponse(resB.headers.get('set-cookie') ?? '');
-    expect(cookieA).toBe(cookieB);
-    expect(cookieA).toBe(existing);
-    expect(nonceOf(cookieA)).toBe(existingNonce);
+    // No CSRF cookie is written on the non-rotating refresh path — the browser
+    // keeps its existing cookie untouched, so it cannot lose a last-write race.
+    expect(csrfCookieFromResponse(resA.headers.get('set-cookie') ?? '')).toBe('');
+    expect(csrfCookieFromResponse(resB.headers.get('set-cookie') ?? '')).toBe('');
 
-    // Token is exactly HMAC(existingNonce, session) — a holder of that nonce stays valid.
+    // Token is exactly HMAC(existingNonce, session) — a holder of that nonce (i.e.
+    // the cookie the browser still holds) stays valid.
     const expected = await signExistingCsrf(existingNonce, SESSION_ID);
     expect(bodyA.token).toBe(expected.token);
 

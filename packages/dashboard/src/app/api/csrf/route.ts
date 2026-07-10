@@ -90,24 +90,64 @@ export async function GET(request: NextRequest) {
   let token: string;
   let nonce: string;
   let issuedAt: number;
+  // [security] ROOT FIX for the refresh/rotation/invalidation cookie race.
+  //
+  // Cookie writes across concurrent responses are last-write-wins in the browser
+  // jar. Every previously-reported race reduced to a "reuse the existing cookie"
+  // response re-emitting a cookie that a *concurrent* response (a middleware/route
+  // rotation, or an RBAC invalidation) was replacing — rolling a rotation back or
+  // resurrecting an invalidated cookie.
+  //
+  // The refresh path (same session, NOT yet due for rotation) re-emits a
+  // BYTE-IDENTICAL cookie, so writing it can only ever LOSE a last-write race and
+  // clobber something newer — it can never usefully change state. So we simply do
+  // NOT write the cookie on that path (`writeCookie = false`). The browser keeps
+  // the cookie it already has; the token we return is HMAC(existingNonce, session)
+  // which still validates against that surviving cookie. A refresh can therefore
+  // never roll back a concurrent rotation (closes the straddle-boundary race) nor
+  // resurrect a cookie a concurrent RBAC invalidation just deleted (closes the
+  // invalidation-reuse race). Only paths that genuinely ADVANCE cookie state
+  // (rotation, fresh mint) write a cookie.
+  let writeCookie: boolean;
   if (sameSession && !rotationDue) {
-    // Case 1: re-sign the nonce already in the browser; keep the cookie stable.
+    // Case 1: re-sign the nonce already in the browser and DO NOT touch the
+    // cookie. No prev cookie either — the nonce is unchanged, so any tab holding
+    // its token stays valid without a grace window.
     ({ token, nonce } = await signExistingCsrf(existingNonce!, sessionId));
     issuedAt = csrfCookieIssuedAt(existingCookie!) ?? rotatedAt;
+    writeCookie = false;
   } else if (rotationDue) {
-    // Case 2: deterministic rotation converged with the middleware's seed.
+    // Case 2: deterministic rotation converged with the middleware's seed. This
+    // genuinely advances the cookie to a new nonce, so it must write.
     ({ token, nonce } = await deriveRotatedCsrf(
       sessionId,
       csrfRotationSeed(existingCookie!),
     ));
     issuedAt = rotatedAt;
+    writeCookie = true;
   } else {
-    // Case 3: fresh random token for a new / cross-session client.
+    // Case 3: fresh random token for a new / cross-session client. Writes a new
+    // cookie bound to the authenticated session.
     ({ token, nonce } = await generateCsrfToken(sessionId));
     issuedAt = rotatedAt;
+    writeCookie = true;
   }
 
+  // [security] R8 — a cross-session existing cookie (a leftover from a previous
+  // account after logout/login) means we are rebinding to a new session here.
+  // Actively expire any stale `prev` cookie the previous session left behind so a
+  // foreign token cannot ride an earlier grace window into the new session. This
+  // is defence-in-depth: `checkCsrf` already rejects a prev whose embedded session
+  // differs from the (now rebound) current cookie's session, but leaving a dangling
+  // foreign prev is unnecessary. Only Case 3 with an existing cookie is a genuine
+  // cross-session rebind; `sameSession` paths keep any legitimate prev intact.
+  const crossSessionRebind = existingCookie !== undefined && !sameSession;
+
   const response = NextResponse.json({ token });
+
+  if (crossSessionRebind) {
+    response.cookies.delete({ name: CSRF_PREV_COOKIE_NAME, path: '/' });
+  }
 
   // Case 2 only: preserve the OLD nonce as `prev`, stamped at rotation time, so
   // a tab that still holds the pre-rotation token is accepted for the grace
@@ -128,18 +168,21 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Set HttpOnly cookie with nonce + session for server-side verification.
-  // V5 Audit §1.P3b: the `!timestamp` suffix drives periodic rotation. For a
-  // reused (non-rotating) cookie the timestamp is preserved so the value is
-  // byte-identical across concurrent responses and the rotation clock is not
-  // reset on every token fetch.
-  response.cookies.set(CSRF_COOKIE_NAME, `${nonce}:${sessionId}!${issuedAt}`, {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure: process.env.NODE_ENV === 'production',
-    path: '/',
-    maxAge: 60 * 60, // 1 hour
-  });
+  // Only write the cookie on paths that ADVANCE its state (rotation / fresh mint).
+  // The non-rotating refresh path intentionally leaves the browser's existing
+  // cookie untouched so it can never win a last-write race against a concurrent
+  // rotation or invalidation (see the block comment above).
+  if (writeCookie) {
+    // Set HttpOnly cookie with nonce + session for server-side verification.
+    // V5 Audit §1.P3b: the `!timestamp` suffix drives periodic rotation.
+    response.cookies.set(CSRF_COOKIE_NAME, `${nonce}:${sessionId}!${issuedAt}`, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: 60 * 60, // 1 hour
+    });
+  }
 
   return response;
 }

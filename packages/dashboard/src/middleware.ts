@@ -288,30 +288,58 @@ export async function middleware(request: NextRequest) {
   // soup"). Deriving the new nonce from the stale cookie's issuance timestamp
   // means every concurrent request converges on the same rotated token.
   const currentCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
-  if (user && currentCookie && shouldRotateCsrf(request)) {
+  if (user && currentCookie) {
     const sessionId = user.id?.slice(-16) ?? 'unknown';
-    const rotatedAt = Date.now();
-
-    // Save the old nonce as `prev` so in-flight requests still holding the old
-    // token are accepted during the grace period. Stamp it with the ROTATION
-    // time (not the stale cookie's original issuance) — the grace window is
-    // measured from when rotation happened. Previously this stored the stale
-    // cookie verbatim, whose timestamp is >30min old by definition (that is
-    // what triggered rotation), so the grace-window check always rejected it
-    // and every in-flight old token 403'd until the client re-fetched.
-    //
-    // [security] Only grant grace when the stale cookie belongs to the SAME
-    // session that is now authenticated. After a logout/login or account switch
-    // the browser may still carry the *previous* user's CSRF cookie (it is not
-    // cleared on sign-in). Re-stamping that foreign `nonce:session` as a fresh
-    // `prev` would let `checkCsrf` accept the previous user's token — which it
-    // verifies against the session embedded in `prev`, not the authenticated
-    // user — for the whole 60s window under the new session. Skipping the prev
-    // cookie on a session mismatch closes that cross-session grace leak; the
-    // stale tab simply re-fetches /api/csrf (the current cookie is still rotated
-    // below to the new session either way).
     const oldSessionId = csrfCookieSessionId(currentCookie);
-    if (oldSessionId === sessionId) {
+
+    // [security] R8 — SESSION-BINDING INVARIANT. The current CSRF cookie's
+    // embedded session MUST always equal the authenticated session. After a
+    // logout/login or account switch the browser still carries the *previous*
+    // user's CSRF cookie (nothing clears it on sign-in), and `checkCsrf` verifies
+    // a token against the session embedded IN the cookie — never the authenticated
+    // user. If that foreign cookie is not yet rotation-due, the old rotation-only
+    // rebind never fired, so the previous user's current+prev cookies survived and
+    // their token kept passing under the NEW session (both current and prev agreed
+    // on the old session). Treat a session mismatch as a mandatory rebind trigger,
+    // not just a time-based one, so a foreign cookie can never outlive the switch.
+    const sessionMismatch = oldSessionId !== sessionId;
+    const timeDue = shouldRotateCsrf(request);
+
+    if (sessionMismatch) {
+      // Foreign cookie → hard reset for the new session. Grant NO prev grace
+      // (there is no legitimate in-flight token for the new session yet) and
+      // actively expire any stale prev cookie with the same `path: '/'` it was
+      // issued with (a bare-name deletion emits a Path-less expiry the browser
+      // will not match against the root-path prev cookie, leaving it intact).
+      //
+      // [security] The rebind nonce is DERIVED DETERMINISTICALLY, not random:
+      // several tabs can hit the middleware with the same foreign cookie during
+      // one account switch, and a per-request random nonce would reintroduce the
+      // cookie-soup race (each response setting a different cookie/token). Seed
+      // the derivation from the foreign cookie's own content under a distinct
+      // `rebind:` domain so (a) all concurrent switch requests converge on one
+      // nonce and (b) the rebind nonce can never collide with a same-session
+      // rotation nonce for the same seed. Unforgeability is unchanged — the nonce
+      // is still HMAC(secret, …) and the foreign cookie content is not secret.
+      const rebindAt = Date.now();
+      supabaseResponse.cookies.delete({ name: CSRF_PREV_COOKIE_NAME, path: '/' });
+      const rebindSeed = `rebind:${stripCsrfTimestamp(currentCookie)}`;
+      const rebound = await deriveRotatedCsrf(sessionId, rebindSeed);
+      supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${rebound.nonce}:${sessionId}!${rebindAt}`, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 60 * 60,
+      });
+    } else if (timeDue) {
+      // Same session, cookie aged past the rotation window → deterministic rotate.
+      const rotatedAt = Date.now();
+
+      // Save the old nonce as `prev` so in-flight requests still holding the old
+      // token are accepted during the grace period. Stamp it with the ROTATION
+      // time (not the stale cookie's original issuance) — the grace window is
+      // measured from when rotation happened.
       const oldPrefix = stripCsrfTimestamp(currentCookie);
       supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${oldPrefix}!${rotatedAt}`, {
         httpOnly: true,
@@ -319,34 +347,26 @@ export async function middleware(request: NextRequest) {
         secure: process.env.NODE_ENV === 'production',
         path: '/',
         // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
-        // buffer. Previously 120s which stored the cookie well past the 60s
-        // acceptance window, wasting cookie bandwidth and leaking timing info.
+        // buffer.
         maxAge: 90,
       });
-    } else {
-      // Session changed — actively expire any stale prev cookie so a foreign
-      // token cannot ride an earlier grace window into the new session. Delete
-      // with the same `path: '/'` the cookie is issued with; a bare-name
-      // deletion emits a Path-less expiry that a browser will not match against
-      // the root-path prev cookie, leaving it intact.
-      supabaseResponse.cookies.delete({ name: CSRF_PREV_COOKIE_NAME, path: '/' });
-    }
 
-    // Derive the rotated token from a stable seed taken from the STALE cookie
-    // itself so every concurrent request lands on the same nonce. For
-    // timestamped cookies the seed is the issuance timestamp; for legacy
-    // timestamp-less cookies it is the cookie's own prefix — never the
-    // per-request clock, which would give concurrent tabs different nonces and
-    // reintroduce the very race this change eliminates.
-    const rotationSeed = csrfRotationSeed(currentCookie);
-    const csrf = await deriveRotatedCsrf(sessionId, rotationSeed);
-    supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${rotatedAt}`, {
-      httpOnly: true,
-      sameSite: 'strict',
-      secure: process.env.NODE_ENV === 'production',
-      path: '/',
-      maxAge: 60 * 60,
-    });
+      // Derive the rotated token from a stable seed taken from the STALE cookie
+      // itself so every concurrent request lands on the same nonce. For
+      // timestamped cookies the seed is the issuance timestamp; for legacy
+      // timestamp-less cookies it is the cookie's own prefix — never the
+      // per-request clock, which would give concurrent tabs different nonces and
+      // reintroduce the very race this change eliminates.
+      const rotationSeed = csrfRotationSeed(currentCookie);
+      const csrf = await deriveRotatedCsrf(sessionId, rotationSeed);
+      supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${rotatedAt}`, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 60 * 60,
+      });
+    }
   }
 
   // Apply CSP nonce to the response. The matching x-nonce request header is

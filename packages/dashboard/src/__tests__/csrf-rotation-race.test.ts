@@ -379,4 +379,55 @@ describe('middleware CSRF rotation under concurrency', () => {
 
     expect(await checkCsrf(inflight)).toBeNull();
   });
+
+  it('rebinds a FOREIGN-session cookie even when it is NOT rotation-due (R8 session-binding)', async () => {
+    // [security] R8 root fix. Before this, the middleware only rebound the CSRF
+    // cookie on a *time-based* rotation. After an account switch the previous
+    // user's cookie is still in the browser; if it is not yet 30min old, no
+    // rotation fired, so the current (and prev) cookie stayed bound to the OLD
+    // session and the old user's token kept passing under the NEW session. The
+    // session-binding invariant now forces a rebind on ANY session mismatch.
+    const { middleware } = await import('../middleware');
+    const otherSession = 'oldsessionabcdef0'.slice(-16);
+    expect(otherSession).not.toBe(SESSION_ID);
+
+    // FRESH foreign cookie (1 min old → NOT rotation-due) plus a fresh foreign
+    // prev, as if the previous user rotated moments before switching accounts.
+    const freshIssuedAt = Date.now() - 60_000;
+    const foreign = await generateCsrfToken(otherSession);
+    const foreignPrev = await generateCsrfToken(otherSession);
+    const req = new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    });
+    req.cookies.set(CSRF_COOKIE_NAME, `${foreign.nonce}:${otherSession}!${freshIssuedAt}`);
+    req.cookies.set(CSRF_PREV_COOKIE_NAME, `${foreignPrev.nonce}:${otherSession}!${freshIssuedAt}`);
+
+    const res = await middleware(req);
+
+    // Current cookie is rebound to the AUTHENTICATED session with a fresh random
+    // nonce — never derived from the foreign cookie's seed.
+    const newCookie = res.cookies.get(CSRF_COOKIE_NAME)!.value;
+    expect(parseCsrfCookie(newCookie).sessionId).toBe(SESSION_ID);
+    expect(parseCsrfCookie(newCookie).nonce).not.toBe(foreign.nonce);
+    const foreignDerived = await deriveRotatedCsrf(SESSION_ID, csrfRotationSeed(`${foreign.nonce}:${otherSession}!${freshIssuedAt}`));
+    expect(parseCsrfCookie(newCookie).nonce).not.toBe(foreignDerived.nonce);
+
+    // The stale prev cookie is actively expired (Max-Age=0 / epoch expiry).
+    const prevCookie = res.cookies.get(CSRF_PREV_COOKIE_NAME);
+    expect(prevCookie?.value ?? '').not.toContain(foreignPrev.nonce);
+
+    // Neither the old current token nor the old prev token validates under the
+    // new session against the rebound cookies.
+    for (const staleToken of [foreign.token, foreignPrev.token]) {
+      const submit = new NextRequest('http://localhost:3000/api/config', {
+        method: 'POST',
+        headers: { host: 'localhost:3000', [CSRF_HEADER_NAME]: staleToken },
+      });
+      submit.cookies.set(CSRF_COOKIE_NAME, newCookie);
+      if (prevCookie?.value) submit.cookies.set(CSRF_PREV_COOKIE_NAME, prevCookie.value);
+      const err = await checkCsrf(submit);
+      expect(err).not.toBeNull();
+      expect(err!.status).toBe(403);
+    }
+  });
 });
