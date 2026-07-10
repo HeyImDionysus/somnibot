@@ -203,6 +203,86 @@ describe('handleRoleUpdate', () => {
     expect(mockQueueDriftItem).toHaveBeenCalled();
   });
 
+  it('classifies a position-only move as HIERARCHY_DRIFT (not EXTERNAL_CHANGE)', async () => {
+    const client = makeClient();
+    client.supabase.from.mockImplementation((table: string) => {
+      if (table === 'discord_id_map') {
+        return chainBuilder({ data: { template_key: 'admin' } });
+      }
+      if (table === 'guild_config') {
+        return chainBuilder({ data: { sync_auto_repair: true } });
+      }
+      return chainBuilder({ data: null });
+    });
+
+    // Only position changed — everything else identical.
+    const oldRole = makeRole({ position: 5 });
+    const newRole = makeRole({ position: 12 });
+    await handleRoleUpdate(client as any, oldRole as any, newRole as any);
+
+    expect(mockQueueDriftItem).toHaveBeenCalledWith(
+      expect.anything(),
+      'g1',
+      expect.objectContaining({
+        type: 'HIERARCHY_DRIFT',
+        severity: 'warning',
+        entityType: 'role',
+        templateKey: 'admin',
+        suggestedAction: 'repair',
+      }),
+    );
+    // A pure position move must NOT trigger the per-role attribute re-apply —
+    // hierarchy is reconciled by the periodic reorder repair over the full set.
+    expect(newRole.edit).not.toHaveBeenCalled();
+  });
+
+  it('treats position+attribute changes as EXTERNAL_CHANGE (not hierarchy)', async () => {
+    const client = makeClient();
+    client.supabase.from.mockImplementation((table: string) => {
+      if (table === 'discord_id_map') {
+        return chainBuilder({ data: { template_key: 'admin' } });
+      }
+      if (table === 'guild_config') {
+        return chainBuilder({ data: { sync_auto_repair: false } });
+      }
+      return chainBuilder({ data: null });
+    });
+
+    // Position AND name changed → not position-only.
+    const oldRole = makeRole({ name: 'Admin', position: 5 });
+    const newRole = makeRole({ name: 'Renamed', position: 12 });
+    await handleRoleUpdate(client as any, oldRole as any, newRole as any);
+
+    expect(mockQueueDriftItem).toHaveBeenCalledWith(
+      expect.anything(),
+      'g1',
+      expect.objectContaining({ type: 'EXTERNAL_CHANGE' }),
+    );
+  });
+
+  it('position + permission change stays PERMISSION_DRIFT', async () => {
+    const client = makeClient();
+    client.supabase.from.mockImplementation((table: string) => {
+      if (table === 'discord_id_map') {
+        return chainBuilder({ data: { template_key: 'mod' } });
+      }
+      if (table === 'guild_config') {
+        return chainBuilder({ data: { sync_auto_repair: false } });
+      }
+      return chainBuilder({ data: null });
+    });
+
+    const oldRole = makeRole({ permissions: { bitfield: 0n }, position: 5 });
+    const newRole = makeRole({ permissions: { bitfield: 8n }, position: 12 });
+    await handleRoleUpdate(client as any, oldRole as any, newRole as any);
+
+    expect(mockQueueDriftItem).toHaveBeenCalledWith(
+      expect.anything(),
+      'g1',
+      expect.objectContaining({ type: 'PERMISSION_DRIFT', severity: 'warning' }),
+    );
+  });
+
   it('skips when no meaningful changes', async () => {
     const client = makeClient();
     client.supabase.from.mockImplementation((table: string) => {

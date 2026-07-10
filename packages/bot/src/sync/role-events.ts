@@ -146,28 +146,57 @@ export async function handleRoleUpdate(
   if (Object.keys(changes).length === 0) return; // No meaningful changes
 
   const hasPermissionChange = 'permissions' in changes;
+  // A pure position move (no permission/attribute change) is a hierarchy drift,
+  // not a generic external change — it must be classified as HIERARCHY_DRIFT so
+  // the sync engine's reorder repair (reorderRolesToDesired) is reachable.
+  // Priority: permissions (security) > position > other attributes.
+  const changeKeys = Object.keys(changes);
+  const isPositionOnly =
+    !hasPermissionChange &&
+    changeKeys.includes('position') &&
+    changeKeys.every((k) => k === 'position');
+
+  let type: DriftType;
+  let severity: DriftSeverity;
+  if (hasPermissionChange) {
+    type = 'PERMISSION_DRIFT';
+    severity = 'warning';
+  } else if (isPositionOnly) {
+    type = 'HIERARCHY_DRIFT';
+    severity = 'warning';
+  } else {
+    type = 'EXTERNAL_CHANGE';
+    severity = 'info';
+  }
 
   log.info(
     `[Sync:Drift] Role "${newRole.name}" modified externally:`,
-    Object.keys(changes).join(', '),
+    changeKeys.join(', '),
   );
 
   const driftItem: DriftItem = {
-    type: hasPermissionChange ? 'PERMISSION_DRIFT' : 'EXTERNAL_CHANGE',
-    severity: hasPermissionChange ? 'warning' : 'info',
+    type,
+    severity,
     entityType: 'role',
-    entityName: newRole.name,
+    entityName: type === 'HIERARCHY_DRIFT' ? 'Role hierarchy' : newRole.name,
     entityDiscordId: newRole.id,
-    description: `Role "${newRole.name}" was modified outside the dashboard`,
+    templateKey: mapping.template_key,
+    description:
+      type === 'HIERARCHY_DRIFT'
+        ? `Role "${newRole.name}" position changed outside the dashboard`
+        : `Role "${newRole.name}" was modified outside the dashboard`,
     details: Object.fromEntries(
       Object.entries(changes).map(([k, v]) => [k, { expected: v.from, actual: v.to }]),
     ),
     suggestedAction: 'repair',
   };
 
-  // Auto-repair if configured
+  // Auto-repair if configured. A pure position move is reconciled by the
+  // periodic sync cycle's reorder repair (which needs the full role set), not
+  // by the per-role attribute repair — so only re-apply attributes here when
+  // the change is not position-only.
   const config = await getSyncConfig(client, newRole.guild.id);
-  if (config.autoRepair) {
+  if (config.autoRepair && !isPositionOnly) {
     await autoRepairRole(client, newRole, mapping.template_key);
   }
 

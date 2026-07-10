@@ -434,3 +434,173 @@ describe('classifyDrift', () => {
     });
   });
 });
+
+// ── Role hierarchy drift (reachability of HIERARCHY_DRIFT) ────
+// These prove the PRODUCTION classifier emits HIERARCHY_DRIFT for real role
+// position moves — the sync-engine reorder repair is only reachable because of
+// this. Without a real producer, that repair branch would be dead code.
+describe('computeStateDiff — role hierarchy drift', () => {
+  it('detects hierarchy drift when mapped roles are out of desired order', () => {
+    // Desired: member(0) < mod(1) < admin(2). Actual Discord positions scramble
+    // mod above admin, so the desired order is no longer reflected.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 3 }),
+        makeActualRole('r-mod', { position: 10 }), // drifted above admin
+        makeActualRole('r-member', { position: 1 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+    expect(diff.roleHierarchyDriftId).toBeDefined();
+    expect(diff.roleHierarchyDriftKey).toBeDefined();
+  });
+
+  it('reports no hierarchy drift when mapped roles are in desired order', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 12 }),
+        makeActualRole('r-mod', { position: 11 }),
+        makeActualRole('r-member', { position: 10 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
+  it('resolves roles from unprefixed ID-map keys (deploy-listener shape)', () => {
+    // deploy-listener persists template_key = raw key (no "role:" prefix).
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 2 }),
+        makeActualRole('r-member', { position: 5 }), // member above admin → drift
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['admin', 'r-admin'],
+      ['member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+  });
+
+  it('ignores managed roles when evaluating hierarchy order', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('bot', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-bot', { position: 5, managed: true }), // integration role
+        makeActualRole('r-member', { position: 10 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:bot', 'r-bot'],
+      ['role:member', 'r-member'],
+    ]);
+
+    // Only one non-managed mapped role remains → cannot be "out of order".
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+});
+
+describe('classifyDrift — HIERARCHY_DRIFT emission', () => {
+  it('emits a repairable HIERARCHY_DRIFT item from a real drifted diff', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2, name: 'Admin' }),
+        makeDesiredRole('mod', { position: 1, name: 'Mod' }),
+        makeDesiredRole('member', { position: 0, name: 'Member' }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { name: 'Admin', position: 3 }),
+        makeActualRole('r-mod', { name: 'Mod', position: 10 }),
+        makeActualRole('r-member', { name: 'Member', position: 1 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    const items = classifyDrift(diff);
+    const hierarchy = items.find(i => i.type === 'HIERARCHY_DRIFT');
+    expect(hierarchy).toBeDefined();
+    expect(hierarchy).toMatchObject({
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'role',
+      suggestedAction: 'repair',
+    });
+    expect(hierarchy!.entityDiscordId).toBeDefined();
+    expect(hierarchy!.templateKey).toBeDefined();
+  });
+
+  it('does not emit HIERARCHY_DRIFT when ordering matches', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 5 }),
+        makeActualRole('r-member', { position: 2 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const items = classifyDrift(computeStateDiff(desired, actual, idMap));
+    expect(items.find(i => i.type === 'HIERARCHY_DRIFT')).toBeUndefined();
+  });
+});

@@ -278,8 +278,8 @@ async function repairDriftItem(
           .eq('guild_id', guild.id)
           .single();
 
-        const desiredRoles = (desired?.roles ?? []) as Array<{ key: string; name: string; color?: number; permissions?: string; hoist?: boolean; mentionable?: boolean }>;
-        const roleDef = desiredRoles.find(r => r.key === roleKey);
+        const desiredRoles = (desired?.roles ?? []) as Array<DesiredRoleDef & { name: string }>;
+        const roleDef = desiredRoles.find(r => stripPrefix(desiredKeyOf(r)) === stripPrefix(roleKey));
         if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
 
         const created = await guild.roles.create({
@@ -312,16 +312,16 @@ async function repairDriftItem(
           .eq('guild_id', guild.id)
           .single();
 
-        const desiredChannels = (desired?.channels ?? []) as Array<{ key: string; name: string; type?: number; parentKey?: string; topic?: string }>;
-        const chanDef = desiredChannels.find(c => c.key === chanKey);
+        const desiredChannels = (desired?.channels ?? []) as Array<DesiredChannelDef & { name: string; parentKey?: string }>;
+        const chanDef = desiredChannels.find(c => stripPrefix(desiredKeyOf(c)) === stripPrefix(chanKey));
         if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
 
-        const parentId = chanDef.parentKey ? idMap.get(`category:${chanDef.parentKey}`) ?? undefined : undefined;
+        const parentId = chanDef.parentKey ? resolveDiscordId(idMap, 'category', chanDef.parentKey) : undefined;
         const created = await guild.channels.create({
           name: chanDef.name,
           type: chanDef.type ?? 0,
           parent: parentId,
-          topic: chanDef.topic,
+          topic: chanDef.topic ?? undefined,
           reason: 'SomniBot sync auto-repair — recreated missing channel',
         }) as { id: string };
 
@@ -389,7 +389,11 @@ async function repairDriftItem(
 }
 
 interface DesiredRoleDef {
-  key: string;
+  // Guilds store the key variantly depending on which write path produced the
+  // row: `key` (diff engine), `template_key`/`templateKey` (deploy/accept path).
+  key?: string;
+  template_key?: string;
+  templateKey?: string;
   name?: string;
   color?: number;
   permissions?: string;
@@ -399,7 +403,9 @@ interface DesiredRoleDef {
 }
 
 interface DesiredChannelDef {
-  key: string;
+  key?: string;
+  template_key?: string;
+  templateKey?: string;
   name?: string;
   type?: number;
   topic?: string | null;
@@ -440,7 +446,7 @@ async function reapplyRoleDesiredState(
     .single();
 
   const desiredRoles = (desired?.roles ?? []) as DesiredRoleDef[];
-  const roleDef = desiredRoles.find(r => stripPrefix(r.key) === stripPrefix(roleKey));
+  const roleDef = desiredRoles.find(r => stripPrefix(desiredKeyOf(r)) === stripPrefix(roleKey));
   if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
 
   await role.edit({
@@ -481,7 +487,7 @@ async function reapplyChannelDesiredState(
     .single();
 
   const desiredChannels = (desired?.channels ?? []) as DesiredChannelDef[];
-  const chanDef = desiredChannels.find(c => stripPrefix(c.key) === stripPrefix(chanKey));
+  const chanDef = desiredChannels.find(c => stripPrefix(desiredKeyOf(c)) === stripPrefix(chanKey));
   if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
 
   const editOptions: Record<string, unknown> = {};
@@ -549,7 +555,10 @@ async function reorderRolesToDesired(
   const sorted = [...desiredRoles].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const movable: Array<{ id: string; currentPosition: number }> = [];
   for (const def of sorted) {
-    const discordId = idMap.get(`role:${stripPrefix(def.key)}`);
+    const defKey = desiredKeyOf(def);
+    if (!defKey) continue;
+    // ID map may store keys prefixed (`role:mod`) or bare (`mod`); try both.
+    const discordId = resolveDiscordId(idMap, 'role', defKey);
     if (!discordId) continue;
     const role = guild.roles.cache.get(discordId);
     if (!role) continue;
@@ -587,10 +596,43 @@ async function reorderRolesToDesired(
 /**
  * Strip a leading "prefix:" (e.g. "role:mod" → "mod"). Desired-state keys and
  * ID-map keys are stored inconsistently with/without the entity-type prefix.
+ * Tolerates undefined/empty input (some desired-state rows omit `key` entirely).
  */
-function stripPrefix(key: string): string {
+function stripPrefix(key: string | undefined | null): string {
+  if (!key) return '';
   const idx = key.indexOf(':');
   return idx >= 0 ? key.slice(idx + 1) : key;
+}
+
+/**
+ * Read a desired-state entry's template key regardless of which shape the guild
+ * stored it as. The deploy/accept paths write `template_key`/`templateKey`,
+ * while the diff engine and older rows use `key`. Any of the three is accepted.
+ */
+function desiredKeyOf(
+  entry: { key?: string; template_key?: string; templateKey?: string },
+): string | undefined {
+  return entry.key ?? entry.template_key ?? entry.templateKey;
+}
+
+/**
+ * Resolve a desired-state entry's template key to a live Discord ID via the ID
+ * map, tolerating both prefixed (`role:mod`) and unprefixed (`mod`) storage on
+ * either side. The deploy listener persists raw keys (`template_key: m.key`),
+ * while the recreate path writes prefixed keys — so we try every combination.
+ */
+function resolveDiscordId(
+  idMap: Map<string, string>,
+  prefix: 'role' | 'channel' | 'category',
+  rawKey: string,
+): string | undefined {
+  const bare = stripPrefix(rawKey);
+  return (
+    idMap.get(`${prefix}:${bare}`) ??
+    idMap.get(bare) ??
+    idMap.get(rawKey) ??
+    idMap.get(`${prefix}:${rawKey}`)
+  );
 }
 
 /**

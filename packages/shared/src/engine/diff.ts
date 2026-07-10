@@ -138,6 +138,18 @@ export interface OverrideDiff {
 export interface StateDiff {
   everyoneDrift: boolean;
   everyoneCurrentPermissions: string;
+  /**
+   * True when the mapped roles' actual Discord positions are not in the same
+   * relative order as the desired `position` field. Role position is not part
+   * of the per-role `changes` (positions are relative in desired state and
+   * absolute in Discord), so hierarchy drift is surfaced as its own signal and
+   * classified into a single HIERARCHY_DRIFT item.
+   */
+  roleHierarchyDrift: boolean;
+  /** Discord ID of a representative out-of-order role (for the drift item). */
+  roleHierarchyDriftId?: string;
+  /** Template key of a representative out-of-order role (for repair lookup). */
+  roleHierarchyDriftKey?: string;
   roles: RoleDiff[];
   categories: CategoryDiff[];
   channels: ChannelDiff[];
@@ -288,6 +300,54 @@ export function computeStateDiff(
         name: actualRole.name,
         discordId: actualRole.id,
       });
+    }
+  }
+
+  // --- Role hierarchy drift ---
+  // Compare the desired relative ordering of mapped roles against their actual
+  // Discord positions. Only roles that resolve to a live, non-managed actual
+  // role participate. If sorting by desired position yields a sequence whose
+  // actual positions are not strictly increasing, the hierarchy has drifted.
+  let roleHierarchyDrift = false;
+  let roleHierarchyDriftId: string | undefined;
+  let roleHierarchyDriftKey: string | undefined;
+  {
+    const mapped: Array<{ key: string; discordId: string; desiredPos: number; actualPos: number }> = [];
+    for (const desiredRole of desired.roles) {
+      // Guilds store the template key variantly (`key` / `template_key` /
+      // `templateKey`), and the ID map keys it prefixed (`role:mod`) or bare
+      // (`mod`). Try every combination so hierarchy drift is detected regardless.
+      const rawKey =
+        desiredRole.key ??
+        (desiredRole as { template_key?: string }).template_key ??
+        (desiredRole as { templateKey?: string }).templateKey;
+      if (!rawKey) continue;
+      const bareKey = rawKey.includes(':') ? rawKey.slice(rawKey.indexOf(':') + 1) : rawKey;
+      const discordId =
+        idMap.get(`role:${bareKey}`) ??
+        idMap.get(bareKey) ??
+        idMap.get(rawKey);
+      if (!discordId) continue;
+      const actualRole = actual.roles.find(r => r.id === discordId);
+      if (!actualRole || actualRole.managed) continue;
+      mapped.push({
+        key: bareKey,
+        discordId,
+        desiredPos: desiredRole.position,
+        actualPos: actualRole.position,
+      });
+    }
+    if (mapped.length >= 2) {
+      const sorted = [...mapped].sort((a, b) => a.desiredPos - b.desiredPos);
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].actualPos <= sorted[i - 1].actualPos) {
+          roleHierarchyDrift = true;
+          // Report the higher-desired role as the representative target.
+          roleHierarchyDriftId = sorted[i].discordId;
+          roleHierarchyDriftKey = sorted[i].key;
+          break;
+        }
+      }
     }
   }
 
@@ -446,13 +506,16 @@ export function computeStateDiff(
     channelsToUpdate: channelDiffs.filter(d => d.action === 'update').length,
     channelsToDelete: channelDiffs.filter(d => d.action === 'delete').length,
     overrideChanges: overrideDiffs.length,
-    totalChanges: roleDiffs.length + categoryDiffs.length + channelDiffs.length + overrideDiffs.length + (everyoneDrift ? 1 : 0),
+    totalChanges: roleDiffs.length + categoryDiffs.length + channelDiffs.length + overrideDiffs.length + (everyoneDrift ? 1 : 0) + (roleHierarchyDrift ? 1 : 0),
     hasBreakingChanges: roleDiffs.some(d => d.action === 'delete') || channelDiffs.some(d => d.action === 'delete'),
   };
 
   return {
     everyoneDrift,
     everyoneCurrentPermissions: actual.everyonePermissions,
+    roleHierarchyDrift,
+    roleHierarchyDriftId,
+    roleHierarchyDriftKey,
     roles: roleDiffs,
     categories: categoryDiffs,
     channels: channelDiffs,
@@ -519,6 +582,22 @@ export function classifyDrift(diff: StateDiff): DriftItem[] {
         suggestedAction: 'accept',
       });
     }
+  }
+
+  // Role hierarchy drift — the mapped roles are no longer in their desired
+  // relative order. Surfaced as a single repairable item; the sync engine
+  // reorders the whole set back to the desired hierarchy.
+  if (diff.roleHierarchyDrift) {
+    items.push({
+      type: 'HIERARCHY_DRIFT',
+      severity: 'warning',
+      entityType: 'role',
+      entityName: 'Role hierarchy',
+      entityDiscordId: diff.roleHierarchyDriftId,
+      templateKey: diff.roleHierarchyDriftKey,
+      description: 'Role hierarchy positions no longer match the desired ordering',
+      suggestedAction: 'repair',
+    });
   }
 
   // Category drifts
