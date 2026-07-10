@@ -179,6 +179,25 @@ export async function deriveRotatedCsrf(
 }
 
 /**
+ * Sign a token for a nonce that already lives in the browser's CSRF cookie.
+ *
+ * [security] `/api/csrf` uses this when a same-session cookie exists but is not
+ * yet due for rotation: re-signing the EXISTING nonce keeps the cookie value
+ * byte-identical, so concurrent tabs refreshing their in-memory token never
+ * overwrite the cookie with a different nonce. Any tab still holding a token for
+ * that nonce stays valid — no cookie-soup race, and no need for a `prev` grace
+ * cookie. Determinism and unforgeability are unchanged: the token is the same
+ * `HMAC(nonce, sessionId)` the double-submit check already validates.
+ */
+export async function signExistingCsrf(
+  nonce: string,
+  sessionId: string,
+): Promise<{ token: string; nonce: string }> {
+  const token = await signCsrfValue(nonce, sessionId);
+  return { token, nonce };
+}
+
+/**
  * Compute the stable rotation seed for a CSRF cookie value.
  *
  * WAVE 2B follow-up [security]: the seed must be derived only from the stale
@@ -209,6 +228,18 @@ export function csrfCookieSessionId(cookieValue: string): string | null {
   const rest = cookieValue.slice(colonIdx + 1);
   const bangIdx = rest.lastIndexOf('!');
   return bangIdx === -1 ? rest : rest.slice(0, bangIdx);
+}
+
+/**
+ * Extract the nonce embedded in a CSRF cookie value
+ * (`nonce:sessionId` or `nonce:sessionId!timestamp`). Returns null when the
+ * cookie has no `:` separator (malformed). Lets callers re-sign the nonce that
+ * is actually stored in the browser instead of deriving a fresh one.
+ */
+export function csrfCookieNonce(cookieValue: string): string | null {
+  const colonIdx = cookieValue.indexOf(':');
+  if (colonIdx === -1) return null;
+  return cookieValue.slice(0, colonIdx);
 }
 
 /**
@@ -326,7 +357,22 @@ export async function checkCsrf(request: NextRequest): Promise<NextResponse | nu
         const prevRest = prevCookie.slice(prevColonIdx + 1, prevBangIdx);
         const prevTimestamp = parseInt(prevCookie.slice(prevBangIdx + 1), 10);
 
-        if (!Number.isNaN(prevTimestamp) && Date.now() - prevTimestamp < CSRF_GRACE_PERIOD_MS) {
+        // [security] Bind the prev-token grace to the ACTIVE session. The grace
+        // branch verifies the header against the session embedded IN the prev
+        // cookie (`prevRest`), so a prev cookie left over from a different
+        // session would let a stale tab pass CSRF under the new session. This
+        // happens even without a fresh rotation: a legitimate same-session
+        // rotation under account A stamps a 60s-fresh `prev`, then the user
+        // signs into account B; the browser still carries A's prev, and the
+        // current cookie has been rebound to B. Requiring the prev session to
+        // equal the current cookie's session (`sessionId`, the active session)
+        // rejects that cross-session grace regardless of whether rotation fired
+        // on the switch request.
+        if (
+          prevRest === sessionId &&
+          !Number.isNaN(prevTimestamp) &&
+          Date.now() - prevTimestamp < CSRF_GRACE_PERIOD_MS
+        ) {
           if (await verifyCsrfToken(headerToken, prevNonce, prevRest)) {
             return null; // Previous token still valid within grace period
           }
@@ -353,20 +399,28 @@ export async function checkCsrf(request: NextRequest): Promise<NextResponse | nu
  */
 const CSRF_ROTATION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
 
-export function shouldRotateCsrf(request: NextRequest): boolean {
-  const csrfCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
-  if (!csrfCookie) return false;
-
-  const bangIdx = csrfCookie.lastIndexOf('!');
+/**
+ * Decide whether a CSRF cookie *value* is due for rotation. Shared by the
+ * request-based `shouldRotateCsrf` (middleware) and `/api/csrf`, which must
+ * apply the exact same age policy so the two rotation paths stay consistent.
+ */
+export function shouldRotateCsrfValue(cookieValue: string): boolean {
+  const bangIdx = cookieValue.lastIndexOf('!');
   if (bangIdx === -1) {
     // Legacy cookie without timestamp — rotate to add one
     return true;
   }
 
-  const issuedAt = parseInt(csrfCookie.slice(bangIdx + 1), 10);
+  const issuedAt = parseInt(cookieValue.slice(bangIdx + 1), 10);
   if (Number.isNaN(issuedAt)) return true;
 
   return Date.now() - issuedAt > CSRF_ROTATION_MAX_AGE_MS;
+}
+
+export function shouldRotateCsrf(request: NextRequest): boolean {
+  const csrfCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+  if (!csrfCookie) return false;
+  return shouldRotateCsrfValue(csrfCookie);
 }
 
 /**
@@ -385,8 +439,16 @@ export { CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, CSRF_HEADER_NAME };
  * after the client re-fetches `/api/csrf`, defeating the documented CSRF
  * invalidation window on RBAC role assignment/removal. Clearing both cookies
  * closes that window. Call this anywhere the current CSRF token is invalidated.
+ *
+ * [security] The expiry Set-Cookie MUST carry the same `path: '/'` these cookies
+ * are issued with (see `/api/csrf` and the middleware rotation). A browser only
+ * removes a stored cookie when the deletion's Path (and Domain) match the stored
+ * cookie's. Deleting by bare name emits a `Path`-less expiry that does not match
+ * the root-path `somnibot-csrf-prev`, leaving it intact so `checkCsrf` could keep
+ * honouring the pre-change token during the grace window. Pass the path so the
+ * deletion actually lands.
  */
 export function invalidateCsrfCookies(response: NextResponse): void {
-  response.cookies.delete(CSRF_COOKIE_NAME);
-  response.cookies.delete(CSRF_PREV_COOKIE_NAME);
+  response.cookies.delete({ name: CSRF_COOKIE_NAME, path: '/' });
+  response.cookies.delete({ name: CSRF_PREV_COOKIE_NAME, path: '/' });
 }

@@ -283,6 +283,56 @@ describe('CSRF Protection', () => {
 
       expect(await checkCsrf(req)).toBeNull();
     });
+
+    it('rejects a prev token whose session differs from the active (current-cookie) session', async () => {
+      // [security] Prev grace is bound to the ACTIVE session. Scenario: a
+      // legitimate same-session rotation under account A stamped a fresh prev
+      // cookie (A's nonce/session), then the user signed into account B; the
+      // current cookie is now B's while the browser still carries A's prev with
+      // a within-grace timestamp. A stale tab replaying A's token must NOT pass
+      // CSRF for a request executed as B, even though the timestamp is fresh and
+      // the token verifies against A's own nonce/session.
+      const sessionA = 'account-a-16chars';
+      const sessionB = 'account-b-16chars';
+      const oldA = await generateCsrfToken(sessionA);
+      const freshB = await generateCsrfToken(sessionB);
+
+      const now = String(Date.now()); // within the 60s grace window
+      const req = makeMutatingRequest('/api/config', {
+        method: 'PUT',
+        headers: { 'x-csrf-token': oldA.token },
+        cookies: {
+          // Active session per the current cookie is B …
+          'somnibot-csrf-token': `${freshB.nonce}:${sessionB}!${now}`,
+          // … but the surviving prev cookie is A's, freshly stamped.
+          [CSRF_PREV_COOKIE_NAME]: `${oldA.nonce}:${sessionA}!${now}`,
+        },
+      });
+
+      const result = await checkCsrf(req);
+      expect(result).not.toBeNull();
+      expect(result!.status).toBe(403);
+    });
+
+    it('still accepts a same-session prev token within the grace window (guard against over-tightening)', async () => {
+      // Regression guard: binding prev to the active session must NOT break the
+      // legitimate same-session grace path (current + prev share the session).
+      const sessionId = 'same-session-16c';
+      const old = await generateCsrfToken(sessionId);
+      const fresh = await generateCsrfToken(sessionId);
+
+      const now = String(Date.now());
+      const req = makeMutatingRequest('/api/config', {
+        method: 'PUT',
+        headers: { 'x-csrf-token': old.token },
+        cookies: {
+          'somnibot-csrf-token': `${fresh.nonce}:${sessionId}!${now}`,
+          [CSRF_PREV_COOKIE_NAME]: `${old.nonce}:${sessionId}!${now}`,
+        },
+      });
+
+      expect(await checkCsrf(req)).toBeNull();
+    });
   });
 
   describe('shouldRotateCsrf', () => {

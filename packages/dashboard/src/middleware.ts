@@ -325,8 +325,11 @@ export async function middleware(request: NextRequest) {
       });
     } else {
       // Session changed — actively expire any stale prev cookie so a foreign
-      // token cannot ride an earlier grace window into the new session.
-      supabaseResponse.cookies.delete(CSRF_PREV_COOKIE_NAME);
+      // token cannot ride an earlier grace window into the new session. Delete
+      // with the same `path: '/'` the cookie is issued with; a bare-name
+      // deletion emits a Path-less expiry that a browser will not match against
+      // the root-path prev cookie, leaving it intact.
+      supabaseResponse.cookies.delete({ name: CSRF_PREV_COOKIE_NAME, path: '/' });
     }
 
     // Derive the rotated token from a stable seed taken from the STALE cookie

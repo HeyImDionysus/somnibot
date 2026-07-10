@@ -47,9 +47,14 @@ import { POST, DELETE } from '../app/api/rbac/users/route';
 // ── Helpers ─────────────────────────────────────────────────
 
 /**
- * A `NextResponse.cookies.delete(name)` sets an expired cookie: the value
- * becomes '' and `expires` is set to the Unix epoch (a past date). Assert both
- * markers so a plain `.set(...)` can't masquerade as a delete.
+ * A `NextResponse.cookies.delete({ name, path })` sets an expired cookie: the
+ * value becomes '' and `expires` is set to the Unix epoch (a past date). Assert
+ * both markers so a plain `.set(...)` can't masquerade as a delete.
+ *
+ * [security] The deletion MUST also carry `Path=/` — the cookies are issued with
+ * `path: '/'`, and a browser only removes a stored cookie when the deletion's
+ * Path matches. A `Path`-less expiry leaves the root-path cookie intact, so
+ * `checkCsrf` could keep honouring the pre-change token during the grace window.
  */
 function assertCookieCleared(res: import('next/server').NextResponse, name: string): void {
   const cookie = res.cookies.get(name);
@@ -57,6 +62,7 @@ function assertCookieCleared(res: import('next/server').NextResponse, name: stri
   expect(cookie!.value).toBe('');
   expect(cookie!.expires, `expected ${name} to be expired`).toBeDefined();
   expect(new Date(cookie!.expires!).getTime()).toBeLessThan(Date.now());
+  expect(cookie!.path, `expected ${name} deletion to target the root path`).toBe('/');
 }
 
 function buildRequest(path: string, method: string): NextRequest {

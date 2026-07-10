@@ -15,11 +15,16 @@ import { SupabaseRuntimeConfigError } from '@/lib/supabase/runtime-config';
 import {
   generateCsrfToken,
   deriveRotatedCsrf,
+  signExistingCsrf,
   csrfRotationSeed,
   csrfCookieSessionId,
+  csrfCookieNonce,
   csrfCookieIssuedAt,
+  shouldRotateCsrfValue,
+  stripCsrfTimestamp,
   generateRandomHex,
   CSRF_COOKIE_NAME,
+  CSRF_PREV_COOKIE_NAME,
 } from '@/lib/api/csrf';
 
 export async function GET(request: NextRequest) {
@@ -49,37 +54,85 @@ export async function GET(request: NextRequest) {
   }
 
   // [security] Converge token issuance with the deterministic middleware
-  // rotation. The middleware derives ONE rotated nonce per (session, stale
-  // cookie) so concurrent tabs crossing the rotation boundary all agree on the
-  // cookie/token. But if each /api/csrf call minted a fresh RANDOM token and
-  // overwrote the cookie, several tabs re-fetching after rotation would race
-  // again: their concurrent responses set different random cookies, and any tab
-  // whose response loses the last-Set-Cookie write submits a token that no
-  // longer matches the surviving cookie (a spurious 403). Deriving from the
-  // existing cookie's own stable rotation seed makes every /api/csrf response
-  // that reads the same cookie converge on the same nonce, token, and cookie
-  // value — matching what the middleware would have derived. We only reuse the
-  // cookie when its embedded session matches the authenticated session, so a
-  // stale cross-session cookie (post logout/login) can never seed the new
-  // session's token; that case falls through to a fresh random token.
+  // rotation, and never strand an in-flight token. There are three cases for the
+  // existing cookie:
+  //
+  // 1. Same-session cookie, NOT yet due for rotation → re-sign the EXISTING
+  //    nonce. The cookie value stays byte-identical, so concurrent tabs merely
+  //    refreshing their in-memory token cannot overwrite the cookie with a
+  //    different nonce. A tab that still holds the token for the current nonce
+  //    (e.g. it mounted first and B just refreshed) stays valid — no cookie-soup
+  //    race and, crucially, no 403 for the tab that did not re-fetch. This is
+  //    the gap the earlier "always derive a new nonce" path left open: it
+  //    rotated the nonce on every fetch without a `prev` grace, so a tab holding
+  //    the pre-fetch token was rejected.
+  //
+  // 2. Same-session cookie that IS due for rotation → derive ONE new nonce
+  //    deterministically from the stale cookie's own seed (so concurrent tabs
+  //    crossing the boundary converge on the same nonce/token/cookie), AND set
+  //    the `prev` cookie so in-flight requests still carrying the pre-rotation
+  //    token are accepted for the grace window — mirroring the middleware.
+  //
+  // 3. No cookie, or a cross-session cookie (post logout/login) → fresh random
+  //    token bound to the authenticated session. A stale cross-session cookie
+  //    can never seed the new session's token.
   const existingCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
-  const reuseExisting =
-    existingCookie !== undefined && csrfCookieSessionId(existingCookie) === sessionId;
+  const existingNonce =
+    existingCookie !== undefined ? csrfCookieNonce(existingCookie) : null;
+  const sameSession =
+    existingCookie !== undefined &&
+    existingNonce !== null &&
+    csrfCookieSessionId(existingCookie) === sessionId;
+  const rotationDue = sameSession && shouldRotateCsrfValue(existingCookie!);
 
-  const { token, nonce } = reuseExisting
-    ? await deriveRotatedCsrf(sessionId, csrfRotationSeed(existingCookie))
-    : await generateCsrfToken(sessionId);
+  const rotatedAt = Date.now();
 
-  // Preserve the existing cookie's issuance timestamp when converging so the
-  // whole cookie value is byte-identical across concurrent responses (and does
-  // not keep resetting the rotation clock on every token fetch). A brand-new
-  // cookie is stamped with the current time. V5 Audit §1.P3b: the `!timestamp`
-  // suffix drives periodic rotation in `shouldRotateCsrf`.
-  const issuedAt = reuseExisting ? (csrfCookieIssuedAt(existingCookie) ?? Date.now()) : Date.now();
+  let token: string;
+  let nonce: string;
+  let issuedAt: number;
+  if (sameSession && !rotationDue) {
+    // Case 1: re-sign the nonce already in the browser; keep the cookie stable.
+    ({ token, nonce } = await signExistingCsrf(existingNonce!, sessionId));
+    issuedAt = csrfCookieIssuedAt(existingCookie!) ?? rotatedAt;
+  } else if (rotationDue) {
+    // Case 2: deterministic rotation converged with the middleware's seed.
+    ({ token, nonce } = await deriveRotatedCsrf(
+      sessionId,
+      csrfRotationSeed(existingCookie!),
+    ));
+    issuedAt = rotatedAt;
+  } else {
+    // Case 3: fresh random token for a new / cross-session client.
+    ({ token, nonce } = await generateCsrfToken(sessionId));
+    issuedAt = rotatedAt;
+  }
 
   const response = NextResponse.json({ token });
 
-  // Set HttpOnly cookie with nonce + session for server-side verification
+  // Case 2 only: preserve the OLD nonce as `prev`, stamped at rotation time, so
+  // a tab that still holds the pre-rotation token is accepted for the grace
+  // window (checkCsrf binds this grace to the active session). The current
+  // cookie belongs to `sessionId` here, so the prev session matches the active
+  // session by construction.
+  if (rotationDue) {
+    response.cookies.set(
+      CSRF_PREV_COOKIE_NAME,
+      `${stripCsrfTimestamp(existingCookie!)}!${rotatedAt}`,
+      {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 90, // grace window (60s) + buffer; matches the middleware
+      },
+    );
+  }
+
+  // Set HttpOnly cookie with nonce + session for server-side verification.
+  // V5 Audit §1.P3b: the `!timestamp` suffix drives periodic rotation. For a
+  // reused (non-rotating) cookie the timestamp is preserved so the value is
+  // byte-identical across concurrent responses and the rotation clock is not
+  // reset on every token fetch.
   response.cookies.set(CSRF_COOKIE_NAME, `${nonce}:${sessionId}!${issuedAt}`, {
     httpOnly: true,
     sameSite: 'strict',
