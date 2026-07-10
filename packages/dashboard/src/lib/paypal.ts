@@ -227,16 +227,49 @@ export async function getSubscriptionAmount(
 }
 
 /**
- * Fetch a fresh PayPal access token using client credentials.
- * Returns null if the request fails (missing creds, network error, etc).
+ * W2: is this HTTP status a transient PayPal-side failure worth retrying?
+ * 5xx = PayPal outage, 429 = throttled, 408 = request timeout.
  */
-export async function getPayPalToken(
-  config: PayPalRuntimeConfig | null = null,
-): Promise<string | null> {
-  try {
-    const runtimeConfig = config ?? await getPayPalRuntimeConfig();
-    if (!runtimeConfig.clientId || !runtimeConfig.clientSecret) return null;
+export function isRetriablePayPalStatus(status: number): boolean {
+  return status >= 500 || status === 429 || status === 408;
+}
 
+export type PayPalTokenResult =
+  | { ok: true; token: string }
+  | { ok: false; retriable: boolean; reason: string };
+
+/**
+ * W2: Fetch a fresh PayPal access token, classifying failures so callers can
+ * distinguish transient infrastructure failures (`retriable: true` — network
+ * error, timeout, 5xx/429) from permanent configuration problems
+ * (`retriable: false` — missing or rejected credentials).
+ *
+ * Failure `reason` strings only ever contain HTTP status codes and generic
+ * fetch error messages — never credentials or tokens — so they are safe to
+ * persist in operator-readable tables (alerts, logs).
+ */
+export async function getPayPalTokenResult(
+  config: PayPalRuntimeConfig | null = null,
+  options: { timeoutMs?: number } = {},
+): Promise<PayPalTokenResult> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? 10_000);
+
+  let runtimeConfig: PayPalRuntimeConfig;
+  try {
+    runtimeConfig = config ?? await getPayPalRuntimeConfig();
+  } catch (err) {
+    return {
+      ok: false,
+      retriable: true,
+      reason: `PayPal config load failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!runtimeConfig.clientId || !runtimeConfig.clientSecret) {
+    return { ok: false, retriable: false, reason: 'PayPal client credentials are not configured' };
+  }
+
+  try {
     const res = await fetch(`${runtimeConfig.apiBase}/v1/oauth2/token`, {
       method: 'POST',
       headers: {
@@ -244,12 +277,39 @@ export async function getPayPalToken(
         Authorization: `Basic ${Buffer.from(`${runtimeConfig.clientId}:${runtimeConfig.clientSecret}`).toString('base64')}`,
       },
       body: 'grant_type=client_credentials',
-      signal: AbortSignal.timeout(10_000), // V6 Audit §2.5: prevent hung token fetch
+      signal: AbortSignal.timeout(timeoutMs), // V6 Audit §2.5: prevent hung token fetch
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      // 4xx (401/403/…) means PayPal rejected the credentials themselves —
+      // retrying with the same credentials cannot succeed.
+      return {
+        ok: false,
+        retriable: isRetriablePayPalStatus(res.status),
+        reason: `token endpoint returned ${res.status}`,
+      };
+    }
     const data = await res.json();
-    return data.access_token;
-  } catch {
-    return null;
+    if (typeof data?.access_token !== 'string' || data.access_token.length === 0) {
+      return { ok: false, retriable: true, reason: 'token endpoint returned no access_token' };
+    }
+    return { ok: true, token: data.access_token };
+  } catch (err) {
+    // AbortSignal timeout or network failure — transient by nature.
+    return {
+      ok: false,
+      retriable: true,
+      reason: `token request failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
+}
+
+/**
+ * Fetch a fresh PayPal access token using client credentials.
+ * Returns null if the request fails (missing creds, network error, etc).
+ */
+export async function getPayPalToken(
+  config: PayPalRuntimeConfig | null = null,
+): Promise<string | null> {
+  const result = await getPayPalTokenResult(config);
+  return result.ok ? result.token : null;
 }
