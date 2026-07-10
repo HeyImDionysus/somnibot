@@ -244,17 +244,29 @@ def _normalize_signature(args_raw):
     return tuple(sig)
 
 
+# A dollar-quote delimiter: $$ or a tagged $name$ (name is an identifier).
+_DOLLAR_TAG_RE = re.compile(r"\$(?:[a-zA-Z_]\w*)?\$")
+
+
 def _find_body(sql, header_end):
-    """Return (body, body_start_index) for the first $$...$$ after header_end.
+    """Return (body, body_start_index) for the first dollar-quoted body after
+    header_end.
+
+    Handles both bare `$$` and TAGGED delimiters (`$function$`, `$body$`, ...),
+    and matches the OPENING tag to its identical CLOSING tag. That is what makes
+    a nested block with a *different* tag (e.g. `EXECUTE $q$ ... $q$` inside a
+    `$$ ... $$` body) part of the body rather than a premature terminator, and
+    also prevents an inner `$$` from truncating a `$function$`-delimited body.
 
     Returns (None, None) if the function has no dollar-quoted body (e.g. a SQL
     RETURN one-liner) — nothing to lint in that case.
     """
-    open_idx = sql.find("$$", header_end)
-    if open_idx == -1:
+    open_m = _DOLLAR_TAG_RE.search(sql, header_end)
+    if open_m is None:
         return None, None
-    body_start = open_idx + 2
-    close_idx = sql.find("$$", body_start)
+    tag = open_m.group(0)
+    body_start = open_m.end()
+    close_idx = sql.find(tag, body_start)
     if close_idx == -1:
         return None, None
     return sql[body_start:close_idx], body_start
@@ -282,8 +294,15 @@ def parse_functions(sql, filename):
             is not None
         )
         # SET search_path = '' (truly empty: two adjacent single quotes).
+        # Postgres accepts both `= ''` and `TO ''`, and the parameter name may
+        # be a quoted identifier ("search_path"); match all of these so a valid
+        # empty-search_path pin is never silently missed.
         fn.search_path_empty = (
-            re.search(r"\bSET\s+search_path\s*=\s*''(?!\S)", preamble, re.IGNORECASE)
+            re.search(
+                r"\bSET\s+\"?search_path\"?\s*(?:=|\bTO\b)\s*''(?!\S)",
+                preamble,
+                re.IGNORECASE,
+            )
             is not None
         )
         fn.body = body

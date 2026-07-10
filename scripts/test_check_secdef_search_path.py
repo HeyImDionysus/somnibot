@@ -352,6 +352,69 @@ AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;
             self.assertEqual(violations, [])
 
 
+class TestDollarQuoteAndSearchPathForms(unittest.TestCase):
+    """Regression guards: valid PG syntax variants must not silently slip past.
+
+    A security gate whose whole purpose is catching what the compiler misses is
+    only as good as its coverage of the syntax the compiler accepts. These forms
+    are all valid Postgres, so a real lottery-class bug written this way must be
+    flagged, not silently missed.
+    """
+
+    def _v(self, sql):
+        violations, _, _, tmp = _audit_sql(("20260101000000_x.sql", sql))
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "extension-function"]
+
+    def test_tagged_dollar_quote_body_is_scanned(self):
+        # $function$-delimited body (Supabase editor / pg_dump emit these).
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $function$ BEGIN PERFORM gen_random_bytes(16); END; $function$;"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_nested_differently_tagged_block_does_not_truncate_body(self):
+        # An inner $q$...$q$ dynamic-SQL block must NOT terminate the outer $$
+        # body early; the ext-fn call AFTER it must still be scanned.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $$\nBEGIN\n"
+            "  EXECUTE $q$ SELECT 1 $q$;\n"
+            "  PERFORM gen_random_bytes(16);\n"
+            "END;\n$$;"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_search_path_set_with_TO_is_recognized(self):
+        # `SET search_path TO ''` is equivalent to `= ''` in Postgres.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path TO ''\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(16); END; $$;"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_quoted_search_path_identifier_is_recognized(self):
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            'SECURITY DEFINER SET "search_path" = \'\'\n'
+            "AS $$ BEGIN PERFORM gen_random_bytes(16); END; $$;"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_nonempty_search_path_still_not_flagged_with_TO(self):
+        # `TO public` is non-empty -> out of scope, must stay unflagged.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path TO public\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(16); END; $$;"
+        )
+        self.assertEqual(self._v(sql), [])
+
+
 class TestCommentHandling(unittest.TestCase):
     def test_prose_mentioning_gen_random_bytes_not_flagged(self):
         sql = """\
