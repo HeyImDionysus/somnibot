@@ -131,8 +131,14 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
     {
       // guild_config is keyed by guild_id (no surrogate id); everything else is
       // dashboard-settable config.
+      //
+      // alert_channel_id is EXCLUDED: no dashboard write path sets it. It is
+      // added by a migration and read only by the bot (alert-service.ts routes
+      // observability alerts to it, automod-sync.ts reads it) — no dashboard
+      // route (guild PATCH, music, etc.) writes it, so no admin change ever
+      // produces an undo payload for it. Listing it would only let a tampered
+      // undo repoint the bot's alert channel to an attacker-chosen id.
       data: new Set([
-        "alert_channel_id",
         "anti_raid_account_age_days",
         "anti_raid_action",
         "anti_raid_ban_delete_seconds",
@@ -736,23 +742,27 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "alerts",
     {
-      // Bot- and system-owned fields are EXCLUDED. The interactive dashboard
-      // write (alerts PATCH) only sets acknowledged/acknowledged_at or
-      // resolved/resolved_at (+ updated_at); the license/paypal-webhook routes
-      // that also raise alerts write alert_type/severity/title/message/metadata.
-      // acknowledged_by, auto_resolved and details are never written by ANY
-      // dashboard route (acknowledged_by/auto_resolved are bot/DB-owned, details
-      // belongs to audit_logs), so they are dropped from the settable set.
+      // Settable set is restricted to the ADMIN-ACTION fields only. The only
+      // interactive dashboard write to alerts is the PATCH route, which lets an
+      // admin acknowledge (acknowledged/acknowledged_at) or resolve
+      // (resolved/resolved_at), stamping updated_at each time. Those are the
+      // only columns an admin change ever produces, so they are the only ones
+      // undo may replay.
+      //
+      // alert_type/severity/title/message/metadata are EXCLUDED: they are the
+      // alert's identity/content, written by the SYSTEM routes that raise or
+      // update alerts (license/validate, paypal/webhook handlers + verify), not
+      // by any interactive admin action. Those webhook/validation writes never
+      // flow through the admin-changes undo system, so undo must never rewrite
+      // an alert's type/severity/body. acknowledged_by, auto_resolved and
+      // details are likewise never written by ANY dashboard route
+      // (acknowledged_by/auto_resolved are bot/DB-owned; details belongs to
+      // audit_logs) and stay excluded.
       data: new Set([
         "acknowledged",
         "acknowledged_at",
-        "alert_type",
-        "message",
-        "metadata",
         "resolved",
         "resolved_at",
-        "severity",
-        "title",
         "updated_at",
       ]),
       match: ID_AND_GUILD,

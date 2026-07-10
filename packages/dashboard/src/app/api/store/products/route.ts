@@ -402,14 +402,15 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
-  // Remove fields that shouldn't be updated directly
-  delete updates.guild_id;
-  delete updates.created_at;
-  updates.updated_at = new Date().toISOString();
-
+  // `updates` contains ONLY the writable product columns: schemas.product.update
+  // is a `.strict()` schema, so any other key (paypal_product_id, guild_id,
+  // created_at, plans, …) is rejected by parseBody above before we get here.
+  // That strict schema — not this handler — is the mass-assignment guard: only
+  // the intended columns can ever reach `.update()`. We stamp updated_at
+  // ourselves so the client can never spoof it.
   const { data, error } = await supabase
     .from('products')
-    .update(updates)
+    .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', id)
     .eq('guild_id', guildId)
     .select()

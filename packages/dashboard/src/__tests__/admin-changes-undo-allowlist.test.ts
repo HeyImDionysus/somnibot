@@ -621,6 +621,64 @@ describe('validateUndoPayload', () => {
     }
   });
 
+  // ── Finding: guild_config.alert_channel_id has NO dashboard write path. It
+  // is added by a migration and read only by the bot (alert-service routes
+  // observability alerts to it; automod-sync reads it). No admin change ever
+  // produces an undo payload for it, so undo must not be able to repoint it. ──
+  it('does not let undo set guild_config.alert_channel_id (bot-only alert routing)', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('guild_config');
+    expect(spec?.data.has('alert_channel_id')).toBe(false);
+    // Real dashboard-settable config columns still work.
+    expect(spec?.data.has('welcome_message')).toBe(true);
+    expect(spec?.data.has('economy_enabled')).toBe(true);
+
+    const res = validateUndoPayload({
+      table: 'guild_config',
+      data: { alert_channel_id: 'attacker-channel' },
+      match: { guild_id: 'guild-1' },
+    }, CTX);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain('alert_channel_id');
+  });
+
+  // ── Finding: alerts — the ONLY interactive dashboard write (alerts PATCH)
+  // acknowledges or resolves an alert. alert_type/severity/title/message/
+  // metadata are the alert's identity/content, written by SYSTEM routes
+  // (license/validate, paypal webhook) that never flow through undo. Undo must
+  // only ever replay the admin ack/resolve action. ──────────────
+  it('restricts alerts undo to admin ack/resolve fields only', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('alerts');
+    // Exactly the columns the PATCH route writes.
+    for (const col of [
+      'acknowledged',
+      'acknowledged_at',
+      'resolved',
+      'resolved_at',
+      'updated_at',
+    ]) {
+      expect(spec?.data.has(col), `alerts settable ${col}`).toBe(true);
+      expect(
+        validateUndoPayload({
+          table: 'alerts',
+          data: { [col]: true },
+          match: { id: 'al-1', guild_id: 'guild-1' },
+        }, CTX).ok,
+        `alerts accepts ${col}`,
+      ).toBe(true);
+    }
+    // System/webhook-owned identity + content columns must be rejected.
+    for (const col of ['alert_type', 'severity', 'title', 'message', 'metadata']) {
+      expect(spec?.data.has(col), `alerts must not settable ${col}`).toBe(false);
+      const res = validateUndoPayload({
+        table: 'alerts',
+        data: { [col]: 'x' },
+        match: { id: 'al-1', guild_id: 'guild-1' },
+      }, CTX);
+      expect(res.ok, `alerts accepted ${col}`).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(col);
+    }
+  });
+
   it('keeps legitimately-settable config columns after the audit', () => {
     // Spot-check that narrowing did not strip real config columns.
     expect(UNDO_TABLE_COLUMNS.get('products')?.data.has('price_cents')).toBe(true);
