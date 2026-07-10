@@ -65,6 +65,20 @@ export function getAuthenticatedTestClient(): SupabaseClient {
   return _authenticatedClient;
 }
 
+/**
+ * Direct Postgres connection string for catalog-level assertions
+ * (publication membership, role privileges) that PostgREST cannot
+ * express. Defaults to the Supabase CLI local-dev database — the same
+ * endpoint CI's db-security-audit job queries via psql.
+ */
+export function getTestDbUrl(): string {
+  return (
+    process.env.SUPABASE_DB_URL ??
+    process.env.DATABASE_URL ??
+    'postgresql://postgres:postgres@127.0.0.1:54322/postgres'
+  );
+}
+
 /** Small helper to sleep for ms milliseconds. */
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
