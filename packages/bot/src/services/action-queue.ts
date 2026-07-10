@@ -1591,9 +1591,13 @@ export async function startActionQueueListener(
   //    it dies with the process; without this catch-up, a restart during a
   //    backoff window would strand the row (the startup/subscribe sweeps
   //    intentionally skip rows still inside their backoff window).
-  // 3. checkLanePendingDepthAlerts — per-lane pending-depth alerting
-  //    (runs LAST so it observes post-sweep depth, not the backlog the
-  //    sweep is about to drain).
+  // 3. checkLanePendingDepthAlerts — per-lane pending-depth alerting.
+  //    All three run concurrently (fire-and-forget), so the depth check
+  //    observes the instantaneous pending depth at tick time — deliberately
+  //    NOT sequenced after the sweep: a sweep blocked on a saturated lane
+  //    must never suppress depth alerting, which matters most during
+  //    exactly such a backlog. A burst the sweep drains immediately may
+  //    fire one alert that auto-resolves on the next tick.
   const staleRecoveryTimer = setInterval(() => {
     recoverStaleActions(guild, supabase, scheduler).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
