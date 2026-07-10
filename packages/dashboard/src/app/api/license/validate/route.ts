@@ -35,6 +35,7 @@ interface LookupResult {
   entitlement_id?: string;
   entitlement_status?: string;
   entitlement_expires_at?: string;
+  entitlement_grace_period_ends_at?: string | null;
   config_max_devices?: number;
   config_device_policy?: string;
   config_feature_flags?: string[];
@@ -157,6 +158,25 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // 4.5. Grace-period lifecycle (W2): compute the grace window at validation
+  // time — never trust a stale `grace_period` status. Reconciliation runs
+  // every 6 hours, so a lapsed-but-unreconciled row would otherwise keep
+  // validating (and keep a churned customer's app running) until the next
+  // sweep. The route only REJECTS: the reconciliation job owns the status
+  // transition (audit trail + role revocation), so the row is left in
+  // grace_period for it to find.
+  const inGracePeriod = result.entitlement_status === 'grace_period';
+  const graceEndsAt = result.entitlement_grace_period_ends_at ?? null;
+  if (inGracePeriod && graceEndsAt && new Date(graceEndsAt) < new Date()) {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
+    return NextResponse.json({
+      valid: false,
+      status: 'expired',
+      error: 'Payment grace period has ended',
+      grace_period_ends_at: graceEndsAt,
+    });
+  }
+
   // 5. Check expiry
   if (result.entitlement_expires_at && new Date(result.entitlement_expires_at) < new Date()) {
     await supabase
@@ -224,13 +244,17 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     valid: true,
-    status: 'active',
+    // W2: surface a decaying entitlement instead of masking it as healthy —
+    // the SDK (and the paying customer's app) can warn that payment failed
+    // and access ends at grace_period_ends_at.
+    status: inGracePeriod ? 'grace_period' : 'active',
     entitlement_id: result.entitlement_id,
     features: result.config_feature_flags ?? [],
     tier: result.config_tier ?? null,
     customer_discord_id: result.customer_discord_id,
     customer_name: result.customer_discord_username,
     expires_at: result.entitlement_expires_at,
+    grace_period_ends_at: inGracePeriod ? graceEndsAt : null,
     session_id: sessionId ?? null,
     heartbeat_interval_seconds: result.config_heartbeat_interval_seconds ?? 0,
   });

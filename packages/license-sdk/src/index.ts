@@ -59,6 +59,12 @@ export interface SomniLicenseConfig {
 
 export interface ValidationResponse {
   valid: boolean;
+  /**
+   * 'active' for a healthy license. 'grace_period' means the license is
+   * still valid but the customer's payment failed — access ends at
+   * `grace_period_ends_at` unless payment recovers. Apps should surface
+   * this to the user (e.g. "update your payment method").
+   */
   status: string;
   entitlement_id?: string;
   features?: string[];
@@ -66,6 +72,12 @@ export interface ValidationResponse {
   customer_discord_id?: string;
   customer_name?: string;
   expires_at?: string | null;
+  /**
+   * Set while `status` is 'grace_period' (and on rejections caused by a
+   * lapsed grace window): ISO timestamp at which the payment-failure grace
+   * period ends/ended. Null for healthy licenses.
+   */
+  grace_period_ends_at?: string | null;
   session_id?: string | null;
   heartbeat_interval_seconds?: number;
   error?: string;

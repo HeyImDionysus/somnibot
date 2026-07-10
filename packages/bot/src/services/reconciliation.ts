@@ -64,7 +64,10 @@ export async function runReconciliation(
     // ── 1. Check active entitlements → Discord roles ──
     // V5 audit 5.1/14.1 — JOIN instead of N+1 per-entitlement customer lookup
     // V11 Audit H-2: Cursor-based pagination to avoid silently skipping rows.
-    {
+    // W2: isolated in its own try/catch — a failure sweeping active
+    // entitlements must never prevent the grace-expiry sweep below from
+    // running, or lapsed grace_period rows would sit unreconciled forever.
+    try {
       let offset = 0;
       let hasMore = true;
       while (hasMore) {
@@ -111,24 +114,43 @@ export async function runReconciliation(
           }
         }
       } // end while
-    } // end block
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      findings.errors.push(`Active entitlement sweep failed: ${msg}`);
+    }
 
     // ── 2. Expire grace periods that have ended ──
     // V11 Audit H-2: Cursor-based pagination.
+    // W2: deterministic revocation — status-guarded transition (never
+    // clobbers a concurrent reactivation), audit trail per entitlement,
+    // operator alert resolution, and durable (queued) role revocation when
+    // the inline removal fails.
     const now = new Date().toISOString();
     {
       let offset = 0;
       let hasMore = true;
-      const allGracePeriod: Array<{ id: string; customer_id: string; granted_role_ids: string[] | null }> = [];
+      const allGracePeriod: Array<{
+        id: string;
+        customer_id: string;
+        granted_role_ids: string[] | null;
+        product_id: string | null;
+        license_key_id: string | null;
+        grace_period_ends_at: string | null;
+      }> = [];
 
       while (hasMore) {
-        const { data: gracePage } = await supabase
+        const { data: gracePage, error: graceError } = await supabase
           .from('entitlements')
-          .select('id, customer_id, granted_role_ids')
+          .select('id, customer_id, granted_role_ids, product_id, license_key_id, grace_period_ends_at')
           .eq('guild_id', guild.id)
           .eq('status', 'grace_period')
           .lt('grace_period_ends_at', now)
           .range(offset, offset + PAGE_SIZE - 1);
+
+        if (graceError) {
+          findings.errors.push(`Grace-period query failed: ${graceError.message}`);
+          break;
+        }
 
         const rows = gracePage ?? [];
         for (const r of rows) allGracePeriod.push(r);
@@ -151,33 +173,134 @@ export async function runReconciliation(
         }
 
         for (const ent of allGracePeriod) {
-          // Expire the entitlement
-          await supabase
+          // Expire the entitlement. Guarded on the current status so a
+          // payment that recovered between the page query and this update
+          // (reactivate → 'active') is never clobbered back to expired.
+          const { data: transitioned, error: expireError } = await supabase
             .from('entitlements')
             .update({
               status: 'expired',
               updated_at: now,
             })
-            .eq('id', ent.id);
+            .eq('id', ent.id)
+            .eq('status', 'grace_period')
+            .select('id');
+
+          if (expireError) {
+            findings.errors.push(`Entitlement ${ent.id}: expire failed: ${expireError.message}`);
+            continue;
+          }
+          if (!transitioned || transitioned.length === 0) {
+            // Concurrently reactivated (or already transitioned) — skip.
+            continue;
+          }
 
           findings.grace_periods_expired++;
 
-          // Revoke roles
-          const roleIds = ent.granted_role_ids ?? [];
-          if (!roleIds.length) continue;
-
           const discordId = customerMap.get(ent.customer_id);
+          const roleIds = ent.granted_role_ids ?? [];
 
-          if (discordId) {
-            try {
-              const member = await guild.members.fetch(discordId);
-              for (const roleId of roleIds) {
-                if (member.roles.cache.has(roleId)) {
+          // Audit trail for the automatic revocation.
+          const { error: auditError } = await supabase.from('audit_logs').insert({
+            guild_id: guild.id,
+            actor_type: 'system',
+            actor_id: 'reconciliation',
+            action: 'entitlement.grace_expired',
+            target_type: 'entitlement',
+            target_id: ent.id,
+            details: {
+              reason: 'grace_period_expired',
+              customer_id: ent.customer_id,
+              product_id: ent.product_id,
+              discord_id: discordId ?? null,
+              role_ids: roleIds,
+              grace_period_ends_at: ent.grace_period_ends_at,
+            },
+          });
+          if (auditError) {
+            findings.errors.push(`Entitlement ${ent.id}: audit log failed: ${auditError.message}`);
+          }
+
+          // Deactivate the entitlement's live license sessions — parity with
+          // EntitlementService.revoke. Validation/heartbeat already reject a
+          // revoked entitlement, but the session rows must not claim to be
+          // active for up to a day until the heartbeat-timeout reaper runs.
+          // NOTE: license_sessions has no guild_id column — the key id (from
+          // a guild-scoped entitlement) is the scope.
+          if (ent.license_key_id) {
+            const { error: sessionError } = await supabase
+              .from('license_sessions')
+              .update({
+                active: false,
+                deactivated_at: now,
+                deactivation_reason: 'entitlement_revoked',
+              })
+              .eq('license_key_id', ent.license_key_id)
+              .eq('active', true);
+            if (sessionError) {
+              findings.errors.push(
+                `Entitlement ${ent.id}: session deactivation failed: ${sessionError.message}`,
+              );
+            }
+          }
+
+          // Terminal state reached — resolve the operator "in grace" alert.
+          const { error: alertError } = await supabase
+            .from('alerts')
+            .update({ resolved: true, resolved_at: now, updated_at: now })
+            .eq('guild_id', guild.id)
+            .eq('alert_type', 'entitlement_grace_period')
+            .eq('metadata->>entitlement_id', ent.id)
+            .eq('resolved', false);
+          if (alertError) {
+            findings.errors.push(`Entitlement ${ent.id}: alert resolve failed: ${alertError.message}`);
+          }
+
+          // Revoke roles inline; anything that fails is queued as a durable
+          // `revoke_roles` bot action instead of being dropped. The row is
+          // already 'expired' so this sweep will never see it again — a
+          // silently dropped removal here would leave the paid role granted
+          // forever.
+          if (!roleIds.length) continue;
+          if (!discordId) continue;
+
+          const failedRoleIds: string[] = [];
+          try {
+            const member = await guild.members.fetch(discordId);
+            for (const roleId of roleIds) {
+              if (member.roles.cache.has(roleId)) {
+                try {
                   await member.roles.remove(roleId, 'Reconciliation: grace period expired');
+                } catch {
+                  failedRoleIds.push(roleId);
                 }
               }
-            } catch {
-              // Member not in guild
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (msg.includes('Unknown Member') || msg.includes('not found')) {
+              // Member left the guild — their roles went with the membership.
+            } else {
+              failedRoleIds.push(...roleIds);
+            }
+          }
+
+          if (failedRoleIds.length > 0) {
+            const { error: queueError } = await supabase.from('bot_action_queue').insert({
+              guild_id: guild.id,
+              action: 'revoke_roles',
+              payload: {
+                discord_id: discordId,
+                role_ids: failedRoleIds,
+                reason: 'grace_period_expired',
+                entitlement_id: ent.id,
+              },
+              status: 'pending',
+            });
+            if (queueError) {
+              findings.errors.push(
+                `Entitlement ${ent.id}: failed to queue role revocation: ${queueError.message}`,
+              );
             }
           }
         }
