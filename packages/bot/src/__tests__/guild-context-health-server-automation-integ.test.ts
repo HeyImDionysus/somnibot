@@ -223,61 +223,64 @@ describe('HealthServer', () => {
     throw new Error(`Server at ${url} not reachable after ${maxAttempts} attempts`);
   }
 
+  /**
+   * Start the health server on an OS-assigned EPHEMERAL port (HEALTH_PORT=0) and
+   * return its base URL once listening. A fixed/random port range collides into
+   * EADDRINUSE under CI's full parallel run (several files start real health
+   * servers), and the failing bind only logs — it never rejects — so requests
+   * would hang. Reading the real port back from server.address() removes the
+   * contention. afterEach stops the server and clears HEALTH_PORT.
+   */
+  async function startOnEphemeralPort(c: any): Promise<string> {
+    const { startHealthServer } = await import('../services/health-server.js');
+    process.env.HEALTH_PORT = '0';
+    const server = startHealthServer(c);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      if (server.listening) resolve();
+      else server.once('listening', () => resolve());
+    });
+    const addr = server.address();
+    const port = addr && typeof addr === 'object' ? addr.port : 0;
+    return `http://127.0.0.1:${port}`;
+  }
+
+  afterEach(async () => {
+    const { stopHealthServer } = await import('../services/health-server.js');
+    stopHealthServer();
+    delete process.env.HEALTH_PORT;
+  });
+
   it('startHealthServer and stopHealthServer', async () => {
-    const { startHealthServer, stopHealthServer } = await import('../services/health-server.js');
-    
-    // Use a random port to avoid conflicts
-    const port = 30000 + Math.floor(Math.random() * 5000);
-    process.env.HEALTH_PORT = String(port);
-    
-    startHealthServer(client as any);
-    
+    const base = await startOnEphemeralPort(client as any);
+
     // Make a health check request (retries until server is ready)
-    const result = await httpGet(`http://127.0.0.1:${port}/health`);
+    const result = await httpGet(`${base}/health`);
     const body = JSON.parse(result.body);
-    
+
     expect(result.status).toBe(200);
     expect(body.status).toBe('ok');
     expect(body.checks.discord).toBe(true);
     expect(body.checks.valkey).toBe(true);
-    
-    stopHealthServer();
-    delete process.env.HEALTH_PORT;
   });
 
   it('health returns 503 when discord disconnected', async () => {
-    const { startHealthServer, stopHealthServer } = await import('../services/health-server.js');
-    
-    const port = 30000 + Math.floor(Math.random() * 5000);
-    process.env.HEALTH_PORT = String(port);
-    
     client.ws.status = 5; // Not connected
-    startHealthServer(client as any);
-    
-    const result = await httpGet(`http://127.0.0.1:${port}/health`);
+    const base = await startOnEphemeralPort(client as any);
+
+    const result = await httpGet(`${base}/health`);
     const body = JSON.parse(result.body);
-    
+
     expect(result.status).toBe(503);
     expect(body.status).toBe('unhealthy');
-    
-    stopHealthServer();
-    delete process.env.HEALTH_PORT;
   });
 
   it('health returns 404 for non-health paths', async () => {
-    const { startHealthServer, stopHealthServer } = await import('../services/health-server.js');
-    
-    const port = 30000 + Math.floor(Math.random() * 5000);
-    process.env.HEALTH_PORT = String(port);
-    
-    startHealthServer(client as any);
-    
-    const result = await httpGet(`http://127.0.0.1:${port}/other`);
-    
+    const base = await startOnEphemeralPort(client as any);
+
+    const result = await httpGet(`${base}/other`);
+
     expect(result.status).toBe(404);
-    
-    stopHealthServer();
-    delete process.env.HEALTH_PORT;
   });
 
   it('stopHealthServer when not started', async () => {

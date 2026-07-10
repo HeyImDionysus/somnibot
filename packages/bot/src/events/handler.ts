@@ -123,6 +123,19 @@ export function registerEvents(client: SomniClient): void {
   // ── Safety nets ──
   registerProcessSafetyNets();
 
+  // ── Setup-verification gate ──
+  // While the bot is in setup-verification mode it is logged in ONLY so the
+  // wizard can confirm it is online; the GuildRouter is an empty placeholder
+  // and guild_config rows do not exist yet. Normal guild event pipelines
+  // (member joins, messages, reactions, voice, drift sync) must not run — they
+  // would only emit the pre-setup error noise the gate is meant to suppress.
+  // Interaction handling is gated inside handleInteraction itself (it must let
+  // the setup wizard's own interactions through while short-circuiting every
+  // other command/component — see isSetupInteraction in interaction-handler.ts).
+  // The flag is cleared by the boot sequence right before the full boot, so
+  // these same handlers light up automatically on transition (no re-register).
+  const gatedForVerification = (): boolean => client.setupVerificationMode === true;
+
   // ── Ready ──
   client.once(Events.ClientReady, async (readyClient) => {
     log.info('Logged in', { tag: readyClient.user.tag, gateway: `${readyClient.ws.ping}ms`, guilds: readyClient.guilds.cache.size });
@@ -130,6 +143,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Guild Member Events ──
   client.on('guildMemberAdd', async (member) => {
+    if (gatedForVerification()) return;
     try {
       const blocked = await processAntiRaid(member.guild, member, client.supabase);
       if (!blocked) await handleMemberJoin(client, member);
@@ -139,45 +153,53 @@ export function registerEvents(client: SomniClient): void {
   });
 
   client.on('guildMemberRemove', async (member) => {
+    if (gatedForVerification()) return;
     try { await handleMemberLeave(client, member); }
     catch (err) { log.error('guildMemberRemove handler error:', { error: String(err) }); }
   });
 
   client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    if (gatedForVerification()) return;
     try { await handleMemberUpdate(client, oldMember, newMember); }
     catch (err) { log.error('guildMemberUpdate handler error:', { error: String(err) }); }
   });
 
   // ── Role Events (Drift Detection) ──
   client.on('roleCreate', async (role) => {
+    if (gatedForVerification()) return;
     try { await handleRoleCreate(client, role); }
     catch (err) { log.error('roleCreate handler error:', { error: String(err) }); }
   });
 
   client.on('roleUpdate', async (oldRole, newRole) => {
+    if (gatedForVerification()) return;
     try { await handleRoleUpdate(client, oldRole, newRole); }
     catch (err) { log.error('roleUpdate handler error:', { error: String(err) }); }
   });
 
   client.on('roleDelete', async (role) => {
+    if (gatedForVerification()) return;
     try { await handleRoleDelete(client, role); }
     catch (err) { log.error('roleDelete handler error:', { error: String(err) }); }
   });
 
   // ── Channel Events (Drift Detection) ──
   client.on('channelCreate', async (channel) => {
+    if (gatedForVerification()) return;
     if (!('guild' in channel)) return;
     try { await handleChannelCreate(client, channel); }
     catch (err) { log.error('channelCreate handler error:', { error: String(err) }); }
   });
 
   client.on('channelUpdate', async (oldChannel, newChannel) => {
+    if (gatedForVerification()) return;
     if (!('guild' in newChannel)) return;
     try { await handleChannelUpdate(client, oldChannel as typeof newChannel, newChannel); }
     catch (err) { log.error('channelUpdate handler error:', { error: String(err) }); }
   });
 
   client.on('channelDelete', async (channel) => {
+    if (gatedForVerification()) return;
     if (!('guild' in channel)) return;
     try { await handleChannelDelete(client, channel); }
     catch (err) { log.error('channelDelete handler error:', { error: String(err) }); }
@@ -185,6 +207,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Message Events ──
   client.on('messageCreate', async (message) => {
+    if (gatedForVerification()) return;
     if (message.author.bot) return;
     if (!message.guild) return;
 
@@ -252,6 +275,7 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Reaction Events ──
   client.on('messageReactionAdd', async (reaction, user) => {
+    if (gatedForVerification()) return;
     if (user.bot) return;
     const message = reaction.message;
     if (!message.guild) return;
@@ -305,6 +329,7 @@ export function registerEvents(client: SomniClient): void {
   });
 
   client.on('messageReactionRemove', async (reaction, user) => {
+    if (gatedForVerification()) return;
     if (user.bot) return;
     const message = reaction.message;
     if (!message.guild) return;
@@ -320,17 +345,20 @@ export function registerEvents(client: SomniClient): void {
 
   // ── Message Edit/Delete Logging ──
   client.on('messageUpdate', async (oldMessage, newMessage) => {
+    if (gatedForVerification()) return;
     try { await logMessageEdit(client, oldMessage, newMessage); }
     catch (err) { log.error('messageUpdate log error:', { error: String(err) }); }
   });
 
   client.on('messageDelete', async (message) => {
+    if (gatedForVerification()) return;
     try { await logMessageDelete(client, message); }
     catch (err) { log.error('messageDelete log error:', { error: String(err) }); }
   });
 
   // ── Voice State Events ──
   client.on('voiceStateUpdate', async (oldState, newState) => {
+    if (gatedForVerification()) return;
     const member = newState.member ?? oldState.member;
     if (!member || member.user.bot) return;
 
