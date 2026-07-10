@@ -103,6 +103,26 @@ export async function POST(
     .eq('order_id', orderId)
     .in('status', ['active', 'pending', 'grace_period']);
 
+  // W2 codex round 2: the revocation above expires 'grace_period' rows, a
+  // terminal transition that strands any open 'entitlement_grace_period'
+  // operator alert suspend() raised — EntitlementService.revoke() and the
+  // reconciliation sweep resolve it on their terminal writes, but this manual
+  // admin refund bypassed both. Resolve it with the same entitlement-scoped
+  // filter (a no-op when none is open). Non-fatal: the revocation committed.
+  const graceAlertEntitlementIds = [...new Set((activeEntitlements ?? []).map((e) => e.id))];
+  if (graceAlertEntitlementIds.length > 0) {
+    const { error: graceAlertError } = await supabase
+      .from('alerts')
+      .update({ resolved: true, resolved_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('guild_id', guildId)
+      .eq('alert_type', 'entitlement_grace_period')
+      .in('metadata->>entitlement_id', graceAlertEntitlementIds)
+      .eq('resolved', false);
+    if (graceAlertError) {
+      console.error('[Commerce] Failed to resolve grace-period alerts on refund:', graceAlertError.message);
+    }
+  }
+
   // Revoke license keys
   await supabase
     .from('license_keys')

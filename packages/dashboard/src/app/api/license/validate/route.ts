@@ -179,10 +179,31 @@ export async function POST(req: NextRequest) {
 
   // 5. Check expiry
   if (result.entitlement_expires_at && new Date(result.entitlement_expires_at) < new Date()) {
+    const expiredAt = new Date().toISOString();
     await supabase
       .from('entitlements')
-      .update({ status: 'expired', updated_at: new Date().toISOString() })
+      .update({ status: 'expired', updated_at: expiredAt })
       .eq('id', result.entitlement_id);
+
+    // W2 codex round 2: an entitlement can natural-expire (expires_at past)
+    // while still in a payment-failure grace window whose deadline has NOT yet
+    // lapsed (so the grace check above did not fire) — this terminal 'expired'
+    // write strands the open 'entitlement_grace_period' operator alert that
+    // revoke()/reconciliation would otherwise resolve. Resolve it with the same
+    // entitlement-scoped filter (a no-op when none is open). Non-fatal: the
+    // expiry write above has already committed.
+    if (result.entitlement_status === 'grace_period' && result.product_guild_id) {
+      const { error: graceAlertError } = await supabase
+        .from('alerts')
+        .update({ resolved: true, resolved_at: expiredAt, updated_at: expiredAt })
+        .eq('guild_id', result.product_guild_id)
+        .eq('alert_type', 'entitlement_grace_period')
+        .eq('metadata->>entitlement_id', result.entitlement_id)
+        .eq('resolved', false);
+      if (graceAlertError) {
+        console.error('[License] Failed to resolve grace-period alert on validation expiry:', graceAlertError.message);
+      }
+    }
 
     await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
     return NextResponse.json({ valid: false, status: 'expired', error: 'License has expired' });

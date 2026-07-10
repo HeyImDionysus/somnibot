@@ -75,3 +75,65 @@ export function truncate(str: string, maxLength: number): string {
   if (str.length <= maxLength) return str;
   return str.slice(0, maxLength - 1) + '…';
 }
+
+/**
+ * Default payment-failure grace window (days). Mirrors the
+ * `guild_config.grace_period_days` column default in the initial schema —
+ * used whenever a guild has no config row (or a null value).
+ */
+export const DEFAULT_GRACE_PERIOD_DAYS = 3;
+
+/**
+ * Minimal structural view of a Supabase client — just enough for the
+ * guild_config grace-window lookup. @somnibot/shared deliberately has no
+ * @supabase/supabase-js dependency; both the bot's and the dashboard's
+ * clients satisfy this shape.
+ *
+ * NOTE: the public parameter is intentionally typed as `{ from(...): unknown }`
+ * rather than a fully-inlined `select → eq → maybeSingle` builder. Asking tsc
+ * to prove the full generic `SupabaseClient` is assignable to a deep builder
+ * literal makes it recurse through PostgrestFilterBuilder's hundreds of
+ * same-named methods until it trips TS2589 ("excessively deep") under the
+ * dashboard's strict config. Widening `from`'s return to `unknown` at the
+ * boundary and re-narrowing it internally keeps the caller-side assignability
+ * check shallow while preserving the exact runtime query.
+ */
+export interface GraceConfigClient {
+  from(table: string): unknown;
+}
+
+interface GraceConfigQuery {
+  select(columns: string): {
+    eq(
+      column: string,
+      value: string,
+    ): {
+      maybeSingle(): PromiseLike<{
+        data: { grace_period_days?: number | null } | null;
+      }>;
+    };
+  };
+}
+
+/**
+ * Read a guild's configured payment-failure grace window
+ * (`guild_config.grace_period_days`), falling back to
+ * DEFAULT_GRACE_PERIOD_DAYS when unset.
+ *
+ * Single source of truth for BOTH suspension paths — the bot's webhook-driven
+ * `subscription_suspended` fulfillment and the dashboard's manual
+ * grace_period transition — so an operator's configured window is honored no
+ * matter which surface starts the grace period. The lookup is fail-open to
+ * the default: a read error must never block a suspension.
+ */
+export async function getGracePeriodDays(
+  supabase: GraceConfigClient,
+  guildId: string,
+): Promise<number> {
+  const query = supabase.from('guild_config') as GraceConfigQuery;
+  const { data } = await query
+    .select('grace_period_days')
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  return data?.grace_period_days ?? DEFAULT_GRACE_PERIOD_DAYS;
+}

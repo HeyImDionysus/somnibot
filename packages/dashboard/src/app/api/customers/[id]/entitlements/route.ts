@@ -11,6 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { getGracePeriodDays } from '@somnibot/shared';
 
 
 export async function GET(
@@ -178,11 +179,16 @@ export async function PUT(req: NextRequest) {
   // W2: the entitlements_grace_period_has_deadline CHECK requires every
   // grace_period row to carry a deadline — a deadline-less row is invisible
   // to the reconciliation sweep (it would decay forever). Manual/admin
-  // transitions into grace get the same default window as
-  // EntitlementService.suspend (3 days).
+  // transitions into grace honor the guild's configured window
+  // (guild_config.grace_period_days) via the same shared helper the bot's
+  // suspension flow (commerce-fulfillment → EntitlementService.suspend) uses,
+  // so an operator's configured deadline is applied no matter which surface
+  // starts the grace period — with the same DEFAULT_GRACE_PERIOD_DAYS fallback
+  // when unset.
   if (status === 'grace_period') {
+    const graceDays = await getGracePeriodDays(supabase, guildId);
     const graceEnds = new Date();
-    graceEnds.setDate(graceEnds.getDate() + 3);
+    graceEnds.setDate(graceEnds.getDate() + graceDays);
     updateData.grace_period_ends_at = graceEnds.toISOString();
   } else if (status === 'active') {
     // Mirrors EntitlementService.reactivate: returning to active clears the

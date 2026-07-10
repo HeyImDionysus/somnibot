@@ -37,6 +37,7 @@ import {
 const ENTITLEMENT_ID = '00000000-0000-4000-a000-000000000001';
 const NOW = new Date('2026-07-09T12:00:00.000Z');
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 function putReq(status: string) {
   return buildRequest('/api/customers/cust-1/entitlements', {
@@ -59,7 +60,7 @@ function setup() {
   });
   const alertsQuery = registerTable(mock, 'alerts');
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-  return { entitlementsQuery, alertsQuery };
+  return { mock, entitlementsQuery, alertsQuery };
 }
 
 beforeEach(() => {
@@ -91,6 +92,39 @@ describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () =>
     // Guild-scoped, targeted at the requested entitlement.
     expect(entitlementsQuery.eq).toHaveBeenCalledWith('id', ENTITLEMENT_ID);
     expect(entitlementsQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
+  });
+
+  it("honors the guild's configured grace window (guild_config.grace_period_days) instead of hardcoding 3 days", async () => {
+    const { mock, entitlementsQuery, alertsQuery } = setup();
+    // Codex round-2 finding #1: the manual admin transition must read the
+    // guild's configured window via the shared getGracePeriodDays helper — the
+    // same source of truth EntitlementService.suspend uses — not a hardcoded 3.
+    const guildConfigQuery = registerTable(mock, 'guild_config');
+    guildConfigQuery.maybeSingle.mockResolvedValue({
+      data: { grace_period_days: 7 },
+    });
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
+
+    // Deadline reflects the 7-day configured window, not the 3-day default —
+    // a test that only asserted THREE_DAYS_MS would pass even against the
+    // hardcoded bug this finding fixes.
+    const expectedDeadline = new Date(NOW.getTime() + 7 * ONE_DAY_MS).toISOString();
+    expect(entitlementsQuery.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'grace_period',
+        grace_period_ends_at: expectedDeadline,
+      }),
+    );
+    // The lookup is scoped to the authenticated guild.
+    expect(guildConfigQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
+    // The raised alert carries the same configured deadline.
+    expect(alertsQuery.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({ grace_period_ends_at: expectedDeadline }),
+      }),
+    );
   });
 
   it('clears the grace deadline on manual reactivation (parity with EntitlementService.reactivate)', async () => {
