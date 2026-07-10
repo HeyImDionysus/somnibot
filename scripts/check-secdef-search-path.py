@@ -22,8 +22,9 @@ GATING check (default; exit 1 on any hit) — the exact outage bug class:
     inside SECURITY DEFINER + search_path='' function bodies.
     `gen_random_uuid()` is deliberately NOT flagged: it is a pg_catalog builtin
     (Postgres 13+) that resolves fine under an empty search_path. This check is
-    precise — an unqualified `gen_random_bytes(` either is or is not present;
-    there are no false positives.
+    precise — an unqualified `gen_random_bytes(` in executable code either is or
+    is not present; string literals and comments are blanked first so mentions
+    in data or prose do not produce false positives.
 
 ADVISORY check (opt-in via --include-tables; only gates with --tables-fatal):
 
@@ -34,11 +35,24 @@ ADVISORY check (opt-in via --include-tables; only gates with --tables-fatal):
     from a real table, so it is advisory-only by default and kept out of the
     pass/fail gate to avoid false positives blocking CI.
 
-Semantics: EFFECTIVE schema. A function is defined by its LATEST
-`CREATE OR REPLACE FUNCTION` across all migrations in timestamp order. Only the
-latest definition of each (name + argument-type signature) is evaluated, so a
-historical buggy definition that a later migration fixes produces no noise on a
-clean main — but reverting the fix immediately re-flags the bug.
+Semantics: EFFECTIVE schema. A function's state is built by replaying all
+migrations in timestamp order:
+  * CREATE [OR REPLACE] FUNCTION      — the latest definition wins;
+  * DROP FUNCTION                     — removes it from the audited set;
+  * ALTER FUNCTION ... SET/SECURITY   — updates its tracked options.
+Identity is the full Postgres key (schema, name, argument-type signature); an
+unqualified name resolves to `public`. Only the final effective definition of
+each function is evaluated, so a historical buggy definition that a later
+migration fixes, drops, or hardens produces no noise on a clean main — but
+reverting that fix immediately re-flags the bug.
+
+Non-code regions are ignored before matching: -- line comments, /* */ block
+comments, and single-quoted string literals are blanked (positions preserved),
+so a name that appears only in data (`'Buy something from the shop'`) or a
+diagnostic (`RAISE NOTICE 'gen_random_bytes(16)'`) is never mistaken for a live
+reference. Both dollar-quoted (`$$`/`$tag$`) and single-quoted (`AS '...'`)
+function bodies are parsed, and option clauses are read whether they precede or
+trail the body.
 
 Exit code 0 = clean, 1 = gating violations found, 2 = usage/parse error.
 """
@@ -61,7 +75,7 @@ DEFAULT_MIGRATIONS_DIR = Path("packages/supabase/migrations")
 # positive.
 EXTENSION_FUNCTIONS = frozenset(
     {
-        # pgcrypto
+        # pgcrypto — digest / hmac / crypt / gen_salt / encrypt family
         "gen_random_bytes",
         "gen_salt",
         "crypt",
@@ -71,17 +85,31 @@ EXTENSION_FUNCTIONS = frozenset(
         "decrypt",
         "encrypt_iv",
         "decrypt_iv",
+        # pgcrypto — PGP symmetric / public-key
         "pgp_sym_encrypt",
+        "pgp_sym_encrypt_bytea",
         "pgp_sym_decrypt",
+        "pgp_sym_decrypt_bytea",
         "pgp_pub_encrypt",
+        "pgp_pub_encrypt_bytea",
         "pgp_pub_decrypt",
-        # uuid-ossp
+        "pgp_pub_decrypt_bytea",
+        "pgp_key_id",
+        # pgcrypto — ASCII armor helpers
+        "armor",
+        "dearmor",
+        # uuid-ossp — generators
         "uuid_generate_v1",
         "uuid_generate_v1mc",
         "uuid_generate_v3",
         "uuid_generate_v4",
         "uuid_generate_v5",
         "uuid_nil",
+        # uuid-ossp — well-known namespace constants
+        "uuid_ns_dns",
+        "uuid_ns_url",
+        "uuid_ns_oid",
+        "uuid_ns_x500",
     }
 )
 
@@ -110,10 +138,22 @@ _TABLE_REF_STOPWORDS = frozenset(
 )
 
 
+# Absent CREATE FUNCTION schema resolves to the first entry of the creating
+# role's search_path; in this repo that is always `public`. Normalizing an
+# unqualified name to `public` lets a `DROP FUNCTION public.f(...)` /
+# `ALTER FUNCTION public.f(...)` match an unqualified `CREATE FUNCTION f(...)`.
+DEFAULT_SCHEMA = "public"
+
+
+def _normalize_schema(schema):
+    return (schema or DEFAULT_SCHEMA).lower()
+
+
 class Function:
     """One CREATE [OR REPLACE] FUNCTION occurrence in a migration file."""
 
     __slots__ = (
+        "schema",
         "name",
         "signature",
         "file",
@@ -124,7 +164,8 @@ class Function:
         "body_line_offset",
     )
 
-    def __init__(self, name, signature, file, line):
+    def __init__(self, schema, name, signature, file, line):
+        self.schema = _normalize_schema(schema)
         self.name = name
         self.signature = signature
         self.file = file
@@ -136,8 +177,13 @@ class Function:
 
     @property
     def key(self):
-        """Effective-schema identity: name + normalized arg-type signature."""
-        return (self.name.lower(), self.signature)
+        """Effective identity: (schema, name, normalized arg-type signature).
+
+        Postgres function identity is schema-qualified, so `public.f(int)` and
+        `private.f(int)` are distinct definitions and must not collapse onto one
+        effective entry.
+        """
+        return (self.schema, self.name.lower(), self.signature)
 
 
 class Violation:
@@ -191,12 +237,86 @@ def _strip_line_comments(sql):
     return "\n".join(out)
 
 
+def _blank_strings_and_block_comments(text):
+    """Replace single-quoted string literals and /* */ block comments with
+    spaces, preserving length and newlines so line/column positions are exact.
+
+    Names mentioned inside data (`'Buy something from the shop'`) or diagnostics
+    (`RAISE NOTICE 'gen_random_bytes(16)'`) or block comments
+    (`/* gen_random_bytes(16) */`) are NOT executable references and must not be
+    matched by the table / extension-function scanners. Blanking them before
+    scanning eliminates that entire false-positive class.
+
+    Postgres string-literal rules honored:
+      * a doubled quote ('') inside a literal is an escaped quote, not a
+        terminator;
+      * dollar-quoted regions are NOT treated as strings here — this runs on a
+        function body that has already been extracted between its dollar tags,
+        and any *inner* dollar-quoted block is left intact (dollar-quoted text
+        rarely holds a false ref, and treating it as a string could hide a real
+        `EXECUTE $q$ ... gen_random_bytes( ... $q$` call).
+    """
+    out = list(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if j + 1 < n and text[j + 1] == "'":
+                        j += 2  # escaped '' — stay inside the literal
+                        continue
+                    break
+                j += 1
+            # Blank the literal contents (keep the quote chars themselves so a
+            # bare '' empty-search_path marker elsewhere is unaffected).
+            for k in range(i + 1, min(j, n)):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = j + 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            j = i + 2
+            while j < n and not (text[j] == "*" and j + 1 < n and text[j + 1] == "/"):
+                j += 1
+            end = min(j + 2, n)
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
 # CREATE [OR REPLACE] FUNCTION [schema.]name ( args... ) up to the arg-list ).
 _FUNC_HEADER_RE = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
     r"(?:(?P<schema>[a-zA-Z_]\w*)\s*\.\s*)?"
     r"(?P<name>[a-zA-Z_]\w*)\s*"
     r"\((?P<args>[^)]*(?:\([^)]*\)[^)]*)*)\)",
+    re.IGNORECASE,
+)
+
+# DROP FUNCTION [IF EXISTS] [schema.]name ( args... )  — args optional.
+_DROP_FUNC_RE = re.compile(
+    r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?"
+    r"(?:(?P<schema>[a-zA-Z_]\w*)\s*\.\s*)?"
+    r"(?P<name>[a-zA-Z_]\w*)\s*"
+    r"(?:\((?P<args>[^)]*(?:\([^)]*\)[^)]*)*)\))?",
+    re.IGNORECASE,
+)
+
+# ALTER FUNCTION [schema.]name ( args... ) <options...> ;  — capture the option
+# tail so `SET search_path = ''` / `SECURITY DEFINER` added later take effect.
+_ALTER_FUNC_RE = re.compile(
+    r"ALTER\s+FUNCTION\s+"
+    r"(?:(?P<schema>[a-zA-Z_]\w*)\s*\.\s*)?"
+    r"(?P<name>[a-zA-Z_]\w*)\s*"
+    r"(?:\((?P<args>[^)]*(?:\([^)]*\)[^)]*)*)\))?"
+    r"(?P<opts>[^;]*)",
     re.IGNORECASE,
 )
 
@@ -246,30 +366,66 @@ def _normalize_signature(args_raw):
 
 # A dollar-quote delimiter: $$ or a tagged $name$ (name is an identifier).
 _DOLLAR_TAG_RE = re.compile(r"\$(?:[a-zA-Z_]\w*)?\$")
+# The function body is introduced by `AS`, then either a dollar tag or a
+# single-quoted literal. Anchoring on `AS` is essential: an option clause such
+# as `SET search_path = ''` contains single quotes that are NOT a body start,
+# so a bare "first quote" search would truncate the preamble mid-option.
+_AS_BODY_START_RE = re.compile(
+    r"\bAS\s+(?P<delim>\$(?:[a-zA-Z_]\w*)?\$|')", re.IGNORECASE
+)
 
 
 def _find_body(sql, header_end):
-    """Return (body, body_start_index) for the first dollar-quoted body after
-    header_end.
+    """Return (body, body_start_index, body_end_index) for the function body
+    after header_end. body_end_index points just past the closing delimiter.
 
-    Handles both bare `$$` and TAGGED delimiters (`$function$`, `$body$`, ...),
-    and matches the OPENING tag to its identical CLOSING tag. That is what makes
-    a nested block with a *different* tag (e.g. `EXECUTE $q$ ... $q$` inside a
-    `$$ ... $$` body) part of the body rather than a premature terminator, and
-    also prevents an inner `$$` from truncating a `$function$`-delimited body.
+    The body is the delimiter that follows the `AS` keyword. Two valid Postgres
+    body forms are handled:
 
-    Returns (None, None) if the function has no dollar-quoted body (e.g. a SQL
-    RETURN one-liner) — nothing to lint in that case.
+      * Dollar-quoted: bare `$$` or TAGGED (`$function$`, `$body$`, ...). The
+        OPENING tag is matched to its identical CLOSING tag, so a nested block
+        with a *different* tag (`EXECUTE $q$ ... $q$` inside `$$ ... $$`) is
+        part of the body, and an inner `$$` never truncates a `$function$` body.
+
+      * Single-quoted string literal: `AS 'BEGIN ... END;'`. A doubled quote
+        ('') inside is an escaped quote, not the terminator. Some migrations use
+        this form; dropping it would let a real unqualified extension call slip
+        through unscanned.
+
+    Returns (None, None, None) if there is no recognizable body (e.g. a SQL
+    `RETURN` one-liner, or `AS 'module', 'symbol'` C-language bindings) —
+    nothing to lint in that case.
     """
-    open_m = _DOLLAR_TAG_RE.search(sql, header_end)
+    open_m = _AS_BODY_START_RE.search(sql, header_end)
     if open_m is None:
-        return None, None
-    tag = open_m.group(0)
+        return None, None, None
+    delim = open_m.group("delim")
     body_start = open_m.end()
-    close_idx = sql.find(tag, body_start)
+    if delim == "'":
+        # Single-quoted body: find the terminating quote, honoring '' escapes.
+        j = body_start
+        n = len(sql)
+        while j < n:
+            if sql[j] == "'":
+                if j + 1 < n and sql[j + 1] == "'":
+                    j += 2
+                    continue
+                return sql[body_start:j], body_start, j + 1
+            j += 1
+        return None, None, None
+    close_idx = sql.find(delim, body_start)
     if close_idx == -1:
-        return None, None
-    return sql[body_start:close_idx], body_start
+        return None, None, None
+    return sql[body_start:close_idx], body_start, close_idx + len(delim)
+
+
+_SECDEF_RE = re.compile(r"\bSECURITY\s+DEFINER\b", re.IGNORECASE)
+# SET search_path = '' (truly empty: two adjacent single quotes). Postgres
+# accepts both `= ''` and `TO ''`, and the parameter name may be a quoted
+# identifier ("search_path"); match all of these.
+_SEARCH_PATH_EMPTY_RE = re.compile(
+    r"\bSET\s+\"?search_path\"?\s*(?:=|\bTO\b)\s*''(?!\S)", re.IGNORECASE
+)
 
 
 def parse_functions(sql, filename):
@@ -277,35 +433,34 @@ def parse_functions(sql, filename):
     clean = _strip_line_comments(sql)
     functions = []
     for m in _FUNC_HEADER_RE.finditer(clean):
+        schema = m.group("schema")
         name = m.group("name")
         signature = _normalize_signature(m.group("args"))
         line = clean.count("\n", 0, m.start()) + 1
-        fn = Function(name, signature, filename, line)
+        fn = Function(schema, name, signature, filename, line)
 
         header_end = m.end()
-        body, body_start = _find_body(clean, header_end)
+        body, body_start, body_end = _find_body(clean, header_end)
         if body is None:
             continue
 
-        # Attribute clauses live BETWEEN the arg list and the opening $$.
+        # Option clauses (LANGUAGE / SECURITY DEFINER / SET search_path) may
+        # appear BEFORE the body (between the arg list and the opening $$) or
+        # AFTER it (a valid Postgres form this repo uses:
+        # `AS $$ ... $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''`).
+        # Scan both regions so trailing options are never missed.
         preamble = clean[header_end:body_start]
-        fn.security_definer = (
-            re.search(r"\bSECURITY\s+DEFINER\b", preamble, re.IGNORECASE)
-            is not None
-        )
-        # SET search_path = '' (truly empty: two adjacent single quotes).
-        # Postgres accepts both `= ''` and `TO ''`, and the parameter name may
-        # be a quoted identifier ("search_path"); match all of these so a valid
-        # empty-search_path pin is never silently missed.
-        fn.search_path_empty = (
-            re.search(
-                r"\bSET\s+\"?search_path\"?\s*(?:=|\bTO\b)\s*''(?!\S)",
-                preamble,
-                re.IGNORECASE,
-            )
-            is not None
-        )
-        fn.body = body
+        trailer_end = clean.find(";", body_end)
+        if trailer_end == -1:
+            trailer_end = len(clean)
+        trailer = clean[body_end:trailer_end]
+        options = preamble + "\n" + trailer
+
+        fn.security_definer = _SECDEF_RE.search(options) is not None
+        fn.search_path_empty = _SEARCH_PATH_EMPTY_RE.search(options) is not None
+        # Blank string literals / block comments in the body so data and
+        # diagnostics that merely mention a name are not matched as references.
+        fn.body = _blank_strings_and_block_comments(body)
         fn.body_line_offset = clean.count("\n", 0, body_start) + 1
         functions.append(fn)
     return functions
@@ -370,13 +525,94 @@ def scan_body(fn, include_tables=False):
     return violations
 
 
+def _apply_drop(effective, schema, name, args):
+    """Remove matching function(s) from effective state for a DROP FUNCTION.
+
+    If the DROP names an explicit argument list, only the exact (schema, name,
+    signature) entry is removed. If args are omitted (`DROP FUNCTION f`), every
+    overload of (schema, name) is removed — that matches Postgres, which
+    requires a unique match but in practice these migrations only have one.
+    """
+    schema = _normalize_schema(schema)
+    name = name.lower()
+    if args is not None:
+        sig = _normalize_signature(args)
+        effective.pop((schema, name, sig), None)
+        return
+    for k in [k for k in effective if k[0] == schema and k[1] == name]:
+        del effective[k]
+
+
+def _apply_alter(effective, schema, name, args, opts):
+    """Apply ALTER FUNCTION option changes (SET search_path='' / SECURITY
+    DEFINER) to the tracked effective definition(s)."""
+    schema = _normalize_schema(schema)
+    name = name.lower()
+    sets_empty = _SEARCH_PATH_EMPTY_RE.search(opts) is not None
+    sets_secdef = _SECDEF_RE.search(opts) is not None
+    if not sets_empty and not sets_secdef:
+        return
+    if args is not None:
+        sig = _normalize_signature(args)
+        targets = [(schema, name, sig)] if (schema, name, sig) in effective else []
+    else:
+        targets = [k for k in effective if k[0] == schema and k[1] == name]
+    for k in targets:
+        fn = effective[k]
+        if sets_empty:
+            fn.search_path_empty = True
+        if sets_secdef:
+            fn.security_definer = True
+
+
+def _apply_statements(effective, sql, path):
+    """Apply every CREATE / DROP / ALTER FUNCTION statement in one migration to
+    the effective-state map, in document order.
+
+    Document order matters within a single file: a CREATE then a later ALTER in
+    the same migration must both land. Line comments are stripped first so a
+    `-- DROP FUNCTION ...` note is not treated as a real drop.
+    """
+    clean = _strip_line_comments(sql)
+    events = []
+    for m in _FUNC_HEADER_RE.finditer(clean):
+        events.append((m.start(), "create", m))
+    for m in _DROP_FUNC_RE.finditer(clean):
+        events.append((m.start(), "drop", m))
+    for m in _ALTER_FUNC_RE.finditer(clean):
+        events.append((m.start(), "alter", m))
+    events.sort(key=lambda e: e[0])
+
+    parsed_creates = {fn.line: fn for fn in parse_functions(sql, os.fspath(path))}
+    for _, kind, m in events:
+        if kind == "create":
+            line = clean.count("\n", 0, m.start()) + 1
+            fn = parsed_creates.get(line)
+            if fn is not None:
+                effective[fn.key] = fn  # later def overwrites earlier
+        elif kind == "drop":
+            _apply_drop(effective, m.group("schema"), m.group("name"), m.group("args"))
+        else:  # alter
+            _apply_alter(
+                effective,
+                m.group("schema"),
+                m.group("name"),
+                m.group("args"),
+                m.group("opts") or "",
+            )
+
+
 def collect_effective_functions(migration_files):
-    """Parse all migrations in timestamp order; keep the LAST def per key."""
+    """Build effective state across all migrations in timestamp order.
+
+    Applies CREATE (latest def wins), DROP (removes), and ALTER (option changes)
+    so the audited set reflects the FINAL schema: a function dropped or hardened
+    by a later migration is scored on that final state, not a stale earlier one.
+    """
     effective = {}
     for path in sorted(migration_files, key=lambda p: Path(p).name):
         sql = Path(path).read_text(encoding="utf-8")
-        for fn in parse_functions(sql, os.fspath(path)):
-            effective[fn.key] = fn  # later timestamp overwrites earlier
+        _apply_statements(effective, sql, os.fspath(path))
     return effective
 
 

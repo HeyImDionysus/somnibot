@@ -435,5 +435,436 @@ $$;
             )
 
 
+# ---------------------------------------------------------------------------
+# Codex finding #1 — skip string literals and /* */ block comments.
+# This is the class that produced the real-tree false positives:
+#   `the` from 'Buy something from the shop'
+#   `own` from 'cannot buy from own listing'
+# ---------------------------------------------------------------------------
+class TestStringLiteralAndBlockCommentSkipping(unittest.TestCase):
+    def _tables(self, body_sql):
+        sql = f"""\
+CREATE OR REPLACE FUNCTION s()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+BEGIN
+{body_sql}
+END;
+$$;
+"""
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_s.sql", sql), include_tables=True
+        )
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "unqualified-table"]
+
+    def _ext(self, body_sql):
+        sql = f"""\
+CREATE OR REPLACE FUNCTION s()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+BEGIN
+{body_sql}
+END;
+$$;
+"""
+        violations, _, _, tmp = _audit_sql(("20260101000000_s.sql", sql))
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "extension-function"]
+
+    def test_from_inside_string_literal_not_flagged_as_table(self):
+        # Exact real-tree false positive #1: 'Buy something from the shop'.
+        v = self._tables(
+            "  INSERT INTO public.quests (title) "
+            "VALUES ('Buy something from the shop');"
+        )
+        self.assertEqual(v, [], msg=f"'the' from a string literal leaked: {v}")
+
+    def test_from_own_inside_raise_exception_not_flagged(self):
+        # Exact real-tree false positive #2: RAISE EXCEPTION 'cannot buy from
+        # own listing' — `from own` is inside a diagnostic string.
+        v = self._tables("  RAISE EXCEPTION 'cannot buy from own listing';")
+        self.assertEqual(v, [], msg=f"'own' from a string literal leaked: {v}")
+
+    def test_extension_fn_inside_string_literal_not_flagged(self):
+        # RAISE NOTICE 'gen_random_bytes(16)' is data, not an executable call.
+        v = self._ext("  RAISE NOTICE 'gen_random_bytes(16)';")
+        self.assertEqual(v, [])
+
+    def test_extension_fn_inside_block_comment_not_flagged(self):
+        v = self._ext(
+            "  /* gen_random_bytes(16) would fail here */\n"
+            "  PERFORM extensions.gen_random_bytes(16);"
+        )
+        self.assertEqual(v, [])
+
+    def test_table_inside_block_comment_not_flagged(self):
+        v = self._tables("  /* DELETE FROM widgets */ PERFORM 1;")
+        self.assertEqual(v, [])
+
+    def test_doubled_quote_escape_does_not_unblank_following_code(self):
+        # 'it''s' is one literal; a real ext call AFTER it must still be caught.
+        v = self._ext(
+            "  RAISE NOTICE 'it''s fine';\n"
+            "  PERFORM gen_random_bytes(8);"
+        )
+        self.assertEqual(v, ["gen_random_bytes"])
+
+    def test_real_call_after_string_literal_still_flagged(self):
+        # A genuine unqualified call must survive string blanking of a sibling.
+        v = self._ext(
+            "  RAISE NOTICE 'buying from the shop';\n"
+            "  PERFORM digest('x', 'sha256');"
+        )
+        self.assertEqual(v, ["digest"])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #2 — single-quoted function bodies (AS '...').
+# ---------------------------------------------------------------------------
+class TestSingleQuotedBody(unittest.TestCase):
+    def _v(self, sql):
+        violations, _, _, tmp = _audit_sql(("20260101000000_q.sql", sql))
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "extension-function"]
+
+    def test_single_quoted_body_is_scanned(self):
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS 'BEGIN PERFORM gen_random_bytes(16); END;';"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_single_quoted_body_qualified_is_clean(self):
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS 'BEGIN PERFORM extensions.gen_random_bytes(16); END;';"
+        )
+        self.assertEqual(self._v(sql), [])
+
+    def test_single_quoted_body_with_escaped_quote(self):
+        # A '' escape inside the body must not terminate it early.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS 'BEGIN RAISE NOTICE ''hi''; PERFORM gen_random_bytes(1); END;';"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #3 — options that appear AFTER the body.
+# ---------------------------------------------------------------------------
+class TestTrailingOptions(unittest.TestCase):
+    def _v(self, sql):
+        violations, _, _, tmp = _audit_sql(("20260101000000_t.sql", sql))
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "extension-function"]
+
+    def test_trailing_secdef_and_search_path_are_scanned(self):
+        # `AS $$ ... $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''`
+        # — the repo's automation_helpers.sql uses exactly this order.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(16); END; $$\n"
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';"
+        )
+        self.assertEqual(self._v(sql), ["gen_random_bytes"])
+
+    def test_trailing_options_qualified_call_is_clean(self):
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void\n"
+            "AS $$ BEGIN PERFORM extensions.gen_random_bytes(16); END; $$\n"
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';"
+        )
+        self.assertEqual(self._v(sql), [])
+
+    def test_trailing_options_not_empty_search_path_out_of_scope(self):
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(16); END; $$\n"
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;"
+        )
+        self.assertEqual(self._v(sql), [])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #4 — schema is part of the effective key.
+# ---------------------------------------------------------------------------
+class TestSchemaQualifiedKey(unittest.TestCase):
+    def test_same_name_different_schema_are_distinct(self):
+        # public.f is buggy; private.f (same args) is clean. Keying on name
+        # alone would collapse them and could hide the buggy one.
+        sql_pub = """\
+CREATE OR REPLACE FUNCTION public.f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        sql_priv = """\
+CREATE OR REPLACE FUNCTION private.f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;
+"""
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_pub.sql", sql_pub),
+            ("20260102000000_priv.sql", sql_priv),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 2, "distinct schemas -> two effective defs")
+            ext = [v for v in violations if v.kind == "extension-function"]
+            self.assertEqual([v.symbol for v in ext], ["gen_random_bytes"])
+            self.assertEqual(ext[0].function.schema, "public")
+
+    def test_unqualified_create_resolves_to_public(self):
+        # `CREATE FUNCTION f` (no schema) keys under public, so a later
+        # `public.f` definition overrides it (same effective identity).
+        sql_old = """\
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        sql_new = """\
+CREATE OR REPLACE FUNCTION public.f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;
+"""
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_old.sql", sql_old),
+            ("20260102000000_new.sql", sql_new),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 1)
+            self.assertEqual(violations, [])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #5 — DROP FUNCTION removes from effective state.
+# ---------------------------------------------------------------------------
+class TestDropFunction(unittest.TestCase):
+    def test_drop_removes_buggy_function_from_gate(self):
+        # A buggy SECDEF function created then dropped later must NOT flag.
+        buggy = """\
+CREATE OR REPLACE FUNCTION dead_fn(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        drop = "DROP FUNCTION IF EXISTS dead_fn(INT);\n"
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_create.sql", buggy),
+            ("20260102000000_drop.sql", drop),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 0, "dropped fn should not remain effective")
+            self.assertEqual(violations, [])
+
+    def test_drop_without_args_removes_overload(self):
+        buggy = """\
+CREATE OR REPLACE FUNCTION dead_fn()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        drop = "DROP FUNCTION IF EXISTS dead_fn;\n"
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_create.sql", buggy),
+            ("20260102000000_drop.sql", drop),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 0)
+            self.assertEqual(violations, [])
+
+    def test_schema_qualified_drop_matches_unqualified_create(self):
+        # `CREATE FUNCTION f` (public) dropped by `DROP FUNCTION public.f(...)`.
+        buggy = """\
+CREATE OR REPLACE FUNCTION purge(a TEXT, b TEXT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        drop = "DROP FUNCTION IF EXISTS public.purge(text, text);\n"
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_create.sql", buggy),
+            ("20260102000000_drop.sql", drop),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 0)
+            self.assertEqual(violations, [])
+
+    def test_drop_then_recreate_keeps_final_definition(self):
+        buggy = """\
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        drop_recreate = """\
+DROP FUNCTION IF EXISTS f(INT);
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;
+"""
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_a.sql", buggy),
+            ("20260102000000_b.sql", drop_recreate),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 1, "recreated fn is effective")
+            self.assertEqual(violations, [])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #6 — ALTER FUNCTION option changes update effective state.
+# ---------------------------------------------------------------------------
+class TestAlterFunction(unittest.TestCase):
+    def test_alter_adds_empty_search_path_and_body_gets_scanned(self):
+        # A SECDEF function without search_path (out of scope) hardened by a
+        # later `ALTER FUNCTION ... SET search_path = ''` must then be scanned,
+        # and an unqualified ext call inside it flagged.
+        created = """\
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        alter = "ALTER FUNCTION f(INT) SET search_path = '';\n"
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_c.sql", created),
+            ("20260102000000_alter.sql", alter),
+        )
+        with tmp:
+            ext = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(ext, ["gen_random_bytes"])
+
+    def test_alter_adds_security_definer(self):
+        # A search_path='' function not yet SECDEF, then ALTER ... SECURITY
+        # DEFINER makes it in-scope.
+        created = """\
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        alter = "ALTER FUNCTION f(INT) SECURITY DEFINER;\n"
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_c.sql", created),
+            ("20260102000000_alter.sql", alter),
+        )
+        with tmp:
+            ext = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(ext, ["gen_random_bytes"])
+
+    def test_alter_without_args_matches_by_name(self):
+        created = """\
+CREATE OR REPLACE FUNCTION public.f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+        alter = "ALTER FUNCTION public.f(INT) SET search_path = '';\n"
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_c.sql", created),
+            ("20260102000000_alter.sql", alter),
+        )
+        with tmp:
+            ext = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(ext, ["gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Codex finding #7 — the added extension functions are audited.
+# ---------------------------------------------------------------------------
+class TestAddedExtensionFunctions(unittest.TestCase):
+    def _one(self, call):
+        sql = f"""\
+CREATE OR REPLACE FUNCTION f()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM {call}; END; $$;
+"""
+        violations, _, _, tmp = _audit_sql(("20260101000000_e.sql", sql))
+        with tmp:
+            return [x.symbol for x in violations if x.kind == "extension-function"]
+
+    def test_newly_added_functions_are_flagged(self):
+        for fn in (
+            "armor('x')",
+            "dearmor('x')",
+            "pgp_key_id('x')",
+            "pgp_sym_encrypt_bytea('x', 'k')",
+            "pgp_pub_decrypt_bytea('x', 'k')",
+            "uuid_ns_url()",
+            "uuid_ns_dns()",
+            "uuid_ns_oid()",
+            "uuid_ns_x500()",
+        ):
+            name = fn.split("(")[0]
+            with self.subTest(fn=name):
+                self.assertEqual(self._one(fn), [name])
+
+    def test_added_functions_qualified_are_clean(self):
+        self.assertEqual(self._one("extensions.armor('x')"), [])
+        self.assertEqual(self._one("extensions.uuid_ns_url()"), [])
+
+
+# ---------------------------------------------------------------------------
+# Real-tree regressions: the exact false positives must be gone, and the two
+# historical bugs must still be catchable.
+# ---------------------------------------------------------------------------
+class TestRealTreeRegressions(unittest.TestCase):
+    def test_no_the_or_own_false_positives_on_real_tree(self):
+        violations, _, _ = checker.audit(REAL_MIGRATIONS, include_tables=True)
+        symbols = {v.symbol.lower() for v in violations}
+        self.assertNotIn("the", symbols, "'the' string-literal false positive returned")
+        self.assertNotIn("own", symbols, "'own' string-literal false positive returned")
+
+    def test_real_tree_fully_clean_including_tables(self):
+        # After finding #1 the advisory table scan is also clean on real main.
+        violations, _, _ = checker.audit(REAL_MIGRATIONS, include_tables=True)
+        self.assertEqual(
+            violations, [], msg="\n".join(v.format() for v in violations)
+        )
+
+    def test_purge_user_data_dropped_not_effective(self):
+        # It is created in v53_dead_table_cleanup and dropped in
+        # v53_production_readiness; DROP handling means it is not audited.
+        eff = checker.collect_effective_functions(
+            sorted(str(p) for p in REAL_MIGRATIONS.glob("*.sql"))
+        )
+        self.assertFalse(
+            any(k[1] == "purge_user_data" for k in eff),
+            "purge_user_data should be removed by its later DROP",
+        )
+
+    def test_would_still_catch_lottery_gen_random_bytes_bug(self):
+        # The original outage: unqualified gen_random_bytes in a SECDEF+''
+        # function. Prove detection survives the parser rewrite.
+        violations, _, _, tmp = _audit_sql(
+            ("20260613100000_v7.sql", BUGGY_V7)
+        )
+        with tmp:
+            genrb = [v for v in violations if v.symbol == "gen_random_bytes"]
+            self.assertEqual(len(genrb), 2)
+
+    def test_would_have_caught_purge_user_data_bug_before_drop(self):
+        # Before it was dropped, purge_user_data had unqualified table refs
+        # under search_path=''. With tables enabled and only the CREATE present,
+        # the linter flags them (advisory) — proving it would have caught it.
+        purge_create = """\
+CREATE OR REPLACE FUNCTION purge_user_data(p_guild_id TEXT, p_user TEXT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+BEGIN
+  DELETE FROM economy_wallets WHERE guild_id = p_guild_id;
+  DELETE FROM economy_transactions WHERE guild_id = p_guild_id;
+END;
+$$;
+"""
+        violations, _, _, tmp = _audit_sql(
+            ("20260601000004_purge.sql", purge_create), include_tables=True
+        )
+        with tmp:
+            tables = sorted(
+                x.symbol for x in violations if x.kind == "unqualified-table"
+            )
+            self.assertEqual(
+                tables, ["economy_transactions", "economy_wallets"]
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
