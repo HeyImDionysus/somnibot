@@ -388,6 +388,22 @@ export class SomniLicense {
           }
         } else {
           this.cachedGraceDeadlineMono = null;
+          // W2 codex: payment recovered — the heartbeat now reports a
+          // non-grace status (e.g. 'active'). A PRIOR grace heartbeat may have
+          // rewritten cachedResult.status to 'grace_period' (and stamped a
+          // deadline) above; clearing only the deadline mono leaves that stale
+          // grace payload in the cache, so validate()/isValid() keep returning
+          // 'grace_period' until the original cacheTtlMs elapses and apps that
+          // treat status !== 'active' as unhealthy keep restricting a recovered
+          // customer. Reconcile the cached payload back to the heartbeat's
+          // status and drop the stale deadline.
+          if (this.cachedResult) {
+            this.cachedResult = {
+              ...this.cachedResult,
+              status: data.status ?? this.cachedResult.status,
+              grace_period_ends_at: null,
+            };
+          }
         }
       } else {
         this.cachedResult = null;

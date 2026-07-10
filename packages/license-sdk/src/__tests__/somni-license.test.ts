@@ -675,6 +675,35 @@ describe('SomniLicense', () => {
       expect(client.isValid()).toBe(false); // capped, even though TTL is 1h
       client.destroy();
     });
+
+    it('resets the cached status back to active when a heartbeat recovers from grace (W2 codex)', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())          // validate: healthy 'active'
+        .mockResolvedValueOnce(heartbeatGrace(3_600_000)) // grace begins, 1h deadline → cache rewritten to grace
+        .mockResolvedValueOnce(heartbeatOk());          // payment recovers → heartbeat 'active'
+      // Long TTL so the cache from the initial validate is still live throughout.
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+
+      await client.heartbeat();                          // cache.status → 'grace_period'
+      const graceCached = await client.validate();
+      expect(fetch).toHaveBeenCalledTimes(2);            // served from cache
+      expect(graceCached.status).toBe('grace_period');
+
+      await client.heartbeat();                          // recovery → 'active'
+      const recoveredCached = await client.validate();
+      // Still cached (no extra fetch), but the stale grace payload must be gone:
+      // apps that treat status !== 'active' as unhealthy would otherwise keep
+      // restricting a recovered customer until the 1h TTL elapsed.
+      expect(fetch).toHaveBeenCalledTimes(3);            // validate + 2 heartbeats, no re-validate
+      expect(recoveredCached.valid).toBe(true);
+      expect(recoveredCached.status).toBe('active');
+      expect(recoveredCached.grace_period_ends_at).toBeNull();
+      expect(client.isValid()).toBe(true);
+      client.destroy();
+    });
   });
 
   // ────────── heartbeat auto-scheduling ──────────

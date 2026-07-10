@@ -497,6 +497,7 @@ describe('EntitlementService.suspend', () => {
   function makeSuspendSupabase(opts: {
     updateResult?: { data: any; error: any };
     alertInsertError?: any;
+    alertRefreshResult?: { error: any };
   } = {}) {
     const updateChain = supaChain();
     updateChain.then = (resolve: any) =>
@@ -504,6 +505,13 @@ describe('EntitlementService.suspend', () => {
 
     const alertsChain = supaChain();
     alertsChain.insert = vi.fn(async () => ({ error: opts.alertInsertError ?? null }));
+    // The refresh-on-duplicate path (23505) does update(...).eq()×4 and awaits
+    // the terminal eq(). Return an awaitable chain so it resolves cleanly and
+    // the update payload/filters can be asserted.
+    const alertsUpdateChain = supaChain();
+    alertsUpdateChain.eq = vi.fn(() => alertsUpdateChain);
+    alertsUpdateChain.then = (resolve: any) => resolve(opts.alertRefreshResult ?? { error: null });
+    alertsChain.update = vi.fn(() => alertsUpdateChain);
 
     const auditChain = supaChain();
     auditChain.insert = vi.fn(async () => ({ error: null }));
@@ -520,7 +528,7 @@ describe('EntitlementService.suspend', () => {
       }),
     } as any;
 
-    return { supabase, updateChain, alertsChain, auditChain, entitlementsChain };
+    return { supabase, updateChain, alertsChain, alertsUpdateChain, auditChain, entitlementsChain };
   }
 
   it('transitions the entitlement to grace_period guarded on active status and returns true', async () => {
@@ -592,6 +600,47 @@ describe('EntitlementService.suspend', () => {
     const service = new EntitlementService(guild, supabase, eventBus);
     const result = await service.suspend('ent1');
     expect(result).toBe(true);
+  });
+
+  it('refreshes the stale duplicate alert in place on a 23505 so operators see the current deadline (W2 codex)', async () => {
+    const guild = makeGuild();
+    const { supabase, alertsChain, alertsUpdateChain } = makeSuspendSupabase({
+      // A prior recovery's resolve failed non-fatally, leaving a stale
+      // unresolved alert; this re-suspension re-enters grace and collides.
+      alertInsertError: { code: '23505', message: 'duplicate key value violates unique constraint' },
+    });
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+    const result = await service.suspend('ent1', 3);
+    expect(result).toBe(true);
+
+    // The stale alert must be rewritten with the freshly-committed deadline —
+    // not left carrying the old message/metadata deadline.
+    expect(alertsChain.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining('ent1'),
+        severity: 'warning',
+        metadata: expect.objectContaining({
+          entitlement_id: 'ent1',
+          grace_period_ends_at: expect.any(String),
+          source: 'entitlement_service.suspend',
+        }),
+      }),
+    );
+    // Scoped to the still-open alert for exactly this entitlement.
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('metadata->>entitlement_id', 'ent1');
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('resolved', false);
+  });
+
+  it('does NOT refresh (no duplicate) when the alert insert succeeds cleanly', async () => {
+    const guild = makeGuild();
+    const { supabase, alertsChain } = makeSuspendSupabase();
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+    await service.suspend('ent1', 3);
+
+    expect(alertsChain.insert).toHaveBeenCalledTimes(1);
+    expect(alertsChain.update).not.toHaveBeenCalled();
   });
 
   it('still returns true when the alert write genuinely fails — the suspension itself committed', async () => {

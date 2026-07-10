@@ -268,25 +268,50 @@ export class EntitlementService {
     // per entitlement): a 23505 unique violation means another writer
     // already raised it, which is dedupe success, not an error. Alert
     // failure never fails the suspension itself — the transition committed.
+    const alertMessage =
+      `Entitlement ${entitlementId} entered a payment-failure grace period ending ` +
+      `${gracePeriodEnds.toISOString()}. If payment is not recovered by then, ` +
+      'access will be revoked automatically.';
+    const alertMetadata = {
+      entitlement_id: entitlementId,
+      customer_id: ent.customer_id,
+      product_id: ent.product_id,
+      order_id: ent.order_id,
+      grace_period_ends_at: gracePeriodEnds.toISOString(),
+      source: 'entitlement_service.suspend',
+    };
     const { error: alertError } = await this.supabase.from('alerts').insert({
       guild_id: guildId,
       alert_type: 'entitlement_grace_period',
       severity: 'warning',
       title: 'Paid entitlement entered payment grace period',
-      message:
-        `Entitlement ${entitlementId} entered a payment-failure grace period ending ` +
-        `${gracePeriodEnds.toISOString()}. If payment is not recovered by then, ` +
-        'access will be revoked automatically.',
-      metadata: {
-        entitlement_id: entitlementId,
-        customer_id: ent.customer_id,
-        product_id: ent.product_id,
-        order_id: ent.order_id,
-        grace_period_ends_at: gracePeriodEnds.toISOString(),
-        source: 'entitlement_service.suspend',
-      },
+      message: alertMessage,
+      metadata: alertMetadata,
     });
-    if (alertError && alertError.code !== '23505') {
+    if (alertError && alertError.code === '23505') {
+      // Codex W2: a stale unresolved alert already occupies the unique slot for
+      // this entitlement (e.g. a prior recovery's resolve failed non-fatally,
+      // then this suspension re-entered grace). The UPDATE above just committed
+      // a NEW grace_period_ends_at, so that pre-existing alert now carries the
+      // OLD deadline in its message/metadata. Refresh it in place — same
+      // entitlement-scoped, unresolved-only filter the manual admin path uses —
+      // so operators see the current revocation time. Non-fatal.
+      const { error: refreshError } = await this.supabase
+        .from('alerts')
+        .update({
+          message: alertMessage,
+          metadata: alertMetadata,
+          severity: 'warning',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('guild_id', guildId)
+        .eq('alert_type', 'entitlement_grace_period')
+        .eq('metadata->>entitlement_id', entitlementId)
+        .eq('resolved', false);
+      if (refreshError) {
+        log.error('Failed to refresh duplicate grace-period alert:', refreshError.message);
+      }
+    } else if (alertError) {
       log.error('Failed to write grace-period alert:', alertError.message);
     }
 

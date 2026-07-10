@@ -64,17 +64,21 @@ export async function POST(request: NextRequest) {
     // otherwise the portal keeps serving a customer whose license the SDK
     // already rejects. Recompute the grace window here with the same predicate
     // license/validate + heartbeat use.
-    const { data: entitlement } = await admin
+    //
+    // A customer may hold more than one candidate row for the same product (a
+    // re-buy, or overlapping subscription + manual grant). Fetch the whole
+    // candidate set — not an arbitrary `.limit(1)` row — and mint the link if
+    // ANY of them is still live, so one lapsed grace row cannot mask another
+    // that is active or in an unexpired grace window.
+    const { data: entitlements } = await admin
       .from('entitlements')
       .select('id, status, grace_period_ends_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
-      .in('status', ['active', 'grace_period'])
-      .limit(1)
-      .maybeSingle();
+      .in('status', ['active', 'grace_period']);
 
-    if (!entitlement || !isEntitlementAccessLive(entitlement)) {
+    if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
       return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
     }
 

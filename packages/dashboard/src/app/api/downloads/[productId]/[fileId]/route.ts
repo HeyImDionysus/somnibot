@@ -100,18 +100,22 @@ export async function GET(
   // reconciliation has not yet expired must NOT serve the file — recompute the
   // grace window here with the same predicate license/validate + heartbeat use,
   // so a signed URL minted while still in grace stops working once the deadline
-  // passes rather than trusting the stale status. ──
-  const { data: entitlement } = await supabase
+  // passes rather than trusting the stale status.
+  //
+  // A customer may hold MORE THAN ONE candidate row for the same product (a
+  // re-buy, or overlapping subscription + manual grant). Fetch the whole
+  // candidate set — not an arbitrary `.limit(1)` row — and grant access if ANY
+  // of them is still live, so one lapsed grace row cannot mask another that is
+  // active or in an unexpired grace window. ──
+  const { data: entitlements } = await supabase
     .from('entitlements')
     .select('id, status, grace_period_ends_at')
     .eq('customer_id', customerId)
     .eq('product_id', productId)
     .eq('guild_id', guildId)
-    .in('status', ['active', 'grace_period'])
-    .limit(1)
-    .maybeSingle();
+    .in('status', ['active', 'grace_period']);
 
-  if (!entitlement || !isEntitlementAccessLive(entitlement)) {
+  if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
     return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
   }
 

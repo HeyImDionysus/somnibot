@@ -11,12 +11,20 @@
 -- leaving the 'entitlement_grace_period' operator alert unresolved forever
 -- after a churned-then-purged customer.
 --
--- Re-create the function verbatim (schema-qualified, SECURITY DEFINER, empty
+-- Re-create the function (schema-qualified, SECURITY DEFINER, empty
 -- search_path — same hardening as the prior version) with one added statement:
 -- after the entitlement cancellation, resolve any open grace alert for this
 -- guild's entitlements belonging to the purged customer. The resolve is
 -- entitlement-scoped and unresolved-only (a no-op when none is open) and runs
 -- inside the same RPC transaction as the cancellation.
+--
+-- NOTE: the prior definition (20260621000000_v9_audit_remediation) reintroduced
+-- a `DELETE FROM public.economy_trivia_sessions`, but that table was dropped in
+-- 20260601000004_v53_dead_table_cleanup. That statement makes the whole RPC
+-- error at runtime (plpgsql resolves the missing relation on first execution),
+-- so every /forgetme after v9 aborts before reaching the entitlement/alert
+-- work. This version restores the v8_purge_search_path behavior of skipping the
+-- dropped table so the RPC (and the new grace-alert resolution below) runs.
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION public.purge_member_data(
@@ -74,10 +82,7 @@ BEGIN
   GET DIAGNOSTICS v_count = ROW_COUNT;
   v_deleted := v_deleted || jsonb_build_object('economy_adventure_sessions', v_count);
 
-  DELETE FROM public.economy_trivia_sessions
-    WHERE guild_id = p_guild_id AND user_id = p_user_id;
-  GET DIAGNOSTICS v_count = ROW_COUNT;
-  v_deleted := v_deleted || jsonb_build_object('economy_trivia_sessions', v_count);
+  -- economy_trivia_sessions: table dropped in v53_dead_table_cleanup — trivia uses Valkey
 
   DELETE FROM public.economy_lottery_tickets
     WHERE guild_id = p_guild_id AND user_id = p_user_id;
