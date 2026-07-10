@@ -321,6 +321,30 @@ describe('HeistManager', () => {
   });
 
   describe('joinHeist', () => {
+    // Helper: the /heist join path now delegates the ENTIRE join to one atomic
+    // heist_join RPC. Set up the recruiting-heist read + the heist_join result.
+    function setupJoin(joinResult: unknown, opts: { configOverrides?: Record<string, unknown> } = {}) {
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig, ...opts.configOverrides }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        return chainBuilder();
+      });
+      const rpcCalls: Array<{ fn: string; args: any }> = [];
+      supabase.rpc.mockImplementation((fn: string, args: any) => {
+        rpcCalls.push({ fn, args });
+        if (fn === 'heist_join') return Promise.resolve(joinResult);
+        return Promise.resolve({ data: null, error: null });
+      });
+      return rpcCalls;
+    }
+
     it('rejects when heists disabled', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
@@ -352,369 +376,100 @@ describe('HeistManager', () => {
       );
     });
 
-    it('rejects when already joined', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u1'], success_chance: 40, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        return chainBuilder();
-      });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('already in') }),
-      );
-    });
-
-    it('rejects when crew is full', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({
-            data: { ...defaultConfig, economy_heist_max_participants: 2 },
-            error: null,
-          });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2', 'u3'], success_chance: 47, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        return chainBuilder();
-      });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('full') }),
-      );
-    });
-
-    it('joins heist successfully', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        if (table === 'economy_heist_participants') {
-          const c = chainBuilder({ data: null, error: null });
-          // For select count
-          (c as any).count = 2;
-          return c;
-        }
-        return chainBuilder();
-      });
-      supabase.rpc.mockResolvedValue({ data: null, error: null });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ embeds: expect.any(Array) }),
-      );
-    });
-
-    it('rejects insufficient balance for join', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Bank' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 5 }, error: null });
-        }
-        return chainBuilder();
-      });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('coins to join') }),
-      );
-    });
-
-    it('refunds a join that raced past the atomic claim (missed join)', async () => {
-      // The join reads the heist as recruiting, charges the fee and inserts the
-      // participant — but resolution froze the crew before the insert committed.
-      // heist_settle_missed_join deletes the stranded row AND refunds the entry
-      // fee atomically, returning 'refunded' only once the credit has committed;
-      // the join path must confirm the refund and tell the user recruiting closed
-      // instead of announcing a false "Joined".
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        return chainBuilder();
-      });
-      const rpcCalls: Array<{ fn: string; args: any }> = [];
-      supabase.rpc.mockImplementation((fn: string, args: any) => {
-        rpcCalls.push({ fn, args });
-        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'refunded', error: null });
-        return Promise.resolve({ data: null, error: null });
+    it('joins atomically via heist_join and announces the derived crew/chance', async () => {
+      // The happy path: heist_join returns 'joined' with the post-join member
+      // count and DERIVED success_chance (base 40 + (3-1)*7 = 54). The command
+      // renders those directly from the RPC result — no separate debit/insert/
+      // append/settle calls.
+      const rpcCalls = setupJoin({
+        data: [{ status: 'joined', member_count: 3, success_chance: 54, role: 'Hacker' }],
+        error: null,
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
 
-      // Refund happens INSIDE the RPC (atomic with the delete) — the bot must
-      // pass the fee to settle, and must NOT issue a separate economy_add_balance
-      // that could land without the delete (or vice versa).
+      // The whole join is one atomic RPC — no legacy debit / append / settle.
+      expect(rpcCalls.some((c) => c.fn === 'heist_join')).toBe(true);
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'array_append_heist_participant')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'heist_settle_missed_join')).toBe(false);
+      // heist_join was passed the derived-chance anchor (base + difficulty) and role.
       expect(rpcCalls).toContainEqual({
-        fn: 'heist_settle_missed_join',
-        args: expect.objectContaining({ p_heist_id: 'h1', p_user_id: 'u1', p_refund_amount: 100 }),
+        fn: 'heist_join',
+        args: expect.objectContaining({
+          p_heist_id: 'h1', p_user_id: 'u1', p_entry_fee: 100,
+          p_max: 8, p_base_chance: 40, p_role: 'Hacker',
+        }),
       });
-      expect(supabase.rpc).not.toHaveBeenCalledWith(
-        'economy_add_balance', expect.anything(),
-      );
-      // User told recruiting already closed; no "Joined" embed.
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ content: expect.stringContaining('already got underway') }),
-      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeDefined();
+      expect(String(replyArg.embeds[0].data.description)).toContain('3/8');
+      expect(String(replyArg.embeds[0].data.description)).toContain('54%');
+    });
+
+    it('rejects when already joined (RPC status already_joined)', async () => {
+      setupJoin({ data: [{ status: 'already_joined', member_count: 2, success_chance: 47, role: null }], error: null });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
       expect(replyArg.embeds).toBeUndefined();
-      expect(replyArg.content).toContain('refunded');
+      expect(replyArg.content).toContain('already in');
     });
 
-    it('retries the missed-join refund and confirms once it commits', async () => {
-      // The atomic delete+refund RPC errors transiently, then succeeds. The bot
-      // must retry inline (the RPC is idempotent) and only confirm the refund
-      // after it actually commits.
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        return chainBuilder();
-      });
-      let attempts = 0;
-      supabase.rpc.mockImplementation((fn: string) => {
-        if (fn === 'heist_settle_missed_join') {
-          attempts++;
-          if (attempts === 1) return Promise.resolve({ data: null, error: { message: 'transient' } });
-          return Promise.resolve({ data: 'refunded', error: null });
-        }
-        return Promise.resolve({ data: null, error: null });
-      });
+    it('rejects when crew is full (RPC status crew_full)', async () => {
+      setupJoin({ data: [{ status: 'crew_full', member_count: 8, success_chance: 89, role: null }], error: null });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-
-      expect(attempts).toBe(2); // one failure, one success
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
-      expect(replyArg.content).toContain('was refunded');
       expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('full');
     });
 
-    it('does not confirm a refund when both settle and undo keep erroring', async () => {
-      // If heist_settle_missed_join errors on every attempt, its transaction
-      // rolled back — the stranded row is NOT deleted and no credit landed. The
-      // bot then tries heist_undo_join to roll the join back; if THAT also errors
-      // on every attempt, the bot must NOT tell the user their fee was refunded
-      // (the earlier bug did) — a false confirmation. It surfaces the honest
-      // "contact an admin" message instead.
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        return chainBuilder();
-      });
-      let settleAttempts = 0;
-      let undoAttempts = 0;
-      supabase.rpc.mockImplementation((fn: string) => {
-        if (fn === 'heist_settle_missed_join') {
-          settleAttempts++;
-          return Promise.resolve({ data: null, error: { message: 'refund tx failed' } });
-        }
-        if (fn === 'heist_undo_join') {
-          undoAttempts++;
-          return Promise.resolve({ data: null, error: { message: 'undo tx failed' } });
-        }
-        return Promise.resolve({ data: null, error: null });
-      });
+    it('rejects insufficient balance (RPC status insufficient_funds)', async () => {
+      setupJoin({ data: [{ status: 'insufficient_funds', member_count: 1, success_chance: 40, role: null }], error: null });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
-
-      expect(settleAttempts).toBeGreaterThan(1); // settle retried, not a single shot
-      expect(undoAttempts).toBeGreaterThan(1);   // undo also retried before giving up
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
-      // Must NOT falsely claim the fee was refunded.
-      expect(replyArg.content).not.toContain('was refunded');
-      // Must not confirm a refund at all, and must not send a "Joined" embed.
-      expect(replyArg.content).not.toContain('Your entry fee was refunded');
-      expect(replyArg.content).toContain('contact a server admin');
       expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('coins to join');
     });
 
-    it('undoes a still-recruiting join when settle keeps erroring transiently (codex :491)', async () => {
-      // The heist is still recruiting (the crew was never frozen), but
-      // heist_settle_missed_join errors on every attempt — a pure transient blip.
-      // Leaving the member joined would let a later claim FREEZE and settle them as
-      // crew even though we are about to tell them they did not join. The bot must
-      // instead UNDO the join: heist_undo_join refunds the frozen fee, deletes the
-      // row, drops the participants[] slot and reverses the +7 success bump, all
-      // atomically. The user is told their join was cancelled and the fee refunded
-      // — never a false "Joined" embed and never a half-committed state.
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        return chainBuilder();
-      });
-      const rpcCalls: Array<{ fn: string; args: any }> = [];
-      supabase.rpc.mockImplementation((fn: string, args: any) => {
-        rpcCalls.push({ fn, args });
-        if (fn === 'heist_settle_missed_join') {
-          return Promise.resolve({ data: null, error: { message: 'transient' } });
-        }
-        if (fn === 'heist_undo_join') {
-          // Undo succeeds: the join is rolled back and the frozen fee refunded
-          // inside the RPC transaction.
-          return Promise.resolve({ data: 'undone', error: null });
-        }
-        return Promise.resolve({ data: null, error: null });
+    // ── Root serialization fix (codex heist-manager.ts:797) ─────────────────
+    it('a join that loses the row lock to resolution is rejected without any charge', async () => {
+      // The claim won the heist-row lock first, so heist_join re-checked the
+      // status under the lock, saw it was no longer 'recruiting', and returned
+      // 'not_recruiting' having debited NOTHING. A post-recruiting insert is
+      // structurally impossible — no fee can be stranded, and the command tells the
+      // user plainly that nothing was charged (never a false "Joined", never a
+      // "we refunded you" for a debit that never happened).
+      const rpcCalls = setupJoin({
+        data: [{ status: 'not_recruiting', member_count: 2, success_chance: 0, role: null }],
+        error: null,
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
 
-      // Undo was invoked with the frozen fee, atomically (no separate credit).
-      expect(rpcCalls).toContainEqual({
-        fn: 'heist_undo_join',
-        args: expect.objectContaining({ p_heist_id: 'h1', p_user_id: 'u1', p_refund_amount: 100 }),
-      });
-      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_add_balance', expect.anything());
+      // No separate debit and no refund — the RPC never charged the fee.
+      expect(rpcCalls.some((c) => c.fn === 'economy_subtract_balance')).toBe(false);
+      expect(rpcCalls.some((c) => c.fn === 'economy_add_balance')).toBe(false);
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
-      // No "Joined" embed; told the join was cancelled and the fee refunded.
-      expect(replyArg.embeds).toBeUndefined();
-      expect(replyArg.content).toContain('refunded');
-      expect(replyArg.content).not.toContain('contact a server admin');
-    });
-
-    it('does not refund a join that made it into the frozen crew', async () => {
-      // heist_settle_missed_join returns 'in_crew' — the participant is stamped
-      // into the frozen crew. The normal "Joined" flow runs.
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        if (table === 'economy_heist_participants') {
-          const c = chainBuilder({ data: null, error: null });
-          (c as any).count = 2;
-          return c;
-        }
-        return chainBuilder();
-      });
-      supabase.rpc.mockImplementation((fn: string) => {
-        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'in_crew', error: null });
-        return Promise.resolve({ data: null, error: null });
-      });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-
-      // No refund; normal "Joined" embed sent.
-      expect(supabase.rpc).not.toHaveBeenCalledWith(
-        'economy_add_balance', expect.anything(),
-      );
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ embeds: expect.any(Array) }),
-      );
-    });
-
-    it('does not announce "Joined" when a racing resolver already reconciled the join', async () => {
-      // Codex :482 — the resolver's bulk heist_reconcile_stranded_joins won the
-      // race and already deleted + refunded this just-inserted row, so
-      // heist_settle_missed_join finds no row and returns 'reconciled'. The old
-      // boolean=false collapsed this into the "still in crew" path and the command
-      // mis-announced "Joined the Heist!" to an already-refunded, removed user.
-      // The command must instead tell the user recruiting closed and their fee is
-      // back — never a "Joined" embed.
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'guild_config') {
-          return chainBuilder({ data: { ...defaultConfig }, error: null });
-        }
-        if (table === 'economy_heists') {
-          return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
-            error: null,
-          });
-        }
-        if (table === 'economy_wallets') {
-          return chainBuilder({ data: { wallet: 500 }, error: null });
-        }
-        return chainBuilder();
-      });
-      supabase.rpc.mockImplementation((fn: string) => {
-        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: 'reconciled', error: null });
-        return Promise.resolve({ data: null, error: null });
-      });
-      const interaction = makeInteraction();
-      await mgr.joinHeist(interaction as any);
-
-      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
-      // Must NOT send a "Joined the Heist!" embed to a reconciled/removed user.
       expect(replyArg.embeds).toBeUndefined();
       expect(replyArg.content).toContain('already got underway');
-      expect(replyArg.content).toContain('refunded');
-      // The reconcile already refunded — the command issues no separate credit.
-      expect(supabase.rpc).not.toHaveBeenCalledWith(
-        'economy_add_balance', expect.anything(),
-      );
+      expect(replyArg.content).toContain('No coins were charged');
+    });
+
+    it('surfaces a clean error and confirms no charge when heist_join errors (tx rolled back)', async () => {
+      // The RPC transaction errored — debit and insert commit together or not at
+      // all, so nothing was charged. The command must not claim a charge or a
+      // refund; the user simply retries.
+      const rpcCalls = setupJoin({ data: null, error: { message: 'transient' } });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      expect(rpcCalls.some((c) => c.fn === 'economy_add_balance')).toBe(false);
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('No coins were charged');
     });
   });
 
