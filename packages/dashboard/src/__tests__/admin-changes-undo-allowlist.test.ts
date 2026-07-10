@@ -187,11 +187,107 @@ describe('validateUndoPayload', () => {
   });
 
   it('keeps the table allowlist and column map in sync', () => {
-    expect([...UNDOABLE_TABLES].sort()).toEqual(Object.keys(UNDO_TABLE_COLUMNS).sort());
+    expect([...UNDOABLE_TABLES].sort()).toEqual([...UNDO_TABLE_COLUMNS.keys()].sort());
     // Sensitive tables must never be undoable.
     expect(UNDOABLE_TABLES.has('users')).toBe(false);
     expect(UNDOABLE_TABLES.has('guild_secrets')).toBe(false);
     expect(UNDOABLE_TABLES.has('dashboard_roles')).toBe(false);
+  });
+
+  // ── Finding 1: allowlist must be a complete superset of dashboard-writable
+  // columns, or real undo payloads get wrongly rejected. ──────────────
+  it('accepts columns that dashboard write routes actually set', () => {
+    // /api/welcome writes welcome_enabled + goodbye_enabled to guild_config.
+    expect(
+      validateUndoPayload({
+        table: 'guild_config',
+        data: { welcome_enabled: true, goodbye_enabled: false },
+        match: { guild_id: 'guild-1' },
+      }).ok,
+    ).toBe(true);
+    // /api/economy/shop writes stock, max_per_user, require_role_id, use_effect…
+    expect(
+      validateUndoPayload({
+        table: 'economy_items',
+        data: {
+          stock: 5,
+          max_per_user: 2,
+          require_role_id: 'r1',
+          grant_role_id: 'r2',
+          usable: true,
+          use_effect: { type: 'boost' },
+          durability: 10,
+          tradeable: false,
+          updated_at: '2026-07-10T00:00:00Z',
+        },
+        match: { id: 'item-9', guild_id: 'guild-1' },
+      }).ok,
+    ).toBe(true);
+  });
+
+  // ── Finding 2: identity/tenant columns are match-only. A tampered payload
+  // must not be able to SET id/guild_id even though it may MATCH on them. ──
+  it('allows id/guild_id in match but rejects them in data', () => {
+    // Legit: id + guild_id used to locate the row.
+    expect(
+      validateUndoPayload({
+        table: 'economy_items',
+        data: { price: 10 },
+        match: { id: 'item-9', guild_id: 'guild-1' },
+      }).ok,
+    ).toBe(true);
+    // Tampered: attempt to re-key the row via data.id.
+    const reId = validateUndoPayload({
+      table: 'economy_items',
+      data: { id: 'other-item' },
+      match: { id: 'item-9', guild_id: 'guild-1' },
+    });
+    expect(reId.ok).toBe(false);
+    if (!reId.ok) expect(reId.reason).toContain('id');
+    // Tampered: attempt to move the row to another tenant via data.guild_id.
+    const reTenant = validateUndoPayload({
+      table: 'economy_items',
+      data: { guild_id: 'attacker-guild' },
+      match: { id: 'item-9', guild_id: 'guild-1' },
+    });
+    expect(reTenant.ok).toBe(false);
+    if (!reTenant.ok) expect(reTenant.reason).toContain('guild_id');
+  });
+
+  it('rejects a settable-only column used as a match key', () => {
+    // welcome_message is settable (data) but not a valid match key.
+    const res = validateUndoPayload({
+      table: 'guild_config',
+      data: { welcome_message: 'hi' },
+      match: { welcome_message: 'hi' },
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain('welcome_message');
+  });
+
+  // ── Finding 3: prototype-pollution — a table of "__proto__"/"constructor"
+  // must be rejected, not resolve to a prototype value. ──────────────
+  it('rejects inherited object keys as table names (no prototype bypass)', () => {
+    for (const table of ['__proto__', 'constructor', 'prototype', 'hasOwnProperty', 'toString']) {
+      const res = validateUndoPayload({
+        table,
+        data: { welcome_message: 'x' },
+        match: { guild_id: 'guild-1' },
+      });
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(table);
+    }
+  });
+
+  it('each table has disjoint-purpose data and match sets that are non-empty', () => {
+    for (const [table, spec] of UNDO_TABLE_COLUMNS) {
+      expect(spec.data.size, `${table} data`).toBeGreaterThan(0);
+      expect(spec.match.size, `${table} match`).toBeGreaterThan(0);
+      // Identity/tenant columns must never be settable.
+      expect(spec.data.has('id'), `${table} data.id`).toBe(false);
+      expect(spec.data.has('guild_id'), `${table} data.guild_id`).toBe(false);
+      expect(spec.data.has('created_at'), `${table} data.created_at`).toBe(false);
+    }
   });
 });
 
