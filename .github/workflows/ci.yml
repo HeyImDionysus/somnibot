@@ -14,7 +14,7 @@
 #   test-integration    → integration tests against local Supabase
 #   migration-lint      → migration naming, ordering, dangerous ops
 #   db-security-audit   → SECURITY DEFINER search_path + RLS policy audit
-#   type-drift          → generated DB types vs migration state
+#   type-drift          → REQUIRED: fails if the committed DB-type snapshot is stale
 #   security            → dependency audit + secret scanning
 #   ci-gate             → required status check — all jobs must pass
 # =============================================================================
@@ -617,8 +617,11 @@ jobs:
         run: cd packages && supabase stop 2>/dev/null || true
 
   # ──────────────────────────────────────────────────────────────────────────
-  # 10. DB Type Drift Check
-  #     Warns when migrations change but generated TS types are stale.
+  # 10. DB Type Drift Check  (REQUIRED GATE — fails the build on drift)
+  #     Regenerates the schema snapshot (packages/shared/src/types/
+  #     database.generated.ts) from the SQL migrations and fails if the committed
+  #     snapshot is stale. Forces a review whenever a migration changes the schema
+  #     without refreshing the generated types.
   # ──────────────────────────────────────────────────────────────────────────
   type-drift:
     name: 🔄 DB Type Drift Check
@@ -628,28 +631,13 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Regenerate types and diff
+      - name: Fail on DB type drift
         run: |
           set -euo pipefail
-          TYPES_FILE="packages/shared/src/types/database.ts"
-
-          # Point generator at the repo checkout path
-          sed -i "s|MIGRATIONS_DIR = .*|MIGRATIONS_DIR = Path(\"packages/supabase/migrations\")|" scripts/generate-db-types.py
-
-          cp "$TYPES_FILE" /tmp/database.ts.committed
-
-          python3 scripts/generate-db-types.py
-
-          if diff -u /tmp/database.ts.committed "$TYPES_FILE" > /tmp/type-drift.diff 2>&1; then
-            echo "✅ database.ts is up to date with migrations"
-          else
-            echo "⚠️  database.ts is out of sync with migrations"
-            echo "Run 'python3 scripts/generate-db-types.py' locally and commit the result."
-            echo ""
-            head -80 /tmp/type-drift.diff
-            # Warn only — don't fail the build
-            exit 0
-          fi
+          # --check regenerates in memory and exits non-zero if the committed
+          # snapshot differs from a fresh generation. The generator resolves the
+          # migrations dir relative to itself, so no path patching is required.
+          python3 scripts/generate-db-types.py --check
 
   # ──────────────────────────────────────────────────────────────────────────
   # 11. Security Checks
@@ -783,8 +771,8 @@ jobs:
           echo "  type-drift:        ${{ needs.type-drift.result }}"
           echo "  security:          ${{ needs.security.result }}"
 
-          # type-drift is warn-only — allow skipped/success
-          # All other jobs must succeed
+          # Every job below is a required gate and must succeed (type-drift is now
+          # fail-on-drift, no longer warn-only).
           FAILED=0
           for result in \
             "${{ needs.install.result }}" \
@@ -798,6 +786,7 @@ jobs:
             "${{ needs.test-integration.result }}" \
             "${{ needs.migration-lint.result }}" \
             "${{ needs.db-security-audit.result }}" \
+            "${{ needs.type-drift.result }}" \
             "${{ needs.security.result }}"; do
             if [ "$result" != "success" ]; then
               FAILED=$((FAILED+1))

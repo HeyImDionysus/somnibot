@@ -1,0 +1,43 @@
+-- ============================================================
+-- Drop dead purge_user_data() — fails under empty search_path
+-- ============================================================
+-- WHAT / WHY
+-- ----------
+-- purge_user_data(text, text) is a security-definer function pinned to
+-- SET search_path = '' whose body references ~17 base tables (economy_wallets,
+-- members, economy_transactions, economy_market_listings, economy_inventories,
+-- economy_streaks, economy_farm_plots, economy_fish_catches,
+-- economy_adventure_sessions, economy_lottery_tickets, economy_pets,
+-- economy_quest_progress, economy_user_achievements, economy_prestige,
+-- xp_history, infractions, tickets) UNQUALIFIED. Under an empty search_path
+-- those names cannot resolve, so any CALL raises "relation does not exist" at
+-- runtime — the same failure class as the v7 lottery gen_random_bytes() outage.
+-- It was surfaced by the secdef search_path linter
+-- (scripts/check-secdef-search-path.py --include-tables) as 32 unqualified-table
+-- findings.
+--
+-- DEAD-OR-ALIVE: PROVABLY DEAD → DROP (not schema-qualify).
+--   1. It was created in 20260601000004_v53_dead_table_cleanup.sql and DROPPED
+--      the very next migration, 20260602000000_v53_production_readiness.sql:227
+--      (DROP FUNCTION IF EXISTS public.purge_user_data(text, text)), which
+--      documents: never called by the bot, references a wrong table name
+--      (economy_inventories vs the real economy_inventory), and deletes
+--      infractions/tickets outright instead of anonymizing.
+--   2. Zero callers anywhere in the repo: no .rpc('purge_user_data'), CALL,
+--      SELECT, PERFORM, pg_cron schedule, or trigger in packages/bot/src,
+--      packages/dashboard/src, scripts/, edge functions, or any migration.
+--   3. Superseded by the LIVE GDPR /forgetme function public.purge_member_data
+--      (packages/bot/src/features/privacy/forgetme-command.ts:118), last defined
+--      in 20260710070000_purge_member_data_grace_alert.sql — NOT touched here.
+--
+-- On a fully-migrated database the function therefore does not exist; the linter
+-- flags the stale historical CREATE because it evaluates the latest
+-- CREATE OR REPLACE and is not DROP-aware. This migration is a forward-only,
+-- idempotent, schema-qualified re-DROP that guarantees the buggy function is
+-- absent regardless of apply history and records the removal as the newest word
+-- on this function. No new security-definer object is introduced.
+--
+-- The live purge_member_data(text, text) is intentionally left untouched.
+-- ============================================================
+
+DROP FUNCTION IF EXISTS public.purge_user_data(text, text);
