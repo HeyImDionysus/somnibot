@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { checkCsrf, shouldRotateCsrf, csrfRotationSeed, stripCsrfTimestamp, deriveRotatedCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
+import { checkCsrf, shouldRotateCsrf, csrfRotationSeed, stripCsrfTimestamp, csrfCookieSessionId, deriveRotatedCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /* ------------------------------------------------------------------ */
@@ -299,17 +299,35 @@ export async function middleware(request: NextRequest) {
     // cookie verbatim, whose timestamp is >30min old by definition (that is
     // what triggered rotation), so the grace-window check always rejected it
     // and every in-flight old token 403'd until the client re-fetched.
-    const oldPrefix = stripCsrfTimestamp(currentCookie);
-    supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${oldPrefix}!${rotatedAt}`, {
-      httpOnly: true,
-      sameSite: 'strict',
-      secure: process.env.NODE_ENV === 'production',
-      path: '/',
-      // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
-      // buffer. Previously 120s which stored the cookie well past the 60s
-      // acceptance window, wasting cookie bandwidth and leaking timing info.
-      maxAge: 90,
-    });
+    //
+    // [security] Only grant grace when the stale cookie belongs to the SAME
+    // session that is now authenticated. After a logout/login or account switch
+    // the browser may still carry the *previous* user's CSRF cookie (it is not
+    // cleared on sign-in). Re-stamping that foreign `nonce:session` as a fresh
+    // `prev` would let `checkCsrf` accept the previous user's token — which it
+    // verifies against the session embedded in `prev`, not the authenticated
+    // user — for the whole 60s window under the new session. Skipping the prev
+    // cookie on a session mismatch closes that cross-session grace leak; the
+    // stale tab simply re-fetches /api/csrf (the current cookie is still rotated
+    // below to the new session either way).
+    const oldSessionId = csrfCookieSessionId(currentCookie);
+    if (oldSessionId === sessionId) {
+      const oldPrefix = stripCsrfTimestamp(currentCookie);
+      supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${oldPrefix}!${rotatedAt}`, {
+        httpOnly: true,
+        sameSite: 'strict',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
+        // buffer. Previously 120s which stored the cookie well past the 60s
+        // acceptance window, wasting cookie bandwidth and leaking timing info.
+        maxAge: 90,
+      });
+    } else {
+      // Session changed — actively expire any stale prev cookie so a foreign
+      // token cannot ride an earlier grace window into the new session.
+      supabaseResponse.cookies.delete(CSRF_PREV_COOKIE_NAME);
+    }
 
     // Derive the rotated token from a stable seed taken from the STALE cookie
     // itself so every concurrent request lands on the same nonce. For

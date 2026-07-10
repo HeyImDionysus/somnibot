@@ -303,6 +303,54 @@ describe('middleware CSRF rotation under concurrency', () => {
     expect([...nonces][0]).toBe(expected.nonce);
   });
 
+  it('does NOT grant a usable prev cookie when the stale cookie is from another session', async () => {
+    // [security] After a logout/login or account switch, the browser can still
+    // carry the PREVIOUS user's CSRF cookie (it is not cleared on sign-in).
+    // Rotating for the newly authenticated session must not re-stamp that
+    // foreign nonce:session as a fresh `prev` — otherwise checkCsrf's prev
+    // branch (which verifies against the session embedded IN prev) would grant
+    // the old user's token a 60s grace window under the NEW session.
+    const { middleware } = await import('../middleware');
+    const otherSession = 'oldsessionabcdef0'.slice(-16); // != SESSION_ID
+    expect(otherSession).not.toBe(SESSION_ID);
+    const staleIssuedAt = Date.now() - 31 * 60 * 1000;
+    const pre = await generateCsrfToken(otherSession);
+
+    const req = new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    });
+    // Cookie's embedded session is the PREVIOUS user; getUser() resolves to
+    // USER_ID (see beforeEach), so the authenticated sessionId = SESSION_ID.
+    req.cookies.set(CSRF_COOKIE_NAME, `${pre.nonce}:${otherSession}!${staleIssuedAt}`);
+
+    const res = await middleware(req);
+
+    // Current cookie is still rotated to the newly authenticated session …
+    const newCookie = res.cookies.get(CSRF_COOKIE_NAME)!.value;
+    expect(parseCsrfCookie(newCookie).sessionId).toBe(SESSION_ID);
+
+    // … but the prev cookie is NOT set to the foreign token. It is either
+    // absent or emitted as an expiring deletion (Max-Age=0). Either way, a real
+    // browser ends up with no usable prev cookie carrying the old user's nonce.
+    const prevValue = res.cookies.get(CSRF_PREV_COOKIE_NAME)?.value ?? '';
+    expect(prevValue).not.toContain(pre.nonce);
+  });
+
+  it('still grants prev grace on a same-session rotation (regression guard for the mismatch check)', async () => {
+    const { middleware } = await import('../middleware');
+    const staleIssuedAt = Date.now() - 31 * 60 * 1000;
+    const pre = await generateCsrfToken(SESSION_ID); // SAME session as the user
+    const req = new NextRequest('http://localhost:3000/dashboard', {
+      headers: { host: 'localhost:3000' },
+    });
+    req.cookies.set(CSRF_COOKIE_NAME, `${pre.nonce}:${SESSION_ID}!${staleIssuedAt}`);
+
+    const res = await middleware(req);
+    const prevValue = res.cookies.get(CSRF_PREV_COOKIE_NAME)?.value ?? '';
+    // Same session → the old nonce IS preserved for the grace window.
+    expect(prevValue).toContain(pre.nonce);
+  });
+
   it('preserves the pre-rotation token via the prev cookie during the grace window', async () => {
     const { middleware } = await import('../middleware');
     const staleIssuedAt = Date.now() - 31 * 60 * 1000;

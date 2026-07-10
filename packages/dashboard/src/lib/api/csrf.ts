@@ -197,6 +197,21 @@ export function csrfRotationSeed(cookieValue: string): string {
 }
 
 /**
+ * Extract the session identifier embedded in a CSRF cookie value
+ * (`nonce:sessionId` or `nonce:sessionId!timestamp`). Returns null when the
+ * cookie has no `:` separator (malformed). Mirrors the parsing in `checkCsrf`
+ * so callers that need to compare the cookie's session against the currently
+ * authenticated session stay consistent.
+ */
+export function csrfCookieSessionId(cookieValue: string): string | null {
+  const colonIdx = cookieValue.indexOf(':');
+  if (colonIdx === -1) return null;
+  const rest = cookieValue.slice(colonIdx + 1);
+  const bangIdx = rest.lastIndexOf('!');
+  return bangIdx === -1 ? rest : rest.slice(0, bangIdx);
+}
+
+/**
  * Extract the issuance timestamp from a CSRF cookie value
  * (`nonce:sessionId!timestamp`). Returns null when the cookie has no parseable
  * `!timestamp` suffix (legacy cookies) so callers can fall back safely.
