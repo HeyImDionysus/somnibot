@@ -47,31 +47,36 @@ function completedRevokeHadFailedRoles(result: unknown): boolean {
   return Array.isArray(failed) && failed.length > 0;
 }
 
-async function hasQueuedSubscriptionExpiryRoleRevocation(
+async function hasQueuedRoleRevocation(
   supabase: ReturnType<typeof createAdminSupabase>,
   input: {
     guildId: string;
     discordId: string;
     orderId: string;
-    productId: string;
+    reason: string;
+    productId?: string;
   },
 ): Promise<boolean> {
+  const payloadFilter: Record<string, string> = {
+    discord_id: input.discordId,
+    order_id: input.orderId,
+    reason: input.reason,
+  };
+  if (input.productId) {
+    payloadFilter.product_id = input.productId;
+  }
+
   const { data, error } = await supabase
     .from('bot_action_queue')
     .select('id, status, result')
     .eq('guild_id', input.guildId)
     .eq('action', 'revoke_roles')
     .in('status', ['pending', 'processing', 'completed'])
-    .contains('payload', {
-      discord_id: input.discordId,
-      order_id: input.orderId,
-      product_id: input.productId,
-      reason: 'subscription_expired',
-    })
+    .contains('payload', payloadFilter)
     .limit(1000);
   requireSupabaseSuccess(
     error,
-    'Failed to inspect queued role revocation for subscription expiry',
+    'Failed to inspect queued role revocation',
   );
   if (!Array.isArray(data)) return false;
   return data.some((row) => {
@@ -535,7 +540,7 @@ export async function handleSubscriptionCancelled(
 
   if (!customer?.discord_id) return;
 
-  await queueFulfillment(supabase, 'fulfill_cancellation', order.guild_id, {
+  const queued = await queueFulfillment(supabase, 'fulfill_cancellation', order.guild_id, {
     fulfillment_type: 'subscription_cancelled',
     guild_id: order.guild_id,
     customer_id: order.customer_id,
@@ -550,6 +555,14 @@ export async function handleSubscriptionCancelled(
     granted_channel_ids: [],
     entitlement_type: 'subscription',
   });
+  // W2: a failed queue insert used to be logged and swallowed — the
+  // cancellation (and the bot-side entitlement revocation it drives) was
+  // silently lost. Throw so the webhook records an error and can be retried;
+  // the bot-side revoke is a no-op for already-revoked entitlements, so a
+  // retry cannot double-revoke.
+  if (!queued) {
+    throw new Error('Failed to queue subscription cancellation fulfillment');
+  }
 
   console.log(
     `[Webhook] Subscription cancelled + fulfillment queued: ${subscriptionId}`,
@@ -718,13 +731,14 @@ export async function handleSubscriptionExpired(
     if (customer?.discord_id) {
       let shouldQueueRoleRevocation = roleIds.length > 0;
       if (shouldQueueRoleRevocation && options.retryingFailedEvent) {
-        shouldQueueRoleRevocation = !(await hasQueuedSubscriptionExpiryRoleRevocation(
+        shouldQueueRoleRevocation = !(await hasQueuedRoleRevocation(
           supabase,
           {
             guildId: order.guild_id,
             discordId: customer.discord_id,
             orderId: order.id,
             productId: order.product_id,
+            reason: 'subscription_expired',
           },
         ));
       }
@@ -834,7 +848,7 @@ export async function handleSubscriptionSuspended(
 
   if (!customer?.discord_id) return;
 
-  await queueFulfillment(supabase, 'fulfill_suspension', order.guild_id, {
+  const queued = await queueFulfillment(supabase, 'fulfill_suspension', order.guild_id, {
     fulfillment_type: 'subscription_suspended',
     guild_id: order.guild_id,
     customer_id: order.customer_id,
@@ -849,6 +863,12 @@ export async function handleSubscriptionSuspended(
     granted_channel_ids: [],
     entitlement_type: 'subscription',
   });
+  // W2: same reasoning as handleSubscriptionCancelled — losing this insert
+  // silently means the entitlement never enters its grace period. The
+  // bot-side suspend targets 'active' entitlements only, so retries are safe.
+  if (!queued) {
+    throw new Error('Failed to queue subscription suspension fulfillment');
+  }
 
   console.log(
     `[Webhook] Subscription suspended + fulfillment queued: ${subscriptionId}`,
@@ -897,10 +917,15 @@ export async function handleSubscriptionPayment(
 
 // ── Capture Refunded / Reversed ─────────────────────
 
+export interface RefundHandlerOptions {
+  retryingFailedEvent?: boolean;
+}
+
 export async function handleCaptureRefunded(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
   eventType: string,
+  options: RefundHandlerOptions = {},
 ) {
   const captureId = resolveCaptureRefundPaymentId(resource);
 
@@ -912,7 +937,14 @@ export async function handleCaptureRefunded(
     return;
   }
 
-  await handleExternalPaymentRefunded(supabase, captureId, eventType, 'capture_id');
+  await handleExternalPaymentRefunded(
+    supabase,
+    captureId,
+    eventType,
+    'capture_id',
+    resource,
+    options,
+  );
 }
 
 // ── Subscription Sale Refunded / Reversed ───────────
@@ -921,6 +953,7 @@ export async function handleSaleRefunded(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
   eventType: string,
+  options: RefundHandlerOptions = {},
 ) {
   const saleId = resolveSaleRefundPaymentId(resource, eventType);
 
@@ -932,32 +965,185 @@ export async function handleSaleRefunded(
     return;
   }
 
-  await handleExternalPaymentRefunded(supabase, saleId, eventType, 'sale_id');
+  await handleExternalPaymentRefunded(
+    supabase,
+    saleId,
+    eventType,
+    'sale_id',
+    resource,
+    options,
+  );
 }
 
+// ── Refund semantics (W2) ───────────────────────────
+
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: unknown }).code === '23505',
+  );
+}
+
+/**
+ * Parse a PayPal money string ("10.00", or "-5.00" — v1 sale refund events
+ * report the refund amount as a negative delta) into non-negative cents.
+ */
+function parseAmountToCents(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.abs(Math.round(parsed * 100));
+}
+
+interface RefundAmountInfo {
+  /** Amount of THIS refund event, in cents (null = missing/unparseable). */
+  refundAmountCents: number | null;
+  refundCurrency: string | null;
+  /** PayPal's cumulative refunded total for the parent capture/sale. */
+  paypalTotalRefundedCents: number | null;
+}
+
+function resolveRefundAmounts(
+  resource: Record<string, unknown>,
+  eventType: string,
+): RefundAmountInfo {
+  if (eventType.startsWith('PAYMENT.CAPTURE.')) {
+    const parsed = paypalCaptureResourceSchema.safeParse(resource);
+    if (!parsed.success) {
+      return { refundAmountCents: null, refundCurrency: null, paypalTotalRefundedCents: null };
+    }
+    return {
+      refundAmountCents: parseAmountToCents(parsed.data.amount?.value),
+      refundCurrency: parsed.data.amount?.currency_code ?? null,
+      paypalTotalRefundedCents: parseAmountToCents(
+        parsed.data.seller_payable_breakdown?.total_refunded_amount?.value,
+      ),
+    };
+  }
+
+  const parsed = paypalSaleResourceSchema.safeParse(resource);
+  if (!parsed.success) {
+    return { refundAmountCents: null, refundCurrency: null, paypalTotalRefundedCents: null };
+  }
+  return {
+    refundAmountCents: parseAmountToCents(parsed.data.amount?.total),
+    refundCurrency: parsed.data.amount?.currency ?? null,
+    paypalTotalRefundedCents: parseAmountToCents(parsed.data.total_refunded_amount?.value),
+  };
+}
+
+type FullRefundReason =
+  | 'reversal'
+  | 'unparseable_amount'
+  | 'currency_mismatch'
+  | 'no_payment_baseline'
+  | 'cumulative_total';
+
+type RefundScope = { kind: 'full'; reason: FullRefundReason } | { kind: 'partial' };
+
+/**
+ * Decide whether a refund event revokes access (full) or is flagged for
+ * operator review (partial). Every ambiguous case resolves to FULL — the
+ * merchant-safe default (money left, so access goes) that also matches the
+ * pre-W2 behavior:
+ *   - .REVERSED events are chargebacks/reversals — always full.
+ *   - Unparseable/missing amounts can't be compared — full.
+ *   - A refund in a different currency can't be compared — full.
+ *   - A payment recorded with amount_cents <= 0 (e.g. a subscription sale
+ *     whose amount lookup failed) has no baseline — full.
+ * Otherwise the cumulative refunded total (max of PayPal's authoritative
+ * total and the locally recorded payment_refunds sum) decides.
+ */
+function classifyRefundScope(input: {
+  eventType: string;
+  paymentAmountCents: number | null;
+  paymentCurrency: string | null;
+  refundAmountCents: number | null;
+  refundCurrency: string | null;
+  cumulativeRefundedCents: number;
+}): RefundScope {
+  if (input.eventType.endsWith('.REVERSED')) {
+    return { kind: 'full', reason: 'reversal' };
+  }
+  if (input.refundAmountCents == null) {
+    return { kind: 'full', reason: 'unparseable_amount' };
+  }
+  if (
+    input.refundCurrency &&
+    input.paymentCurrency &&
+    input.refundCurrency.toUpperCase() !== input.paymentCurrency.toUpperCase()
+  ) {
+    return { kind: 'full', reason: 'currency_mismatch' };
+  }
+  if (typeof input.paymentAmountCents !== 'number' || input.paymentAmountCents <= 0) {
+    return { kind: 'full', reason: 'no_payment_baseline' };
+  }
+  if (input.cumulativeRefundedCents >= input.paymentAmountCents) {
+    return { kind: 'full', reason: 'cumulative_total' };
+  }
+  return { kind: 'partial' };
+}
+
+function formatCents(cents: number | null, currency: string | null): string {
+  if (cents == null) return 'an unknown amount';
+  return `${(cents / 100).toFixed(2)} ${currency ?? ''}`.trim();
+}
+
+/**
+ * PAYMENT.CAPTURE.REFUNDED / .REVERSED and PAYMENT.SALE.REFUNDED / .REVERSED.
+ *
+ * W2 semantics:
+ *  - FULL refund/reversal → revoke entitlements, license keys and their
+ *    active license sessions, queue Discord role revocation, and write the
+ *    audit trail. The payments.status flip to refunded/reversed happens LAST:
+ *    it is the commit marker the replay guard keys off, so a crash mid-way
+ *    leaves the event retryable instead of half-revoked-but-skipped.
+ *  - PARTIAL refund → access is NOT auto-revoked. The refund is recorded,
+ *    an operator-review alert is raised (deduped per refund id by a partial
+ *    unique index), and the decision is written to audit_logs. (No per-product
+ *    auto-revoke override exists in the schema today; review-first is the
+ *    only behavior.)
+ *  - Idempotency → each refund id is recorded in payment_refunds under a
+ *    unique index; a replayed event tolerates the 23505 and skips its side
+ *    effects unless it is resuming a previously failed attempt.
+ *  - Ordering → a refund arriving before its capture/sale-completed event
+ *    (no payments row yet) throws so the webhook is recorded as an error and
+ *    PayPal's retry re-processes it once the payment exists (refund event
+ *    types are in RESUMABLE_FAILED_EVENT_TYPES).
+ */
 async function handleExternalPaymentRefunded(
   supabase: ReturnType<typeof createAdminSupabase>,
   paymentId: string,
   eventType: string,
   identifierField: 'capture_id' | 'sale_id',
+  resource: Record<string, unknown>,
+  options: RefundHandlerOptions = {},
 ) {
-  const { data: payment } = await supabase
-    .from('payments')
-    .select('id, order_id, customer_id, guild_id, status')
-    .eq('paypal_payment_id', paymentId)
-    .maybeSingle();
-
   const identifierName = identifierField === 'capture_id' ? 'capture' : 'sale';
 
+  const { data: payment, error: paymentError } = await supabase
+    .from('payments')
+    .select('id, order_id, customer_id, guild_id, status, amount_cents, currency')
+    .eq('paypal_payment_id', paymentId)
+    .maybeSingle();
+  requireSupabaseSuccess(paymentError, 'Failed to load payment for refund');
+
   if (!payment?.order_id) {
-    console.warn(
-      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — no matching payment row, ignoring`,
+    // Out-of-order webhook: the refund raced ahead of its
+    // PAYMENT.CAPTURE.COMPLETED / PAYMENT.SALE.COMPLETED (or the payment was
+    // never recorded). Silently ignoring this — the old behavior — left the
+    // customer with full access after an external refund. Throw instead so
+    // the event is recorded as an error and PayPal's retries re-process it
+    // once the payment row exists.
+    throw new Error(
+      `${eventType} for ${identifierName} ${paymentId} has no matching payment row yet — ` +
+        'deferring for webhook retry (out-of-order delivery or unknown payment)',
     );
-    return;
   }
 
-  // V5 Audit §2.P3b: Skip if payment was already refunded/reversed to prevent
-  // duplicate processing noise and redundant role-revocation queue entries.
+  // Idempotency guard: only set after every revocation effect has succeeded.
   if (payment.status === 'refunded' || payment.status === 'reversed') {
     console.info(
       `[Webhook] ${eventType} for ${identifierName} ${paymentId} — payment already ${payment.status}, skipping`,
@@ -967,89 +1153,321 @@ async function handleExternalPaymentRefunded(
 
   const orderId = payment.order_id;
   const refundStatus = eventType.endsWith('.REVERSED') ? 'reversed' : 'refunded';
+  const amounts = resolveRefundAmounts(resource, eventType);
+  const refundId =
+    typeof resource.id === 'string' && resource.id.length > 0 ? resource.id : null;
 
-  const { data: activeEntitlements } = await supabase
-    .from('entitlements')
-    .select('id, customer_id, granted_role_ids')
-    .eq('order_id', orderId)
-    .in('status', ['active', 'pending', 'grace_period'])
-    .limit(1000);
-
-  await supabase
-    .from('payments')
-    .update({ status: refundStatus })
-    .eq('id', payment.id);
-
-  await supabase
-    .from('orders')
-    .update({ status: 'refunded', updated_at: new Date().toISOString() })
-    .eq('id', orderId);
-
-  await supabase
-    .from('entitlements')
-    .update({
-      status: 'expired',
-      cancelled_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('order_id', orderId)
-    .in('status', ['active', 'pending', 'grace_period']);
-
-  await supabase
-    .from('license_keys')
-    .update({
-      status: 'revoked',
-      revoked_at: new Date().toISOString(),
-      revocation_reason: refundStatus,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('order_id', orderId)
-    .neq('status', 'revoked');
-
-  if (activeEntitlements?.length) {
-    const allRoleIds = [
-      ...new Set(activeEntitlements.flatMap((e) => e.granted_role_ids ?? [])),
-    ];
-    if (allRoleIds.length > 0) {
-      const { data: customer } = await supabase
-        .from('customers')
-        .select('discord_id')
-        .eq('id', activeEntitlements[0]!.customer_id)
-        .single();
-
-      if (customer?.discord_id) {
-        await queueFulfillment(supabase, 'revoke_roles', payment.guild_id, {
-          discord_id: customer.discord_id,
-          role_ids: allRoleIds,
-          reason: refundStatus,
-          order_id: orderId,
-        });
+  // Record this refund id — the unique index on payment_refunds
+  // (paypal_refund_id) is the atomic dedupe across replays, resumed retries
+  // and concurrent instances; a 23505 means "already recorded", not an error.
+  let alreadyRecorded = false;
+  if (refundId) {
+    const { error: refundInsertError } = await supabase.from('payment_refunds').insert({
+      payment_id: payment.id,
+      order_id: orderId,
+      guild_id: payment.guild_id,
+      paypal_refund_id: refundId,
+      event_type: eventType,
+      amount_cents: amounts.refundAmountCents,
+      currency: amounts.refundCurrency,
+    });
+    if (refundInsertError) {
+      if (isUniqueViolation(refundInsertError)) {
+        alreadyRecorded = true;
+      } else {
+        throw new Error(
+          `Failed to record refund ${refundId}: ${formatSupabaseError(refundInsertError)}`,
+        );
       }
     }
   }
 
-  await supabase
-    .from('audit_logs')
-    .insert({
+  // Locally recorded cumulative total (includes this refund's row).
+  const { data: recordedRefunds, error: recordedRefundsError } = await supabase
+    .from('payment_refunds')
+    .select('amount_cents')
+    .eq('payment_id', payment.id)
+    .limit(1000);
+  requireSupabaseSuccess(recordedRefundsError, 'Failed to load recorded refunds for payment');
+  const locallyRecordedCents = (recordedRefunds ?? []).reduce(
+    (sum, row) =>
+      sum + (typeof row?.amount_cents === 'number' ? row.amount_cents : 0),
+    0,
+  );
+  // Two concurrent partial refunds can each miss the other's row locally;
+  // PayPal's cumulative total (present on capture refunds and sale refunds)
+  // is authoritative and closes that window on whichever event carries it.
+  const cumulativeRefundedCents = Math.max(
+    locallyRecordedCents,
+    amounts.paypalTotalRefundedCents ?? 0,
+    amounts.refundAmountCents ?? 0,
+  );
+
+  const scope = classifyRefundScope({
+    eventType,
+    paymentAmountCents: typeof payment.amount_cents === 'number' ? payment.amount_cents : null,
+    paymentCurrency: typeof payment.currency === 'string' ? payment.currency : null,
+    refundAmountCents: amounts.refundAmountCents,
+    refundCurrency: amounts.refundCurrency,
+    cumulativeRefundedCents,
+  });
+
+  if (scope.kind === 'partial') {
+    // A replayed, already-recorded partial refund has nothing left to do —
+    // unless this is the resumption of a previously FAILED attempt, where
+    // the alert/audit writes may not have happened (both are idempotent:
+    // the alert is deduped per refund id by a partial unique index).
+    if (alreadyRecorded && !options.retryingFailedEvent) {
+      console.info(
+        `[Webhook] ${eventType} for ${identifierName} ${paymentId} — partial refund ${refundId} already processed, skipping`,
+      );
+      return;
+    }
+
+    const { error: alertError } = await supabase.from('alerts').insert({
+      guild_id: payment.guild_id,
+      alert_type: 'partial_refund_review',
+      severity: 'warning',
+      title: 'Partial PayPal refund — review required',
+      message:
+        `PayPal reported a partial refund of ${formatCents(amounts.refundAmountCents, amounts.refundCurrency)} ` +
+        `against a payment of ${formatCents(payment.amount_cents, payment.currency)} (order ${orderId}). ` +
+        'Access was NOT revoked automatically — review the order and revoke manually if warranted.',
+      metadata: {
+        source: 'paypal_webhook',
+        event_type: eventType,
+        paypal_refund_id: refundId,
+        [identifierField]: paymentId,
+        order_id: orderId,
+        payment_id: payment.id,
+        refund_amount_cents: amounts.refundAmountCents,
+        payment_amount_cents: payment.amount_cents ?? null,
+        cumulative_refunded_cents: cumulativeRefundedCents,
+        currency: amounts.refundCurrency ?? payment.currency ?? null,
+      },
+    });
+    if (alertError && !isUniqueViolation(alertError)) {
+      throw new Error(
+        `Failed to raise partial refund review alert: ${formatSupabaseError(alertError)}`,
+      );
+    }
+
+    const { error: auditError } = await supabase.from('audit_logs').insert({
       guild_id: payment.guild_id,
       actor_type: 'system',
       actor_id: 'paypal_webhook',
-      action:
-        eventType.endsWith('.REVERSED')
-          ? 'order.reversed'
-          : 'order.refunded_external',
+      action: 'order.refund_partial',
       target_type: 'order',
       target_id: orderId,
-      details: { event_type: eventType, [identifierField]: paymentId },
-    })
-    .then(
-      () => {},
-      () => {
-        /* ignore */
+      details: {
+        event_type: eventType,
+        [identifierField]: paymentId,
+        paypal_refund_id: refundId,
+        refund_scope: 'partial',
+        refund_amount_cents: amounts.refundAmountCents,
+        payment_amount_cents: payment.amount_cents ?? null,
+        cumulative_refunded_cents: cumulativeRefundedCents,
+        currency: amounts.refundCurrency ?? payment.currency ?? null,
+        decision: 'access_retained_pending_review',
       },
+    });
+    requireSupabaseSuccess(auditError, 'Failed to write partial refund audit log');
+
+    console.log(
+      `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — ` +
+        `partial refund (${cumulativeRefundedCents}/${payment.amount_cents} cents), access retained, operator review raised`,
     );
+    return;
+  }
+
+  // ── FULL refund/reversal: revoke everything, marker last ──
+
+  // On a resumed retry, entitlements may already be expired by the failed
+  // attempt — include them so the role revocation is still computed/queued.
+  const entitlementLookupStatuses = options.retryingFailedEvent
+    ? EXPIRY_RETRY_ENTITLEMENT_STATUSES
+    : EXPIRABLE_ENTITLEMENT_STATUSES;
+
+  const { data: activeEntitlements, error: entitlementsError } = await supabase
+    .from('entitlements')
+    .select('id, customer_id, granted_role_ids, license_key_id')
+    .eq('order_id', orderId)
+    .in('status', entitlementLookupStatuses)
+    .limit(1000);
+  requireSupabaseSuccess(entitlementsError, 'Failed to load entitlements for refund revocation');
+
+  // All of the order's license keys (any status) so already-revoked keys from
+  // a crashed earlier attempt still get their sessions deactivated.
+  const { data: orderLicenseKeys, error: orderLicenseKeysError } = await supabase
+    .from('license_keys')
+    .select('id')
+    .eq('order_id', orderId)
+    .limit(1000);
+  requireSupabaseSuccess(orderLicenseKeysError, 'Failed to load license keys for refund revocation');
+
+  const licenseKeyIds = [
+    ...new Set([
+      ...(activeEntitlements ?? [])
+        .map((ent) => ent.license_key_id)
+        .filter((id): id is string => Boolean(id)),
+      ...(orderLicenseKeys ?? [])
+        .map((key) => key.id)
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  ];
+
+  const revokedRoleIds = [
+    ...new Set(
+      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+    ),
+  ];
+  const customerId: string | null =
+    (typeof payment.customer_id === 'string' && payment.customer_id) ||
+    activeEntitlements?.[0]?.customer_id ||
+    null;
+
+  // Preserve roles still granted by the customer's other live entitlements
+  // (same rule as subscription expiry) — a refund of product A must not strip
+  // a role the customer still pays for through product B.
+  let roleIds = revokedRoleIds;
+  if (revokedRoleIds.length > 0 && customerId) {
+    const { data: remainingEntitlements, error: remainingError } = await supabase
+      .from('entitlements')
+      .select('granted_role_ids')
+      .eq('customer_id', customerId)
+      .eq('guild_id', payment.guild_id)
+      .neq('order_id', orderId)
+      .in('status', ['active', 'pending', 'grace_period'])
+      .limit(1000);
+    requireSupabaseSuccess(
+      remainingError,
+      'Failed to load role-preserving entitlements for refund',
+    );
+    const preservedRoleIds = new Set(
+      (remainingEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
+    );
+    roleIds = revokedRoleIds.filter((roleId) => !preservedRoleIds.has(roleId));
+  }
+
+  const nowIso = new Date().toISOString();
+
+  const { error: expireEntitlementsError } = await supabase
+    .from('entitlements')
+    .update({
+      status: 'expired',
+      cancelled_at: nowIso,
+      updated_at: nowIso,
+    })
+    .eq('order_id', orderId)
+    .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
+  requireSupabaseSuccess(expireEntitlementsError, 'Failed to revoke entitlements for refund');
+
+  const { error: revokeKeysError } = await supabase
+    .from('license_keys')
+    .update({
+      status: 'revoked',
+      revoked_at: nowIso,
+      revocation_reason: refundStatus,
+      updated_at: nowIso,
+    })
+    .eq('order_id', orderId)
+    .neq('status', 'revoked');
+  requireSupabaseSuccess(revokeKeysError, 'Failed to revoke license keys for refund');
+
+  if (licenseKeyIds.length > 0) {
+    const { error: deactivateSessionsError } = await supabase
+      .from('license_sessions')
+      .update({
+        active: false,
+        deactivated_at: nowIso,
+        deactivation_reason: 'entitlement_revoked',
+      })
+      .in('license_key_id', licenseKeyIds)
+      .eq('active', true);
+    requireSupabaseSuccess(
+      deactivateSessionsError,
+      'Failed to deactivate license sessions for refund',
+    );
+  }
+
+  if (roleIds.length > 0 && customerId) {
+    const { data: customer, error: customerError } = await supabase
+      .from('customers')
+      .select('discord_id')
+      .eq('id', customerId)
+      .maybeSingle();
+    requireSupabaseSuccess(customerError, 'Failed to load customer for refund role revocation');
+
+    if (customer?.discord_id) {
+      let shouldQueueRoleRevocation = true;
+      if (options.retryingFailedEvent) {
+        shouldQueueRoleRevocation = !(await hasQueuedRoleRevocation(supabase, {
+          guildId: payment.guild_id,
+          discordId: customer.discord_id,
+          orderId,
+          reason: refundStatus,
+        }));
+      }
+
+      if (shouldQueueRoleRevocation) {
+        const queued = await queueFulfillment(supabase, 'revoke_roles', payment.guild_id, {
+          discord_id: customer.discord_id,
+          role_ids: roleIds,
+          reason: refundStatus,
+          order_id: orderId,
+        });
+        if (!queued) {
+          throw new Error('Failed to queue role revocation for refund');
+        }
+      }
+    } else {
+      console.warn(
+        `[Webhook] ${eventType} for order ${orderId} — customer has no discord_id, Discord roles not revoked`,
+      );
+    }
+  }
+
+  const { error: auditError } = await supabase.from('audit_logs').insert({
+    guild_id: payment.guild_id,
+    actor_type: 'system',
+    actor_id: 'paypal_webhook',
+    action:
+      eventType.endsWith('.REVERSED')
+        ? 'order.reversed'
+        : 'order.refunded_external',
+    target_type: 'order',
+    target_id: orderId,
+    details: {
+      event_type: eventType,
+      [identifierField]: paymentId,
+      paypal_refund_id: refundId,
+      refund_scope: 'full',
+      full_refund_reason: scope.reason,
+      refund_amount_cents: amounts.refundAmountCents,
+      payment_amount_cents: payment.amount_cents ?? null,
+      cumulative_refunded_cents: cumulativeRefundedCents,
+      entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
+      license_key_ids: licenseKeyIds,
+      role_ids: roleIds,
+    },
+  });
+  requireSupabaseSuccess(auditError, 'Failed to write refund audit log');
+
+  const { error: orderUpdateError } = await supabase
+    .from('orders')
+    .update({ status: 'refunded', updated_at: nowIso })
+    .eq('id', orderId);
+  requireSupabaseSuccess(orderUpdateError, 'Failed to mark order refunded');
+
+  // Commit marker LAST — the replay guard at the top keys off this status,
+  // so it must only flip once every revocation effect has been applied.
+  const { error: paymentUpdateError } = await supabase
+    .from('payments')
+    .update({ status: refundStatus })
+    .eq('id', payment.id);
+  requireSupabaseSuccess(paymentUpdateError, `Failed to mark payment ${refundStatus}`);
 
   console.log(
-    `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId})`,
+    `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — full refund, access revoked`,
   );
 }

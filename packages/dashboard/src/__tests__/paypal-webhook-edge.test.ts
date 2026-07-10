@@ -1465,17 +1465,26 @@ describe('PayPal webhook — edge cases', () => {
         },
         error: null,
       },
-      entitlements: {
-        data: [
-          {
-            id: 'entitlement-1',
-            customer_id: 'customer-1',
-            granted_role_ids: ['role-1', 'role-2'],
-          },
-        ],
-        error: null,
-      },
+      entitlements: [
+        {
+          data: [
+            {
+              id: 'entitlement-1',
+              customer_id: 'customer-1',
+              granted_role_ids: ['role-1', 'role-2'],
+              license_key_id: null,
+            },
+          ],
+          error: null,
+        },
+        { data: [], error: null }, // role-preservation lookup (other orders)
+        { data: null, error: null },
+      ],
+      license_keys: { data: [], error: null },
       customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: { data: null, error: null },
+      audit_logs: { data: null, error: null },
+      orders: { data: null, error: null },
     });
     const req = makeReplay({
       event_type: 'PAYMENT.SALE.REFUNDED',

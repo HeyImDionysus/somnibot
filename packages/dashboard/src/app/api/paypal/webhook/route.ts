@@ -39,6 +39,15 @@ import {
 const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
 const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   'BILLING.SUBSCRIPTION.EXPIRED',
+  // W2 refund semantics: refund handling is idempotent (payment_refunds
+  // unique refund id + payments.status flipped only after all effects), and
+  // an out-of-order refund (arriving before its capture/sale-completed
+  // event) intentionally fails so PayPal's retry re-processes it once the
+  // payment row exists. Both need failed refund events to be resumable.
+  'PAYMENT.CAPTURE.REFUNDED',
+  'PAYMENT.CAPTURE.REVERSED',
+  'PAYMENT.SALE.REFUNDED',
+  'PAYMENT.SALE.REVERSED',
 ]);
 
 type PayPalWebhookEvent = {
@@ -332,11 +341,15 @@ export async function POST(req: NextRequest) {
         break;
       case 'PAYMENT.CAPTURE.REFUNDED':
       case 'PAYMENT.CAPTURE.REVERSED':
-        await handleCaptureRefunded(supabase, event.resource, event.event_type);
+        await handleCaptureRefunded(supabase, event.resource, event.event_type, {
+          retryingFailedEvent,
+        });
         break;
       case 'PAYMENT.SALE.REFUNDED':
       case 'PAYMENT.SALE.REVERSED':
-        await handleSaleRefunded(supabase, event.resource, event.event_type);
+        await handleSaleRefunded(supabase, event.resource, event.event_type, {
+          retryingFailedEvent,
+        });
         break;
       default:
         console.log(`[Webhook] Unhandled event: ${event.event_type}`);

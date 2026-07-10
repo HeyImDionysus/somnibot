@@ -31,6 +31,15 @@ export const paypalCaptureResourceSchema = z.object({
     value: z.string().optional(),
     currency_code: z.string().optional(),
   }).optional(),
+  // W2 refund semantics: on PAYMENT.CAPTURE.REFUNDED the resource is a v2
+  // Refund object whose seller_payable_breakdown carries PayPal's
+  // authoritative cumulative refunded total for the parent capture.
+  seller_payable_breakdown: z.object({
+    total_refunded_amount: z.object({
+      value: z.string().optional(),
+      currency_code: z.string().optional(),
+    }).optional(),
+  }).optional(),
   supplementary_data: z.object({
     related_ids: z.object({
       capture_id: z.string().optional(),
@@ -48,6 +57,12 @@ export const paypalSaleResourceSchema = z.object({
   billing_agreement_id: z.string().optional(),
   amount: z.object({
     total: z.string().optional(),
+    currency: z.string().optional(),
+  }).optional(),
+  // W2 refund semantics: v1 sale refund resources carry the cumulative
+  // refunded total for the parent sale.
+  total_refunded_amount: z.object({
+    value: z.string().optional(),
     currency: z.string().optional(),
   }).optional(),
   links: z.array(paypalLinkSchema).optional(),
