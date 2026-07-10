@@ -46,6 +46,19 @@ export interface SetupGateEvaluation {
   message: string | null;
   /** The dashboard URL surfaced in the message so the owner can finish setup. */
   dashboardUrl: string;
+  /**
+   * True only when `state: 'complete'` was determined from an actual
+   * `setup_completed_at` row read — NOT from the read-failure fallback (a
+   * transient error with a token present degrades to 'complete' so an
+   * already-finalized production bot still boots normally on a blip).
+   *
+   * Startup treats both the same (either way, run the full boot). The
+   * setup-completion watcher, however, must NOT fire a verification→full-boot
+   * transition on a transient read blip that merely *looks* complete: it
+   * requires an unambiguously completed row, so it keys off this flag. Always
+   * false for non-complete states.
+   */
+  completionConfirmed: boolean;
 }
 
 const INSTANCE_SETTINGS_TABLE = 'instance_settings';
@@ -158,14 +171,22 @@ function hasDiscordTokenInEnv(env: NodeJS.ProcessEnv): boolean {
   return typeof env.DISCORD_TOKEN === 'string' && env.DISCORD_TOKEN.trim().length > 0;
 }
 
-/** Build the 'complete' evaluation (normal full boot). */
-function completeEvaluation(dashboardUrl: string): SetupGateEvaluation {
+/**
+ * Build the 'complete' evaluation (normal full boot).
+ *
+ * `confirmed` is true when a real `setup_completed_at` row was read, false when
+ * this is the transient-read-failure fallback (token present → boot normally
+ * anyway). The setup-completion watcher only transitions on a confirmed
+ * completion; see SetupGateEvaluation.completionConfirmed.
+ */
+function completeEvaluation(dashboardUrl: string, confirmed: boolean): SetupGateEvaluation {
   return {
     state: 'complete',
     shouldLogin: true,
     shouldRunFullInit: true,
     message: null,
     dashboardUrl,
+    completionConfirmed: confirmed,
   };
 }
 
@@ -180,6 +201,7 @@ function notStartedEvaluation(dashboardUrl: string): SetupGateEvaluation {
       `Setup not complete — no Discord bot token is configured yet. ` +
       `Finish setup at ${dashboardUrl} before the bot can run.`,
     dashboardUrl,
+    completionConfirmed: false,
   };
 }
 
@@ -204,7 +226,9 @@ export async function evaluateSetupGate(
 
   const completed = await readInstanceSetting(supabase, SETUP_COMPLETED_KEY);
   if (completed.value) {
-    return completeEvaluation(dashboardUrl);
+    // Genuine completed row read — an unambiguous completion the watcher can
+    // safely transition on.
+    return completeEvaluation(dashboardUrl, true);
   }
 
   // The setup_completed_at lookup did NOT complete (transient PostgREST/RLS
@@ -215,7 +239,10 @@ export async function evaluateSetupGate(
   // stay 'not_started' and idle rather than crash-loop.
   if (completed.readFailed) {
     if (hasDiscordTokenInEnv(env)) {
-      return completeEvaluation(dashboardUrl);
+      // Unknown state, but a token is present so we boot normally rather than
+      // downgrade a finalized bot on a blip. This completion is NOT confirmed:
+      // the setup-completion watcher must not treat it as a genuine finalize.
+      return completeEvaluation(dashboardUrl, false);
     }
     return notStartedEvaluation(dashboardUrl);
   }
@@ -238,6 +265,7 @@ export async function evaluateSetupGate(
         `Setup not complete — the bot is running in setup-verification mode so the wizard can confirm it is online. ` +
         `Finish setup at ${dashboardUrl} to enable all features.`,
       dashboardUrl,
+      completionConfirmed: false,
     };
   }
 

@@ -124,6 +124,24 @@ export interface SetupVerificationServices {
 }
 
 /**
+ * Write a verification `health` snapshot for every guild the bot is currently
+ * in. The setup route's Supabase readiness fallback
+ * (getOwnerRuntimeReadiness) looks up `bot_diagnostics` by the *configured*
+ * guild id — which is not necessarily `primaryGuildId` when the bot is in
+ * several guilds and the owner is setting up a non-primary one. Writing a row
+ * per current guild guarantees the configured guild is covered whichever one
+ * it is, and reading membership live means a guild the bot has since left is
+ * no longer refreshed (its last row goes stale and the readiness check trusts
+ * it for at most the 5-minute freshness window).
+ */
+async function refreshHealthForCurrentGuilds(client: SomniClient): Promise<void> {
+  const guildIds = Array.from(client.guilds.cache.keys());
+  for (const guildId of guildIds) {
+    await writeVerificationHealthSnapshot(client.supabase, guildId);
+  }
+}
+
+/**
  * Bring the bot online in verification-only mode. Writes the guild record(s),
  * starts the bot-level heartbeat, and writes/refreshes a `health` diagnostic
  * row so the setup wizard can confirm the bot is reachable — via Valkey OR its
@@ -168,12 +186,15 @@ export async function runSetupVerificationBoot(
   heartbeat.start();
 
   // Also write a `health` diagnostic so the wizard's Supabase readiness
-  // fallback works when Valkey is unreachable from the dashboard. Refresh it
-  // on the same cadence the readiness check's 5-minute freshness window
-  // expects to stay comfortably fresh.
-  await writeVerificationHealthSnapshot(client.supabase, primaryGuildId);
+  // fallback works when Valkey is unreachable from the dashboard. The readiness
+  // check reads the row for the *configured* guild (which may not be the
+  // primary one), so we write a row per current guild — see
+  // refreshHealthForCurrentGuilds. Refresh on a cadence comfortably inside the
+  // readiness check's 5-minute freshness window, re-reading membership each
+  // tick so a guild the bot has been removed from stops being refreshed.
+  await refreshHealthForCurrentGuilds(client);
   const healthTimer = setInterval(() => {
-    void writeVerificationHealthSnapshot(client.supabase, primaryGuildId);
+    void refreshHealthForCurrentGuilds(client);
   }, VERIFY_HEALTH_INTERVAL_MS);
   healthTimer.unref?.();
 

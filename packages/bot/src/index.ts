@@ -194,6 +194,14 @@ async function main(): Promise<void> {
     if (setupGate && setupGate.state === 'in_progress') {
       log.warn(setupGate.message ?? 'Setup not complete — running in setup-verification mode.');
 
+      // Flag verification mode so the normal Discord event handlers registered
+      // in registerEvents() bail out. They are wired up (login must succeed for
+      // the wizard's "bot online" check) but running member/message/reaction
+      // pipelines now — against an empty router and missing guild_config — only
+      // reproduces the pre-setup error noise this gate exists to suppress. The
+      // full-boot transition clears this flag before enabling real features.
+      client.setupVerificationMode = true;
+
       // Provide a real (empty) GuildRouter before returning. registerEvents()
       // has already scheduled periodic crons that unconditionally call
       // client.router.all() (see events/handler.ts). Without a router those
@@ -233,8 +241,11 @@ async function main(): Promise<void> {
     // an empty placeholder). The owner commonly invites the bot mid-setup, so
     // we still write the guild record here — otherwise the wizard's "guild
     // detected" check would never see the just-invited guild and setup could
-    // not finish.
-    if (setupGate && setupGate.state === 'in_progress' && !fullBootStarted) {
+    // not finish. Keyed on the LIVE verification flag (not the static startup
+    // gate) so that after the completion watcher transitions us out of
+    // verification, a first guild joining drives the full boot below instead of
+    // looping back into verification-only mode.
+    if (client.setupVerificationMode && !fullBootStarted) {
       try {
         await writeGuildRecord(guild, client.supabase);
         // If the bot booted with no guilds, no verification heartbeat was
@@ -247,6 +258,21 @@ async function main(): Promise<void> {
       } catch (err) {
         log.error('Failed to record guild during setup verification', { id: guild.id, error: String(err) });
       }
+      return;
+    }
+
+    // Deferred-boot case: a finalized bot that reached ClientReady with zero
+    // guilds ran runFullBoot(), which installed a router and returned WITHOUT
+    // starting the bot-level services (deploy listener, heartbeat, anti-raid
+    // pruner, presence) or resolving a primary guild — it reset fullBootStarted
+    // so a later guildCreate could complete boot. Now that the first guild has
+    // joined, re-enter the full boot so those global services actually start;
+    // otherwise the dashboard heartbeat and friends stay absent until a manual
+    // restart. runFullBoot auto-detects the guild and is idempotent (guarded by
+    // fullBootStarted), so a normal per-guild add still just gets its context.
+    if (!fullBootStarted) {
+      log.info('First guild joined after a guildless boot — completing full boot now', { id: guild.id });
+      await runFullBoot(client, botLevelServices);
       return;
     }
 
@@ -341,6 +367,25 @@ function startSetupCompletionWatcher(
     } catch (err) {
       log.warn('Failed tearing down placeholder router during transition', { error: String(err) });
     }
+
+    // Reload the freshly-finalized settings BEFORE the in-process full boot.
+    // When the bot entered verification mode it had already run
+    // loadConfigFromDatabase()/loadConfig() and cached process.env. The
+    // finalize step then persisted the remaining credentials (PayPal,
+    // deployment, guild) into instance_settings. Without re-reading them here,
+    // the full boot would start with the stale pre-setup env — features that
+    // read process.env (e.g. PAYPAL_CLIENT_ID) would stay unconfigured until a
+    // manual restart, defeating the no-restart transition. Reload DB→env now so
+    // full boot sees the finalized config.
+    try {
+      await loadConfigFromDatabase();
+    } catch (err) {
+      log.warn('Config reload before full-boot transition failed (non-fatal)', { error: String(err) });
+    }
+
+    // Leave verification mode: the normal event handlers gate on this flag, so
+    // clearing it lights up real feature processing as full boot builds it out.
+    client.setupVerificationMode = false;
 
     await runFullBoot(client, botLevelServices);
   });

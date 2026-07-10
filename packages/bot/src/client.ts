@@ -48,6 +48,18 @@ export class SomniClient extends Client {
   public readonly env: BotEnv;
   public router!: GuildRouter;
   public _registeredCommands?: import('discord.js').RESTPostAPIApplicationCommandsJSONBody[];
+  /**
+   * True while the bot is running in setup-verification mode (gate
+   * 'in_progress'): logged in only so the setup wizard can confirm it is
+   * online, with the heavy per-guild feature init deliberately skipped.
+   *
+   * Normal Discord event handlers (member joins, messages, reactions, etc.)
+   * MUST bail out while this is set — the GuildRouter is an empty placeholder
+   * and guild_config rows do not exist yet, so running feature pipelines only
+   * produces the pre-setup error noise the gate exists to suppress. The boot
+   * sequence clears this flag right before it runs the full boot.
+   */
+  public setupVerificationMode = false;
 
   constructor() {
     const env = getConfig();

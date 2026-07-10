@@ -52,6 +52,9 @@ describe('evaluateSetupGate', () => {
     expect(result.shouldLogin).toBe(true);
     expect(result.shouldRunFullInit).toBe(true);
     expect(result.message).toBeNull();
+    // A genuine completed-row read is a CONFIRMED completion — the setup
+    // watcher may transition on it.
+    expect(result.completionConfirmed).toBe(true);
   });
 
   it('returns "in_progress" when a Discord token exists but setup is not finalized', async () => {
@@ -66,6 +69,8 @@ describe('evaluateSetupGate', () => {
     expect(result.shouldRunFullInit).toBe(false);
     expect(result.message).toContain('Setup not complete');
     expect(result.message).toContain('http://localhost:3456');
+    // Not complete → never a confirmed completion.
+    expect(result.completionConfirmed).toBe(false);
   });
 
   it('treats a token present in env (launcher-forked) as "in_progress"', async () => {
@@ -129,6 +134,12 @@ describe('evaluateSetupGate', () => {
     expect(result.state).toBe('complete');
     expect(result.shouldLogin).toBe(true);
     expect(result.shouldRunFullInit).toBe(true);
+    // Codex round-2 finding #5: this 'complete' is the read-failure fallback,
+    // NOT a genuine completed-row read. It must be flagged unconfirmed so the
+    // setup-completion watcher does not fire a premature full-boot transition
+    // on a transient blip while in verification mode (where a token is always
+    // present, making this fallback path the common one on a read error).
+    expect(result.completionConfirmed).toBe(false);
   });
 
   it('stays "not_started" on a transient read error when no token is present', async () => {

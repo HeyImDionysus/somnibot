@@ -161,6 +161,62 @@ describe('runSetupVerificationBoot', () => {
     expect(typeof healthRows[0].snapshot_at).toBe('string');
   });
 
+  // ── Codex round-2 finding #3: health for the CONFIGURED guild ──
+  // The setup route reads bot_diagnostics health for the configured guild id,
+  // which is NOT necessarily the primary/first guild when the bot is already
+  // in several guilds. Writing health only for the primary would leave a
+  // non-primary configured guild marked offline whenever Valkey is down (the
+  // exact outage this Supabase fallback covers). We write a row per current
+  // guild so the configured one is always covered.
+  it('writes a `health` row for EVERY current guild (covers a non-primary configured guild)', async () => {
+    // Primary is g1, but the owner may be configuring g2 — both must get health.
+    const { client, rowsFor } = makeClient([makeGuild('g1'), makeGuild('g2')], 'g1');
+    await runSetupVerificationBoot(client);
+
+    const healthGuildIds = new Set(
+      rowsFor('bot_diagnostics').filter((r) => r.type === 'health').map((r) => r.guild_id),
+    );
+    expect(healthGuildIds.has('g1')).toBe(true);
+    expect(healthGuildIds.has('g2')).toBe(true);
+  });
+
+  // ── Codex round-2 finding #3: stop refreshing after removal ──
+  // The refresher re-reads client.guilds.cache each tick, so a guild the bot
+  // has been removed from (dropped from the cache, e.g. via guildDelete) stops
+  // getting fresh health rows — its last row goes stale and the readiness
+  // check no longer trusts it, preventing a "finalized but bot not present"
+  // instance.
+  it('stops refreshing health for a guild the bot has been removed from', async () => {
+    vi.useFakeTimers();
+    try {
+      const guilds = new Map([['g1', makeGuild('g1')], ['g2', makeGuild('g2')]]) as any;
+      guilds.first = () => guilds.get('g1');
+      const { supabase, rowsFor } = makeSupabase();
+      const client = { guildId: 'g1', supabase, valkey: {}, guilds: { cache: guilds } } as any;
+
+      const services = await runSetupVerificationBoot(client);
+      // Immediate write covered both guilds.
+      expect(new Set(rowsFor('bot_diagnostics').map((r) => r.guild_id))).toEqual(new Set(['g1', 'g2']));
+
+      // Bot removed from g2 (as guildDelete would do) — drop it from the cache.
+      guilds.delete('g2');
+
+      // Advance past one refresh interval (60s).
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const g2RowsAfter = rowsFor('bot_diagnostics').filter((r) => r.guild_id === 'g2').length;
+      const g1RowsAfter = rowsFor('bot_diagnostics').filter((r) => r.guild_id === 'g1').length;
+      // g1 got at least one more refresh; g2 got no NEW rows after removal
+      // (still just the single pre-removal write).
+      expect(g1RowsAfter).toBeGreaterThanOrEqual(2);
+      expect(g2RowsAfter).toBe(1);
+
+      services!.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('auto-detects the primary guild id when not preset', async () => {
     const { client } = makeClient([makeGuild('gX')]);
     await runSetupVerificationBoot(client);

@@ -43,12 +43,12 @@ describe('startSetupCompletionWatcher', () => {
     watcher.stop();
   });
 
-  it('transitions to full boot once the gate reports complete (no manual restart)', async () => {
-    // First few polls: still in progress. Then setup finalizes → complete.
+  it('transitions to full boot once the gate reports a CONFIRMED complete (no manual restart)', async () => {
+    // First few polls: still in progress. Then setup finalizes → confirmed complete.
     evaluateSetupGate
-      .mockResolvedValueOnce({ state: 'in_progress' })
-      .mockResolvedValueOnce({ state: 'in_progress' })
-      .mockResolvedValue({ state: 'complete' });
+      .mockResolvedValueOnce({ state: 'in_progress', completionConfirmed: false })
+      .mockResolvedValueOnce({ state: 'in_progress', completionConfirmed: false })
+      .mockResolvedValue({ state: 'complete', completionConfirmed: true });
     const onComplete = vi.fn().mockResolvedValue(undefined);
 
     startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
@@ -58,7 +58,7 @@ describe('startSetupCompletionWatcher', () => {
   });
 
   it('fires the transition exactly once and stops polling afterwards', async () => {
-    evaluateSetupGate.mockResolvedValue({ state: 'complete' });
+    evaluateSetupGate.mockResolvedValue({ state: 'complete', completionConfirmed: true });
     const onComplete = vi.fn().mockResolvedValue(undefined);
 
     startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
@@ -74,7 +74,42 @@ describe('startSetupCompletionWatcher', () => {
   it('keeps polling (does not crash) when a gate evaluation throws', async () => {
     evaluateSetupGate
       .mockRejectedValueOnce(new Error('transient'))
-      .mockResolvedValue({ state: 'complete' });
+      .mockResolvedValue({ state: 'complete', completionConfirmed: true });
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
+    await vi.advanceTimersByTimeAsync(3000);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Codex round-2 finding #5: do not treat poll read failures as completion ──
+  // In verification mode DISCORD_TOKEN is always present, so a transient
+  // read error makes evaluateSetupGate degrade to state:'complete' with
+  // completionConfirmed:false. The watcher must NOT fire the full-boot
+  // transition on that unconfirmed signal — only on a genuine completed row.
+  it('does NOT transition on an UNCONFIRMED complete (transient read failure fallback)', async () => {
+    // Every poll returns the read-failure fallback: complete-looking but not
+    // confirmed. The owner has not actually finished setup.
+    evaluateSetupGate.mockResolvedValue({ state: 'complete', completionConfirmed: false });
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    const watcher = startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // Polled repeatedly, but never fired the premature transition.
+    expect(evaluateSetupGate).toHaveBeenCalled();
+    expect(onComplete).not.toHaveBeenCalled();
+    watcher.stop();
+  });
+
+  it('transitions only once the unconfirmed blip clears into a confirmed completion', async () => {
+    // A transient read-failure fallback first (must be ignored), then the real
+    // finalized row arrives (confirmed) → transition fires exactly once.
+    evaluateSetupGate
+      .mockResolvedValueOnce({ state: 'complete', completionConfirmed: false })
+      .mockResolvedValueOnce({ state: 'complete', completionConfirmed: false })
+      .mockResolvedValue({ state: 'complete', completionConfirmed: true });
     const onComplete = vi.fn().mockResolvedValue(undefined);
 
     startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });

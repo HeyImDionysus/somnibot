@@ -7,9 +7,12 @@
  * owner finishes setup but the bot stays gated (no GuildRouter features,
  * commands, presence, diagnostics) until a manual restart.
  *
- * This watcher polls the setup gate; once it reports 'complete', it invokes the
- * supplied `onComplete` transition exactly once so the SAME process can tear
- * down the verification-only services and run the full boot in-place.
+ * This watcher polls the setup gate; once it reports a CONFIRMED 'complete'
+ * (an actual setup_completed_at row, not the read-failure fallback), it invokes
+ * the supplied `onComplete` transition exactly once so the SAME process can tear
+ * down the verification-only services and run the full boot in-place. A
+ * transient read error that merely *looks* complete (token present) must not
+ * fire the transition — see the completionConfirmed check below.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createLogger } from '@somnibot/shared';
@@ -59,7 +62,15 @@ export function startSetupCompletionWatcher(
       log.warn('Setup-completion check failed (will retry)', { error: String(err) });
       return;
     }
-    if (gate.state !== 'complete') return;
+    // Only transition on an UNAMBIGUOUS completion. evaluateSetupGate degrades
+    // to `state: 'complete'` on a transient read failure when DISCORD_TOKEN is
+    // present (so an already-finalized bot still boots on a blip) — but in
+    // verification mode the token is always present by design, so a transient
+    // read error would otherwise fire the full boot before the owner actually
+    // finished setup, re-enabling the noisy feature init this gate suppresses.
+    // completionConfirmed is true only when a real setup_completed_at row was
+    // read, which is the signal we require here.
+    if (gate.state !== 'complete' || !gate.completionConfirmed) return;
 
     fired = true;
     stop();
