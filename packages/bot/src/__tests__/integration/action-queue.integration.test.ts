@@ -8,7 +8,13 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { requireSupabase } from './helpers.js';
+import postgres from 'postgres';
+import {
+  requireSupabase,
+  getAnonTestClient,
+  getAuthenticatedTestClient,
+  getTestDbUrl,
+} from './helpers.js';
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-queue-guild-${Date.now()}`;
@@ -149,5 +155,151 @@ describe('Dead-letter queue', () => {
     expect(dlqEntry!.action).toBe('SEND_NOTIFICATION');
     expect(dlqEntry!.error_message).toContain('Missing Permissions');
     expect(dlqEntry!.retry_count).toBe(3);
+  });
+});
+
+const expectPermissionDenied = (error: { code?: string; message?: string } | null) => {
+  expect(error).not.toBeNull();
+  const denied =
+    error!.code === '42501' || /permission denied/i.test(error!.message ?? '');
+  expect(denied, `expected permission denied, got: ${JSON.stringify(error)}`).toBe(true);
+};
+
+describe('Dead-letter queue lockdown (20260709210000_dlq_rls_lockdown)', () => {
+  // The DLQ preserves full action payloads — including
+  // license_key_plaintext for failed deliver_receipt actions — so it
+  // must be readable/writable only via service_role. Grants for
+  // anon/authenticated are revoked, so PostgREST must return a
+  // permission-denied error (42501), not an empty RLS-filtered result.
+
+  it('denies anon reads on action_queue_dlq', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('action_queue_dlq').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies anon inserts into action_queue_dlq', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('action_queue_dlq').insert({
+      guild_id: GUILD_ID,
+      action: 'deliver_receipt',
+      payload: {},
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated reads on action_queue_dlq', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('action_queue_dlq').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated updates on action_queue_dlq', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed
+      .from('action_queue_dlq')
+      .update({ acknowledged: true })
+      .eq('guild_id', GUILD_ID);
+    expectPermissionDenied(error);
+  });
+
+  it('still allows service-role reads (bot + dashboard admin path)', async () => {
+    const { data, error } = await supa
+      .from('action_queue_dlq')
+      .select('id, action, payload')
+      .eq('guild_id', GUILD_ID);
+
+    expect(error).toBeNull();
+    // The row dead-lettered in the previous suite is still visible.
+    expect((data ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('Live queue lockdown (20260709230000_bot_action_queue_rls_lockdown)', () => {
+  // bot_action_queue retry rows for deliver_receipt / fulfill_* carry
+  // license_key_plaintext in payload, so the live queue must be
+  // service_role-only, same posture as the DLQ. Phase A's
+  // SELECT/INSERT grants to authenticated (and any legacy anon default
+  // grants) are revoked — PostgREST must return permission denied
+  // (42501), not an empty RLS-filtered result.
+
+  it('denies anon reads on bot_action_queue', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('bot_action_queue').select('id').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies anon inserts into bot_action_queue', async () => {
+    const anon = getAnonTestClient();
+    const { error } = await anon.from('bot_action_queue').insert({
+      guild_id: GUILD_ID,
+      action: 'deliver_receipt',
+      payload: {},
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated reads on bot_action_queue', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('bot_action_queue').select('id, payload').limit(1);
+    expectPermissionDenied(error);
+  });
+
+  it('denies authenticated inserts into bot_action_queue (Phase A grant revoked)', async () => {
+    const authed = getAuthenticatedTestClient();
+    const { error } = await authed.from('bot_action_queue').insert({
+      guild_id: GUILD_ID,
+      action: 'config_reload',
+      payload: { section: 'all' },
+    });
+    expectPermissionDenied(error);
+  });
+
+  it('still allows service-role reads including retry payloads', async () => {
+    const { data, error } = await supa
+      .from('bot_action_queue')
+      .select('id, action, payload, status')
+      .eq('guild_id', GUILD_ID);
+
+    expect(error).toBeNull();
+    // Rows enqueued by the suites above are still visible.
+    expect((data ?? []).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps the bot Realtime feed preconditions intact (publication + service_role grants)', async () => {
+    // The bot's production listener subscribes to postgres_changes
+    // INSERTs on bot_action_queue with the service key
+    // (packages/bot/src/services/action-queue.ts). End-to-end event
+    // delivery is environment-dependent and cannot be exercised
+    // against the CI-local Supabase stack — a live subscribe/insert
+    // probe deterministically timed out there (websocket join never
+    // completed; see PR #265) — so this asserts, at the catalog level,
+    // the two preconditions of that flow which the lockdown migration
+    // could plausibly have broken:
+    //   1. the table is still a member of the supabase_realtime
+    //      publication (the WAL feed Realtime reads), and
+    //   2. service_role still holds SELECT (required both for walrus
+    //      visibility checks and the bot's own reads).
+    // Authenticated/anon subscribers losing events is the *intended*
+    // effect of the lockdown; no browser subscription targets this
+    // table. Delivery itself is proven by the production bot flow.
+    const sql = postgres(getTestDbUrl(), { max: 1 });
+    try {
+      const pub = await sql`
+        SELECT 1 AS ok
+        FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND schemaname = 'public'
+          AND tablename = 'bot_action_queue'`;
+      expect(pub.length, 'bot_action_queue must stay in the supabase_realtime publication').toBe(1);
+
+      const [priv] = await sql`
+        SELECT has_table_privilege('service_role', 'public.bot_action_queue', 'SELECT') AS can_select,
+               has_table_privilege('service_role', 'public.bot_action_queue', 'INSERT') AS can_insert`;
+      expect(priv?.can_select, 'service_role must retain SELECT on bot_action_queue').toBe(true);
+      expect(priv?.can_insert, 'service_role must retain INSERT on bot_action_queue').toBe(true);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
   });
 });

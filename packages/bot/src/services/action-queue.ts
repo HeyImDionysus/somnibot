@@ -22,7 +22,16 @@ import { ChannelType, EmbedBuilder, PermissionsBitField, type Guild, type GuildC
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
-import { CommerceFulfillmentService, type FulfillmentPayload } from './commerce-fulfillment.js';
+import {
+  CommerceFulfillmentService,
+  RECEIPT_DELIVERY_ACTION,
+  classifyDeliveryError,
+  writeReceiptDeliveryAlert,
+  type DeliveryFailureKind,
+  type FulfillmentPayload,
+  type ReceiptDeliveryPayload,
+} from './commerce-fulfillment.js';
+import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
@@ -437,6 +446,59 @@ async function handleFulfillment(
     return {
       success: false,
       error: result.errors.join('; '),
+    };
+  }
+}
+
+// ── Receipt Delivery Handler ──────────────────────────
+// Persistent re-delivery of a paid customer's receipt/license-key DM, queued
+// by CommerceFulfillmentService when the initial DM attempt fails. Transient
+// errors (network blips, Discord 5xx) are retryable and go through the
+// queue's exponential backoff; permanent errors (DMs disabled, unknown user)
+// fail immediately so retries aren't burned on a hopeless delivery. Final
+// failures are dead-lettered + alerted in processAction below.
+
+async function handleDeliverReceipt(
+  guild: Guild,
+  _supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const p = payload as unknown as Partial<ReceiptDeliveryPayload>;
+  if (!p.discord_id || !p.order_number || !p.product_name) {
+    return {
+      success: false,
+      error: 'Missing required fields: discord_id, order_number, product_name',
+      retryable: false,
+    };
+  }
+
+  // A retried/DLQ-redelivered receipt must show the ORDER date, not the
+  // date the retry finally succeeded. order_date is stamped into the payload
+  // when the redelivery is queued; fall back to "now" only for legacy rows
+  // queued before the field existed (where "now" is at most the retry lag
+  // wrong, same as the old behavior).
+  const parsedOrderDate = p.order_date ? new Date(p.order_date) : null;
+  const orderDate =
+    parsedOrderDate && !Number.isNaN(parsedOrderDate.getTime()) ? parsedOrderDate : new Date();
+
+  try {
+    const user = await guild.client.users.fetch(p.discord_id);
+    await deliverReceiptDM(user, {
+      orderNumber: p.order_number,
+      productName: p.product_name,
+      amountCents: p.amount_cents ?? 0,
+      currency: p.currency ?? 'USD',
+      licenseKey: p.license_key_plaintext ?? null,
+      date: orderDate,
+    });
+    return { success: true, data: { orderNumber: p.order_number, delivered: true } };
+  } catch (err) {
+    const kind = classifyDeliveryError(err);
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Receipt delivery ${kind === 'permanent' ? 'permanently ' : ''}failed: ${msg}`,
+      retryable: kind === 'transient',
     };
   }
 }
@@ -932,6 +994,7 @@ const ACTION_HANDLERS: Record<
   fulfill_subscription: handleFulfillment,
   fulfill_cancellation: handleFulfillment,
   fulfill_suspension: handleFulfillment,
+  [RECEIPT_DELIVERY_ACTION]: handleDeliverReceipt,
   config_reload: handleConfigReload,
   send_embed: handleSendEmbed,
   test_welcome: handleTestWelcome,
@@ -948,6 +1011,83 @@ const ACTION_HANDLERS: Record<
   sync_ignore_drift: handleSyncIgnoreDrift,
   sync_clear_all_drift: handleSyncClearAllDrift,
 };
+
+// V5 Audit §6.5: in-process retry budget for transient handler failures
+// (exponential backoff 30s → 60s → 120s — see processAction below).
+const HANDLER_MAX_RETRIES = 3;
+
+// Payload fields that must never be copied into audit_logs. Queue and DLQ
+// rows intentionally keep the plaintext license key so a failed delivery
+// stays retryable (license_keys stores only hash/prefix/suffix at rest),
+// but audit_logs has long, guild-configurable retention (default 180 days)
+// — the audit trail only needs to know the field was present, not its value.
+const SENSITIVE_AUDIT_PAYLOAD_FIELDS = ['license_key_plaintext'] as const;
+
+/**
+ * Return a copy of the action payload safe for the audit trail: sensitive
+ * fields (currently the plaintext license key carried by deliver_receipt and
+ * fulfill_* payloads) are replaced with '[REDACTED]'. Never mutates the
+ * original — the live payload must keep the key for retries.
+ */
+export function redactPayloadForAudit(
+  payload: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  if (payload == null || typeof payload !== 'object') return {};
+  let redacted: Record<string, unknown> = payload;
+  for (const field of SENSITIVE_AUDIT_PAYLOAD_FIELDS) {
+    if (field in redacted && redacted[field] !== undefined) {
+      if (redacted === payload) redacted = { ...payload };
+      redacted[field] = '[REDACTED]';
+    }
+  }
+  return redacted;
+}
+
+/**
+ * Final-failure handling for receipt/license-key delivery: a paid customer
+ * has not received their goods, so this must never disappear silently.
+ * Dead-letters the action to `action_queue_dlq` (dashboard-visible, manually
+ * retryable — same shape as the stale-recovery DLQ writes below) and raises
+ * an operator alert with the actionable next step.
+ */
+async function deadLetterReceiptDelivery(
+  guild: Guild,
+  supabase: SupabaseClient,
+  action: ActionRow,
+  result: ActionResult,
+  attempts: number,
+): Promise<void> {
+  const payload = action.payload as unknown as Partial<ReceiptDeliveryPayload>;
+  const kind: DeliveryFailureKind = result.retryable === false ? 'permanent' : 'transient';
+
+  let payloadPreserved = false;
+  try {
+    const { error } = await supabase.from('action_queue_dlq').insert({
+      guild_id: guild.id,
+      action: action.action,
+      payload: action.payload ?? {},
+      error_message: result.error ?? 'Receipt delivery failed',
+      retry_count: attempts,
+      max_retries: HANDLER_MAX_RETRIES,
+      original_id: action.id,
+    });
+    if (error) throw new Error(error.message);
+    payloadPreserved = true;
+  } catch (dlqErr) {
+    log.error(`Failed to write DLQ entry for ${action.id}:`, dlqErr);
+  }
+
+  await writeReceiptDeliveryAlert(supabase, {
+    guildId: guild.id,
+    orderNumber: payload.order_number ?? 'unknown',
+    productName: payload.product_name ?? 'unknown',
+    discordId: payload.discord_id ?? 'unknown',
+    kind,
+    attempts,
+    lastError: result.error ?? 'unknown',
+    payloadPreserved,
+  });
+}
 
 async function processAction(
   guild: Guild,
@@ -1013,16 +1153,21 @@ async function processAction(
                         !result.error?.includes('Unknown action') &&
                         !result.error?.includes('Missing required');
 
-    if (isTransient && retryCount <= 3) {
+    if (isTransient && retryCount <= HANDLER_MAX_RETRIES) {
       const backoffMs = Math.min(30_000 * Math.pow(2, retryCount - 1), 120_000);
       log.info(`Scheduling retry #${retryCount} for ${action.id} in ${backoffMs / 1000}s`);
 
+      // next_retry_at persists the backoff schedule: the row goes back to
+      // 'pending' for crash-safety, but sweeps must not pick it up before
+      // the backoff elapses (the in-process setTimeout below is the primary
+      // retry path; the periodic sweep is the catch-up if the process dies).
       await supabase
         .from('bot_action_queue')
         .update({
           status: 'pending',
           retry_count: retryCount,
           error_message: result.error ?? null,
+          next_retry_at: new Date(Date.now() + backoffMs).toISOString(),
         })
         .eq('id', action.id);
 
@@ -1037,6 +1182,14 @@ async function processAction(
 
       return; // Don't mark as failed yet — retry scheduled
     }
+
+    // This failure is FINAL (permanent error or retry budget exhausted).
+    // Receipt/license-key delivery means a paid customer has not received
+    // their goods — dead-letter it and alert the operator instead of
+    // dropping it silently.
+    if (action.action === RECEIPT_DELIVERY_ACTION) {
+      await deadLetterReceiptDelivery(guild, supabase, action, result, retryCount);
+    }
   }
 
   // Mark completed/failed
@@ -1050,7 +1203,9 @@ async function processAction(
     })
     .eq('id', action.id);
 
-  // Audit log
+  // Audit log. The payload is redacted first: deliver_receipt / fulfill_*
+  // payloads carry the plaintext license key (by design, for retryability),
+  // and audit_logs retention is far too long to hold a copy of it.
   await writeAuditLog(supabase, {
     guildId: guild.id,
     actorType: 'dashboard',
@@ -1058,7 +1213,7 @@ async function processAction(
     action: `bot.${action.action}`,
     details: {
       actionId: action.id,
-      payload: action.payload,
+      payload: redactPayloadForAudit(action.payload),
       result: result.data,
     },
     success: result.success,
@@ -1085,6 +1240,10 @@ async function processAction(
  *
  * 1. Process any existing pending actions (in case we missed them while offline)
  * 2. Subscribe to Realtime INSERT events on bot_action_queue
+ * 3. Once the subscription is SUBSCRIBED, sweep pending rows again — rows
+ *    inserted between step 1's snapshot and the subscription going live
+ *    (e.g. deliver_receipt re-delivery rows queued by step 1 itself) are
+ *    invisible to both step 1 and Realtime.
  */
 // V48-C3: how long an action can be stuck in 'processing' before we
 // assume the worker crashed and re-queue it (or fail it if the retry
@@ -1118,15 +1277,23 @@ async function recoverStaleActions(
     log.warn(`DLQ: ${failedCount} action(s) failed after exhausting retries`);
     // V53 Phase 2: Write failed actions to DLQ table for dashboard visibility
     for (const row of failedRows) {
+      let fullRow: {
+        action: string;
+        payload: unknown;
+        error_message: string | null;
+        retry_count: number | null;
+      } | null = null;
+      let payloadPreserved = false;
       try {
         // Fetch full action row for payload + error
-        const { data: fullRow } = await supabase
+        const { data } = await supabase
           .from('bot_action_queue')
           .select('action, payload, error_message, retry_count')
           .eq('id', row.id)
           .maybeSingle();
+        fullRow = data;
         if (fullRow) {
-          await supabase.from('action_queue_dlq').insert({
+          const { error: dlqInsertError } = await supabase.from('action_queue_dlq').insert({
             guild_id: guild.id,
             action: fullRow.action,
             payload: fullRow.payload ?? {},
@@ -1135,9 +1302,29 @@ async function recoverStaleActions(
             max_retries: ACTION_QUEUE_MAX_RETRIES,
             original_id: row.id,
           });
+          payloadPreserved = !dlqInsertError;
         }
       } catch (dlqErr) {
         log.error(`Failed to write DLQ entry for ${row.id}:`, dlqErr);
+      }
+
+      // Receipt/license-key delivery must never fail silently: exhaustion can
+      // also happen through THIS crash-recovery path (bot died mid-delivery
+      // repeatedly), not just the in-process retry path in processAction —
+      // surface the same operator alert here.
+      if (row.action === RECEIPT_DELIVERY_ACTION) {
+        const payload = (fullRow?.payload ?? {}) as Partial<ReceiptDeliveryPayload>;
+        await writeReceiptDeliveryAlert(supabase, {
+          guildId: guild.id,
+          orderNumber: payload.order_number ?? 'unknown',
+          productName: payload.product_name ?? 'unknown',
+          discordId: payload.discord_id ?? 'unknown',
+          kind: 'transient',
+          attempts: fullRow?.retry_count ?? ACTION_QUEUE_MAX_RETRIES,
+          lastError:
+            fullRow?.error_message ?? 'Stale processing recovery: retry budget exhausted',
+          payloadPreserved,
+        });
       }
     }
   }
@@ -1161,6 +1348,41 @@ async function recoverStaleActions(
   }
 }
 
+/**
+ * Fetch and process every row currently in 'pending' and due for this guild.
+ * Used for the startup backlog sweep, re-run after the Realtime subscription
+ * activates, and the periodic catch-up sweep (see startActionQueueListener)
+ * — the atomic claim in processAction makes overlapping sweeps/Realtime
+ * deliveries safe.
+ *
+ * Rows parked for backoff are excluded: processAction returns transiently
+ * failed rows to 'pending' with next_retry_at set to the end of their
+ * 30/60/120s backoff window, and sweeping those immediately (e.g. on every
+ * Realtime reconnect) would defeat the backoff. They are retried by the
+ * in-process timer, or — if the process died before it fired — by the
+ * periodic sweep once next_retry_at has passed, so they never strand.
+ */
+async function sweepPendingActions(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<void> {
+  const { data: pending } = await supabase
+    .from('bot_action_queue')
+    .select('*')
+    .eq('guild_id', guild.id)
+    .eq('status', 'pending')
+    .or(`next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`)
+    .order('created_at', { ascending: true })
+    .limit(1000);
+
+  if (pending && pending.length > 0) {
+    log.info(`Processing ${pending.length} pending action(s)`);
+    for (const action of pending) {
+      await processAction(guild, supabase, action as ActionRow);
+    }
+  }
+}
+
 export interface ActionQueueHandle {
   staleRecoveryTimer: ReturnType<typeof setInterval>;
 }
@@ -1178,26 +1400,22 @@ export async function startActionQueueListener(
   await recoverStaleActions(guild, supabase);
 
   // Process any pending actions from while the bot was offline
-  const { data: pending } = await supabase
-    .from('bot_action_queue')
-    .select('*')
-    .eq('guild_id', guild.id)
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1000);
+  await sweepPendingActions(guild, supabase);
 
-  if (pending && pending.length > 0) {
-    log.info(`Processing ${pending.length} pending action(s)`);
-    for (const action of pending) {
-      await processAction(guild, supabase, action as ActionRow);
-    }
-  }
-
-  // Periodic stale-row sweep (runs in addition to the startup pass so
-  // long-running deployments don't accumulate stuck rows).
+  // Periodic sweep (runs in addition to the startup pass so long-running
+  // deployments don't accumulate stuck rows). Two jobs:
+  // 1. recoverStaleActions — rows stuck in 'processing' after a crash.
+  // 2. sweepPendingActions — 'pending' rows whose backoff (next_retry_at)
+  //    has elapsed. The in-process retry timer normally handles these, but
+  //    it dies with the process; without this catch-up, a restart during a
+  //    backoff window would strand the row (the startup/subscribe sweeps
+  //    intentionally skip rows still inside their backoff window).
   const staleRecoveryTimer = setInterval(() => {
     recoverStaleActions(guild, supabase).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
+    });
+    sweepPendingActions(guild, supabase).catch((err) => {
+      log.error('Due-retry sweep error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();
@@ -1231,6 +1449,19 @@ export async function startActionQueueListener(
         if (status === 'SUBSCRIBED') {
           log.info('Realtime subscription: SUBSCRIBED');
           reconnectDelay = 1_000; // reset backoff on success
+          // Rows inserted after the startup sweep read its snapshot but
+          // before this subscription became active are invisible to both
+          // paths — Realtime only fires for future INSERTs. The startup
+          // sweep itself creates such rows: a fulfill_purchase processed
+          // from the offline backlog whose receipt DM fails inserts a new
+          // pending deliver_receipt row, which would otherwise sit pending
+          // until the next restart. Re-sweep now that the subscription is
+          // live; the atomic claim in processAction makes any overlap with
+          // Realtime deliveries safe. This also heals INSERTs missed while
+          // a dropped subscription was reconnecting.
+          sweepPendingActions(guild, supabase).catch((sweepErr) => {
+            log.error('Post-subscribe pending sweep failed:', { error: String(sweepErr) });
+          });
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
           log.warn(`Realtime subscription ${status}, reconnecting in ${reconnectDelay}ms`, {
             error: err ? String(err) : undefined,

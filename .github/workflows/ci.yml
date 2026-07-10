@@ -551,6 +551,7 @@ jobs:
             "dashboard_roles" "dashboard_user_roles"
             "automations" "automation_executions"
             "dead_letter_queue" "workflow_events"
+            "action_queue_dlq" "bot_action_queue"
             "health_metrics"
           )
 

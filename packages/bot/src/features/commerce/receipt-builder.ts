@@ -141,33 +141,49 @@ export function buildReceiptComponents(data: ReceiptData): ContainerBuilder | nu
 }
 
 /**
+ * Deliver the receipt DM to a user. Tries Components v2, falls back to embed.
+ *
+ * Throws on delivery failure so callers can classify the error (e.g. DMs
+ * disabled vs transient Discord outage) and route it to persistent retry —
+ * a paid customer's license key must never be dropped silently.
+ */
+export async function deliverReceiptDM(
+  user: User,
+  data: ReceiptData,
+): Promise<void> {
+  const dm = await user.createDM();
+
+  // Try Components v2 first
+  const container = buildReceiptComponents(data);
+  if (container) {
+    try {
+      await dm.send({
+        components: [container],
+        flags: [4096], // IS_COMPONENTS_V2
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Discord Components V2 not yet typed in discord.js
+      } as Parameters<typeof dm.send>[0]);
+      return;
+    } catch {
+      // Fall through to embed
+    }
+  }
+
+  // Fallback: standard embed
+  const embed = buildReceiptEmbed(data);
+  await dm.send({ embeds: [embed] });
+}
+
+/**
  * Send receipt DM to a user. Tries Components v2, falls back to embed.
+ * Swallows errors — use deliverReceiptDM when the caller needs to classify
+ * and handle delivery failures.
  */
 export async function sendReceiptDM(
   user: User,
   data: ReceiptData,
 ): Promise<boolean> {
   try {
-    const dm = await user.createDM();
-
-    // Try Components v2 first
-    const container = buildReceiptComponents(data);
-    if (container) {
-      try {
-        await dm.send({
-          components: [container],
-          flags: [4096], // IS_COMPONENTS_V2
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Discord Components V2 not yet typed in discord.js
-        } as Parameters<typeof dm.send>[0]);
-        return true;
-      } catch {
-        // Fall through to embed
-      }
-    }
-
-    // Fallback: standard embed
-    const embed = buildReceiptEmbed(data);
-    await dm.send({ embeds: [embed] });
+    await deliverReceiptDM(user, data);
     return true;
   } catch (err) {
     log.error(`Failed to DM receipt to ${user.id}:`, err);

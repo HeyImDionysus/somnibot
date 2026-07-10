@@ -73,6 +73,9 @@ vi.mock('../services/audit.js', () => ({
 // ── Mock commerce-fulfillment ──────────────────────────────
 vi.mock('../services/commerce-fulfillment.js', () => ({
   CommerceFulfillmentService: class { async fulfill() { return { success: true }; } },
+  RECEIPT_DELIVERY_ACTION: 'deliver_receipt',
+  classifyDeliveryError: vi.fn(() => 'transient'),
+  writeReceiptDeliveryAlert: vi.fn(async () => {}),
 }));
 
 // ── Mock shared (createLogger + calculateLevel) ────────────
