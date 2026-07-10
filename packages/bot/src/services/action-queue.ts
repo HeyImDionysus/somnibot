@@ -762,8 +762,24 @@ async function handleRevokeRoles(
   }
 
   log.info(`Revoked ${removed.length} roles from ${discordId} (${reason})`);
+
+  // Any role that could not be removed must NOT be treated as done. This action
+  // is the durable fallback the reconciliation grace-expiry sweep queues when
+  // its inline removal failed — and that sweep already flipped the entitlement
+  // to 'expired', so it will never revisit this member. If we returned success
+  // with a non-empty `failed`, the queue would mark the action completed and a
+  // transient Discord/API error would leave the paid role granted forever.
+  // Fail (retryable) so the queue's backoff re-runs the handler; the per-role
+  // `member.roles.cache.has` guard above makes the retry idempotent — already
+  // removed roles are skipped, only the still-attached ones are re-attempted.
   if (failed.length > 0) {
     log.warn(`Failed to revoke ${failed.length} roles from ${discordId}:`, failed);
+    return {
+      success: false,
+      error: `Failed to revoke ${failed.length} of ${roleIds.length} role(s) from ${discordId}`,
+      retryable: true,
+      data: { discordId, removed, failed, reason },
+    };
   }
 
   return {

@@ -11,6 +11,7 @@ import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { getGracePeriodDays } from '@somnibot/shared';
 
 
 export async function GET(
@@ -175,6 +176,27 @@ export async function PUT(req: NextRequest) {
     updateData.cancelled_at = new Date().toISOString();
   }
 
+  // W2: the entitlements_grace_period_has_deadline CHECK requires every
+  // grace_period row to carry a deadline — a deadline-less row is invisible
+  // to the reconciliation sweep (it would decay forever). Manual/admin
+  // transitions into grace honor the guild's configured window
+  // (guild_config.grace_period_days) via the same shared helper the bot's
+  // suspension flow (commerce-fulfillment → EntitlementService.suspend) uses,
+  // so an operator's configured deadline is applied no matter which surface
+  // starts the grace period — with the same DEFAULT_GRACE_PERIOD_DAYS fallback
+  // when unset.
+  if (status === 'grace_period') {
+    const graceDays = await getGracePeriodDays(supabase, guildId);
+    const graceEnds = new Date();
+    graceEnds.setDate(graceEnds.getDate() + graceDays);
+    updateData.grace_period_ends_at = graceEnds.toISOString();
+  } else if (status === 'active') {
+    // Mirrors EntitlementService.reactivate: returning to active clears the
+    // grace deadline. Terminal statuses keep it as a trace of when the
+    // window lapsed (parity with revoke() and the reconciliation sweep).
+    updateData.grace_period_ends_at = null;
+  }
+
   // V47-C2: scope by guild so another owner cannot toggle entitlement
   // status (e.g. silently reactivate a refunded entitlement) by id alone.
   const { data, error } = await supabase
@@ -187,6 +209,92 @@ export async function PUT(req: NextRequest) {
 
   if (error) {
     return dbError(error, 'customers/entitlements');
+  }
+
+  // W2 review: manual status changes must replicate the
+  // EntitlementService.suspend/reactivate alert lifecycle — otherwise a
+  // manual suspension raises no operator alert and a manual reactivation
+  // strands the 'entitlement_grace_period' alert unresolved forever. Alert
+  // writes are non-fatal: the status change above has already committed.
+  if (status === 'grace_period') {
+    const alertMessage =
+      `Entitlement ${entitlement_id} was manually moved into a grace period ending ` +
+      `${updateData.grace_period_ends_at}. If payment is not recovered by then, ` +
+      'access will be revoked automatically.';
+    const alertMetadata = {
+      entitlement_id,
+      customer_id: data?.customer_id ?? null,
+      product_id: data?.product_id ?? null,
+      order_id: data?.order_id ?? null,
+      grace_period_ends_at: updateData.grace_period_ends_at,
+      source: 'dashboard.entitlements.update',
+    };
+
+    // Same deduped raise as EntitlementService.suspend: the partial unique
+    // index uniq_alerts_unresolved_entitlement_grace permits one unresolved
+    // alert per entitlement, so a 23505 means one already exists (e.g. the
+    // entitlement was already in grace, or this races the bot's suspend()).
+    const { error: alertError } = await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'entitlement_grace_period',
+      severity: 'warning',
+      title: 'Paid entitlement entered payment grace period',
+      message: alertMessage,
+      metadata: alertMetadata,
+    });
+    if (alertError && alertError.code === '23505') {
+      // Codex W2: the PUT above already wrote a NEW grace_period_ends_at, so the
+      // pre-existing unresolved alert now carries a stale deadline in its
+      // message/metadata. Refresh it in place (same entitlement-scoped filter as
+      // the resolve branch) so operators see the current revocation time rather
+      // than the old one. Non-fatal — the status change has already committed.
+      const { error: refreshError } = await supabase
+        .from('alerts')
+        .update({
+          message: alertMessage,
+          metadata: alertMetadata,
+          severity: 'warning',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('guild_id', guildId)
+        .eq('alert_type', 'entitlement_grace_period')
+        .eq('metadata->>entitlement_id', entitlement_id)
+        .eq('resolved', false);
+      if (refreshError) {
+        console.error(
+          '[customers/entitlements] Failed to refresh duplicate grace-period alert:',
+          refreshError.message,
+        );
+      }
+    } else if (alertError) {
+      console.error(
+        '[customers/entitlements] Failed to write grace-period alert:',
+        alertError.message,
+      );
+    }
+  } else {
+    // Every other status this route allows (active, cancelled, expired,
+    // revoked, pending) means the entitlement is no longer in grace —
+    // resolve any outstanding alert. Same entitlement-scoped filters as
+    // EntitlementService.reactivate/revoke and the reconciliation sweep;
+    // a no-op when none exists.
+    const { error: alertError } = await supabase
+      .from('alerts')
+      .update({
+        resolved: true,
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('guild_id', guildId)
+      .eq('alert_type', 'entitlement_grace_period')
+      .eq('metadata->>entitlement_id', entitlement_id)
+      .eq('resolved', false);
+    if (alertError) {
+      console.error(
+        '[customers/entitlements] Failed to resolve grace-period alert:',
+        alertError.message,
+      );
+    }
   }
 
   return NextResponse.json({ success: true, data });
