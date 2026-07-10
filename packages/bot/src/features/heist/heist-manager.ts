@@ -531,11 +531,27 @@ export class HeistManager {
       return;  // success / failed / cancelled — already terminal
     }
 
-    // Authoritative crew from the deduped join table.
+    // A legacy in_progress heist from the OLD (pre-atomic) resolver has no frozen
+    // resolution. Never guess an outcome — driving it to 'failed' could terminally
+    // fail (and announce a loss for) a heist that actually succeeded and paid out
+    // under the old code. Leave it in_progress for a dedicated backfill;
+    // heist_finalize_resolution likewise refuses a NULL resolution. This covers
+    // both the direct-in_progress path and the claim-lost re-read above.
+    if (outcome === null) {
+      log.warn(`Skipping legacy in_progress heist ${heistId} with NULL resolution — leaving for backfill`);
+      return;
+    }
+
+    // Authoritative crew: only the FROZEN set stamped by the atomic claim
+    // (claimed_at IS NOT NULL). A /heist join whose participant insert raced past
+    // the claim is unstamped, so it is neither paid a success share nor
+    // refunded/announced as part of an under-crewed cancellation — the settled
+    // crew is exactly the v_count the claim decided the payout for.
     const { data: partRows } = await this.supabase
       .from('economy_heist_participants')
       .select('user_id, role')
       .eq('heist_id', heistId)
+      .not('claimed_at', 'is', null)
       .limit(1000);
     const partList = (partRows ?? []) as Array<{ user_id: string; role: string }>;
     const participants = partList.map((r) => r.user_id);
@@ -588,6 +604,19 @@ export class HeistManager {
         }
       }
 
+      // Do NOT finalise while any credit is still outstanding. Finalising would
+      // flip the row out of 'in_progress', after which resumePendingHeists no
+      // longer selects it and resolveHeist returns early for terminal statuses —
+      // the unpaid participant (paid_at still NULL) would never be retried and
+      // silently loses their share. Leave the heist in_progress so the next
+      // resume re-runs the payout loop; heist_credit_participant is idempotent
+      // (paid_at guard), so already-paid crew are not double-credited and only
+      // the still-unpaid members are settled on retry.
+      if (failedPayouts.length > 0) {
+        log.warn(`Heist ${heistId} left in_progress: ${failedPayouts.length} payout(s) failed — will retry on next resume`);
+        return;
+      }
+
       // Finalise once, and announce iff THIS call performed the terminal flip.
       // heist_finalize_resolution returns true only for the caller that moved
       // the row out of 'in_progress'; a concurrent resolver or a post-crash
@@ -602,13 +631,10 @@ export class HeistManager {
       }
       if (finalized !== true) return;  // another resolver already finalised — no re-notify
 
+      // We only reach here once every credit succeeded (the failedPayouts guard
+      // above returns early otherwise), so every crew member is paid.
       const crewList = partList
-        .map((p) => {
-          const isFailed = failedPayouts.includes(p.user_id);
-          return isFailed
-            ? `• <@${p.user_id}> — **${p.role}** (⚠️ payout failed — contact admin)`
-            : `• <@${p.user_id}> — **${p.role}** (+${perPerson.toLocaleString()} coins)`;
-        })
+        .map((p) => `• <@${p.user_id}> — **${p.role}** (+${perPerson.toLocaleString()} coins)`)
         .join('\n');
 
       const story = randomPick(SUCCESS_STORIES);

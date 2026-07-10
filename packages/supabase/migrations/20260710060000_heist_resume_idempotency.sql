@@ -16,16 +16,22 @@
 --   1. heist_claim_for_resolution — under FOR UPDATE on the heist row, decide
 --      the ENTIRE outcome exactly once: too-few-crew ⇒ flip recruiting→cancelled;
 --      otherwise roll success server-side (CSPRNG), store the decision and the
---      per-person payout on the row, and flip recruiting→in_progress. Only the
---      caller that observes 'recruiting' wins; every other concurrent or
---      post-crash caller gets claimed=false and must NOT re-decide or re-pay.
+--      per-person payout on the row, and flip recruiting→in_progress. It also
+--      FREEZES the crew set by stamping claimed_at on the participants it counts
+--      (same heist lock), so a late /heist join whose insert races past the
+--      claim is neither counted nor paid. Only the caller that observes
+--      'recruiting' wins; every other concurrent or post-crash caller gets
+--      claimed=false and must NOT re-decide or re-pay.
 --   2. Per-participant credit idempotency via economy_heist_participants.paid_at:
 --      heist_credit_participant pays a participant iff paid_at IS NULL and stamps
 --      it in the SAME transaction, so a retry after a crash pays each crew member
---      exactly once (success payout AND cancel refund share this guard).
---   3. heist_finalize_resolution — flips in_progress→success/failed (or leaves a
---      cancelled heist as-is) exactly once, guarded on the current status so a
---      second finalize is a no-op.
+--      exactly once (success payout AND cancel refund share this guard). If any
+--      credit errors, the bot leaves the heist in_progress (unfinalised) so a
+--      later resume retries the unpaid member — a payout is never dropped.
+--   3. heist_finalize_resolution — flips in_progress→success/failed exactly once,
+--      guarded on the current status so a second finalize is a no-op. It refuses
+--      to finalize a legacy in_progress heist with a NULL resolution (from the
+--      old resolver) rather than defaulting it to 'failed'.
 -- Participant JOINs are already deduped by the UNIQUE (heist_id, user_id) on
 -- economy_heist_participants (v36), so no participant can be double-counted.
 
@@ -55,6 +61,18 @@ ALTER TABLE economy_heist_participants
 -- whose credit RPC errored). Additive; independent of paid_at.
 ALTER TABLE economy_heist_participants
   ADD COLUMN IF NOT EXISTS payout_failed BOOLEAN NOT NULL DEFAULT false;
+
+-- claimed_at: freezes the crew set at claim time. heist_claim_for_resolution
+-- stamps every participant it counted under the heist-row lock; the bot then
+-- settles ONLY stamped participants. This closes a TOCTOU: a /heist join that
+-- read the heist as 'recruiting' just before expiry can still insert its
+-- participant row after the claim commits (the insert takes no heist-row lock),
+-- and that late row would otherwise be paid target_payout/old_count even though
+-- it was never part of the frozen v_count. A late row has claimed_at = NULL and
+-- is excluded from settlement. NULL until claimed; persists across crash/resume
+-- so a resumed in_progress heist settles the same frozen crew.
+ALTER TABLE economy_heist_participants
+  ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 
 -- ─── 3. Atomic single-shot claim ─────────────────────────────
 -- Decides the whole outcome under the heist row lock. Returns exactly one
@@ -108,11 +126,21 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Crew size from the deduped join table (authoritative; the participants
-  -- array is display-only and TOCTOU-prone).
+  -- Freeze the crew set: stamp claimed_at on every current participant, then
+  -- count exactly those stamped rows. Both the stamp and the count run under
+  -- the heist-row lock held above, so a /heist join whose participant insert
+  -- lands after this claim (its insert takes no heist-row lock) is neither
+  -- stamped nor counted — the bot settles only claimed_at IS NOT NULL rows, so
+  -- that late joiner is never paid a share sized for the frozen v_count.
+  UPDATE public.economy_heist_participants p
+     SET claimed_at = now()
+   WHERE p.heist_id = p_heist_id
+     AND p.claimed_at IS NULL;
+
   SELECT COUNT(*)::INTEGER INTO v_count
     FROM public.economy_heist_participants p
-   WHERE p.heist_id = p_heist_id;
+   WHERE p.heist_id = p_heist_id
+     AND p.claimed_at IS NOT NULL;
 
   -- Too few crew — cancel and let the caller refund entry fees.
   IF v_count < p_min_participants THEN
@@ -237,8 +265,16 @@ BEGIN
     RETURN false;  -- not claimed-in-progress (already finalised or cancelled)
   END IF;
 
+  -- A legacy in_progress heist from the OLD (pre-atomic) resolver has no frozen
+  -- resolution. Never guess: coercing NULL to 'failed' would terminally fail —
+  -- and announce a loss for — a heist that may have actually succeeded and paid
+  -- out under the old code. Leave it in_progress for a dedicated backfill.
+  IF v_resolution IS NULL THEN
+    RETURN false;
+  END IF;
+
   UPDATE public.economy_heists h
-     SET status      = COALESCE(v_resolution, 'failed'),
+     SET status      = v_resolution,
          resolved_at = now()
    WHERE h.id = p_heist_id;
 

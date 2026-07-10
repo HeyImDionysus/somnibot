@@ -64,7 +64,12 @@ function makeStatefulDb(opts: {
   participants: string[];
   successChance?: number;
   targetPayout?: number;
+  // user_ids whose heist_credit_participant call errors — but only while the
+  // mutable Set still contains them, so a test can clear it to model a
+  // transient failure that heals on the next resume.
+  failCreditFor?: Set<string>;
 }) {
+  const failCreditFor = opts.failCreditFor ?? new Set<string>();
   const heist: any = {
     id: 'h1',
     guild_id: 'g1',
@@ -77,8 +82,14 @@ function makeStatefulDb(opts: {
     participants: [...opts.participants],
     expires_at: new Date(Date.now() - 1000).toISOString(),
   };
+  // A heist that starts already claimed (in_progress) had its crew frozen by
+  // the earlier claim, so those participants carry claimed_at. A still-recruiting
+  // heist has none stamped yet — the claim RPC stamps them.
+  const preClaimed = opts.status === 'in_progress';
   const parts = opts.participants.map((uid) => ({
-    heist_id: 'h1', user_id: uid, role: 'Hacker', payout: 0, paid_at: null as string | null, payout_failed: false,
+    heist_id: 'h1', user_id: uid, role: 'Hacker', payout: 0,
+    paid_at: null as string | null, payout_failed: false,
+    claimed_at: (preClaimed ? new Date().toISOString() : null) as string | null,
   }));
 
   // Ledger of every wallet credit that actually landed.
@@ -102,12 +113,19 @@ function makeStatefulDb(opts: {
 
   function partsChain() {
     let target: { user_id?: string } = {};
+    let claimedOnly = false;
     const chain: any = {
       select: () => chain,
       eq: (col: string, val: string) => { if (col === 'user_id') target.user_id = val; return chain; },
       in: () => chain,
       order: () => chain,
       limit: () => chain,
+      // Models `.not('claimed_at', 'is', null)` — the frozen-crew filter the
+      // settle loop uses so late (unstamped) joiners are excluded.
+      not: (col: string, op: string, _val: unknown) => {
+        if (col === 'claimed_at' && op === 'is') claimedOnly = true;
+        return chain;
+      },
       update: (patch: Record<string, unknown>) => {
         for (const p of parts) {
           if (target.user_id && p.user_id !== target.user_id) continue;
@@ -117,8 +135,12 @@ function makeStatefulDb(opts: {
       },
       single: () => Promise.resolve({ data: null, error: null }),
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
-      then: (res: (v: unknown) => void) =>
-        Promise.resolve({ data: parts.map((p) => ({ ...p })), error: null }).then(res),
+      then: (res: (v: unknown) => void) => {
+        const rows = parts
+          .filter((p) => (claimedOnly ? p.claimed_at != null : true))
+          .map((p) => ({ ...p }));
+        return Promise.resolve({ data: rows, error: null }).then(res);
+      },
     };
     return chain;
   }
@@ -144,7 +166,13 @@ function makeStatefulDb(opts: {
         if (heist.status !== 'recruiting') {
           return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null }], error: null });
         }
-        const count = parts.length;
+        // Freeze the crew: stamp claimed_at on unstamped rows, then count only
+        // stamped rows — mirrors the migration's UPDATE ... WHERE claimed_at IS
+        // NULL followed by COUNT(*) WHERE claimed_at IS NOT NULL. Rows flagged
+        // __late model participant inserts that commit AFTER this claim, so they
+        // are left unstamped (never counted, never settled).
+        for (const p of parts) { if (p.claimed_at == null && !(p as any).__late) p.claimed_at = new Date().toISOString(); }
+        const count = parts.filter((p) => p.claimed_at != null).length;
         if (count < args.p_min_participants) {
           heist.status = 'cancelled'; heist.resolution = 'cancelled'; heist.resolved_at = new Date().toISOString();
           return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null }], error: null });
@@ -161,13 +189,21 @@ function makeStatefulDb(opts: {
       if (fn === 'heist_credit_participant') {
         const p = parts.find((x) => x.user_id === args.p_user_id);
         if (!p || p.paid_at) return Promise.resolve({ data: false, error: null }); // idempotent skip
+        // Injected credit failure — leaves paid_at NULL (nothing stamped) so the
+        // participant remains retryable, exactly like a real RPC error.
+        if (failCreditFor.has(args.p_user_id)) {
+          return Promise.resolve({ data: null, error: { message: 'injected credit failure' } });
+        }
         if (args.p_amount > 0) credits.push({ user_id: args.p_user_id, amount: args.p_amount });
         p.paid_at = new Date().toISOString(); p.payout = args.p_amount; p.payout_failed = false;
         return Promise.resolve({ data: true, error: null });
       }
       if (fn === 'heist_finalize_resolution') {
         if (heist.status !== 'in_progress') return Promise.resolve({ data: false, error: null });
-        heist.status = heist.resolution ?? 'failed'; heist.resolved_at = new Date().toISOString();
+        // Refuse a NULL resolution (legacy in_progress heist) rather than
+        // defaulting it to 'failed' — mirrors the migration guard.
+        if (heist.resolution == null) return Promise.resolve({ data: false, error: null });
+        heist.status = heist.resolution; heist.resolved_at = new Date().toISOString();
         return Promise.resolve({ data: true, error: null });
       }
       if (fn === 'economy_add_balance') {
@@ -324,5 +360,109 @@ describe('heist resume idempotency', () => {
     const successSends = send.mock.calls.filter(
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'));
     expect(successSends).toHaveLength(1);
+  });
+
+  // ── Finding 1: settle only the frozen (claimed) crew ────────────────────
+  it('a late joiner inserted after the claim is not paid a success share', async () => {
+    const db = makeStatefulDb({ status: 'recruiting', participants: ['u1', 'u2'], successChance: 100, targetPayout: 250 });
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    // Simulate a /heist join whose participant insert lands AFTER the claim:
+    // add an unstamped (claimed_at = null) row flagged __late so the claim fake
+    // leaves it unstamped. In the real system the claim already committed and
+    // froze the crew at 2 members.
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, __late: true } as any);
+
+    await resolve(mgr);
+
+    expect(db.heist.status).toBe('success');
+    // payout_each was frozen at 250/2 = 125; only the two claimed members get it.
+    expect(db.credits).toHaveLength(2);
+    expect(db.credits.map((c) => c.user_id).sort()).toEqual(['u1', 'u2']);
+    expect(db.credits.every((c) => c.amount === 125)).toBe(true);
+    // The late joiner is never credited.
+    expect(db.credits.some((c) => c.user_id === 'late')).toBe(false);
+  });
+
+  it('an under-crewed cancellation refunds/announces only the frozen crew', async () => {
+    // The heist is already claimed-cancelled with one stamped crew member; a
+    // later unstamped row (a join that raced past the claim) is present when the
+    // refund pass reads participants. It must be excluded from both the refund
+    // and the announced crew count.
+    const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 100 });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    // Mark the late row so the claim fake does not stamp it (models an insert
+    // that commits after the claim's freeze).
+    (db.parts[1] as any).__late = true;
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // claims (freezes u1 only), cancels, refunds the frozen crew
+
+    expect(db.heist.status).toBe('cancelled');
+    // Only u1 (the frozen crew) is refunded; the late joiner is not.
+    expect(db.credits).toHaveLength(1);
+    expect(db.credits[0]).toEqual({ user_id: 'u1', amount: 100 });
+    const cancelSends = send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'));
+    // Announced once, and the crew size in the message reflects the frozen 1.
+    expect(cancelSends).toHaveLength(1);
+    expect(String(cancelSends[0][0]?.embeds?.[0]?.data?.description ?? '')).toContain('got 1');
+  });
+
+  // ── Finding 2: an errored payout stays retryable (not finalised) ────────
+  it('a failed payout leaves the heist in_progress and retries on resume', async () => {
+    const failSet = new Set(['u2']);
+    const db = makeStatefulDb({
+      status: 'recruiting', participants: ['u1', 'u2'], successChance: 100, targetPayout: 250,
+      failCreditFor: failSet,
+    });
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // u1 paid, u2's credit errors → must NOT finalise
+
+    // The heist is left mid-resolution so a later resume can retry u2.
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.heist.resolution).toBe('success');
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 125 }]);
+    // No success announcement while a payout is still outstanding.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(0);
+
+    // The transient failure heals; the next resume pays only the still-unpaid u2.
+    failSet.clear();
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('success');
+    expect(db.credits).toHaveLength(2);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
+    // u1 is not double-credited (paid_at guard).
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toHaveLength(1);
+    // Announced exactly once, only after every member is paid.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+  });
+
+  // ── Finding 3: legacy in_progress heist (NULL resolution) is not failed ──
+  it('a legacy in_progress heist with NULL resolution is left untouched, not failed', async () => {
+    // Old-resolver row: status in_progress but no frozen resolution.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: null, participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    // The old crew were already stamped-in-progress in this model; ensure the
+    // manager still refuses to finalize regardless of the frozen-crew filter.
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await mgr.resumePendingHeists('g1');
+
+    // Must NOT be driven to a terminal 'failed'; left for a dedicated backfill.
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.credits).toHaveLength(0);
+    // No failure (or any) announcement for the legacy heist.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist'))).toHaveLength(0);
   });
 });
