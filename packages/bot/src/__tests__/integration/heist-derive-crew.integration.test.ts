@@ -344,13 +344,23 @@ describe('finding 3 — base_success_chance preserves the odds an in-flight heis
     try {
       // Build a 3-member crew.
       expect(await join(heistId, JOINER_A)).toBe('joined');
+      // Seed JOINER_B's wallet BEFORE the join RPC: heist_join debits the entry
+      // fee via economy_subtract_balance, which RAISES (→ 'insufficient_funds', no
+      // row inserted) if the wallet does not yet exist. Seeding after the call left
+      // JOINER_B unfunded, so their row was never inserted and the crew derived as
+      // 2 instead of 3.
+      await seedWallet(JOINER_B, ENTRY_FEE);
       const joinResult = await supa.rpc('heist_join', {
         p_heist_id: heistId, p_user_id: JOINER_B, p_role: 'Lookout',
         p_entry_fee: ENTRY_FEE, p_max: MAX, p_base_chance: BASE_CHANCE,
       });
-      await seedWallet(JOINER_B, ENTRY_FEE); // (already seeded in join; harmless)
+      expect(joinResult.error).toBeNull();
+      const joinRow = Array.isArray(joinResult.data) ? joinResult.data[0] : joinResult.data;
+      // Fail loudly here (not later via a wrong count) if the 3rd member did not
+      // actually join.
+      expect(joinRow?.status).toBe('joined');
       // The chance heist_join derived for the 3rd member.
-      const derivedAtJoin = (Array.isArray(joinResult.data) ? joinResult.data[0] : joinResult.data)?.success_chance;
+      const derivedAtJoin = joinRow?.success_chance;
 
       const count = await crewCount(heistId);
       expect(count).toBe(3);
