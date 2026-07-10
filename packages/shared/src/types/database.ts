@@ -1983,6 +1983,9 @@ export interface DbActionQueueDlq {
   id: string;
   guild_id: string;
   action: string;
+  // 20260710020000: dead-lettered rows preserve their processing lane
+  // (stamped by a BEFORE INSERT trigger) so DLQ listings are self-describing.
+  lane: 'commerce' | 'game';
   payload: Record<string, unknown>;
   error_message: string | null;
   retry_count: number;
