@@ -118,6 +118,16 @@ const LOCKED_TABLES = [
   'xp_multipliers',
 ] as const;
 
+/**
+ * Postgres array literal for binding the table list as a single text
+ * parameter (cast server-side). Built manually instead of via
+ * postgres.js sql.array(): the helper's type inference is
+ * connection-state dependent and serialized the first in-flight array
+ * parameter without braces in CI (22P02 malformed array literal).
+ * Safe to join unquoted — every name matches /^[a-z_]+$/.
+ */
+const TABLE_LIST = `{${LOCKED_TABLES.join(',')}}`;
+
 let supa!: SupabaseClient;
 let sql!: ReturnType<typeof postgres>;
 
@@ -151,7 +161,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
     it('every locked table exists (typo guard for this list)', async () => {
       const rows = await sql`
         SELECT t.name
-        FROM unnest(${sql.array([...LOCKED_TABLES])}::text[]) AS t(name)
+        FROM unnest(${TABLE_LIST}::text[]) AS t(name)
         WHERE pg_catalog.to_regclass('public.' || quote_ident(t.name)) IS NULL`;
       expect(
         rows.map((r) => r.name),
@@ -165,7 +175,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = 'public'
-          AND c.relname = ANY(${sql.array([...LOCKED_TABLES])}::name[])
+          AND c.relname = ANY(${TABLE_LIST}::name[])
           AND c.relrowsecurity = false`;
       expect(
         rows.map((r) => r.relname),
@@ -179,7 +189,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
         FROM information_schema.role_table_grants
         WHERE table_schema = 'public'
           AND grantee IN ('anon', 'authenticated')
-          AND table_name = ANY(${sql.array([...LOCKED_TABLES])}::text[])
+          AND table_name = ANY(${TABLE_LIST}::text[])
         ORDER BY table_name, grantee`;
       expect(
         rows.map((r) => `${r.table_name}:${r.grantee}`),
@@ -192,7 +202,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
         SELECT tablename, policyname, roles
         FROM pg_catalog.pg_policies
         WHERE schemaname = 'public'
-          AND tablename = ANY(${sql.array([...LOCKED_TABLES])}::name[])
+          AND tablename = ANY(${TABLE_LIST}::name[])
           AND roles IS DISTINCT FROM ARRAY['service_role']::name[]
         ORDER BY tablename, policyname`;
       expect(
@@ -204,7 +214,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
     it('every locked table has a service_role FOR ALL policy', async () => {
       const rows = await sql`
         SELECT t.name
-        FROM unnest(${sql.array([...LOCKED_TABLES])}::text[]) AS t(name)
+        FROM unnest(${TABLE_LIST}::text[]) AS t(name)
         WHERE NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_policies p
           WHERE p.schemaname = 'public'
@@ -222,7 +232,7 @@ describe('RLS sweep lockdown (20260710010000_rls_pattern_sweep_lockdown)', () =>
     it('service_role retains SELECT/INSERT on every locked table', async () => {
       const rows = await sql`
         SELECT t.name
-        FROM unnest(${sql.array([...LOCKED_TABLES])}::text[]) AS t(name)
+        FROM unnest(${TABLE_LIST}::text[]) AS t(name)
         WHERE NOT (
           has_table_privilege('service_role', 'public.' || quote_ident(t.name), 'SELECT')
           AND has_table_privilege('service_role', 'public.' || quote_ident(t.name), 'INSERT')
