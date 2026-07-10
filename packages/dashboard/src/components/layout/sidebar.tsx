@@ -11,6 +11,7 @@ import {
   PendingOrdersBadge,
   ActiveGiveawaysBadge,
   DlqBadge,
+  SidebarBadgesProvider,
 } from '@/components/layout/sidebar-badges';
 import { createClient } from '@/lib/supabase/client';
 import {
@@ -267,6 +268,7 @@ export function Sidebar() {
       <GuildSelector />
 
       {/* Navigation */}
+      <SidebarBadgesProvider>
       <nav className="flex-1 overflow-y-auto px-2 py-3">
         {navigation.map((group) => {
           const isCollapsed = collapsed[group.id] && !group.alwaysOpen && !groupHasActive(group);
@@ -379,6 +381,7 @@ export function Sidebar() {
           </Link>
         </div>
       </nav>
+      </SidebarBadgesProvider>
 
       {/* Footer — user info */}
       <div className="border-t border-discord-border-subtle px-3 py-2">

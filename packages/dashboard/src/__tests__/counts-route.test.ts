@@ -1,10 +1,17 @@
 /**
  * Tests for /api/counts — sidebar badge count route.
  *
- * Covers the DLQ badge fix: 'action_queue_dlq' must be an allowed table
- * and must get the pending filter (acknowledged=false, retried=false)
- * applied server-side, since the table is service_role-only and its
- * count can never be derived client-side.
+ * Covers:
+ *  - The DLQ badge: 'action_queue_dlq' is an allowed table and gets the
+ *    pending filter (acknowledged=false, retried=false) applied server-side,
+ *    since the table is service_role-only.
+ *  - DLQ owner-gating: the DLQ count is only returned to the guild owner;
+ *    non-owners get 0 (its volume can reveal sensitive failed actions and
+ *    the table may hold plaintext license keys).
+ *  - Tickets badge counts active tickets = open OR claimed (matches the
+ *    dashboard stats query), so a fully-claimed backlog still surfaces.
+ *  - Batch form (?tables=a,b,c) returns a { counts } map in one request so
+ *    the sidebar can avoid fanning out one request per badge.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -45,42 +52,49 @@ function makeChain(result: { count: number | null; error: unknown }) {
   return chain;
 }
 
-function makeRequest(table: string | null) {
+function makeRequest(params: Record<string, string>) {
   const url = new URL('http://localhost/api/counts');
-  if (table !== null) url.searchParams.set('table', table);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   return new NextRequest(url);
+}
+
+/** Set the auth context returned by requirePermission for a test. */
+function setAuth(overrides: Partial<{ isOwner: boolean; guildId: string }> = {}) {
+  (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
+    guildId: overrides.guildId ?? 'guild-123',
+    userId: 'user-789',
+    discordId: 'discord-1',
+    isOwner: overrides.isOwner ?? true,
+    permissions: [],
+  });
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mockSupabase);
-  (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
-    guildId: 'guild-123',
-    userId: 'user-789',
-    permissions: [],
-  });
+  setAuth({ isOwner: true });
 });
 
-describe('GET /api/counts', () => {
+describe('GET /api/counts (single table)', () => {
   it('returns count 0 for a table not in the allowlist', async () => {
-    const res = await GET(makeRequest('users'));
+    const res = await GET(makeRequest({ table: 'users' }));
     const body = await res.json();
     expect(body.count).toBe(0);
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
   it('returns count 0 when table param is missing', async () => {
-    const res = await GET(makeRequest(null));
+    const res = await GET(makeRequest({}));
     const body = await res.json();
     expect(body.count).toBe(0);
     expect(mockFrom).not.toHaveBeenCalled();
   });
 
-  it('counts action_queue_dlq with the pending filter applied server-side', async () => {
+  it('counts action_queue_dlq with the pending filter applied server-side (owner)', async () => {
     const chain = makeChain({ count: 7, error: null });
     mockFrom.mockReturnValue(chain);
 
-    const res = await GET(makeRequest('action_queue_dlq'));
+    const res = await GET(makeRequest({ table: 'action_queue_dlq' }));
     const body = await res.json();
 
     expect(body.count).toBe(7);
@@ -92,23 +106,38 @@ describe('GET /api/counts', () => {
     expect(chain.eq).toHaveBeenCalledWith('retried', false);
   });
 
-  it('counts tickets with the open-status filter', async () => {
+  it('does NOT expose action_queue_dlq to non-owners — returns 0 without querying', async () => {
+    setAuth({ isOwner: false });
+    const chain = makeChain({ count: 7, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest({ table: 'action_queue_dlq' }));
+    const body = await res.json();
+
+    expect(body.count).toBe(0);
+    // The sensitive table must not be queried at all for a non-owner.
+    expect(mockFrom).not.toHaveBeenCalledWith('action_queue_dlq');
+  });
+
+  it('counts tickets as open OR claimed (matches dashboard stats)', async () => {
     const chain = makeChain({ count: 3, error: null });
     mockFrom.mockReturnValue(chain);
 
-    const res = await GET(makeRequest('tickets'));
+    const res = await GET(makeRequest({ table: 'tickets' }));
     const body = await res.json();
 
     expect(body.count).toBe(3);
     expect(chain.eq).toHaveBeenCalledWith('guild_id', 'guild-123');
-    expect(chain.eq).toHaveBeenCalledWith('status', 'open');
+    expect(chain.in).toHaveBeenCalledWith('status', ['open', 'claimed']);
+    // Must not narrow to only 'open' — claimed tickets still need attention.
+    expect(chain.eq).not.toHaveBeenCalledWith('status', 'open');
   });
 
   it('counts orders with the pending-status filter', async () => {
     const chain = makeChain({ count: 2, error: null });
     mockFrom.mockReturnValue(chain);
 
-    await GET(makeRequest('orders'));
+    await GET(makeRequest({ table: 'orders' }));
     expect(chain.eq).toHaveBeenCalledWith('status', 'pending');
   });
 
@@ -116,7 +145,7 @@ describe('GET /api/counts', () => {
     const chain = makeChain({ count: 1, error: null });
     mockFrom.mockReturnValue(chain);
 
-    await GET(makeRequest('giveaways'));
+    await GET(makeRequest({ table: 'giveaways' }));
     expect(chain.eq).toHaveBeenCalledWith('status', 'active');
   });
 
@@ -124,7 +153,7 @@ describe('GET /api/counts', () => {
     const chain = makeChain({ count: 4, error: null });
     mockFrom.mockReturnValue(chain);
 
-    await GET(makeRequest('incidents'));
+    await GET(makeRequest({ table: 'incidents' }));
     expect(chain.in).toHaveBeenCalledWith('status', [
       'open',
       'investigating',
@@ -137,7 +166,7 @@ describe('GET /api/counts', () => {
     const chain = makeChain({ count: 9, error: null });
     mockFrom.mockReturnValue(chain);
 
-    const res = await GET(makeRequest('infractions'));
+    const res = await GET(makeRequest({ table: 'infractions' }));
     const body = await res.json();
 
     expect(body.count).toBe(9);
@@ -151,7 +180,7 @@ describe('GET /api/counts', () => {
     const chain = makeChain({ count: null, error: { message: 'boom' } });
     mockFrom.mockReturnValue(chain);
 
-    const res = await GET(makeRequest('action_queue_dlq'));
+    const res = await GET(makeRequest({ table: 'action_queue_dlq' }));
     const body = await res.json();
     expect(body.count).toBe(0);
   });
@@ -161,7 +190,7 @@ describe('GET /api/counts', () => {
       new Error('Unauthorized'),
     );
 
-    const res = await GET(makeRequest('action_queue_dlq'));
+    const res = await GET(makeRequest({ table: 'action_queue_dlq' }));
     const body = await res.json();
     expect(body.count).toBe(0);
   });
@@ -170,8 +199,81 @@ describe('GET /api/counts', () => {
     const chain = makeChain({ count: null, error: null });
     mockFrom.mockReturnValue(chain);
 
-    const res = await GET(makeRequest('tickets'));
+    const res = await GET(makeRequest({ table: 'tickets' }));
     const body = await res.json();
     expect(body.count).toBe(0);
+  });
+});
+
+describe('GET /api/counts (batch: ?tables=a,b,c)', () => {
+  it('returns a counts map for multiple tables in one request', async () => {
+    // Distinct count per table so we can assert the map is keyed correctly.
+    const byTable: Record<string, number> = {
+      tickets: 5,
+      orders: 2,
+      giveaways: 1,
+      action_queue_dlq: 3,
+    };
+    mockFrom.mockImplementation((table: string) =>
+      makeChain({ count: byTable[table] ?? 0, error: null }),
+    );
+
+    const res = await GET(
+      makeRequest({ tables: 'tickets,orders,giveaways,action_queue_dlq' }),
+    );
+    const body = await res.json();
+
+    expect(body.counts).toEqual({
+      tickets: 5,
+      orders: 2,
+      giveaways: 1,
+      action_queue_dlq: 3,
+    });
+  });
+
+  it('owner-gates the DLQ within the batch: non-owner gets 0 and no DLQ query', async () => {
+    setAuth({ isOwner: false });
+    mockFrom.mockImplementation((table: string) =>
+      makeChain({ count: table === 'tickets' ? 4 : 9, error: null }),
+    );
+
+    const res = await GET(makeRequest({ tables: 'tickets,action_queue_dlq' }));
+    const body = await res.json();
+
+    expect(body.counts.tickets).toBe(4);
+    expect(body.counts.action_queue_dlq).toBe(0);
+    expect(mockFrom).not.toHaveBeenCalledWith('action_queue_dlq');
+    expect(mockFrom).toHaveBeenCalledWith('tickets');
+  });
+
+  it('ignores unknown tables in the batch and dedupes repeats', async () => {
+    mockFrom.mockImplementation(() => makeChain({ count: 1, error: null }));
+
+    const res = await GET(makeRequest({ tables: 'tickets,users,tickets, orders ' }));
+    const body = await res.json();
+
+    // 'users' dropped, duplicate 'tickets' collapsed.
+    expect(Object.keys(body.counts).sort()).toEqual(['orders', 'tickets']);
+    expect(mockFrom).toHaveBeenCalledWith('tickets');
+    expect(mockFrom).toHaveBeenCalledWith('orders');
+    expect(mockFrom).not.toHaveBeenCalledWith('users');
+  });
+
+  it('returns an empty counts map when no valid tables are requested', async () => {
+    const res = await GET(makeRequest({ tables: 'users,nonsense' }));
+    const body = await res.json();
+    expect(body.counts).toEqual({});
+    expect(mockFrom).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty counts map (not a single count) when unauthenticated', async () => {
+    (requirePermission as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Unauthorized'),
+    );
+
+    const res = await GET(makeRequest({ tables: 'tickets,orders' }));
+    const body = await res.json();
+    expect(body.counts).toEqual({});
+    expect(body.count).toBeUndefined();
   });
 });
