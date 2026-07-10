@@ -35,32 +35,46 @@ const ALLOWED_TABLES = [
 type AllowedTable = (typeof ALLOWED_TABLES)[number];
 
 /**
- * Tables whose counts are sensitive enough to require guild-owner
- * authorization. `action_queue_dlq` may contain plaintext license keys
- * (see the DLQ lockdown migration) and its page is gated behind
- * `requireGuildOwner()` in /api/action-queue and /api/diagnostics, so a
- * non-owner dashboard user must not be able to read its volume here either.
+ * Tables whose counts require guild-owner authorization because their
+ * backing GET API is gated behind `requireGuildOwner()`. A badge count must
+ * never be more permissive than the route that serves the underlying data,
+ * otherwise a delegated non-owner would see a non-zero sidebar count for a
+ * page the API will then deny them.
+ *
+ * Owner-only backing routes (verified — all call requireGuildOwner()):
+ *   - action_queue_dlq → /api/action-queue, /api/diagnostics. May contain
+ *     plaintext license keys (see the DLQ lockdown migration).
+ *   - tickets          → /api/tickets:17
+ *   - orders           → /api/orders:18
+ *   - giveaways        → /api/giveaways (GET)
+ *   - infractions      → /api/moderation/infractions:17
+ *
+ * These are deliberately NOT gated by a delegable page permission such as
+ * dashboard.manage_tickets: the backing routes ignore those permissions and
+ * require the owner, so honoring them here would leak operational/commerce
+ * volume to users the real page denies.
  */
-const OWNER_ONLY_TABLES: ReadonlySet<AllowedTable> = new Set(['action_queue_dlq']);
+const OWNER_ONLY_TABLES: ReadonlySet<AllowedTable> = new Set([
+  'action_queue_dlq',
+  'tickets',
+  'orders',
+  'giveaways',
+  'infractions',
+]);
 
 /**
- * Per-table permission gate. Each badge count mirrors the permission that
- * gates its own dashboard page/API (see ROUTE_PERMISSIONS in shared/rbac),
- * so a delegated user with only an unrelated permission cannot read
- * operational/commerce volume for pages they cannot open. `full_access`
- * (owners) satisfies every entry via hasPermission(). `action_queue_dlq`
- * is intentionally absent — it is owner-gated by OWNER_ONLY_TABLES, a
- * stronger gate than any single permission.
+ * Per-table permission gate for tables whose backing API is gated by a
+ * delegable page permission (NOT requireGuildOwner()). Only such tables may
+ * appear here — anything owner-gated belongs in OWNER_ONLY_TABLES. Each entry
+ * mirrors the permission that gates its own dashboard page/API (see
+ * ROUTE_PERMISSIONS in shared/rbac), so a delegated user with the matching
+ * permission sees the same volume the page would show them, and a user with
+ * only an unrelated permission sees 0. `full_access` (owners) satisfies every
+ * entry via hasPermission().
  */
-const TABLE_PERMISSIONS: Record<
-  Exclude<AllowedTable, 'action_queue_dlq'>,
-  DashboardPermission
-> = {
-  tickets: 'dashboard.manage_tickets', // /tickets
-  orders: 'dashboard.manage_orders', // /store/orders
-  giveaways: 'dashboard.manage_server', // /giveaways
-  infractions: 'dashboard.manage_moderation', // /moderation/infractions
-  incidents: 'dashboard.manage_incidents', // /incidents
+const TABLE_PERMISSIONS: Partial<Record<AllowedTable, DashboardPermission>> = {
+  // /incidents — /api/incidents gates GET on requirePermission('dashboard.manage_incidents')
+  incidents: 'dashboard.manage_incidents',
 };
 
 /** V7 Audit §7.P3a — Zod-validated single-table query param for /api/counts */
@@ -74,10 +88,15 @@ const countsQuerySchema = z.object({
  * permission that gates its own dashboard page, so the badge never exposes
  * volume for an area the user cannot open. Returns false (→ count 0) rather
  * than erroring so an unauthorized badge simply renders nothing.
+ *
+ * Fail-closed: a table that is neither owner-only nor in TABLE_PERMISSIONS
+ * (e.g. one added to ALLOWED_TABLES without a gate) is treated as owner-only,
+ * so a new badge can never accidentally leak volume to non-owners.
  */
 function canCountTable(ctx: AuthContext, table: AllowedTable): boolean {
   if (OWNER_ONLY_TABLES.has(table)) return ctx.isOwner;
-  const required = TABLE_PERMISSIONS[table as Exclude<AllowedTable, 'action_queue_dlq'>];
+  const required = TABLE_PERMISSIONS[table];
+  if (required === undefined) return ctx.isOwner;
   return hasPermission(ctx.permissions, required);
 }
 
