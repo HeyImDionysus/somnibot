@@ -67,12 +67,23 @@ export async function runSyncCycle(
     .limit(1000);
 
   const idMap = new Map<string, string>();
+  // Entity-typed map keyed by `${entity_type}:${bareKey}`. The flat `idMap`
+  // above collapses rows that share a bare template_key across entity types
+  // (a role and a channel both keyed `staff`), so hierarchy resolution needs
+  // this entity-scoped view to avoid resolving a role key to a channel's ID.
+  const entityIdMap = new Map<string, string>();
   for (const m of mappings ?? []) {
     idMap.set(m.template_key, m.discord_id);
+    if (m.entity_type) {
+      const bare = String(m.template_key).includes(':')
+        ? String(m.template_key).slice(String(m.template_key).indexOf(':') + 1)
+        : String(m.template_key);
+      entityIdMap.set(`${m.entity_type}:${bare}`, m.discord_id);
+    }
   }
 
   // 4. Compute diff
-  const diff = computeStateDiff(desiredState, actualState, idMap);
+  const diff = computeStateDiff(desiredState, actualState, idMap, entityIdMap);
 
   // 5. Classify drift
   const rawDriftItems = classifyDrift(diff);
@@ -117,7 +128,7 @@ export async function runSyncCycle(
       if (item.suggestedAction !== 'repair') continue;
 
       try {
-        const repairResult = await repairDriftItem(guild, supabase, item, idMap);
+        const repairResult = await repairDriftItem(guild, supabase, item, idMap, entityIdMap);
         if (repairResult.success) {
           repaired++;
           log.info(`Auto-repaired ${item.entityType} "${item.entityName}": ${repairResult.action}`);
@@ -263,6 +274,7 @@ async function repairDriftItem(
   supabase: SupabaseClient,
   item: DriftItem,
   idMap: Map<string, string>,
+  entityIdMap?: Map<string, string>,
 ): Promise<RepairResult> {
   // Use DriftType + entityType to determine the right repair action
   switch (item.type) {
@@ -393,7 +405,7 @@ async function repairDriftItem(
       if (item.entityType !== 'role') {
         return { success: false, action: 'manual_required', reason: `Hierarchy repair not supported for ${item.entityType}` };
       }
-      return await reorderRolesToDesired(guild, supabase, item, idMap);
+      return await reorderRolesToDesired(guild, supabase, item, idMap, entityIdMap);
     }
 
     default:
@@ -535,6 +547,7 @@ async function reorderRolesToDesired(
   supabase: SupabaseClient,
   item: DriftItem,
   idMap: Map<string, string>,
+  entityIdMap?: Map<string, string>,
 ): Promise<RepairResult> {
   const botHighest = guild.members.me?.roles.highest.position;
   if (typeof botHighest !== 'number') {
@@ -576,7 +589,9 @@ async function reorderRolesToDesired(
     const defKey = desiredKeyOf(def);
     if (!defKey) continue;
     // ID map may store keys prefixed (`role:mod`) or bare (`mod`); try both.
-    const discordId = resolveDiscordId(idMap, 'role', defKey);
+    // Pass the entity-typed map so a bare-key collision with a channel/category
+    // of the same key cannot resolve this role to the wrong Discord ID.
+    const discordId = resolveDiscordId(idMap, 'role', defKey, entityIdMap);
     if (!discordId) continue;
     const role = guild.roles.cache.get(discordId);
     if (!role) continue;
@@ -652,14 +667,44 @@ function resolveDiscordId(
   idMap: Map<string, string>,
   prefix: 'role' | 'channel' | 'category',
   rawKey: string,
+  entityIdMap?: Map<string, string>,
 ): string | undefined {
   const bare = stripPrefix(rawKey);
-  return (
-    idMap.get(`${prefix}:${bare}`) ??
-    idMap.get(bare) ??
-    idMap.get(rawKey) ??
-    idMap.get(`${prefix}:${rawKey}`)
-  );
+  // Prefer the flat prefixed key first (already entity-scoped), then the
+  // entity-typed map, which is the only source that survives a bare-key
+  // collision across entity types (a role and a channel both keyed `staff`).
+  const prefixed = idMap.get(`${prefix}:${bare}`);
+  if (prefixed) return prefixed;
+  if (entityIdMap) {
+    const typed = entityIdMap.get(`${prefix}:${bare}`) ?? entityIdMap.get(`${prefix}:${rawKey}`);
+    if (typed) return typed;
+  }
+  // Bare/raw fallback — but reject a hit that the entity-typed map shows belongs
+  // to a DIFFERENT entity type, so a channel row keyed `staff` cannot resolve as
+  // the role `staff`.
+  const bareHit = idMap.get(bare) ?? idMap.get(rawKey) ?? idMap.get(`${prefix}:${rawKey}`);
+  if (bareHit && entityIdMap && isForeignEntityId(entityIdMap, prefix, bareHit)) {
+    return undefined;
+  }
+  return bareHit;
+}
+
+/**
+ * True when `discordId` is registered in `entityIdMap` under an entity type
+ * other than `entityType` — used to reject a bare-key collision that actually
+ * belongs to a different entity.
+ */
+function isForeignEntityId(
+  entityIdMap: Map<string, string>,
+  entityType: 'role' | 'channel' | 'category',
+  discordId: string,
+): boolean {
+  for (const [key, id] of entityIdMap) {
+    if (id !== discordId) continue;
+    const type = key.includes(':') ? key.slice(0, key.indexOf(':')) : key;
+    if (type !== entityType) return true;
+  }
+  return false;
 }
 
 /**

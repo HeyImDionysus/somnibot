@@ -574,6 +574,81 @@ describe('computeStateDiff — role hierarchy drift', () => {
     expect(diff.roleHierarchyDrift).toBe(true);
   });
 
+  it('disambiguates bare role keys by entity type so a channel mapping cannot mask a role', () => {
+    // Both a role and a channel are keyed with the bare template_key "staff".
+    // deploy-listener persists bare keys, and the flat idMap can only hold one
+    // "staff" entry — here the CHANNEL row won (last writer), so a naive bare
+    // lookup for role "staff" would resolve to the channel's Discord ID, the
+    // role would be dropped from the hierarchy comparison, and a real inversion
+    // would go undetected. The entity-typed map must rescue the role lookup.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('staff', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-staff', { position: 2 }),
+        makeActualRole('r-member', { position: 7 }), // member above staff → inversion
+      ],
+    });
+    // Flat map: the channel "staff" clobbered the role "staff" (bare-key collision).
+    const idMap = new Map<string, string>([
+      ['staff', 'c-staff-channel'], // channel id, NOT the role
+      ['member', 'r-member'],
+    ]);
+    // Entity-typed map preserves entity_type from the real table primary key.
+    const entityIdMap = new Map<string, string>([
+      ['role:staff', 'r-staff'],
+      ['channel:staff', 'c-staff-channel'],
+      ['role:member', 'r-member'],
+    ]);
+
+    // Without the entity map the collision would hide the drift…
+    const naive = computeStateDiff(desired, actual, idMap);
+    expect(naive.roleHierarchyDrift).toBe(false); // role "staff" dropped → no pair
+
+    // …but with it, the role resolves correctly and the inversion is detected.
+    // The representative is the higher-desired role sitting too low: "staff".
+    const diff = computeStateDiff(desired, actual, idMap, entityIdMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+    expect(diff.roleHierarchyDriftKey).toBe('staff');
+    expect(diff.roleHierarchyDriftId).toBe('r-staff');
+  });
+
+  it('rejects a bare-key flat-map hit that belongs to another entity type', () => {
+    // No prefixed and no entity-typed role entry for "staff" — only a bare
+    // flat-map entry that actually points at a channel. The isForeignEntityId
+    // guard must refuse it rather than resolving the role to a channel ID.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('staff', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-member', { position: 7 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['staff', 'c-staff-channel'], // bare hit, but it's a channel
+      ['member', 'r-member'],
+    ]);
+    const entityIdMap = new Map<string, string>([
+      ['channel:staff', 'c-staff-channel'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap, entityIdMap);
+    // Only "member" resolves to a live role → fewer than two → no false drift,
+    // and crucially "staff" did NOT resolve to the channel id.
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
   it('ignores managed roles when evaluating hierarchy order', () => {
     const desired = baseDesiredState({
       roles: [

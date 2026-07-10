@@ -8,7 +8,7 @@
  * Architecture doc §15: "Event-based drift detection (role/channel update events)"
  */
 
-import type { Role } from 'discord.js';
+import type { Guild, Role } from 'discord.js';
 import type { SomniClient } from '../client.js';
 import type { DriftItem, DriftSeverity, DriftType } from '@somnibot/shared';
 import { writeAuditLog } from '../services/audit.js';
@@ -156,6 +156,21 @@ export async function handleRoleUpdate(
     changeKeys.includes('position') &&
     changeKeys.every((k) => k === 'position');
 
+  // A role's numeric `position` shifts whenever ANY role above/below it is
+  // added, removed, or moved — including untracked roles the dashboard never
+  // manages. A bare numeric change that leaves the tracked roles in their
+  // desired relative order is NOT hierarchy drift: the periodic diff (which
+  // compares relative ordering, not absolute numbers) would not report it, and
+  // queuing a HIERARCHY_DRIFT here produces a stale false item whose repair can
+  // only no-op/clear. Only surface drift when the tracked roles are actually
+  // out of desired order.
+  if (isPositionOnly && !(await trackedRolesOutOfDesiredOrder(client, newRole.guild))) {
+    log.info(
+      `[Sync:Drift] Role "${newRole.name}" position changed but tracked roles remain in desired order — not drift`,
+    );
+    return;
+  }
+
   let type: DriftType;
   let severity: DriftSeverity;
   if (hasPermissionChange) {
@@ -282,6 +297,79 @@ async function getSyncConfig(client: SomniClient, guildId: string): Promise<Sync
   } catch { /* non-critical */ }
 
   return config;
+}
+
+/**
+ * Determine whether the tracked (mapped) roles are currently out of their
+ * desired relative order in this guild.
+ *
+ * Mirrors the periodic diff engine's hierarchy check: resolve each desired role
+ * to a live, non-managed Discord role, sort by desired position, and look for a
+ * strict inversion in the actual Discord positions. A tie (equal actual
+ * positions) is NOT an inversion because Discord positions are not guaranteed
+ * unique. Returns false when fewer than two mapped roles resolve (nothing can
+ * be "out of order").
+ *
+ * Used to suppress false HIERARCHY_DRIFT items from pure numeric position moves
+ * (e.g. an untracked role inserted elsewhere) that preserve the tracked
+ * ordering — exactly the drift the periodic diff would decline to report.
+ */
+async function trackedRolesOutOfDesiredOrder(
+  client: SomniClient,
+  guild: Guild,
+): Promise<boolean> {
+  const { data: desired } = await client.supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  const desiredRoles = (desired?.roles as Record<string, unknown>[]) ?? [];
+  if (desiredRoles.length < 2) return false;
+
+  const { data: mappings } = await client.supabase
+    .from('discord_id_map')
+    .select('template_key, discord_id')
+    .eq('guild_id', guild.id)
+    .eq('entity_type', 'role')
+    .limit(1000);
+
+  const idMap = new Map<string, string>();
+  for (const m of (mappings ?? []) as Array<{ template_key: string; discord_id: string }>) {
+    idMap.set(m.template_key, m.discord_id);
+  }
+
+  const bare = (key: string): string =>
+    key.includes(':') ? key.slice(key.indexOf(':') + 1) : key;
+  const resolveRoleId = (rawKey: string): string | undefined =>
+    idMap.get(`role:${bare(rawKey)}`) ??
+    idMap.get(bare(rawKey)) ??
+    idMap.get(rawKey) ??
+    idMap.get(`role:${rawKey}`);
+
+  const mapped: Array<{ desiredPos: number; actualPos: number }> = [];
+  for (const def of desiredRoles) {
+    const rawKey = (def.template_key ?? def.templateKey ?? def.key) as string | undefined;
+    if (!rawKey) continue;
+    const discordId = resolveRoleId(rawKey);
+    if (!discordId) continue;
+    const role = guild.roles.cache.get(discordId);
+    if (!role || role.managed) continue;
+    mapped.push({
+      desiredPos: (def.position as number) ?? 0,
+      actualPos: role.position,
+    });
+  }
+
+  if (mapped.length < 2) return false;
+
+  const sorted = [...mapped].sort((a, b) => a.desiredPos - b.desiredPos);
+  for (let i = 1; i < sorted.length; i++) {
+    // Strict inversion only — a tie is treated as correctly ordered because
+    // Discord does not guarantee unique role positions.
+    if (sorted[i].actualPos < sorted[i - 1].actualPos) return true;
+  }
+  return false;
 }
 
 /**

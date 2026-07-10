@@ -192,6 +192,47 @@ describe('HIERARCHY_DRIFT reachability via the real classifier', () => {
     expect(result.repaired).toBeGreaterThanOrEqual(1);
   });
 
+  it('detects hierarchy drift when a channel shares a bare template_key with a role', async () => {
+    // A role and a channel are both keyed bare "staff". The flat idMap can only
+    // hold one "staff" entry; here the CHANNEL mapping is inserted last and wins.
+    // Without entity-type disambiguation the role lookup resolves to the
+    // channel's ID, the role drops out of the hierarchy comparison, and the real
+    // inversion (member above staff) is never repaired. runSyncCycle must build
+    // the entity-typed map from discord_id_map.entity_type and still reorder.
+    const actualRoles = [
+      { id: 'r-staff', name: 'Staff', position: 2 },
+      { id: 'r-member', name: 'Member', position: 9 }, // member above staff → drift
+    ];
+    snapshotState = snapshotFromRoles(actualRoles);
+
+    const desired = {
+      roles: [
+        { template_key: 'staff', name: 'Staff', permissions: '0', color: 0, hoist: false, mentionable: false, position: 1 },
+        { template_key: 'member', name: 'Member', permissions: '0', color: 0, hoist: false, mentionable: false, position: 0 },
+      ],
+      channels: [],
+    };
+    // Order matters: the channel "staff" row comes AFTER the role "staff" row, so
+    // in the flat Map<string,string> the channel id clobbers the role id.
+    const mappings = [
+      { template_key: 'staff', discord_id: 'r-staff', entity_type: 'role' },
+      { template_key: 'member', discord_id: 'r-member', entity_type: 'role' },
+      { template_key: 'staff', discord_id: 'c-staff', entity_type: 'channel' },
+    ];
+    const setPositions = vi.fn(async (_updates: Array<{ role: string; position: number }>) => {});
+    const guild = makeGuild({ botHighestPosition: 50, setPositions, roles: actualRoles });
+
+    const result = await runSyncCycle(guild, makeSupabase({ desired, mappings }), bus, makeConfig());
+
+    // The role resolved through the entity-typed map, so the inversion is found
+    // and reorderRolesToDesired issues the reorder.
+    expect(setPositions).toHaveBeenCalledTimes(1);
+    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
+    const byRole = new Map(updates.map((u) => [u.role, u.position]));
+    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-staff')!);
+    expect(result.repaired).toBeGreaterThanOrEqual(1);
+  });
+
   it('does not reorder when the real diff engine sees roles already in order', async () => {
     const actualRoles = [
       { id: 'r-admin', name: 'Admin', position: 12 },

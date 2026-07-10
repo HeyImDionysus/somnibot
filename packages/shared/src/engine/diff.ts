@@ -201,13 +201,45 @@ export interface DriftItem {
 // ============================================================
 
 /**
+ * True when `discordId` is registered in `entityIdMap` under an entity type
+ * OTHER than `entityType`. Used to reject a bare-key flat-map resolution that
+ * actually belongs to a different entity (e.g. a channel row keyed `staff`
+ * whose ID would otherwise be mistaken for a role of the same bare key).
+ */
+function isForeignEntityId(
+  entityIdMap: Map<string, string> | undefined,
+  entityType: 'role' | 'channel' | 'category',
+  discordId: string,
+): boolean {
+  if (!entityIdMap) return false;
+  for (const [key, id] of entityIdMap) {
+    if (id !== discordId) continue;
+    const type = key.includes(':') ? key.slice(0, key.indexOf(':')) : key;
+    if (type !== entityType) return true;
+  }
+  return false;
+}
+
+/**
  * Compute the diff between desired and actual state.
  * ID mapping is provided by the discord_id_map table.
+ *
+ * `idMap` is the historical flat map (template key → discord ID). The
+ * `discord_id_map` table's real primary key is (guild, entity_type, template
+ * key), so the same bare `template_key` (e.g. `staff`) can legitimately exist
+ * for BOTH a role and a channel/category. Flattening those rows into a single
+ * `Map<string, string>` loses that entity dimension: whichever row is inserted
+ * last wins, so a bare-key lookup for a role can silently resolve to a
+ * channel's Discord ID (and vice-versa). To keep the hierarchy comparison from
+ * dropping a role on such a collision, callers may additionally pass
+ * `entityIdMap`, keyed by `${entityType}:${bareKey}`, which preserves the
+ * entity type and is consulted first for role resolution.
  */
 export function computeStateDiff(
   desired: DesiredState,
   actual: ActualState,
   idMap: Map<string, string>, // template key → discord ID
+  entityIdMap?: Map<string, string>, // `${entity_type}:${bareKey}` → discord ID
 ): StateDiff {
   const roleDiffs: RoleDiff[] = [];
   const categoryDiffs: CategoryDiff[] = [];
@@ -327,10 +359,29 @@ export function computeStateDiff(
         (desiredRole as { templateKey?: string }).templateKey;
       if (!rawKey) continue;
       const bareKey = rawKey.includes(':') ? rawKey.slice(rawKey.indexOf(':') + 1) : rawKey;
-      const discordId =
-        idMap.get(`role:${bareKey}`) ??
-        idMap.get(bareKey) ??
-        idMap.get(rawKey);
+      // Resolve to a Discord ID, disambiguating by entity type so a bare-key
+      // lookup cannot collide with a channel/category mapping of the same key.
+      // Priority:
+      //   1. Prefixed flat-map key (`role:staff`) — already entity-scoped.
+      //   2. Entity-typed map (`role:staff`), when the caller supplies one — the
+      //      only source that survives a bare-key collision, since it is keyed
+      //      by entity type at construction from the real table primary key.
+      //   3. Bare / raw flat-map keys — last-resort fallback, but ONLY accepted
+      //      when the resolved ID is not claimed by a different entity type, so
+      //      a channel row keyed `staff` can never masquerade as a role here.
+      let discordId = idMap.get(`role:${bareKey}`);
+      if (!discordId && entityIdMap) {
+        discordId =
+          entityIdMap.get(`role:${bareKey}`) ??
+          entityIdMap.get(`role:${rawKey}`) ??
+          undefined;
+      }
+      if (!discordId) {
+        const bareCandidate = idMap.get(bareKey) ?? idMap.get(rawKey);
+        if (bareCandidate && !isForeignEntityId(entityIdMap, 'role', bareCandidate)) {
+          discordId = bareCandidate;
+        }
+      }
       if (!discordId) continue;
       const actualRole = actual.roles.find(r => r.id === discordId);
       if (!actualRole || actualRole.managed) continue;
