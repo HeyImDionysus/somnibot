@@ -14,12 +14,31 @@
  *               Identity / tenant columns (`id`, `guild_id`) and immutable
  *               `created_at` are deliberately excluded — undo replays a value
  *               change, it must never re-key a row or move it between tenants.
+ *               Columns the dashboard never writes (bot-owned counters like
+ *               `scheduled_messages.current_sends` / `last_sent_at`) are also
+ *               excluded so a tampered undo can't rewind scheduler state.
  *   - `match` = the only columns undo may MATCH on (the `.match(match)` filter).
  *               These are the identity / tenant columns used to locate the row.
  *
  * Splitting the two sets means a tampered payload cannot smuggle an identifier
  * or tenant key into `data` (which would let the service-role write re-point a
  * row) even though that same column is legitimately allowed in `match`.
+ *
+ * The column allowlist alone is NOT enough to make the match safe, so each
+ * entry also carries a tenancy contract enforced at apply time:
+ *   - `requiredMatch` = identity key(s) that MUST be present in `match`. Without
+ *     this a payload could match on the tenant key ALONE (e.g.
+ *     `match: { guild_id }`) and the service-role `.update().match()` would
+ *     rewrite EVERY row of that guild instead of the single undo target.
+ *   - `guildScope` = how the write is confined to the caller's guild:
+ *       · `{ kind: "column", column }` — the guild column must be present in
+ *         `match` and its value must equal the caller's `ctx.guildId`. This
+ *         blocks a tampered payload from naming another guild's id/tenant.
+ *       · `{ kind: "lookup", ... }` — the table has NO guild column of its own
+ *         (e.g. `product_license_config`, keyed by `product_id`). The route
+ *         must resolve the row's owning guild through a parent table and verify
+ *         it against `ctx.guildId` BEFORE applying. `validateUndoPayload`
+ *         returns a `tenancyCheck` directive describing that lookup.
  *
  * Column sets are derived from the real table schemas
  * (packages/shared/src/types/database.ts + packages/supabase/migrations) and
@@ -34,11 +53,44 @@
  * `undefined` and is rejected, instead of returning a prototype value that
  * would bypass the allowlist and crash the `.has()` check downstream.
  */
+/**
+ * How undo confines a write to the caller's guild.
+ *
+ * - `column`: the table has its own guild column. `match` must include it and
+ *   its value must equal the caller's `ctx.guildId` (checked synchronously in
+ *   `validateUndoPayload`).
+ * - `lookup`: the table has NO guild column, so the owning guild is derived by
+ *   joining a `localKey` value to a `foreignTable`'s `foreignKey` and reading
+ *   its `foreignGuildColumn`. The undo route resolves and verifies this against
+ *   `ctx.guildId` before applying the write.
+ */
+export type UndoGuildScope =
+  | { readonly kind: "column"; readonly column: string }
+  | {
+      readonly kind: "lookup";
+      /** Match key on THIS table whose value identifies the parent row. */
+      readonly localKey: string;
+      /** Parent table that carries the guild column. */
+      readonly foreignTable: string;
+      /** Parent-table column matched against the local key's value. */
+      readonly foreignKey: string;
+      /** Guild column on the parent table to compare against ctx.guildId. */
+      readonly foreignGuildColumn: string;
+    };
+
 export interface UndoTableSpec {
   /** Columns undo may set via `.update(data)`. */
   readonly data: ReadonlySet<string>;
   /** Columns undo may filter on via `.match(match)`. */
   readonly match: ReadonlySet<string>;
+  /**
+   * Identity key(s) that MUST be present in `match`. Guards against a payload
+   * that matches on the tenant key alone (which would update every row in the
+   * guild). Every required key must also be a member of `match`.
+   */
+  readonly requiredMatch: ReadonlySet<string>;
+  /** How the write is confined to the caller's guild (see UndoGuildScope). */
+  readonly guildScope: UndoGuildScope;
 }
 
 /**
@@ -47,6 +99,16 @@ export interface UndoTableSpec {
  * single row without crossing tenants.
  */
 const ID_AND_GUILD: ReadonlySet<string> = new Set(["id", "guild_id"]);
+
+/**
+ * Tenancy contract for the common `{ id, guild_id }` shape: the surrogate `id`
+ * must be present (so the write hits one row) and the write is scoped to the
+ * caller's guild via the `guild_id` match value.
+ */
+const ID_AND_GUILD_SCOPE = {
+  requiredMatch: new Set(["id"]) as ReadonlySet<string>,
+  guildScope: { kind: "column", column: "guild_id" } as UndoGuildScope,
+};
 
 export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   string,
@@ -221,7 +283,11 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "xp_min",
         "xp_multiplier_mode",
       ]),
+      // guild_id IS the primary key here, so it is both the required identity
+      // key and the guild scope column.
       match: new Set(["guild_id"]),
+      requiredMatch: new Set(["guild_id"]),
+      guildScope: { kind: "column", column: "guild_id" },
     },
   ],
   [
@@ -243,6 +309,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -266,6 +333,8 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       ]),
       // product_files is located by its id, its parent product, and its tenant.
       match: new Set(["id", "product_id", "guild_id"]),
+      requiredMatch: new Set(["id"]),
+      guildScope: { kind: "column", column: "guild_id" },
     },
   ],
   [
@@ -284,7 +353,20 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
         "watermark_config",
       ]),
+      // product_license_config is keyed by product_id and has NO guild column,
+      // so its owning guild must be resolved through products.guild_id and
+      // verified against ctx.guildId before the undo is applied. Without this,
+      // a tampered undo row in guild A could rewrite guild B's license config
+      // by naming B's product UUID.
       match: new Set(["product_id"]),
+      requiredMatch: new Set(["product_id"]),
+      guildScope: {
+        kind: "lookup",
+        localKey: "product_id",
+        foreignTable: "products",
+        foreignKey: "id",
+        foreignGuildColumn: "guild_id",
+      },
     },
   ],
   [
@@ -292,6 +374,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
     {
       data: new Set(["announce", "level", "remove_at_level", "role_id"]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -299,6 +382,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
     {
       data: new Set(["multiplier", "role_id"]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -318,6 +402,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "role_id",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -338,6 +423,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -358,6 +444,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -384,6 +471,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -408,19 +496,24 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "use_components_v2",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
     "scheduled_messages",
     {
+      // NOTE: current_sends / last_sent_at are deliberately excluded — they are
+      // owned by the bot's scheduler runner (packages/bot/src/features/
+      // scheduled-messages/runner.ts), not written by the dashboard route
+      // (packages/dashboard/src/app/api/scheduled-messages/route.ts only sets
+      // the config fields below). Letting undo rewind those counters could
+      // duplicate sends or prematurely exhaust max_sends.
       data: new Set([
         "active",
         "channel_id",
         "cron_expression",
-        "current_sends",
         "embed_config_id",
         "end_date",
-        "last_sent_at",
         "max_sends",
         "message",
         "name",
@@ -429,6 +522,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -453,6 +547,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -478,6 +573,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "use_effect",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -494,6 +590,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -512,6 +609,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -527,6 +625,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -550,6 +649,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "winners",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -567,6 +667,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "title",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -584,6 +685,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "winning_option_id",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -592,6 +694,8 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       // Keyed by guild_id (its primary key), not a surrogate id.
       data: new Set(["auto_trigger", "enabled", "trigger_mode", "updated_at"]),
       match: new Set(["guild_id"]),
+      requiredMatch: new Set(["guild_id"]),
+      guildScope: { kind: "column", column: "guild_id" },
     },
   ],
   [
@@ -606,6 +710,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "title",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -622,6 +727,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -643,6 +749,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
   [
@@ -661,6 +768,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "updated_at",
       ]),
       match: ID_AND_GUILD,
+      ...ID_AND_GUILD_SCOPE,
     },
   ],
 ]);
@@ -683,9 +791,39 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   );
 }
 
+/**
+ * A tenancy check the undo route must run against the DB before applying a
+ * write to a table that has no guild column of its own. Resolve the row named
+ * by `keyValue` in `foreignTable` and confirm its `foreignGuildColumn` equals
+ * the caller's guild; reject the undo otherwise.
+ */
+export interface UndoTenancyCheck {
+  readonly foreignTable: string;
+  readonly foreignKey: string;
+  readonly keyValue: unknown;
+  readonly foreignGuildColumn: string;
+}
+
 export type UndoValidation =
-  | { ok: true; table: string; data: Record<string, unknown>; match: Record<string, unknown> }
+  | {
+      ok: true;
+      table: string;
+      data: Record<string, unknown>;
+      match: Record<string, unknown>;
+      /**
+       * Present only for tables scoped via a parent lookup (no own guild
+       * column). The route MUST resolve this and verify it equals ctx.guildId
+       * before writing. Absent when the guild scope was already verified
+       * synchronously against a guild match column.
+       */
+      tenancyCheck?: UndoTenancyCheck;
+    }
   | { ok: false; reason: string };
+
+/** Caller context needed to scope an undo write to a single tenant. */
+export interface UndoContext {
+  readonly guildId: string;
+}
 
 /**
  * Re-validate a resolved undo payload against the allowlist at APPLY time.
@@ -694,13 +832,24 @@ export type UndoValidation =
  *   - table/data/match are not the expected shapes,
  *   - the table is not on the allowlist,
  *   - `match` is empty (an empty match would update every row in the table),
- *   - any column in `data` is not in the table's settable allowlist, or
- *   - any column in `match` is not in the table's match allowlist.
+ *   - any column in `data` is not in the table's settable allowlist,
+ *   - any column in `match` is not in the table's match allowlist,
+ *   - a required identity key is missing from `match` (a tenant-only match
+ *     would update every row in the guild), or
+ *   - the table has a guild column whose match value does not equal
+ *     `ctx.guildId` (a tampered payload naming another guild).
  *
  * `data` and `match` are validated against SEPARATE allowlists: identity/tenant
  * columns are match-only, so a tampered payload cannot set them.
+ *
+ * For a table scoped via a parent lookup (no own guild column), the guild can't
+ * be verified here; the returned `tenancyCheck` tells the route which parent
+ * row to resolve and confirm against `ctx.guildId` before applying.
  */
-export function validateUndoPayload(payload: unknown): UndoValidation {
+export function validateUndoPayload(
+  payload: unknown,
+  ctx: UndoContext,
+): UndoValidation {
   if (!isPlainObject(payload)) {
     return { ok: false, reason: "undo payload is not an object" };
   }
@@ -745,5 +894,52 @@ export function validateUndoPayload(payload: unknown): UndoValidation {
     }
   }
 
-  return { ok: true, table, data, match };
+  // Require every identity key so the write can only ever hit a single row.
+  // Without this a payload could match on the tenant key alone (or, for lookup
+  // tables, omit the parent key) and the service-role update would rewrite
+  // every matching row instead of the one undo target.
+  for (const key of spec.requiredMatch) {
+    if (!Object.prototype.hasOwnProperty.call(match, key)) {
+      return {
+        ok: false,
+        reason: `undo match for table "${table}" is missing required identity key "${key}"`,
+      };
+    }
+  }
+
+  // Confine the write to the caller's guild.
+  if (spec.guildScope.kind === "column") {
+    const { column } = spec.guildScope;
+    // requiredMatch guarantees presence for guild-keyed tables; belt-and-braces
+    // for id-keyed tables whose guild column is present-but-optional in match.
+    if (!Object.prototype.hasOwnProperty.call(match, column)) {
+      return {
+        ok: false,
+        reason: `undo match for table "${table}" is missing guild scope key "${column}"`,
+      };
+    }
+    if (match[column] !== ctx.guildId) {
+      return {
+        ok: false,
+        reason: `undo match for table "${table}" targets a different guild`,
+      };
+    }
+    return { ok: true, table, data, match };
+  }
+
+  // Lookup-scoped: no guild column on this table. Hand the route a directive to
+  // resolve the owning guild through the parent table and verify it.
+  const { localKey, foreignTable, foreignKey, foreignGuildColumn } = spec.guildScope;
+  return {
+    ok: true,
+    table,
+    data,
+    match,
+    tenancyCheck: {
+      foreignTable,
+      foreignKey,
+      keyValue: match[localKey],
+      foreignGuildColumn,
+    },
+  };
 }

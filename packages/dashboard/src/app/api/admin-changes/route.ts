@@ -86,12 +86,40 @@ export async function POST(request: NextRequest) {
     // list payload is rejected here, before any DB write.
     const undo = change.undo_payload;
     if (undo !== null && undo !== undefined) {
-      const validation = validateUndoPayload(undo);
+      const validation = validateUndoPayload(undo, { guildId: ctx.guildId });
       if (!validation.ok) {
         return NextResponse.json(
           { error: `Undo blocked: ${validation.reason}` },
           { status: 400 },
         );
+      }
+
+      // For tables with no guild column of their own (e.g.
+      // product_license_config), the allowlist can't confine the write to this
+      // guild synchronously. Resolve the row's owning guild through its parent
+      // table and verify it against ctx.guildId BEFORE applying, so a tampered
+      // undo row can't reach across tenants by naming another guild's key.
+      if (validation.tenancyCheck) {
+        const { foreignTable, foreignKey, keyValue, foreignGuildColumn } =
+          validation.tenancyCheck;
+        const { data: owner, error: ownerError } = await admin
+          .from(foreignTable)
+          .select(foreignGuildColumn)
+          .eq(foreignKey, keyValue as string)
+          .maybeSingle();
+
+        if (ownerError) return dbError(ownerError, 'admin-changes');
+        // foreignTable/foreignGuildColumn are dynamic, so the generated
+        // Supabase types can't narrow the row shape; read the guild value
+        // through an unknown-first cast.
+        const ownerGuild =
+          owner && ((owner as unknown as Record<string, unknown>)[foreignGuildColumn]);
+        if (!owner || ownerGuild !== ctx.guildId) {
+          return NextResponse.json(
+            { error: 'Undo blocked: target does not belong to this guild' },
+            { status: 400 },
+          );
+        }
       }
 
       const { error: undoError } = await admin
