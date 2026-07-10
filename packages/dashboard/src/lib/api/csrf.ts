@@ -417,6 +417,65 @@ export function shouldRotateCsrfValue(cookieValue: string): boolean {
   return Date.now() - issuedAt > CSRF_ROTATION_MAX_AGE_MS;
 }
 
+/**
+ * WAVE 2B follow-up [security] — proactive near-boundary rotation lead time.
+ *
+ * `/api/csrf` normally re-signs the existing (unchanged) nonce when a same-session
+ * cookie is not yet rotation-due, writing no cookie. That is correct except in a
+ * narrow window: if the cookie is issued just BEFORE the rotation boundary, a
+ * freshly fetched token is for the OLD nonce, but a concurrent request may rotate
+ * the cookie moments later. The user then holds a token that matches only the
+ * `prev` grace cookie — which expires 60s after rotation. A user who fetches a
+ * token, spends a minute filling a form, and submits would 403.
+ *
+ * To close this, `/api/csrf` PROACTIVELY rotates when the cookie is within this
+ * lead time of the hard boundary: it returns the deterministic rotated token and
+ * writes the rotated cookie + prev, so the token the user just fetched is valid
+ * against the CURRENT cookie (not just the expiring grace window) even if a
+ * concurrent request rotates. The derivation is the same deterministic seed the
+ * middleware uses, so the two paths converge on one nonce.
+ *
+ * Set to CSRF_GRACE_PERIOD_MS (60s): the lead time is exactly the window in which
+ * a not-yet-due token could otherwise become grace-only before the user submits.
+ */
+const CSRF_ROTATION_LEAD_MS = CSRF_GRACE_PERIOD_MS; // 60s
+
+/**
+ * Whether a same-session cookie is close enough to the rotation boundary that
+ * `/api/csrf` should proactively rotate NOW rather than re-sign the old nonce.
+ * Returns true when the cookie is due, or within CSRF_ROTATION_LEAD_MS of the
+ * hard boundary. Legacy (timestamp-less) and unparseable cookies are always due
+ * (mirrors `shouldRotateCsrfValue`), so they also count as near-boundary.
+ */
+export function isNearRotationBoundary(cookieValue: string): boolean {
+  const bangIdx = cookieValue.lastIndexOf('!');
+  if (bangIdx === -1) return true;
+  const issuedAt = parseInt(cookieValue.slice(bangIdx + 1), 10);
+  if (Number.isNaN(issuedAt)) return true;
+  return Date.now() - issuedAt > CSRF_ROTATION_MAX_AGE_MS - CSRF_ROTATION_LEAD_MS;
+}
+
+/**
+ * WAVE 2B follow-up [security] — DETERMINISTIC cross-session rebind seed.
+ *
+ * When `/api/csrf` (or the middleware) rebinds a leftover foreign cookie to the
+ * newly authenticated session, several post-switch tabs can hit the endpoint with
+ * the SAME foreign cookie at once. A random nonce per tab reintroduces the
+ * cookie-soup race (each response setting a different cookie/token, last write
+ * wins, the other tabs' forms 403). Deriving the rebind nonce from the foreign
+ * cookie's own content under a distinct `rebind:` domain makes all concurrent
+ * post-switch tabs converge on one nonce, exactly as the middleware does — so the
+ * two rebind paths agree and no tab is stranded. Domain separation guarantees the
+ * rebind nonce can never collide with a same-session rotation nonce for the same
+ * seed. Unforgeability is unchanged: the nonce is still HMAC(secret, …).
+ */
+export async function deriveRebindCsrf(
+  sessionId: string,
+  foreignCookieValue: string,
+): Promise<{ token: string; nonce: string }> {
+  return deriveRotatedCsrf(sessionId, `rebind:${stripCsrfTimestamp(foreignCookieValue)}`);
+}
+
 export function shouldRotateCsrf(request: NextRequest): boolean {
   const csrfCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
   if (!csrfCookie) return false;

@@ -28,6 +28,11 @@
  *   R8  session switch A→B with leftover cookies   → B never validated by A's token/grace
  *   R9  invalidateCsrfCookies path correctness     → deletes root-path cookies
  *   R10 prev grace bound to active session         → cross-session prev rejected
+ *   R11 post-switch FIRST mutating request         → rejected + rebound BEFORE
+ *                                                    validation (ordering fix)
+ *   R12 concurrent /api/csrf cross-session rebind  → deterministic convergence
+ *   R13 near-boundary /api/csrf fetch              → proactive rotation, no
+ *                                                    grace-only token
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -40,6 +45,7 @@ import { GET } from '@/app/api/csrf/route';
 import {
   deriveRotatedCsrf,
   generateCsrfToken,
+  signExistingCsrf,
   csrfRotationSeed,
   checkCsrf,
   invalidateCsrfCookies,
@@ -127,6 +133,30 @@ async function submit(jar: CookieJar, headerToken: string): Promise<boolean> {
   jar.onto(req);
   const err = await checkCsrf(req);
   return err === null; // true = accepted
+}
+
+/**
+ * Drive a mutating request THROUGH the middleware (auth + CSRF validation +
+ * rebind all in one pass), returning the middleware's response. Unlike `submit`,
+ * this exercises the real ordering: the middleware must reject (or rebind and
+ * fail closed) a request whose CSRF cookie belongs to a different session than
+ * the authenticated user BEFORE the request is allowed to reach a handler.
+ */
+async function submitThroughMiddleware(
+  jar: CookieJar,
+  headerToken: string,
+): Promise<NextResponse> {
+  const req = new NextRequest('http://localhost:3000/api/economy/config', {
+    method: 'POST',
+    headers: { host: 'localhost:3000', [CSRF_HEADER_NAME]: headerToken },
+  });
+  jar.onto(req);
+  return middleware(req);
+}
+
+/** A middleware response that passes CSRF has status 200 (NextResponse.next). */
+function csrfPassed(res: NextResponse): boolean {
+  return res.status !== 403;
 }
 
 /** Read the current token issued for the jar's cookie by fetching /api/csrf. */
@@ -549,5 +579,228 @@ describe('R10 — prev grace bound to active session', () => {
     }));
     // Same-session prev within the grace window is accepted.
     expect(await submit(jar, prev.token)).toBe(true);
+  });
+});
+
+/* ================================================================== */
+/*  R11 — VALIDATION-ORDERING: the FIRST mutating request after an     */
+/*  account switch must NOT be validated by the previous session's     */
+/*  token. The middleware must detect the session mismatch and fail    */
+/*  closed BEFORE the request reaches a handler — never validate A's   */
+/*  token and then rebind only in the response.                        */
+/* ================================================================== */
+
+describe('R11 — post-switch first-request rejection/rebind ordering', () => {
+  it("rejects the first mutating request that carries A's cookie+token while authenticated as B", async () => {
+    // A legitimately established current+prev cookies bound to SESSION_A.
+    const aOld = `${'8'.repeat(32)}:${SESSION_A}!${staleIssuedAt()}`;
+    const aRotate = await middleware(dashboardRequest({ [CSRF_COOKIE_NAME]: aOld }));
+    const jar = new CookieJar();
+    jar.apply(aRotate);
+
+    // The browser still holds A's current cookie/token. Capture A's live token
+    // (the one the browser's form would carry) against the surviving cookie.
+    const aCurrent = jar.get(CSRF_COOKIE_NAME)!;
+    const aNonce = parseNonce(aCurrent);
+    const aToken = (await signExistingCsrf(aNonce, SESSION_A)).token;
+    // Sanity: A's token validates under A (pure checkCsrf on the jar).
+    expect(await submit(jar, aToken)).toBe(true);
+
+    // The user switches to account B. The VERY FIRST request after the switch is
+    // a mutating POST that still carries A's cookie and A's token. getUser() now
+    // resolves to B.
+    mockUser(USER_B);
+    ({ middleware } = await import('../middleware'));
+
+    const res = await submitThroughMiddleware(jar, aToken);
+
+    // The request must be rejected (fail closed) — it must never be validated by
+    // A's token and reach the handler as B. The old code called checkCsrf BEFORE
+    // the session-mismatch rebind, so A's token passed and the POST executed as B.
+    expect(csrfPassed(res)).toBe(false);
+    expect(res.status).toBe(403);
+  });
+
+  it("rebinds the cookie to B on that first request so the *next* request can succeed with a fresh token", async () => {
+    const aOld = `${'9'.repeat(32)}:${SESSION_A}!${freshIssuedAt()}`; // not even rotation-due
+    const jar = new CookieJar();
+    jar.apply(new NextResponse(null, {
+      headers: { 'set-cookie': `${CSRF_COOKIE_NAME}=${aOld}` },
+    }));
+    const aToken = (await signExistingCsrf('9'.repeat(32), SESSION_A)).token;
+
+    mockUser(USER_B);
+    ({ middleware } = await import('../middleware'));
+
+    // First mutating request: rejected, but the response rebinds the cookie to B.
+    const res = await submitThroughMiddleware(jar, aToken);
+    expect(res.status).toBe(403);
+    jar.apply(res);
+
+    // Cookie is now bound to B, and A's token no longer validates against it.
+    expect(jar.get(CSRF_COOKIE_NAME)).toContain(`:${SESSION_B}!`);
+    expect(await submit(jar, aToken)).toBe(false);
+
+    // B re-fetches /api/csrf and gets a token that validates for a real request.
+    const bToken = await fetchToken(jar);
+    expect(jar.get(CSRF_COOKIE_NAME)).toContain(`:${SESSION_B}!`);
+    expect(await submit(jar, bToken)).toBe(true);
+  });
+
+  it("a foreign PREV token cannot ride the first-request grace into B either", async () => {
+    // The browser carries A's current + a fresh A prev (as if A rotated moments
+    // before the switch). The first mutating request replays A's PREV token.
+    const aCurrent = await generateCsrfToken(SESSION_A);
+    const aPrev = await generateCsrfToken(SESSION_A);
+    const now = Date.now();
+    const jar = new CookieJar();
+    jar.apply(new NextResponse(null, {
+      headers: {
+        'set-cookie': `${CSRF_COOKIE_NAME}=${aCurrent.nonce}:${SESSION_A}!${now}`,
+      },
+    }));
+    jar.apply(new NextResponse(null, {
+      headers: {
+        'set-cookie': `${CSRF_PREV_COOKIE_NAME}=${aPrev.nonce}:${SESSION_A}!${now}`,
+      },
+    }));
+
+    mockUser(USER_B);
+    ({ middleware } = await import('../middleware'));
+
+    const res = await submitThroughMiddleware(jar, aPrev.token);
+    expect(res.status).toBe(403);
+  });
+});
+
+/* ================================================================== */
+/*  R12 — DETERMINISTIC cross-session rebind in /api/csrf.            */
+/*  Several post-switch tabs each fetch /api/csrf with the SAME       */
+/*  leftover foreign cookie; they must converge on one nonce/token/   */
+/*  cookie so concurrent tabs don't 403 each other (cookie soup).    */
+/* ================================================================== */
+
+describe('R12 — deterministic cross-session rebind convergence (/api/csrf)', () => {
+  it('concurrent /api/csrf fetches with the same foreign cookie converge on one nonce', async () => {
+    // Post-switch: getUser() resolves to A (default), the browser still carries
+    // B's leftover cookie. N tabs each call /api/csrf with that same cookie.
+    const foreign = `${'a'.repeat(32)}:${SESSION_B}!${staleIssuedAt()}`;
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        GET(csrfGetRequest({ [CSRF_COOKIE_NAME]: foreign })),
+      ),
+    );
+
+    const cookies = responses.map((r) => r.cookies.get(CSRF_COOKIE_NAME)!.value);
+    const nonces = new Set(cookies.map(parseNonce));
+    // All tabs agree on ONE rebound nonce — no cookie soup across post-switch tabs.
+    expect(nonces.size).toBe(1);
+
+    const tokens = await Promise.all(responses.map((r) => r.json().then((b) => b.token)));
+    expect(new Set(tokens).size).toBe(1);
+
+    // Every response is bound to the authenticated session, not the foreign one.
+    for (const c of cookies) {
+      expect(c).toContain(`:${SESSION_A}!`);
+      expect(c).not.toContain(SESSION_B);
+    }
+
+    // The converged token validates against the converged cookie.
+    const jar = new CookieJar();
+    jar.apply(responses[0]);
+    expect(await submit(jar, tokens[0])).toBe(true);
+  });
+
+  it('the cross-session rebind token is unforgeable (not derivable from the foreign seed alone)', async () => {
+    const foreign = `${'b'.repeat(32)}:${SESSION_B}!${staleIssuedAt()}`;
+    const res = await GET(csrfGetRequest({ [CSRF_COOKIE_NAME]: foreign }));
+    const token = (await res.json()).token;
+    // The plain rotation derivation from the foreign seed must NOT equal the
+    // rebound token — the rebind is domain-separated so a foreign cookie can
+    // never seed a token that would collide with a same-session rotation.
+    const foreignDerived = await deriveRotatedCsrf(SESSION_A, csrfRotationSeed(foreign));
+    expect(token).not.toBe(foreignDerived.token);
+  });
+});
+
+/* ================================================================== */
+/*  R13 — NEAR-BOUNDARY proactive rotation in /api/csrf.             */
+/*  A same-session fetch shortly before the rotation boundary must    */
+/*  NOT hand out a token for the OLD nonce with no cookie update: if  */
+/*  a concurrent request rotates before the user submits, the fetched */
+/*  token would validate only inside the 60s prev-grace window and    */
+/*  403 afterwards. Near the boundary, proactively return the         */
+/*  DETERMINISTIC ROTATED token and set the rotated cookie + prev.    */
+/* ================================================================== */
+
+describe('R13 — near-boundary proactive rotation (/api/csrf)', () => {
+  const ROTATE_MS_LOCAL = 30 * 60 * 1000;
+  // Just inside the rotation window but within the proactive-rotation lead time:
+  // old enough that a rotation is imminent, not yet "due" by the hard boundary.
+  const nearBoundaryIssuedAt = (): number => Date.now() - (ROTATE_MS_LOCAL - 10_000);
+
+  it('a near-boundary fetch returns the deterministic ROTATED token and writes the rotated cookie', async () => {
+    const oldNonce = 'c'.repeat(32);
+    const cookie = `${oldNonce}:${SESSION_A}!${nearBoundaryIssuedAt()}`;
+
+    const res = await GET(csrfGetRequest({ [CSRF_COOKIE_NAME]: cookie }));
+    const token = (await res.json()).token;
+
+    // It rotated proactively: the cookie is written to a new nonce (not left
+    // untouched at the old nonce) and the token is the deterministic rotation.
+    const newCookie = res.cookies.get(CSRF_COOKIE_NAME);
+    expect(newCookie).toBeDefined();
+    const expected = await deriveRotatedCsrf(SESSION_A, csrfRotationSeed(cookie));
+    expect(parseNonce(newCookie!.value)).toBe(expected.nonce);
+    expect(token).toBe(expected.token);
+
+    // A prev cookie preserves the old nonce for any tab still holding it.
+    expect(res.cookies.get(CSRF_PREV_COOKIE_NAME)!.value).toContain(oldNonce);
+  });
+
+  it('a proactively-rotated token CONVERGES with a concurrent middleware rotation on the same cookie', async () => {
+    // The physically-consistent version of the race: a cookie old enough that BOTH
+    // /api/csrf (near-boundary) and the middleware (hard-due) rotate it on the same
+    // request wave. Both read the same issuance seed, so they derive the SAME nonce
+    // — the proactively-fetched token validates against the middleware's surviving
+    // cookie DIRECTLY, with no reliance on the 60s prev-grace window.
+    const oldNonce = 'd'.repeat(32);
+    const hardDue = `${oldNonce}:${SESSION_A}!${staleIssuedAt()}`; // 31min → both rotate
+
+    // User fetches a token; /api/csrf proactively rotates (writes cookie + prev).
+    const fetchJar = new CookieJar();
+    fetchJar.apply(new NextResponse(null, { headers: { 'set-cookie': `${CSRF_COOKIE_NAME}=${hardDue}` } }));
+    const fetchedToken = await fetchToken(fetchJar);
+    const fetchedNonce = parseNonce(fetchJar.get(CSRF_COOKIE_NAME)!);
+
+    // A concurrent middleware rotation reads the SAME stale cookie and rotates to
+    // the SAME deterministic nonce. Its cookie is what the browser jar keeps.
+    const mRes = await middleware(dashboardRequest({ [CSRF_COOKIE_NAME]: hardDue }));
+    const mNonce = parseNonce(mRes.cookies.get(CSRF_COOKIE_NAME)!.value);
+    expect(mNonce).toBe(fetchedNonce); // convergence
+
+    // Prove direct validity against the middleware's surviving cookie, with NO
+    // prev cookie present — the fetched token is bound to the current nonce, not
+    // the grace window.
+    const jarNoPrev = new CookieJar();
+    jarNoPrev.apply(new NextResponse(null, {
+      headers: { 'set-cookie': `${CSRF_COOKIE_NAME}=${mRes.cookies.get(CSRF_COOKIE_NAME)!.value}` },
+    }));
+    expect(await submit(jarNoPrev, fetchedToken)).toBe(true);
+  });
+
+  it('re-signs the old nonce (writes nothing) when the cookie is comfortably far from the boundary', async () => {
+    // Regression guard: proactive rotation must NOT fire for a fresh cookie. A
+    // cookie well before the lead window is still handled by the no-write refresh
+    // path (byte-identical cookie, no cookie-soup risk).
+    const nonce = 'e'.repeat(32);
+    const cookie = `${nonce}:${SESSION_A}!${freshIssuedAt()}`; // 1min old → far from boundary
+    const res = await GET(csrfGetRequest({ [CSRF_COOKIE_NAME]: cookie }));
+    // No cookie is written; the returned token re-signs the existing nonce.
+    expect(res.cookies.get(CSRF_COOKIE_NAME)).toBeUndefined();
+    expect(res.cookies.get(CSRF_PREV_COOKIE_NAME)).toBeUndefined();
+    const expected = await signExistingCsrf(nonce, SESSION_A);
+    expect((await res.json()).token).toBe(expected.token);
   });
 });
