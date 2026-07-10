@@ -371,6 +371,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Lint migration files
         run: |
           set -euo pipefail
@@ -437,6 +440,14 @@ jobs:
             exit 1
           fi
           echo "✅ All migrations pass lint"
+
+      # GATING: SECURITY DEFINER + SET search_path = '' bodies must schema-qualify
+      # extension functions (pgcrypto/uuid-ossp). Default mode exits non-zero on
+      # any unqualified extension-function reference — the exact class that caused
+      # the lottery outage (gen_random_bytes() unqualified under an empty
+      # search_path). Table refs are advisory-only and NOT gated here.
+      - name: Lint SECURITY DEFINER search_path references
+        run: python3 scripts/check-secdef-search-path.py
 
   # ──────────────────────────────────────────────────────────────────────────
   # 9. DB Security Audit
