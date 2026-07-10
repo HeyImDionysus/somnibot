@@ -418,11 +418,12 @@ export class HeistManager {
       guild_id: guildId,
       user_id: userId,
       role,
-      // Freeze the exact debited fee on the row. If this join races past the
-      // atomic claim (claimed_at stays NULL), the stranded-join reconcile refunds
-      // THIS amount on any outcome — success/failed included, where the per-heist
-      // refund_each is NULL — and immune to a later config edit. The value is what
-      // was actually charged above, not a fresh read of guild_config.
+      // Freeze the exact debited fee on the row. This is the SINGLE source every
+      // refund path reads: whether this member ends up frozen crew on a cancelled
+      // heist, or a stranded late-join on any outcome (success/failed included),
+      // they are refunded THIS amount — the fee they actually paid — immune to a
+      // later config edit. The value is what was charged above, not a fresh read
+      // of guild_config.
       entry_fee_paid: entryFee,
     });
     if (partInsertErr) {
@@ -489,11 +490,49 @@ export class HeistManager {
       log.warn(`heist_settle_missed_join attempt ${attempt + 1} failed:`, res.error.message);
     }
     if (missedErr) {
-      // Every attempt to atomically delete+refund the stranded row failed. The
-      // row is still present and the fee is still charged; log at error level so
-      // an operator can reconcile, and tell the user honestly — do NOT claim it
-      // was refunded.
+      // Every attempt to atomically settle the row failed. The most likely cause
+      // is a TRANSIENT blip while the heist is still 'recruiting' — the fee was
+      // debited, the participant row inserted, and participants[] appended, but
+      // heist_settle_missed_join never committed. We must NOT leave the member
+      // half-committed (fee gone, in participants[] and the row present) and tell
+      // them the heist got underway: a later claim would then FREEZE and settle
+      // them as crew even though they were told they did not join (codex :491).
+      //
+      // Instead, atomically UNDO the join: heist_undo_join refunds the frozen fee,
+      // deletes the row, drops the participants[] slot, and reverses the +7
+      // success_chance bump — but ONLY while the heist is still recruiting and the
+      // member is neither frozen nor settled. It is retried inline (idempotent: a
+      // repeat after 'undone' finds the row gone and returns 'gone').
       log.error(`heist_settle_missed_join failed after retries for heist ${heist.id}, user ${userId}:`, missedErr.message);
+      let undoStatus: string | null = null;
+      let undoErr: { message: string } | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await this.supabase.rpc('heist_undo_join', {
+          p_heist_id: heist.id, p_user_id: userId, p_refund_amount: entryFee,
+        });
+        undoErr = res.error;
+        undoStatus = res.data as string | null;
+        if (!res.error) break;
+        log.warn(`heist_undo_join attempt ${attempt + 1} failed:`, res.error.message);
+      }
+      if (!undoErr && (undoStatus === 'undone' || undoStatus === 'gone')) {
+        // The join was rolled back (or was already gone) and the fee refunded —
+        // tell the user honestly that they did NOT join and their fee is back.
+        await interaction.reply({
+          content: '❌ We hit a snag processing your join, so it was cancelled and your entry fee was refunded. Try `/heist join` again.',
+          ephemeral: true,
+        });
+        return;
+      }
+      // Undo could not help — either it also failed transiently, or the heist has
+      // already left recruiting (undoStatus 'not_recruiting'/'in_crew'), meaning
+      // the claim may have frozen this member into the crew. In the latter case the
+      // normal settle path (or the resolver's bulk reconcile sweep) will settle or
+      // refund the row, so the fee is NOT lost. Surface the honest message without
+      // claiming a refund we could not confirm.
+      if (undoErr) {
+        log.error(`heist_undo_join also failed after retries for heist ${heist.id}, user ${userId}:`, undoErr.message);
+      }
       await interaction.reply({
         content: '❌ The heist already got underway before you could join, and we could not process your entry-fee refund right now. Please contact a server admin — your fee has not been lost.',
         ephemeral: true,
@@ -628,15 +667,14 @@ export class HeistManager {
     // claim and fall through to the idempotent settle/finalise below.
     let outcome: 'success' | 'failed' | 'cancelled' | null = null;
     if (heist.status === 'recruiting') {
-      // Pass the entry fee so the claim can FREEZE the per-member refund on the
-      // row (refund_each) the same way it freezes payout_each for a success.
-      // Every later refund retry then reads that frozen amount off the row, so a
-      // guild_config entry-fee edit after the claim can neither inflate nor
-      // shrink an in-flight refund.
+      // The claim freezes the crew (claimed_at), rolls the outcome, and stores
+      // payout_each for a success. It no longer freezes a per-heist refund amount:
+      // every refund now reads each participant's OWN frozen entry_fee_paid off the
+      // participant row, immune to a config edit after the debit, so the claim
+      // needs neither the entry fee nor a refund_each column.
       const { data: claimData, error: claimErr } = await this.supabase.rpc('heist_claim_for_resolution', {
         p_heist_id: heistId,
         p_min_participants: minParticipants,
-        p_entry_fee: entryFee,
       });
       if (claimErr) {
         // Transient claim error. resolveHeist already deleted this heist's only
@@ -682,12 +720,12 @@ export class HeistManager {
       } else {
         outcome = claim.outcome as typeof outcome;
         heist.payout_each = claim.payout_each;
-        heist.refund_each = claim.refund_each;
       }
     } else if (heist.status === 'in_progress') {
       // Crashed after claim, before finalisation — resume the stored decision.
-      // payout_each / refund_each are already frozen on the row read above, so
-      // the settle pass uses those and never re-derives money from config.
+      // payout_each is already frozen on the row read above, and every refund
+      // reads each participant's frozen entry_fee_paid, so the settle pass never
+      // re-derives money from config.
       outcome = (heist.resolution as typeof outcome) ?? null;
     } else {
       return;  // success / failed / cancelled — already terminal
@@ -711,7 +749,7 @@ export class HeistManager {
     // crew is exactly the v_count the claim decided the payout for.
     const { data: partRows, error: partErr } = await this.supabase
       .from('economy_heist_participants')
-      .select('user_id, role')
+      .select('user_id, role, entry_fee_paid')
       .eq('heist_id', heistId)
       .not('claimed_at', 'is', null)
       .limit(1000);
@@ -728,7 +766,7 @@ export class HeistManager {
       this.scheduleResolveRetry(guildId, heistId, channelId);
       return;
     }
-    const partList = (partRows ?? []) as Array<{ user_id: string; role: string }>;
+    const partList = (partRows ?? []) as Array<{ user_id: string; role: string; entry_fee_paid: number | null }>;
     const participants = partList.map((r) => r.user_id);
 
     // Reconcile crash-stranded late joins BEFORE terminalizing (any outcome).
@@ -745,16 +783,15 @@ export class HeistManager {
     // nothing — so this composes with retry/resume without double-refunding.
     //
     // Refund amount: a stranded late-join must get back exactly the fee IT paid,
-    // on ANY outcome — including success/failed, where the per-heist refund_each
-    // is NULL. So the RPC refunds each stranded row's OWN frozen entry_fee_paid
-    // (stamped on the participant at join time), which is correct per-row and
-    // immune to a config edit after the debit. p_refund_amount below is only a
-    // legacy fallback for pre-freeze rows whose entry_fee_paid is NULL; it must
-    // NOT be re-derived from a per-heist value that is wrong for a success/failed
-    // outcome, so we pass the current entry fee (the best available approximation
-    // for a legacy row), NOT refund_each. A failed reconcile is treated exactly
-    // like the frozen-crew read failure: retryable, NEVER a terminal flip — a
-    // stranded fee must not be lost to a transient error.
+    // on ANY outcome. The RPC refunds each stranded row's OWN frozen
+    // entry_fee_paid (stamped on the participant at join time) — the same
+    // per-participant frozen-fee source the cancelled frozen crew now uses, so
+    // every refund path is uniform and immune to a config edit after the debit.
+    // p_refund_amount below is only a legacy fallback for pre-freeze rows whose
+    // entry_fee_paid is NULL; we pass the current entry fee (the best available
+    // approximation for a legacy row). A failed reconcile is treated exactly like
+    // the frozen-crew read failure: retryable, NEVER a terminal flip — a stranded
+    // fee must not be lost to a transient error.
     const { error: reconcileErr } = await this.supabase.rpc('heist_reconcile_stranded_joins', {
       p_heist_id: heistId, p_refund_amount: entryFee,
     });
@@ -765,20 +802,23 @@ export class HeistManager {
     }
 
     if (outcome === 'cancelled') {
-      // Refund the FROZEN entry fee, read off the heist row (refund_each stamped
-      // by the claim), NOT re-derived from guild_config. A fee edit between the
-      // claim and this (possibly retried/resumed) refund therefore cannot change
-      // what a frozen crew member gets back — they are refunded exactly what was
-      // charged. refund_each is guaranteed non-NULL on a 'cancelled' heist (the
-      // claim always stamps it); the ?? entryFee is a defensive fallback for a
-      // legacy pre-freeze row and is never the value for heists claimed by this
-      // code. heist_credit_participant is idempotent (paid_at guard), so a
-      // re-resolve after a crash does not double-refund.
-      const refundEach = heist.refund_each ?? entryFee;
+      // Refund each frozen crew member their OWN frozen entry_fee_paid — the exact
+      // amount THAT member was charged at join time, stamped on their participant
+      // row. This is the unification (codex heist-manager.ts:777): if an admin
+      // edits the entry fee during the recruiting window, crew members can have
+      // paid DIFFERENT fees, so a single per-heist refund_each would over- or
+      // under-refund someone. Reading each row's entry_fee_paid is correct
+      // per-member and identical to the source the stranded-join refund uses — one
+      // frozen-fee mechanism for every refund path. The ?? entryFee is the legacy
+      // fallback for a pre-freeze row whose entry_fee_paid is NULL (same fallback
+      // the stranded path uses). heist_credit_participant is idempotent (paid_at
+      // guard), so a re-resolve after a crash does not double-refund.
       const failedRefunds: string[] = [];
-      for (const uid of participants) {
+      for (const part of partList) {
+        const uid = part.user_id;
+        const refundAmount = part.entry_fee_paid ?? entryFee;
         const { error: refundErr } = await this.supabase.rpc('heist_credit_participant', {
-          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: refundEach,
+          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: refundAmount,
         });
         if (refundErr) {
           log.error(`Failed to refund ${uid}:`, refundErr.message);

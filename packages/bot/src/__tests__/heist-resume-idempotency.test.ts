@@ -61,10 +61,14 @@ function makeStatefulDb(opts: {
   status: string;
   resolution?: string | null;
   payoutEach?: number | null;
-  refundEach?: number | null;
   participants: string[];
   successChance?: number;
   targetPayout?: number;
+  // Per-user frozen entry_fee_paid stamped on each seeded participant row. Lets a
+  // test model a crew that paid DIFFERENT fees (an admin edited the entry fee mid
+  // recruiting window) so the cancel refund can be asserted per-member. Defaults
+  // to 100 for any user not listed here.
+  entryFeePaid?: Record<string, number>;
   // user_ids whose heist_credit_participant call errors — but only while the
   // mutable Set still contains them, so a test can clear it to model a
   // transient failure that heals on the next resume.
@@ -103,9 +107,6 @@ function makeStatefulDb(opts: {
     status: opts.status,
     resolution: opts.resolution ?? null,
     payout_each: opts.payoutEach ?? null,
-    // Frozen per-member refund. A pre-claimed cancelled in_progress row carries
-    // it (the claim stamped it); recruiting rows have it stamped by the claim RPC.
-    refund_each: opts.refundEach ?? null,
     target_name: 'Corner Store',
     target_payout: opts.targetPayout ?? 250,
     success_chance: opts.successChance ?? 40,
@@ -120,10 +121,12 @@ function makeStatefulDb(opts: {
     heist_id: 'h1', user_id: uid, role: 'Hacker', payout: 0,
     paid_at: null as string | null, payout_failed: false,
     claimed_at: (preClaimed ? new Date().toISOString() : null) as string | null,
-    // Frozen fee this member paid at join time. The bot stamps it on insert; the
-    // stranded-join reconcile refunds THIS per-row value on any outcome. Default
-    // to the config entry fee (100) so existing tests keep their amounts.
-    entry_fee_paid: 100 as number | null,
+    // Frozen fee this member paid at join time. The bot stamps it on insert; EVERY
+    // refund path — cancelled frozen crew AND stranded late join — refunds THIS
+    // per-row value on any outcome. Default to the config entry fee (100) so
+    // existing tests keep their amounts; a test may override per-user to model a
+    // crew that paid heterogeneous fees.
+    entry_fee_paid: (opts.entryFeePaid?.[uid] ?? 100) as number | null,
   }));
 
   // Ledger of every wallet credit that actually landed.
@@ -228,7 +231,7 @@ function makeStatefulDb(opts: {
         // read and the claim.
         if (heist.status !== 'recruiting' || loseClaim.on) {
           claimState.lostClaim = true;
-          return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null, refund_each: null }], error: null });
+          return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null }], error: null });
         }
         // Freeze the crew: stamp claimed_at on unstamped rows, then count only
         // stamped rows — mirrors the migration's UPDATE ... WHERE claimed_at IS
@@ -242,19 +245,19 @@ function makeStatefulDb(opts: {
           // resolution='cancelled' (not terminal), so a failed refund stays
           // retryable; heist_finalize_resolution moves it to terminal 'cancelled'
           // only after every refund committed. Mirrors 20260710120000 §B.
-          // The per-member refund is FROZEN from the passed entry fee (mirrors
-          // 20260710130000 §2), so later retries read a stable amount off the row.
-          heist.status = 'in_progress'; heist.resolution = 'cancelled'; heist.refund_each = args.p_entry_fee;
-          return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null, refund_each: args.p_entry_fee }], error: null });
+          // The claim no longer freezes a per-heist refund amount — every refund
+          // reads each participant's OWN frozen entry_fee_paid (20260710160000).
+          heist.status = 'in_progress'; heist.resolution = 'cancelled';
+          return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null }], error: null });
         }
         const isSuccess = (heist.success_chance ?? 0) > 0; // deterministic for tests
         if (isSuccess) {
           const each = Math.floor(heist.target_payout / count);
           heist.status = 'in_progress'; heist.resolution = 'success'; heist.payout_each = each;
-          return Promise.resolve({ data: [{ claimed: true, outcome: 'success', participant_count: count, payout_each: each, refund_each: null }], error: null });
+          return Promise.resolve({ data: [{ claimed: true, outcome: 'success', participant_count: count, payout_each: each }], error: null });
         }
         heist.status = 'in_progress'; heist.resolution = 'failed'; heist.payout_each = 0;
-        return Promise.resolve({ data: [{ claimed: true, outcome: 'failed', participant_count: count, payout_each: 0, refund_each: null }], error: null });
+        return Promise.resolve({ data: [{ claimed: true, outcome: 'failed', participant_count: count, payout_each: 0 }], error: null });
       }
       if (fn === 'heist_reconcile_stranded_joins') {
         // Sweep every crash-stranded late-join row (claimed_at NULL AND paid_at
@@ -277,6 +280,32 @@ function makeStatefulDb(opts: {
           if (refund > 0) credits.push({ user_id: p.user_id, amount: refund });
         }
         return Promise.resolve({ data: stranded.length, error: null });
+      }
+      if (fn === 'heist_settle_missed_join') {
+        // Models the migration's TEXT-status contract, including the finding-#3
+        // fix: every 'reconciled' branch array_removes the user from
+        // participants[] before returning, so a joinHeist that appended before
+        // calling this RPC cannot leave a ghost participant in the array.
+        if (heist.status === 'recruiting') return Promise.resolve({ data: 'recruiting', error: null });
+        const p = parts.find((x) => x.user_id === args.p_user_id);
+        if (!p) {
+          // Row gone (a concurrent bulk reconcile deleted it). Strip any ghost
+          // array slot and report reconciled.
+          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
+          return Promise.resolve({ data: 'reconciled', error: null });
+        }
+        if (p.claimed_at != null) return Promise.resolve({ data: 'in_crew', error: null });
+        if (p.paid_at != null) {
+          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
+          return Promise.resolve({ data: 'reconciled', error: null });
+        }
+        // Unstamped + unsettled: delete, strip array slot, refund frozen fee.
+        const idx = parts.indexOf(p);
+        if (idx >= 0) parts.splice(idx, 1);
+        heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
+        const refund = p.entry_fee_paid ?? args.p_refund_amount;
+        if (refund > 0) credits.push({ user_id: args.p_user_id, amount: refund });
+        return Promise.resolve({ data: 'refunded', error: null });
       }
       if (fn === 'heist_credit_participant') {
         const p = parts.find((x) => x.user_id === args.p_user_id);
@@ -743,7 +772,7 @@ describe('heist resume idempotency', () => {
     // in_progress/retryable, then refund once the read heals.
     const failCrewRead = { on: true };
     const db = makeStatefulDb({
-      status: 'in_progress', resolution: 'cancelled', refundEach: 100,
+      status: 'in_progress', resolution: 'cancelled',
       participants: ['u1'], failCrewRead,
     });
     // Pre-claimed cancelled row: its single crew member was frozen (claimed_at set).
@@ -769,29 +798,82 @@ describe('heist resume idempotency', () => {
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(1);
   });
 
-  // ── Newest finding (b): the cancel refund amount is FROZEN at claim time ──
-  it('the claim freezes refund_each on the row and the refund uses that frozen value', async () => {
-    // The under-crewed claim must persist the per-member refund (the entry fee it
-    // was passed) on the heist row, and the settle pass must refund exactly that
-    // frozen amount — establishing the value the resume test proves is immune to
-    // later config drift.
+  // ── Unification (codex :777): the cancel refund is each member's OWN frozen fee ──
+  it('a cancelled heist refunds each frozen crew member their OWN entry_fee_paid', async () => {
+    // The refund reads each participant's frozen entry_fee_paid (not a per-heist
+    // amount). refund_each no longer exists on the row — the per-participant frozen
+    // fee is the single source for every refund path.
     const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 100 });
     const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
-    await resolve(mgr); // 1 < min(2) → cancel; claim freezes refund_each = 100
+    await resolve(mgr); // 1 < min(2) → cancel; refund u1 their frozen fee (100)
 
     expect(db.heist.status).toBe('cancelled');
-    expect(db.heist.refund_each).toBe(100); // frozen on the row at claim time
-    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]); // refunded the frozen value
+    expect(db.heist.refund_each).toBeUndefined(); // column removed — no per-heist frozen refund
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]); // refunded the per-row frozen value
   });
 
-  it('a resumed cancelled heist refunds the frozen refund_each off the row (not config)', async () => {
-    // A crash left the heist in_progress/cancelled with refund_each=100 frozen on
-    // the row. Even if config now reads a different entry fee, the resume refunds
-    // the frozen 100.
+  it('a cancelled crew that paid DIFFERENT fees is each refunded its own amount (codex :777)', async () => {
+    // An admin raised the entry fee during the recruiting window: the initiator u1
+    // paid 100, a later joiner u2 paid 200. min crew is 3, so with only 2 members
+    // the heist cancels. The OLD code refunded every frozen member a single
+    // per-heist refund_each (over/under-refunding u1 or u2). The unified path
+    // refunds each member their OWN frozen entry_fee_paid: u1 → 100, u2 → 200.
     const db = makeStatefulDb({
-      status: 'in_progress', resolution: 'cancelled', refundEach: 100,
+      status: 'recruiting', participants: ['u1', 'u2'], successChance: 100,
+      entryFeePaid: { u1: 100, u2: 200 },
+    });
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    // min participants for cancellation is 2 by default; force a higher bar so a
+    // 2-member crew cancels. CONFIG drives economy_heist_min_participants.
+    CONFIG.economy_heist_min_participants = 3;
+    try {
+      await resolve(mgr); // 2 < min(3) → cancel; each member refunded their own fee
+    } finally {
+      CONFIG.economy_heist_min_participants = 2;
+    }
+
+    expect(db.heist.status).toBe('cancelled');
+    // Each frozen crew member refunded EXACTLY what they paid — never a shared value.
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 100 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 200 }]);
+    // Announced once.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(1);
+  });
+
+  it('a resumed cancelled heist refunds each crew member their frozen entry_fee_paid (not config)', async () => {
+    // A crash left the heist in_progress/cancelled with the crew frozen. Even if
+    // config now reads a different entry fee, the resume refunds each member the
+    // fee frozen on their participant row (u1 paid 100, u2 paid 200), never the
+    // drifted config value.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'cancelled',
+      participants: ['u1', 'u2'], entryFeePaid: { u1: 100, u2: 200 },
+    });
+    db.parts[0].claimed_at = new Date().toISOString(); // frozen crew member
+    db.parts[1].claimed_at = new Date().toISOString(); // frozen crew member
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    CONFIG.economy_heist_entry_fee = 999;
+    try {
+      await mgr.resumePendingHeists('g1');
+    } finally {
+      CONFIG.economy_heist_entry_fee = 100;
+    }
+
+    expect(db.heist.status).toBe('cancelled');
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 100 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 200 }]);
+  });
+
+  it('a resumed single-member cancelled heist refunds the frozen fee (legacy shape)', async () => {
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'cancelled',
       participants: ['u1'],
     });
     db.parts[0].claimed_at = new Date().toISOString(); // frozen crew member
@@ -1078,5 +1160,36 @@ describe('heist resume idempotency', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ── Finding #3 (codex migration:114): settle removes an already-reconciled
+  //    joiner from participants[] so the array and rows stay consistent. ──
+  it('heist_settle_missed_join removes an already-reconciled joiner from participants[] (no ghost)', async () => {
+    // Model the exact race: the resolver's bulk reconcile already deleted +
+    // refunded the late joiner's participant ROW (so no row exists), but joinHeist
+    // had appended the user to participants[] via array_append_heist_participant
+    // BEFORE it reached heist_settle_missed_join. Without the array_remove on the
+    // 'reconciled' NOT-FOUND branch, the array keeps a ghost: a refunded, non-crew
+    // user still shown in /heist view and still bumping success_chance. The RPC
+    // must strip the array slot and return 'reconciled'.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    // The bulk reconcile already deleted the 'late' ROW, but the ghost array entry
+    // survives (joinHeist appended it after the delete).
+    db.heist.participants.push('late');
+    const { supabase } = db;
+
+    const res = await supabase.rpc('heist_settle_missed_join', {
+      p_heist_id: 'h1', p_user_id: 'late', p_refund_amount: 100,
+    });
+
+    // Reconciled (no row to settle), and — the finding-#3 fix — the ghost array
+    // slot is stripped so participants[] matches the rows.
+    expect(res.data).toBe('reconciled');
+    expect(db.heist.participants).not.toContain('late');
+    // No second refund: the bulk reconcile already paid it; settle only fixes the array.
+    expect(db.credits.filter((c) => c.user_id === 'late')).toHaveLength(0);
   });
 });

@@ -535,11 +535,13 @@ describe('HeistManager', () => {
       expect(replyArg.embeds).toBeUndefined();
     });
 
-    it('does not confirm a refund when the missed-join RPC keeps erroring', async () => {
+    it('does not confirm a refund when both settle and undo keep erroring', async () => {
       // If heist_settle_missed_join errors on every attempt, its transaction
       // rolled back — the stranded row is NOT deleted and no credit landed. The
-      // bot must NOT tell the user their fee was refunded (the earlier bug did),
-      // because that would be a false confirmation.
+      // bot then tries heist_undo_join to roll the join back; if THAT also errors
+      // on every attempt, the bot must NOT tell the user their fee was refunded
+      // (the earlier bug did) — a false confirmation. It surfaces the honest
+      // "contact an admin" message instead.
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
@@ -555,24 +557,84 @@ describe('HeistManager', () => {
         }
         return chainBuilder();
       });
-      let attempts = 0;
+      let settleAttempts = 0;
+      let undoAttempts = 0;
       supabase.rpc.mockImplementation((fn: string) => {
         if (fn === 'heist_settle_missed_join') {
-          attempts++;
+          settleAttempts++;
           return Promise.resolve({ data: null, error: { message: 'refund tx failed' } });
+        }
+        if (fn === 'heist_undo_join') {
+          undoAttempts++;
+          return Promise.resolve({ data: null, error: { message: 'undo tx failed' } });
         }
         return Promise.resolve({ data: null, error: null });
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
 
-      expect(attempts).toBeGreaterThan(1); // retried, not a single shot
+      expect(settleAttempts).toBeGreaterThan(1); // settle retried, not a single shot
+      expect(undoAttempts).toBeGreaterThan(1);   // undo also retried before giving up
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
       // Must NOT falsely claim the fee was refunded.
       expect(replyArg.content).not.toContain('was refunded');
       // Must not confirm a refund at all, and must not send a "Joined" embed.
       expect(replyArg.content).not.toContain('Your entry fee was refunded');
+      expect(replyArg.content).toContain('contact a server admin');
       expect(replyArg.embeds).toBeUndefined();
+    });
+
+    it('undoes a still-recruiting join when settle keeps erroring transiently (codex :491)', async () => {
+      // The heist is still recruiting (the crew was never frozen), but
+      // heist_settle_missed_join errors on every attempt — a pure transient blip.
+      // Leaving the member joined would let a later claim FREEZE and settle them as
+      // crew even though we are about to tell them they did not join. The bot must
+      // instead UNDO the join: heist_undo_join refunds the frozen fee, deletes the
+      // row, drops the participants[] slot and reverses the +7 success bump, all
+      // atomically. The user is told their join was cancelled and the fee refunded
+      // — never a false "Joined" embed and never a half-committed state.
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      const rpcCalls: Array<{ fn: string; args: any }> = [];
+      supabase.rpc.mockImplementation((fn: string, args: any) => {
+        rpcCalls.push({ fn, args });
+        if (fn === 'heist_settle_missed_join') {
+          return Promise.resolve({ data: null, error: { message: 'transient' } });
+        }
+        if (fn === 'heist_undo_join') {
+          // Undo succeeds: the join is rolled back and the frozen fee refunded
+          // inside the RPC transaction.
+          return Promise.resolve({ data: 'undone', error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      // Undo was invoked with the frozen fee, atomically (no separate credit).
+      expect(rpcCalls).toContainEqual({
+        fn: 'heist_undo_join',
+        args: expect.objectContaining({ p_heist_id: 'h1', p_user_id: 'u1', p_refund_amount: 100 }),
+      });
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_add_balance', expect.anything());
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // No "Joined" embed; told the join was cancelled and the fee refunded.
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('refunded');
+      expect(replyArg.content).not.toContain('contact a server admin');
     });
 
     it('does not refund a join that made it into the frozen crew', async () => {
