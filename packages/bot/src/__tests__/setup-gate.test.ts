@@ -15,14 +15,20 @@ import { evaluateSetupGate, resolveDashboardUrl } from '../services/setup-gate.j
 /**
  * Build a stub Supabase whose `instance_settings` reads resolve from a
  * key→value map. Mirrors the real `.from().select().eq().maybeSingle()` chain.
+ * `opts.error` fails every read; `opts.errorForKeys` fails only specific keys
+ * (to simulate a transient blip on a single lookup).
  */
-function makeSupabase(settings: Record<string, string>, opts: { error?: { code?: string } } = {}) {
+function makeSupabase(
+  settings: Record<string, string>,
+  opts: { error?: { code?: string }; errorForKeys?: Record<string, { code?: string }> } = {},
+) {
   return {
     from: (_table: string) => ({
       select: () => ({
         eq: (_col: string, key: string) => ({
           maybeSingle: async () => {
-            if (opts.error) return { data: null, error: opts.error };
+            const keyError = opts.error ?? opts.errorForKeys?.[key];
+            if (keyError) return { data: null, error: keyError };
             const value = settings[key];
             return { data: value !== undefined ? { value } : null, error: null };
           },
@@ -73,13 +79,48 @@ describe('evaluateSetupGate', () => {
     expect(result.completionConfirmed).toBe(false);
   });
 
-  it('treats a token present in env (launcher-forked) as "in_progress"', async () => {
-    const supabase = makeSupabase({});
+  it('stays "in_progress" for a launcher-forked mid-wizard boot (env token AND wizard credential row)', async () => {
+    // The desktop launcher forks the bot with DISCORD_TOKEN in env AND syncs
+    // the raw discord_bot_token row to instance_settings. Both present with no
+    // completion row = a setup flow that has not finalized → verification mode.
+    const supabase = makeSupabase({ discord_bot_token: 'a-bot-token' });
     const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
 
     expect(result.state).toBe('in_progress');
     expect(result.shouldLogin).toBe(true);
     expect(result.shouldRunFullInit).toBe(false);
+  });
+
+  // ── Codex round-3 finding #1: env-complete = complete ──
+  // A deployment configured entirely through environment variables (VPS /
+  // docker-compose .env — the pre-existing supported path) never runs the
+  // dashboard wizard, so no setup_completed_at row will EVER exist. Gating it
+  // on the mere presence of DISCORD_TOKEN would leave commands/features/
+  // presence uninitialized forever. No wizard credential row + token in env
+  // must boot fully.
+  it('does NOT gate an env-configured deployment (token in env, no wizard rows, no completion row)', async () => {
+    const supabase = makeSupabase({});
+    const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
+
+    expect(result.state).toBe('complete');
+    expect(result.shouldLogin).toBe(true);
+    expect(result.shouldRunFullInit).toBe(true);
+    expect(result.message).toBeNull();
+    // Not derived from a completion row → the setup-completion watcher must
+    // not treat this as a finalize signal.
+    expect(result.completionConfirmed).toBe(false);
+  });
+
+  it('env-configured classification ignores the bot\'s own sync flags (discord_bot_token_configured)', async () => {
+    // syncConfigToDatabase writes `<key>_configured` flags for secrets — never
+    // the raw row. Those flags must not be mistaken for wizard-stored
+    // credentials, or every env-configured deploy would self-gate after its
+    // first boot synced config to the DB.
+    const supabase = makeSupabase({ discord_bot_token_configured: 'true' });
+    const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
+
+    expect(result.state).toBe('complete');
+    expect(result.shouldRunFullInit).toBe(true);
   });
 
   it('returns "not_started" when no Discord token exists anywhere', async () => {
@@ -104,14 +145,21 @@ describe('evaluateSetupGate', () => {
     expect(result.message).toContain('https://ops.example.com');
   });
 
-  it('treats a missing table (42P01) as a clean first-boot absence, staying wizard-usable', async () => {
-    // Table not created yet → this is an EXPECTED absence, not a read failure.
-    // With a token in env the wizard must still be able to verify the bot.
+  it('treats a missing table (42P01) with an env token as env-configured — boots fully', async () => {
+    // Table not created yet → this is an EXPECTED clean absence, not a read
+    // failure. No completion row and no wizard credential row can exist in a
+    // table that does not exist, so a token in env means the deployment is
+    // env-configured (or migrations failed — either way full boot is the
+    // state that never strands a working deploy). The wizard's readiness
+    // checks still pass against a full boot (heartbeat + guild rows), so a
+    // rare launcher fork that races the credential sync still completes setup.
     const supabase = makeSupabase({}, { error: { code: '42P01' } });
     const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
 
-    expect(result.state).toBe('in_progress');
+    expect(result.state).toBe('complete');
     expect(result.shouldLogin).toBe(true);
+    expect(result.shouldRunFullInit).toBe(true);
+    expect(result.completionConfirmed).toBe(false);
   });
 
   it('degrades to "not_started" on a missing table when no token is present', async () => {
@@ -146,6 +194,28 @@ describe('evaluateSetupGate', () => {
     // No token to log in with even if state is unknown → idle rather than
     // crash-loop by attempting a Discord login.
     const supabase = makeSupabase({}, { error: { code: 'PGRST301' } });
+    const result = await evaluateSetupGate(supabase, {} as any);
+
+    expect(result.state).toBe('not_started');
+    expect(result.shouldLogin).toBe(false);
+  });
+
+  it('boots fully (unconfirmed) when only the wizard-credential read blips and a token is in env', async () => {
+    // setup_completed_at reads cleanly absent, but the discord_bot_token
+    // lookup fails transiently. With a token in env, prefer full boot over
+    // gating a possibly env-configured/finalized deployment on a blip — the
+    // same philosophy as the completed-row read-failure fallback. Unconfirmed
+    // so the completion watcher never transitions on it.
+    const supabase = makeSupabase({}, { errorForKeys: { discord_bot_token: { code: 'PGRST301' } } });
+    const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
+
+    expect(result.state).toBe('complete');
+    expect(result.shouldRunFullInit).toBe(true);
+    expect(result.completionConfirmed).toBe(false);
+  });
+
+  it('stays "not_started" when the wizard-credential read blips and no token is in env', async () => {
+    const supabase = makeSupabase({}, { errorForKeys: { discord_bot_token: { code: 'PGRST301' } } });
     const result = await evaluateSetupGate(supabase, {} as any);
 
     expect(result.state).toBe('not_started');

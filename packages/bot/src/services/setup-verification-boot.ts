@@ -217,8 +217,21 @@ export async function runSetupVerificationBoot(
   // Resolve a primary guild id for the heartbeat's Supabase fallback row.
   const primaryGuildId = client.guildId || guilds.first()?.id || '';
   if (!client.guildId && primaryGuildId) {
-    Object.defineProperty(client, 'guildId', { value: primaryGuildId, writable: false });
-    log.info('Auto-detected guild for setup verification', { guildId: primaryGuildId });
+    // PROVISIONAL assignment — deliberately a plain writable set, NOT a frozen
+    // defineProperty (codex round-3 finding #2). Verification mode picks the
+    // first cached guild only so the heartbeat/health signals have a guild id;
+    // the owner may finalize setup with a DIFFERENT guild (the setup route
+    // supports an explicitly configured guild id, and verification writes
+    // health for every guild precisely because of that). The
+    // verification→full-boot transition re-resolves the finalized
+    // DISCORD_GUILD_ID after reloading config and overwrites this value;
+    // freezing it here would make that overwrite throw (strict-mode ESM) and
+    // anchor the bot-level services (heartbeat, presence, deploy fallback,
+    // first-boot DM) to the wrong guild until a manual restart.
+    client.guildId = primaryGuildId;
+    log.info('Auto-detected guild for setup verification (provisional until setup finalizes)', {
+      guildId: primaryGuildId,
+    });
     // Persist the detected guild so the dashboard setup route can resolve it as
     // the configured guild (it falls back to instance_settings.discord_guild_id
     // when DISCORD_GUILD_ID is unset — which is exactly this auto-detect case —

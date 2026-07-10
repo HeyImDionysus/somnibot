@@ -15,7 +15,7 @@ if (typeof globalThis.WebSocket === 'undefined') {
 
 import { loadConfig } from './config.js';
 import { loadConfigFromDatabase, syncConfigToDatabase } from './services/config-loader.js';
-import { SomniClient } from './client.js';
+import { SomniClient, getPrimaryDiscordGuildId } from './client.js';
 import { registerEvents } from './events/handler.js';
 import { connectValkey } from './services/valkey.js';
 import { startDeployListener } from './deploy/deploy-listener.js';
@@ -399,6 +399,24 @@ function startSetupCompletionWatcher(
       log.warn('Config reload before full-boot transition failed (non-fatal)', { error: String(err) });
     }
 
+    // Re-resolve the primary guild from the FINALIZED config (codex round-3
+    // finding #2). Verification mode may have provisionally auto-detected the
+    // first cached guild, but the finalize step can specify a DIFFERENT
+    // discord_guild_id (reloaded into env just above). runFullBoot skips its
+    // own auto-detection when client.guildId is already set, so without this
+    // override the bot-level services (heartbeat, presence, deploy fallback,
+    // first-boot DM) would stay anchored to the provisional guild until a
+    // manual restart. The provisional assignment is deliberately writable —
+    // see runSetupVerificationBoot.
+    const configuredGuildId = getPrimaryDiscordGuildId(process.env.DISCORD_GUILD_ID ?? '');
+    if (configuredGuildId && configuredGuildId !== client.guildId) {
+      log.info('Finalized config names a different primary guild — overriding provisional detection', {
+        provisional: client.guildId || '(none)',
+        configured: configuredGuildId,
+      });
+      client.guildId = configuredGuildId;
+    }
+
     // Leave verification mode: the normal event handlers gate on this flag, so
     // clearing it lights up real feature processing as full boot builds it out.
     client.setupVerificationMode = false;
@@ -425,6 +443,25 @@ async function runFullBoot(
 ): Promise<void> {
   if (fullBootStarted) return;
   fullBootStarted = true;
+
+  // ── Tear down any router installed by an earlier partial boot ──
+  // Two placeholders can precede this function's router: the empty
+  // verification-mode router (normally already destroyed by the transition
+  // path — destroyAll() is idempotent, so re-destroying is harmless and covers
+  // a failed transition teardown), and the guildless placeholder installed
+  // below on a deferred boot. Codex round-3 finding #3: a later guildCreate
+  // re-enters here and previously replaced that placeholder WITHOUT destroying
+  // it, leaking its eviction interval for the life of the process. Destroy
+  // before replacing — the crons calling client.router.all() stay safe because
+  // a destroyed router simply has no contexts, and the real router is
+  // installed synchronously below (no await in between).
+  if (client.router) {
+    try {
+      client.router.destroyAll();
+    } catch (err) {
+      log.warn('Failed tearing down previous GuildRouter before full boot', { error: String(err) });
+    }
+  }
 
   // ── Auto-detect guild ID if not set ──
   if (!client.guildId) {

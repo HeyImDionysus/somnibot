@@ -159,6 +159,37 @@ describe('GuildRouter', () => {
     expect(router.size).toBe(0);
   });
 
+  // ── Codex round-3 finding #3: replacing a placeholder must not leak its timer ──
+  // index.ts installs empty placeholder routers (verification mode, guildless
+  // deferred boot) and later replaces them with the real router in runFullBoot.
+  // The replacement calls destroyAll() first — these assert that actually
+  // releases the eviction interval and that a double teardown (transition path
+  // already destroyed the verification placeholder) stays safe.
+  it('destroyAll() clears the eviction interval so a replaced placeholder leaks no timer', () => {
+    const { client, supabase, valkey, eventBus } = makeDeps();
+    const before = vi.getTimerCount();
+    const router = new GuildRouter(client as any, supabase, valkey, eventBus);
+
+    // Constructor arms the periodic eviction interval.
+    expect(vi.getTimerCount()).toBe(before + 1);
+
+    router.destroyAll();
+
+    // Interval released — a full boot replacing this router leaves nothing running.
+    expect(vi.getTimerCount()).toBe(before);
+  });
+
+  it('destroyAll() is idempotent (safe when the transition already tore the placeholder down)', async () => {
+    const { client, supabase, valkey, eventBus } = makeDeps();
+    const router = new GuildRouter(client as any, supabase, valkey, eventBus);
+
+    await router.getContext('g1');
+    router.destroyAll();
+
+    expect(() => router.destroyAll()).not.toThrow();
+    expect(router.size).toBe(0);
+  });
+
   it('throws when guild is not in cache', async () => {
     const { client, supabase, valkey, eventBus } = makeDeps({});
     const router = new GuildRouter(client as any, supabase, valkey, eventBus);

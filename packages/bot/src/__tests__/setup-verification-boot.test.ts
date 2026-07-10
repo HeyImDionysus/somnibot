@@ -228,6 +228,25 @@ describe('runSetupVerificationBoot', () => {
     expect(heartbeatCtor).toHaveBeenCalledWith(client.valkey, client.supabase, 'gX', client);
   });
 
+  // ── Codex round-3 finding #2: the provisional guild must stay writable ──
+  // Verification auto-detects the FIRST cached guild only so heartbeat/health
+  // signals have an id — but the owner may finalize setup with a DIFFERENT
+  // guild. The verification→full-boot transition overwrites client.guildId
+  // from the finalized config; a frozen (writable:false) property would make
+  // that overwrite throw in strict-mode ESM and anchor bot-level services to
+  // the wrong guild until a restart.
+  it('keeps the provisional auto-detected guild id writable so the finalize transition can override it', async () => {
+    const { client } = makeClient([makeGuild('gX')]);
+    await runSetupVerificationBoot(client);
+    expect(client.guildId).toBe('gX');
+
+    // Simulate the transition applying a finalized DISCORD_GUILD_ID.
+    expect(() => {
+      client.guildId = 'g-configured';
+    }).not.toThrow();
+    expect(client.guildId).toBe('g-configured');
+  });
+
   // ── Codex round-3 finding #4: persist the auto-detected guild ──
   // The dashboard setup route resolves the configured guild via
   // getConfiguredDiscordGuildId, which — when DISCORD_GUILD_ID is unset (exactly
