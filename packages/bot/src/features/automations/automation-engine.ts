@@ -10,7 +10,7 @@ import type Valkey from 'iovalkey';
 import type { PlatformEvent } from '@somnibot/shared';
 import type { PlatformEventBus } from '../../services/event-bus.js';
 import { AutomationLoader, type LoadedAutomation } from './automation-loader.js';
-import { evaluateConditions, type ConditionContext } from './condition-evaluator.js';
+import { evaluateConditions, createRegexBudget, type ConditionContext, type RegexBudget } from './condition-evaluator.js';
 import { executeActions, type ActionContext } from './action-executor.js';
 import type { AlertService } from '../../services/alert-service.js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
@@ -29,6 +29,13 @@ export interface AutomationEventContext {
   message: Message | null;
   /** Template variables resolved from the trigger event data */
   variables: Record<string, string>;
+  /**
+   * PR #269 review (P2): Shared regex-evaluation budget for this event.
+   * One instance per platform event (created in buildEventContext) so the
+   * aggregate time spent in message_matches_regex vm evaluations across ALL
+   * automations triggered by the event is capped (EVENT_REGEX_BUDGET_MS).
+   */
+  regexBudget: RegexBudget;
 }
 
 export class AutomationEngine {
@@ -173,6 +180,7 @@ export class AutomationEngine {
       messageContent: ctx.message?.content ?? null,
       supabase: this.supabase,
       guildId: this.guild.id,
+      regexBudget: ctx.regexBudget,
     };
 
     const conditionsPassed = await evaluateConditions(
@@ -401,6 +409,10 @@ export class AutomationEngine {
       messageId,
       message: null, // Message object needs to be attached separately for message-based triggers
       variables,
+      // One budget per event: buildEventContext is called exactly once per
+      // event (handleEvent / processMessageEvent / processReactionEvent), so
+      // every automation processed for this event draws from the same budget.
+      regexBudget: createRegexBudget(),
     };
   }
 

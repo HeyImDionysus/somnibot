@@ -8,13 +8,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('discord.js', () => ({}));
 
+const mockLog = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+}));
 vi.mock('@somnibot/shared', () => ({
-  createLogger: () => ({
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  }),
+  createLogger: () => mockLog,
 }));
 
 vi.mock('./automod-actions.js', () => ({
@@ -435,6 +436,62 @@ describe('automod-engine', () => {
       const client = makeClient();
       await invalidateRulesCache(client as any);
       // Should complete without error
+    });
+  });
+
+  // ── word-filter per-message budget (PR #269 review) ─────
+
+  describe('word-filter budget enforcement between words', () => {
+    const modConfig = {
+      escalationChain: [],
+      infractionExpiryDays: 30,
+      modLogChannelId: null,
+    };
+
+    it('bails out of the word loop when the per-message budget is exceeded — no match, no punishment', async () => {
+      // Injected clock (Date.now call order): deadline computed at t=0
+      // (→ 500), between-rules check at t=1, word 1 checked at t=2 (within
+      // budget — evaluates a fast non-matching regex), word 2 checked at
+      // t=600 → over deadline → bail. Words 2 and 3 WOULD match the content,
+      // proving the bail (not a failed match) stopped the loop.
+      const times = [0, 1, 2, 600];
+      let call = 0;
+      const nowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementation(() => times[Math.min(call++, times.length - 1)]!);
+      try {
+        const rule = makeRule('word_filter', {
+          words: ['zzz\\d+', 'bad', 'content'],
+          matchMode: 'regex',
+          caseSensitive: false,
+        });
+        const msg = makeMessage('this is bad content');
+        const result = await processMessage(makeClient([rule]) as any, msg as any, modConfig);
+
+        // Fails toward "no match": the user is not punished on a budget bail.
+        expect(result).toBe(false);
+        expect(msg.delete).not.toHaveBeenCalled();
+
+        // Logged exactly once, reporting how many words were skipped.
+        const bailWarns = mockLog.warn.mock.calls.filter((c) =>
+          String(c[0]).includes('word-filter budget exceeded'),
+        );
+        expect(bailWarns).toHaveLength(1);
+        expect(String(bailWarns[0]![0])).toContain('skipped 2 remaining word(s)');
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('evaluates all words normally when the budget is not exceeded', async () => {
+      const rule = makeRule('word_filter', {
+        words: ['zzz\\d+', 'bad'],
+        matchMode: 'regex',
+        caseSensitive: false,
+      });
+      const msg = makeMessage('this is bad content');
+      const result = await processMessage(makeClient([rule]) as any, msg as any, modConfig);
+      expect(result).toBe(true);
     });
   });
 });

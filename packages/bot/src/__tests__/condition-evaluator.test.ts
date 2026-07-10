@@ -3,8 +3,14 @@
  *
  * Tests evaluateConditions with mock Discord/Supabase objects.
  */
-import { describe, it, expect } from 'vitest';
-import { evaluateConditions, type ConditionContext, type AutomationCondition } from '../features/automations/condition-evaluator.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  evaluateConditions,
+  createRegexBudget,
+  EVENT_REGEX_BUDGET_MS,
+  type ConditionContext,
+  type AutomationCondition,
+} from '../features/automations/condition-evaluator.js';
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -211,6 +217,111 @@ describe('message_matches_regex', () => {
       makeCtx({ messageContent: null }),
     );
     expect(result).toBe(false);
+  });
+});
+
+describe('message_matches_regex — per-event regex budget (PR #269)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Simulate regex spend with an injected clock: Date.now returns the given
+   * values in call order (last value repeats). The evaluator calls Date.now
+   * exactly twice per evaluated regex condition (start + end of the vm run),
+   * so the schedule controls the "cost" charged to the budget without real
+   * slow patterns.
+   */
+  function mockClock(schedule: number[]) {
+    let call = 0;
+    return vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => schedule[Math.min(call++, schedule.length - 1)]!);
+  }
+
+  it('budget matches the automod per-message budget (500ms)', () => {
+    expect(EVENT_REGEX_BUDGET_MS).toBe(500);
+  });
+
+  it('evaluates later regex conditions as non-match once the budget is exhausted (fail-closed)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // First regex "costs" 600ms (> 500ms budget); the second — which WOULD
+    // match — must be skipped as a non-match, failing the AND chain.
+    mockClock([0, 600]);
+    const budget = createRegexBudget();
+    const result = await evaluateConditions(
+      [
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        { type: 'message_matches_regex', config: { value: 'order' } },
+      ],
+      makeCtx({ messageContent: 'order 123', regexBudget: budget }),
+    );
+    expect(result).toBe(false);
+    expect(budget.remainingMs).toBeLessThanOrEqual(0);
+    expect(budget.exhaustedLogged).toBe(true);
+  });
+
+  it('exhaustion affects only regex conditions — results already obtained and non-regex conditions stand', async () => {
+    mockClock([0, 600]);
+    const budget = createRegexBudget();
+    const result = await evaluateConditions(
+      [
+        // Matches before the budget runs dry (its own evaluation is never cut short)…
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        // …and non-regex conditions still evaluate normally afterwards.
+        { type: 'has_role', config: { value: 'role-a' } },
+      ],
+      makeCtx({ messageContent: 'order 123', regexBudget: budget }),
+    );
+    expect(result).toBe(true);
+    expect(budget.remainingMs).toBeLessThanOrEqual(0);
+  });
+
+  it('creates a fresh budget per call when none is supplied (no cross-event leakage)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockClock([0, 600]);
+    // First call exhausts its own implicit budget…
+    const first = await evaluateConditions(
+      [
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+      ],
+      makeCtx({ messageContent: '123' }),
+    );
+    expect(first).toBe(false);
+    // …but a subsequent call (a new event) starts with a full budget.
+    const second = await evaluateConditions(
+      [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+      makeCtx({ messageContent: '123' }),
+    );
+    expect(second).toBe(true);
+  });
+
+  it('aggregates across evaluateConditions calls sharing one budget and logs exhaustion once', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockClock([0, 600]);
+    const budget = createRegexBudget();
+    // Automation 1 spends the whole event budget (and matches).
+    const a1 = await evaluateConditions(
+      [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+      makeCtx({ messageContent: '123', regexBudget: budget }),
+    );
+    // Automations 2 and 3 (same event, same budget) are skipped as non-match.
+    const a2 = await evaluateConditions(
+      [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+      makeCtx({ messageContent: '123', regexBudget: budget }),
+    );
+    const a3 = await evaluateConditions(
+      [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+      makeCtx({ messageContent: '123', regexBudget: budget }),
+    );
+    expect(a1).toBe(true);
+    expect(a2).toBe(false);
+    expect(a3).toBe(false);
+    const exhaustionWarns = warnSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Regex evaluation budget exhausted'),
+    );
+    expect(exhaustionWarns).toHaveLength(1);
   });
 });
 

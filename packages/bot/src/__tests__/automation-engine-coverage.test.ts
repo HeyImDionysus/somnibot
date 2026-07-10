@@ -40,6 +40,8 @@ vi.mock('../features/automations/automation-loader.js', () => ({
 const mockEvaluateConditions = vi.fn().mockResolvedValue(true);
 vi.mock('../features/automations/condition-evaluator.js', () => ({
   evaluateConditions: (...args: unknown[]) => mockEvaluateConditions(...args),
+  // PR #269: engine creates one shared regex budget per event
+  createRegexBudget: () => ({ remainingMs: 500, exhaustedLogged: false }),
 }));
 
 const mockExecuteActions = vi.fn().mockResolvedValue({ executed: 1, failed: 0, errors: [] });
@@ -535,6 +537,33 @@ describe('AutomationEngine', () => {
         {} as any,
       );
       expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── per-event regex budget wiring (PR #269 review) ──────
+
+  describe('regex budget wiring', () => {
+    it('passes ONE shared regex budget to all automations of an event, and a fresh one per event', async () => {
+      const autos = [makeAutomation({ id: 'a1' }), makeAutomation({ id: 'a2' })];
+      mockGetForTrigger.mockReturnValue(autos);
+      mockEvaluateConditions.mockResolvedValue(true);
+      await engine.start();
+
+      eventBus.fire({ type: 'member.joined', guildId: 'g1', data: { discordId: 'u1' } });
+      await new Promise((r) => setTimeout(r, 50));
+      eventBus.fire({ type: 'member.joined', guildId: 'g1', data: { discordId: 'u1' } });
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(mockEvaluateConditions).toHaveBeenCalledTimes(4);
+      const budgets = mockEvaluateConditions.mock.calls.map(
+        (c) => (c[1] as { regexBudget: unknown }).regexBudget,
+      );
+      for (const b of budgets) expect(b).toBeDefined();
+      // Both automations of event 1 share the same budget object…
+      expect(budgets[0]).toBe(budgets[1]);
+      // …event 2 gets its own.
+      expect(budgets[2]).toBe(budgets[3]);
+      expect(budgets[0]).not.toBe(budgets[2]);
     });
   });
 });

@@ -156,6 +156,11 @@ function isExempt(
 // aggregate. This deadline caps the total time spent checking ALL rules on a
 // single message; a rule whose regexes hit their timeout burns budget and the
 // remaining rules are skipped with a warning.
+// PR #269 review (P2): the same deadline is also enforced BETWEEN WORDS
+// inside checkWordFilter — config.words is owner-editable with no per-rule
+// cap, so without the word-level check a single regex-mode rule with a few
+// pathological entries could block for words.length × 250ms before the
+// between-rules check ever ran.
 const MESSAGE_RULE_BUDGET_MS = 500;
 
 export async function processMessage(
@@ -186,7 +191,7 @@ export async function processMessage(
 
     if (isExempt(member, rule, channelId)) continue;
 
-    const violation = await checkRule(client, message, rule);
+    const violation = await checkRule(client, message, rule, deadline);
     if (violation) {
       await executeAutoModAction(client, message, rule, violation, modConfig);
       return true;
@@ -199,15 +204,20 @@ export async function processMessage(
 /**
  * Check a single rule against a message.
  * Returns the violation description, or null if no violation.
+ *
+ * @param deadline - Wall-clock deadline (epoch ms) from processMessage's
+ *                   per-message budget; enforced between words in
+ *                   checkWordFilter (PR #269 review).
  */
 async function checkRule(
   client: SomniClient,
   message: Message,
   rule: DbAutomodRule,
+  deadline: number,
 ): Promise<string | null> {
   switch (rule.type) {
     case 'word_filter':
-      return checkWordFilter(message.content, rule.config as WordFilterConfig);
+      return checkWordFilter(message.content, rule.config as WordFilterConfig, deadline);
     case 'link_filter':
       return checkLinkFilter(message.content, rule.config as LinkFilterConfig);
     case 'invite_filter':
@@ -237,12 +247,27 @@ async function checkRule(
 function checkWordFilter(
   content: string,
   config: WordFilterConfig,
+  deadline: number,
 ): string | null {
   if (!config.words || config.words.length === 0) return null;
 
   const text = config.caseSensitive ? content : content.toLowerCase();
 
-  for (const word of config.words) {
+  for (const [index, word] of config.words.entries()) {
+    // PR #269 review (P2): enforce the per-message budget BETWEEN WORDS, not
+    // just between rules. In regex mode each pathological entry can burn a
+    // full 250ms vm timeout while the loop marches on, and config.words is
+    // owner-editable with no per-rule cap. Shares processMessage's wall-clock
+    // deadline (MESSAGE_RULE_BUDGET_MS) and the same `Date.now() > deadline`
+    // check. Fails toward "no match": a budget bail never punishes the user.
+    if (Date.now() > deadline) {
+      log.warn(
+        `Automod word-filter budget exceeded (${MESSAGE_RULE_BUDGET_MS}ms) — ` +
+        `skipped ${config.words.length - index} remaining word(s) in rule; treating as no match`,
+      );
+      return null;
+    }
+
     const target = config.caseSensitive ? word : word.toLowerCase();
 
     switch (config.matchMode) {

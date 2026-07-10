@@ -8,6 +8,42 @@ import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('ConditionEval');
 
+/**
+ * PR #269 review (P2): Aggregate regex-evaluation budget per platform event.
+ *
+ * Each `message_matches_regex` condition may synchronously block the event
+ * loop for up to 250ms (the vm timeout below). Automation limits allow up to
+ * 100 automations per guild with up to 50 conditions each, and the engine
+ * starts EVERY matching automation for an event — so without an aggregate
+ * cap, a handful of pathological owner-configured patterns could block the
+ * event loop for many seconds per message.
+ *
+ * The budget is spend-accounted: the wall-clock time of each regex
+ * evaluation (including timeouts) is subtracted from a budget shared by all
+ * automations triggered by one event. Once exhausted, remaining regex
+ * conditions evaluate as non-match — fail-closed for triggering, a budget
+ * bail never fires an automation — with a single warning per event.
+ *
+ * 500ms matches the automod per-message budget (MESSAGE_RULE_BUDGET_MS in
+ * moderation/automod-engine.ts). An in-flight evaluation is never cut short
+ * (each keeps its full calibrated 250ms so legitimate patterns don't flake
+ * under load), so worst-case overshoot is one vm-timeout slice (~250ms)
+ * beyond the budget.
+ */
+export const EVENT_REGEX_BUDGET_MS = 500;
+
+export interface RegexBudget {
+  /** Milliseconds left for regex evaluation across the current event. */
+  remainingMs: number;
+  /** Ensures the budget-exhausted warning is logged once per event. */
+  exhaustedLogged: boolean;
+}
+
+/** Create a fresh regex budget (the engine creates one per platform event). */
+export function createRegexBudget(): RegexBudget {
+  return { remainingMs: EVENT_REGEX_BUDGET_MS, exhaustedLogged: false };
+}
+
 export interface ConditionContext {
   guild: Guild;
   member: GuildMember | null;
@@ -15,6 +51,13 @@ export interface ConditionContext {
   messageContent: string | null;
   supabase: SupabaseClient;
   guildId: string;
+  /**
+   * Shared per-event regex budget (see EVENT_REGEX_BUDGET_MS). The automation
+   * engine supplies one instance per platform event so all automations
+   * triggered by that event share it; when absent (direct callers, tests) a
+   * fresh per-call budget is created in evaluateConditions.
+   */
+  regexBudget?: RegexBudget;
 }
 
 export interface AutomationCondition {
@@ -29,6 +72,9 @@ export async function evaluateConditions(
   conditions: AutomationCondition[],
   ctx: ConditionContext,
 ): Promise<boolean> {
+  // PR #269 review: guarantee a regex budget exists even for direct callers
+  // so a single evaluateConditions call is always bounded.
+  ctx.regexBudget ??= createRegexBudget();
   for (const condition of conditions) {
     const passed = await evaluateCondition(condition, ctx);
     if (!passed) return false;
@@ -144,6 +190,21 @@ async function evaluateCondition(
 
     case 'message_matches_regex': {
       if (!ctx.messageContent) return false;
+      // PR #269 review (P2): enforce the shared per-event regex budget.
+      // Exhausted → remaining regex conditions are non-matches (fail-closed
+      // for triggering; never throws), logged once per event.
+      const budget = ctx.regexBudget;
+      if (budget && budget.remainingMs <= 0) {
+        if (!budget.exhaustedLogged) {
+          budget.exhaustedLogged = true;
+          log.warn(
+            `Regex evaluation budget exhausted (${EVENT_REGEX_BUDGET_MS}ms) for guild ${ctx.guildId} — ` +
+            'remaining message_matches_regex conditions evaluate as non-match for this event',
+          );
+        }
+        return false;
+      }
+      const startedAt = Date.now();
       try {
         const raw = config.value as string;
         // Limit pattern length to prevent catastrophic backtracking
@@ -175,6 +236,9 @@ async function evaluateCondition(
       } catch {
         // Timeout, invalid regex, or other error — treat as non-match
         return false;
+      } finally {
+        // Charge actual elapsed time (including vm timeouts) to the budget.
+        if (budget) budget.remainingMs -= Date.now() - startedAt;
       }
     }
 
