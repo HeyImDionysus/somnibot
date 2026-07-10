@@ -315,21 +315,25 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "product_files",
     {
+      // File LOCATORS (external_url, file_path, storage_path, storage_bucket)
+      // and the immutable upload metadata that travels with them (file_name,
+      // mime_type, file_size_bytes, size_bytes, version) are deliberately
+      // EXCLUDED. They are assigned once by the upload/create routes
+      // (store/files + store/products/[id]/files POST) and never edited by any
+      // dashboard UPDATE path — the dashboard only ever inserts or deletes a
+      // file row. The download endpoint later TRUSTS file_path / external_url to
+      // issue signed URLs or redirect paid downloads
+      // (downloads/[productId]/[fileId] route), so letting a tampered undo
+      // rewrite them on an existing row could repoint a paid download to an
+      // attacker-controlled object or URL, bypassing upload validation.
+      // download_count is a system counter owned by the download RPC.
+      // Only display metadata a dashboard admin could legitimately re-edit
+      // remains settable.
       data: new Set([
         "description",
         "display_name",
-        "download_count",
-        "external_url",
-        "file_name",
-        "file_path",
-        "file_size_bytes",
-        "mime_type",
         "name",
-        "size_bytes",
         "sort_order",
-        "storage_bucket",
-        "storage_path",
-        "version",
       ]),
       // product_files is located by its id, its parent product, and its tenant.
       match: new Set(["id", "product_id", "guild_id"]),
@@ -528,6 +532,13 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "automations",
     {
+      // Runtime/execution metadata is EXCLUDED. execution_count and
+      // last_executed_at are maintained by the bot's execution-logger
+      // (increment_automation_count RPC, with a last_executed_at fallback), and
+      // rate_limit_per_user / rate_limit_window_seconds are consumed by the
+      // bot's automation-loader. None are written by the dashboard PUT/POST
+      // (which only sets the config fields below via typedPick + updated_at), so
+      // a tampered undo must not reset execution history or alter rate limiting.
       data: new Set([
         "actions",
         "conditions",
@@ -535,11 +546,7 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "enabled",
         "exclude_channel_ids",
         "exclude_user_ids",
-        "execution_count",
-        "last_executed_at",
         "name",
-        "rate_limit_per_user",
-        "rate_limit_window_seconds",
         "target_channel_ids",
         "target_user_ids",
         "trigger_config",
@@ -579,11 +586,15 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "stats_channels",
     {
+      // Bot-owned runtime fields are EXCLUDED. The bot's stats-manager creates
+      // the Discord channel and writes channel_id, then writes last_value /
+      // last_updated_at on every stats tick. The dashboard PUT only sets
+      // stat_type, name_format, stat_config, active (typedPick) + updated_at.
+      // Letting undo set channel_id could repoint the bot to rename an arbitrary
+      // guild channel on the next tick; rewinding last_value / last_updated_at
+      // corrupts the runtime state the bot maintains.
       data: new Set([
         "active",
-        "channel_id",
-        "last_updated_at",
-        "last_value",
         "name_format",
         "stat_config",
         "stat_type",
@@ -631,12 +642,18 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "giveaways",
     {
+      // entries (the entrant list) is EXCLUDED — it is owned by the bot via the
+      // atomic giveaway_add_entry / giveaway_remove_entry RPCs and read by the
+      // giveaway-manager to select winners. The dashboard PUT only edits
+      // admin-controlled fields (prize, winner_count, status, winners, …) and
+      // never touches entries. Letting a tampered undo inject or remove
+      // participants would change who is eligible for prizes / product
+      // entitlements before the bot ends the giveaway.
       data: new Set([
         "channel_id",
         "created_by",
         "ended_at",
         "ends_at",
-        "entries",
         "message_id",
         "prize",
         "prize_license_count",

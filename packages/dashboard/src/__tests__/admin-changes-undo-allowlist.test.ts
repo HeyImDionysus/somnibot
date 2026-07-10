@@ -410,6 +410,127 @@ describe('validateUndoPayload', () => {
     if (!lastSent.ok) expect(lastSent.reason).toContain('last_sent_at');
   });
 
+  // ── Finding (11:46): stats_channels — the bot's stats-manager owns
+  // channel_id / last_value / last_updated_at (writes them on each tick); the
+  // dashboard PUT only sets stat_type/name_format/stat_config/active. Undo must
+  // not be able to repoint channel_id or rewind runtime values. ──────────────
+  it('does not let undo set bot-owned stats_channels runtime fields', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('stats_channels');
+    expect(spec?.data.has('channel_id')).toBe(false);
+    expect(spec?.data.has('last_value')).toBe(false);
+    expect(spec?.data.has('last_updated_at')).toBe(false);
+    // Dashboard-writable config columns remain settable.
+    expect(spec?.data.has('stat_type')).toBe(true);
+    expect(spec?.data.has('name_format')).toBe(true);
+    expect(spec?.data.has('stat_config')).toBe(true);
+    expect(spec?.data.has('active')).toBe(true);
+
+    const repoint = validateUndoPayload({
+      table: 'stats_channels',
+      // Repointing channel_id would make the bot rename an arbitrary channel.
+      data: { channel_id: 'attacker-channel' },
+      match: { id: 'sc-1', guild_id: 'guild-1' },
+    }, CTX);
+    expect(repoint.ok).toBe(false);
+    if (!repoint.ok) expect(repoint.reason).toContain('channel_id');
+
+    for (const col of ['last_value', 'last_updated_at']) {
+      const res = validateUndoPayload({
+        table: 'stats_channels',
+        data: { [col]: 'x' },
+        match: { id: 'sc-1', guild_id: 'guild-1' },
+      }, CTX);
+      expect(res.ok, col).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(col);
+    }
+  });
+
+  // ── Finding (11:46): automations — execution_count / last_executed_at are
+  // owned by the bot's execution-logger (increment_automation_count RPC), and
+  // rate_limit_per_user / rate_limit_window_seconds are consumed by the bot's
+  // automation-loader. The dashboard PUT/POST never write them. ──────────────
+  it('does not let undo set bot-owned automations runtime fields', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('automations');
+    for (const col of [
+      'execution_count',
+      'last_executed_at',
+      'rate_limit_per_user',
+      'rate_limit_window_seconds',
+    ]) {
+      expect(spec?.data.has(col), col).toBe(false);
+      const res = validateUndoPayload({
+        table: 'automations',
+        data: { [col]: 1 },
+        match: { id: 'auto-1', guild_id: 'guild-1' },
+      }, CTX);
+      expect(res.ok, col).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(col);
+    }
+    // Dashboard-writable config columns remain settable.
+    expect(spec?.data.has('enabled')).toBe(true);
+    expect(spec?.data.has('trigger_config')).toBe(true);
+    expect(spec?.data.has('actions')).toBe(true);
+  });
+
+  // ── Finding (11:46): product_files — file locators (file_path / external_url
+  // / storage_path / storage_bucket) are assigned once by the upload/create
+  // routes and TRUSTED by the download endpoint to sign URLs / redirect paid
+  // downloads. No dashboard UPDATE path edits them. Undo must not rewrite them
+  // on an existing row. ──────────────
+  it('does not let undo set product_files file locators', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('product_files');
+    for (const col of [
+      'file_path',
+      'external_url',
+      'storage_path',
+      'storage_bucket',
+      // Immutable upload metadata assigned at create time alongside the locator.
+      'file_name',
+      'mime_type',
+      'file_size_bytes',
+      'size_bytes',
+      'version',
+      // System counter owned by the download RPC.
+      'download_count',
+    ]) {
+      expect(spec?.data.has(col), col).toBe(false);
+      const res = validateUndoPayload({
+        table: 'product_files',
+        data: { [col]: 'https://attacker.example/evil' },
+        match: { id: 'f-1', product_id: 'p-1', guild_id: 'guild-1' },
+      }, CTX);
+      expect(res.ok, col).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(col);
+    }
+    // Display metadata a dashboard admin could legitimately re-edit stays settable.
+    expect(spec?.data.has('display_name')).toBe(true);
+    expect(spec?.data.has('description')).toBe(true);
+    expect(spec?.data.has('name')).toBe(true);
+    expect(spec?.data.has('sort_order')).toBe(true);
+  });
+
+  // ── Finding (11:46): giveaways — the entrant list `entries` is owned by the
+  // bot via the atomic add/remove RPCs and drives winner selection. The
+  // dashboard PUT never touches it. Undo must not inject/remove entrants. ──────
+  it('does not let undo set the bot-owned giveaways entrant list', () => {
+    const spec = UNDO_TABLE_COLUMNS.get('giveaways');
+    expect(spec?.data.has('entries')).toBe(false);
+    // Admin-controlled fields the dashboard PUT edits remain settable.
+    expect(spec?.data.has('prize')).toBe(true);
+    expect(spec?.data.has('winner_count')).toBe(true);
+    expect(spec?.data.has('status')).toBe(true);
+    expect(spec?.data.has('winners')).toBe(true);
+
+    const res = validateUndoPayload({
+      table: 'giveaways',
+      // Injecting an entrant would change prize / entitlement eligibility.
+      data: { entries: ['attacker-user'] },
+      match: { id: 'g-1', guild_id: 'guild-1' },
+    }, CTX);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain('entries');
+  });
+
   // ── Finding (05:40): product_license_config has no guild column, so undo
   // must defer a parent-table ownership check to the route. ──────────────
   it('emits a tenancy lookup for guild-less product_license_config', () => {
