@@ -222,12 +222,17 @@ describe('action-queue', () => {
 
       // The interval call to recoverStaleActions
       const callsBefore = supa.rpc.mock.calls.length;
-      vi.advanceTimersByTime(65000);
-      // Let any promises settle
-      await vi.runAllTimersAsync().catch(() => {});
+      // Fire the 60s interval once and flush its async callbacks.
+      // (Previously advanceTimersByTime + runAllTimersAsync, which ground
+      // through vitest's 10,000-timer abort on the never-ending interval;
+      // the per-lane depth checks added to the sweep tick made those 10k
+      // no-op fires exceed the 10s test timeout.)
+      await vi.advanceTimersByTimeAsync(65_000);
 
       vi.useRealTimers();
-        expect(supa.from).toHaveBeenCalled();
+      // The periodic tick re-ran stale recovery (RPC) and the pending sweep.
+      expect(supa.rpc.mock.calls.length).toBeGreaterThan(callsBefore);
+      expect(supa.from).toHaveBeenCalled();
     });
 
     it('subscribes to realtime INSERT events', async () => {

@@ -168,8 +168,17 @@ Anti-raid and rate limiting will rebuild state on next event. Economy cooldowns 
 |--------|-----------|
 | Heartbeat stale | >5 min |
 | Automation consecutive failures | 3 |
-| Action queue depth | >100 pending |
+| Action queue depth — commerce lane (`action_queue_depth_commerce`) | >10 pending (critical) |
+| Action queue depth — game lane (`action_queue_depth_game`) | >100 pending (warning) |
 | Memory usage | >1.5 GB |
+
+Queue-depth alerts are per lane: `bot_action_queue` rows are classified
+`commerce` (paid-store fulfillment, receipt/license-key delivery, entitlement
+revocation) or `game` (everything else) by a DB trigger, and commerce rows are
+always processed ahead of game rows. A commerce backlog means paying customers
+are waiting — treat it as an incident. A game backlog does not delay commerce
+processing (separate lane and concurrency budget). At most one unresolved
+alert exists per guild per lane; alerts auto-resolve when the lane drains.
 
 ## Alert Response
 
@@ -180,7 +189,11 @@ Check: process running → Discord gateway → Valkey → Supabase → restart
 Check: `alerts` table → `automation_executions` errors → fix perms/channels
 
 ### Action Queue Backup
-Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → check DLQ
+Check stuck `processing` items → `bot_action_queue_recover_stale()` RPC → check DLQ.
+For a **commerce-lane** alert, filter on `lane = 'commerce'` in both
+`bot_action_queue` and `action_queue_dlq` — those rows are paid fulfillment
+(orders, receipts, revocations) and every DLQ'd receipt delivery also raises
+its own operator alert.
 
 ## Database
 

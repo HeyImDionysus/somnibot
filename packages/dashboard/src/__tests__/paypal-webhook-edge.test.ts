@@ -21,6 +21,8 @@ vi.mock('@/lib/paypal', () => ({
     webhookId: 'test-webhook-id',
   }),
   getPayPalToken: vi.fn().mockResolvedValue('test-token'),
+  getPayPalTokenResult: vi.fn().mockResolvedValue({ ok: true, token: 'test-token' }),
+  isRetriablePayPalStatus: (status: number) => status >= 500 || status === 429 || status === 408,
   PAYPAL_API_BASE: 'https://api-m.sandbox.paypal.com',
 }));
 vi.mock('@/lib/api/rate-limit', () => ({

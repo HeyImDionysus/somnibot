@@ -1108,6 +1108,9 @@ export interface DbBotActionQueue {
   action: string;
   payload: Record<string, unknown>;
   status: 'pending' | 'processing' | 'completed' | 'failed';
+  // 20260710020000: processing lane — stamped by a BEFORE INSERT trigger
+  // from `action` (commerce = paid-store work, prioritized over game).
+  lane: 'commerce' | 'game';
   result: Record<string, unknown> | null;
   error_message: string | null;
   created_at: string;
