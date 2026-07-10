@@ -29,6 +29,38 @@ import {
 } from '@/lib/api/commerce-income-wall';
 
 /**
+ * Verify the target product exists AND belongs to the caller's guild.
+ *
+ * Every plan write that binds a plan to a product (POST create, PUT
+ * product_id change) must pass this check regardless of the plan's
+ * price/active state. The plan row always carries the CALLER'S guild_id but
+ * product_id comes straight from the request body — without this check, a
+ * plan created in guild B can attach to guild A's product, and the bot's
+ * checkout (cheapest active plan for the product) would happily select it.
+ *
+ * Returns null when the write may proceed, or a 404/500 error response.
+ */
+async function requireGuildProduct(
+  supabase: SupabaseClient,
+  guildId: string,
+  productId: string,
+): Promise<NextResponse | null> {
+  const { data: product, error } = await supabase
+    .from('products')
+    .select('id')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (error) {
+    return dbError(error, 'store/plans');
+  }
+  if (!product) {
+    return apiError('Product not found for this guild', 404);
+  }
+  return null;
+}
+
+/**
  * Compliance-wall check for a plan write. Call only when the EFFECTIVE plan
  * state (stored + updated values) is CHARGEABLE — active with price_cents > 0
  * or with a paypal_plan_id (checkout starts a subscription from the PayPal id
@@ -150,6 +182,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Cross-guild injection guard: ALWAYS verify product ownership before
+  // insert — for zero-price and inactive plans too, not only chargeable ones.
+  const notOwned = await requireGuildProduct(supabase, guildId, product_id);
+  if (notOwned) return notOwned;
+
   // Compliance wall: a CHARGEABLE plan (active, and priced > 0 or carrying a
   // paypal_plan_id) makes the parent subscription buyable — re-check the
   // role-income overlap before writing it. Inactive plans, and zero-price
@@ -202,6 +239,13 @@ export async function PUT(req: NextRequest) {
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing plan id' }, { status: 400 });
+  }
+
+  // Cross-guild injection guard on re-parenting: changing product_id must
+  // never point this guild's plan at another guild's product.
+  if (updates.product_id) {
+    const notOwned = await requireGuildProduct(supabase, guildId, updates.product_id);
+    if (notOwned) return notOwned;
   }
 
   // Compliance wall: re-check whenever the update can turn this plan into (or

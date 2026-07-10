@@ -263,8 +263,20 @@ const promotionCreate = z.object({
 
 const entitlementGrant = z.object({
   product_id: uuid,
-  type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
-  source: z.enum(['manual', 'purchase', 'gift', 'promotion']).default('manual'),
+  // Must mirror the entitlements table CHECK (type IN ('one_time','subscription'))
+  // and EntitlementService.grant's 'one_time' | 'subscription' union. 'free' was
+  // ungrantable — it passed zod, manufactured an order, then died on a raw DB
+  // CHECK violation surfaced as a generic 500. Nothing grants a 'free'
+  // entitlement (no UI/bot/docs/tests reference it), so it is removed here.
+  type: z.enum(['one_time', 'subscription']).default('one_time'),
+  // Must mirror the entitlements.source (and orders.source) CHECK constraint
+  // in the initial schema — ('purchase', 'giveaway', 'manual', 'automation'),
+  // the same union as EntitlementService.grant. The previous enum accepted
+  // 'gift'/'promotion', which passed validation but died at insert with a
+  // raw DB CHECK violation. COMPLIANCE: do NOT add new values here — the
+  // bot's commerce-role-guard deny-lists non-purchase sources; any new
+  // source needs a real-money-or-not decision there first.
+  source: z.enum(['purchase', 'giveaway', 'manual', 'automation']).default('manual'),
   expires_at: z.string().datetime().optional().nullable(),
   granted_role_ids: snowflakeArray,
   granted_channel_ids: snowflakeArray,
