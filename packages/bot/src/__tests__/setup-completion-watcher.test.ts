@@ -131,4 +131,67 @@ describe('startSetupCompletionWatcher', () => {
     expect(evaluateSetupGate.mock.calls.length).toBe(callsAtStop);
     expect(onComplete).not.toHaveBeenCalled();
   });
+
+  // ── Codex round-3 finding #2: a stopped watcher must not fire completion ──
+  // clearInterval only prevents FUTURE ticks; a tick already suspended inside
+  // `await evaluateSetupGate` can still resume. If stop() runs while a poll is
+  // in flight and that poll then observes a CONFIRMED complete, the watcher must
+  // NOT call onComplete — once stopped, it stays stopped (no post-shutdown /
+  // post-replacement transition).
+  it('does NOT fire onComplete when stop() is called while a poll is in flight', async () => {
+    let releaseGate!: (v: unknown) => void;
+    // First poll hangs until we release it; by then stop() has been called.
+    evaluateSetupGate.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseGate = resolve; }),
+    );
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    const watcher = startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
+    // Kick off the first poll (it suspends on the pending gate promise).
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(evaluateSetupGate).toHaveBeenCalledTimes(1);
+
+    // Stop the watcher while that poll is still awaiting the gate.
+    watcher.stop();
+
+    // Now the in-flight gate resolves to a CONFIRMED completion.
+    releaseGate({ state: 'complete', completionConfirmed: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The post-await guard must have suppressed the transition.
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // And it stays stopped — no future polls or fires.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(evaluateSetupGate).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Codex round-3 finding #2: overlapping slow polls fire onComplete once ──
+  // If two polls overlap (each slower than pollMs) and BOTH observe a confirmed
+  // completion, the post-await `fired` re-check must ensure onComplete runs
+  // exactly once — not once per overlapping poll.
+  it('fires onComplete exactly once even when slow polls overlap', async () => {
+    const gates: Array<(v: unknown) => void> = [];
+    // Every poll returns a promise we resolve manually, so several can be
+    // in flight simultaneously (each slower than the 1000ms interval).
+    evaluateSetupGate.mockImplementation(
+      () => new Promise((resolve) => { gates.push(resolve); }),
+    );
+    const onComplete = vi.fn().mockResolvedValue(undefined);
+
+    startSetupCompletionWatcher(supabase, onComplete, { pollMs: 1000 });
+
+    // Start two overlapping polls before either resolves.
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(gates.length).toBeGreaterThanOrEqual(2);
+
+    // Resolve BOTH in-flight polls with a confirmed completion.
+    gates[0]({ state: 'complete', completionConfirmed: true });
+    gates[1]({ state: 'complete', completionConfirmed: true });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
 });

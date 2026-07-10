@@ -79,14 +79,70 @@ export async function writeGuildRecord(guild: Guild, supabase: SupabaseClient): 
 }
 
 /**
+ * Persist an auto-detected guild id into `instance_settings.discord_guild_id`
+ * (codex round-3 finding #4).
+ *
+ * The dashboard setup route resolves the configured guild via
+ * getConfiguredDiscordGuildId, which — when neither `DISCORD_GUILD_ID` in the
+ * environment nor the wizard-written credential is present — falls back to
+ * `instance_settings.discord_guild_id`. It then calls getOwnerRuntimeReadiness
+ * with that id BEFORE ever querying the `guild` table, and returns
+ * `guildDetected: false` when the id is null. So a pure invite-and-detect setup
+ * (owner invites the bot without pre-entering a guild id) would stay blocked
+ * even though the bot wrote the `guild` row — the route never looks the row up
+ * without a configured id.
+ *
+ * Writing the detected id here closes that gap. It mirrors the row shape the
+ * config-loader uses (key/value/section) so the value is indistinguishable from
+ * one the wizard would have written, and the dashboard's readiness check then
+ * finds the guild.
+ */
+async function persistDetectedGuildId(
+  supabase: SupabaseClient,
+  guildId: string,
+): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from('instance_settings')
+      .upsert(
+        {
+          key: 'discord_guild_id',
+          value: guildId,
+          section: 'discord',
+        },
+        { onConflict: 'key' },
+      );
+    if (error) {
+      log.warn('Failed to persist detected guild id to instance_settings', {
+        guildId,
+        error: error.message,
+      });
+    } else {
+      log.info('Persisted detected guild id for setup readiness', { guildId });
+    }
+  } catch (err) {
+    log.warn('Error persisting detected guild id to instance_settings', {
+      guildId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Write a minimal `type: 'health'` diagnostic row so the setup route's
  * Supabase readiness fallback (which checks for a fresh `health` snapshot
  * before trying Valkey) can prove the bot is online without Valkey. The full
  * DiagnosticsService writes a richer row in normal boot; here we only need the
  * (guild_id, type, snapshot_at) tuple the readiness check reads — every other
  * column has a schema default.
+ *
+ * Exported so the boot sequence can write an IMMEDIATE snapshot for a
+ * newly-invited guild on the guildCreate verification path (codex round-3
+ * finding #3) instead of waiting up to a full 60s refresher tick — otherwise,
+ * with Valkey unavailable, the setup route can report guildDetected:true but
+ * botOnline:false right after the invite and reject finalize.
  */
-async function writeVerificationHealthSnapshot(
+export async function writeVerificationHealthSnapshot(
   supabase: SupabaseClient,
   guildId: string,
 ): Promise<void> {
@@ -163,6 +219,11 @@ export async function runSetupVerificationBoot(
   if (!client.guildId && primaryGuildId) {
     Object.defineProperty(client, 'guildId', { value: primaryGuildId, writable: false });
     log.info('Auto-detected guild for setup verification', { guildId: primaryGuildId });
+    // Persist the detected guild so the dashboard setup route can resolve it as
+    // the configured guild (it falls back to instance_settings.discord_guild_id
+    // when DISCORD_GUILD_ID is unset — which is exactly this auto-detect case —
+    // and reports guildDetected:false without it). See persistDetectedGuildId.
+    await persistDetectedGuildId(client.supabase, primaryGuildId);
   }
 
   // Write the guild record for every guild the bot is currently in so the

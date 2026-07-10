@@ -31,7 +31,11 @@ vi.mock('../services/heartbeat.js', () => ({
   },
 }));
 
-import { writeGuildRecord, runSetupVerificationBoot } from '../services/setup-verification-boot.js';
+import {
+  writeGuildRecord,
+  runSetupVerificationBoot,
+  writeVerificationHealthSnapshot,
+} from '../services/setup-verification-boot.js';
 
 function makeGuild(id: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -224,12 +228,62 @@ describe('runSetupVerificationBoot', () => {
     expect(heartbeatCtor).toHaveBeenCalledWith(client.valkey, client.supabase, 'gX', client);
   });
 
+  // ── Codex round-3 finding #4: persist the auto-detected guild ──
+  // The dashboard setup route resolves the configured guild via
+  // getConfiguredDiscordGuildId, which — when DISCORD_GUILD_ID is unset (exactly
+  // this auto-detect case) — falls back to instance_settings.discord_guild_id
+  // and returns guildDetected:false when that is null. So a pure
+  // invite-and-detect setup would stay blocked even though the `guild` row was
+  // written. Persisting the detected id closes that gap.
+  it('persists the auto-detected guild id to instance_settings.discord_guild_id', async () => {
+    const { client, rowsFor } = makeClient([makeGuild('gX')]);
+    await runSetupVerificationBoot(client);
+
+    const settingsRows = rowsFor('instance_settings');
+    const guildIdRow = settingsRows.find((r) => r.key === 'discord_guild_id');
+    expect(guildIdRow).toBeDefined();
+    expect(guildIdRow).toEqual(
+      expect.objectContaining({ key: 'discord_guild_id', value: 'gX', section: 'discord' }),
+    );
+  });
+
+  it('does NOT overwrite instance_settings.discord_guild_id when the guild is already configured', async () => {
+    // guildId preset (DISCORD_GUILD_ID configured) → no auto-detect, so we must
+    // not clobber the configured value with a write here.
+    const { client, rowsFor } = makeClient([makeGuild('g1')], 'g1');
+    await runSetupVerificationBoot(client);
+
+    const settingsRows = rowsFor('instance_settings');
+    expect(settingsRows.find((r) => r.key === 'discord_guild_id')).toBeUndefined();
+  });
+
   it('returns null and does not start a heartbeat when no guild is present', async () => {
     const { client, rowsFor } = makeClient([]);
     const services = await runSetupVerificationBoot(client);
     expect(rowsFor('guild')).toHaveLength(0);
     expect(heartbeatStart).not.toHaveBeenCalled();
     expect(services).toBeNull();
+  });
+
+  // ── Codex round-3 finding #3: immediate health for a newly-invited guild ──
+  // On the guildCreate verification path, when a heartbeat already exists (an
+  // earlier guild started verification), runSetupVerificationBoot is NOT re-run,
+  // so the periodic refresher would not cover the new guild until its next 60s
+  // tick. index.ts writes an immediate snapshot via this exported helper so the
+  // setup route's Supabase fallback can see the guild online right after the
+  // invite (Valkey-down case). This asserts the helper writes the health row the
+  // readiness check reads.
+  it('writeVerificationHealthSnapshot upserts an immediate health row for one guild', async () => {
+    const { supabase, rowsFor } = makeSupabase();
+    await writeVerificationHealthSnapshot(supabase, 'g-new');
+
+    expect(supabase.from).toHaveBeenCalledWith('bot_diagnostics');
+    const rows = rowsFor('bot_diagnostics');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({ guild_id: 'g-new', type: 'health' }),
+    );
+    expect(typeof rows[0].snapshot_at).toBe('string');
   });
 
   it('stop() halts both the heartbeat and the health-snapshot refresher', async () => {

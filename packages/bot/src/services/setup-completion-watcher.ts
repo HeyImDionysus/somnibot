@@ -44,9 +44,16 @@ export function startSetupCompletionWatcher(
 ): SetupCompletionWatcher {
   const pollMs = opts.pollMs ?? SETUP_COMPLETION_POLL_MS;
   let fired = false;
+  // Once stop() is called the watcher stays stopped for good: clearing the
+  // interval only prevents FUTURE ticks, but a tick already suspended inside
+  // `await evaluateSetupGate` can still resume afterwards. This flag lets that
+  // in-flight callback bail after the await so a stopped/replaced watcher never
+  // fires onComplete (e.g. after shutdown, or after another watcher took over).
+  let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
 
   const stop = (): void => {
+    stopped = true;
     if (timer) {
       clearInterval(timer);
       timer = null;
@@ -54,7 +61,9 @@ export function startSetupCompletionWatcher(
   };
 
   timer = setInterval(async () => {
-    if (fired) return;
+    // Guard BEFORE the await: skip if already fired or stopped, so overlapping
+    // slow polls do not pile up into the async section below.
+    if (fired || stopped) return;
     let gate;
     try {
       gate = await evaluateSetupGate(supabase);
@@ -62,6 +71,12 @@ export function startSetupCompletionWatcher(
       log.warn('Setup-completion check failed (will retry)', { error: String(err) });
       return;
     }
+    // Re-check AFTER the await: while this poll was awaiting the gate, stop()
+    // may have run (shutdown/replacement) or a concurrent slow poll may have
+    // already fired the transition. Either way this callback must not run
+    // onComplete a second time or after shutdown — the lifecycle guarantee is
+    // "once stopped, stays stopped; onComplete fires at most once".
+    if (fired || stopped) return;
     // Only transition on an UNAMBIGUOUS completion. evaluateSetupGate degrades
     // to `state: 'complete'` on a transient read failure when DISCORD_TOKEN is
     // present (so an already-finalized bot still boots on a blip) — but in

@@ -25,7 +25,11 @@ import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from '
 import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
 import { evaluateSetupGate, createBootstrapSupabase } from './services/setup-gate.js';
-import { runSetupVerificationBoot, writeGuildRecord } from './services/setup-verification-boot.js';
+import {
+  runSetupVerificationBoot,
+  writeGuildRecord,
+  writeVerificationHealthSnapshot,
+} from './services/setup-verification-boot.js';
 import {
   startSetupCompletionWatcher as startWatcher,
   type SetupCompletionWatcher,
@@ -251,9 +255,21 @@ async function main(): Promise<void> {
         // If the bot booted with no guilds, no verification heartbeat was
         // started. Now that a guild exists, start one so the wizard's
         // "bot online" check (which reads the bot-level heartbeat) can pass.
+        // runSetupVerificationBoot also writes an immediate health row for this
+        // guild, so the snapshot below is only needed on the else branch.
         if (!botLevelServices.heartbeat) {
           const verifyServices = await runSetupVerificationBoot(client);
           if (verifyServices) botLevelServices.heartbeat = verifyServices;
+        } else {
+          // A heartbeat already exists (an earlier guild started verification),
+          // so runSetupVerificationBoot is NOT re-run here — which means the
+          // periodic health refresher would not cover this newly-invited guild
+          // until its next 60s tick. Write an immediate health snapshot for it
+          // (codex round-3 finding #3): otherwise, with Valkey unavailable to
+          // the dashboard, the setup route's Supabase fallback would see
+          // guildDetected:true but botOnline:false for this guild right after
+          // the invite and reject finalize until the refresher catches up.
+          await writeVerificationHealthSnapshot(client.supabase, guild.id);
         }
       } catch (err) {
         log.error('Failed to record guild during setup verification', { id: guild.id, error: String(err) });

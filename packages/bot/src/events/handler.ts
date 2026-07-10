@@ -129,7 +129,9 @@ export function registerEvents(client: SomniClient): void {
   // and guild_config rows do not exist yet. Normal guild event pipelines
   // (member joins, messages, reactions, voice, drift sync) must not run — they
   // would only emit the pre-setup error noise the gate is meant to suppress.
-  // Interaction handling is intentionally NOT gated so `/setup` still works.
+  // Interaction handling is gated inside handleInteraction itself (it must let
+  // the setup wizard's own interactions through while short-circuiting every
+  // other command/component — see isSetupInteraction in interaction-handler.ts).
   // The flag is cleared by the boot sequence right before the full boot, so
   // these same handlers light up automatically on transition (no re-register).
   const gatedForVerification = (): boolean => client.setupVerificationMode === true;
