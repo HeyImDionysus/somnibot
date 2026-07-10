@@ -46,6 +46,10 @@ export const SETUP_WEBHOOK_PROBE_HEADER = 'x-somnibot-webhook-probe';
 
 const PROBE_CHALLENGE_VERSION = 'v1';
 const PROBE_CHALLENGE_TTL_MS = 2 * 60_000;
+// Total budget for one probe, covering BOTH the vetting DNS lookup and the
+// HTTP round-trip: the DNS phase races against this deadline and the fetch
+// only gets whatever budget remains, so a wedged resolver cannot hang
+// GET /api/setup or finalize beyond this bound.
 const PROBE_TIMEOUT_MS = 8_000;
 // Cache probe outcomes: the setup page polls GET /api/setup every few
 // seconds, and each probe is an outbound request to our own public URL.
@@ -60,6 +64,7 @@ const PROBE_MAX_RESPONSE_BYTES = 4_096;
 
 export type SetupWebhookProbeFailureReason =
   | 'dns'
+  | 'dns-timeout'
   | 'tls'
   | 'timeout'
   | 'connection'
@@ -333,10 +338,46 @@ function isBlockedProbeAddress(address: string, hostname: string): boolean {
 }
 
 /**
+ * Race a promise against an absolute deadline. Used to keep the vetting DNS
+ * lookup inside the overall probe budget: dns/promises lookups have no
+ * timeout of their own, so a wedged resolver would otherwise hang the probe
+ * (and everything awaiting it) indefinitely.
+ *
+ * The raced promise keeps running after a timeout — Node offers no way to
+ * cancel an in-flight getaddrinfo — so a no-op rejection handler is attached
+ * up front to keep a late lookup failure from becoming an unhandled
+ * rejection.
+ */
+async function raceDeadline<T>(
+  promise: Promise<T>,
+  deadlineAt: number,
+): Promise<{ kind: 'ok'; value: T } | { kind: 'deadline' }> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) return { kind: 'deadline' };
+
+  promise.catch(() => {}); // handled here so a post-timeout rejection never goes unhandled
+
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ kind: 'ok' as const, value })),
+      new Promise<{ kind: 'deadline' }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: 'deadline' }), remainingMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Vet the probe target before any outbound request: reject private/internal
  * IP literals outright, and resolve hostnames rejecting the target when ANY
  * resolved address is private (a mixed answer means a rebinding-style DNS
- * name could steer the probe internally).
+ * name could steer the probe internally). The DNS phase is bounded by
+ * `deadlineAt` — the same deadline the fetch later runs against — so the
+ * whole probe (DNS + fetch) stays within one PROBE_TIMEOUT_MS budget.
  *
  * Returns null when the target is acceptable, or the terminal
  * SetupWebhookReachability to report otherwise.
@@ -353,6 +394,7 @@ async function vetProbeTarget(
   url: string,
   lookupImpl: ProbeLookup,
   timeoutMs: number,
+  deadlineAt: number,
   checkedAt: string,
 ): Promise<SetupWebhookReachability | null> {
   let hostname: string;
@@ -378,14 +420,25 @@ async function vetProbeTarget(
   if (isIP(bareHost) !== 0) {
     addresses = [bareHost];
   } else {
+    let raced: { kind: 'ok'; value: Array<{ address: string; family: number }> } | { kind: 'deadline' };
     try {
-      addresses = (await lookupImpl(bareHost)).map((entry) => entry.address);
+      raced = await raceDeadline(lookupImpl(bareHost), deadlineAt);
     } catch (err) {
       // Resolving here (instead of first inside fetch) classifies DNS
       // failures at the same step that vets the answer.
       const { failureReason, detail } = classifyProbeError(err, timeoutMs);
       return { status: 'unreachable', failureReason, detail, checkedUrl: url, checkedAt };
     }
+    if (raced.kind === 'deadline') {
+      return {
+        status: 'unreachable',
+        failureReason: 'dns-timeout',
+        detail: `DNS lookup for the webhook hostname did not complete within ${Math.round(timeoutMs / 1000)}s — the DNS resolver on this server appears unresponsive.`,
+        checkedUrl: url,
+        checkedAt,
+      };
+    }
+    addresses = raced.value.map((entry) => entry.address);
     if (addresses.length === 0) {
       return {
         status: 'unreachable',
@@ -463,6 +516,9 @@ export async function probeSetupWebhookUrl(
   const fetchImpl: ProbeFetch = options.fetchImpl ?? fetch;
   const lookupImpl: ProbeLookup = options.lookupImpl ?? defaultProbeLookup;
   const checkedAt = new Date().toISOString();
+  // One deadline covers the whole probe: the vetting DNS lookup races
+  // against it, and the fetch below gets only whatever budget remains.
+  const deadlineAt = Date.now() + timeoutMs;
 
   const challenge = createSetupWebhookProbeChallenge();
   if (!challenge) {
@@ -475,7 +531,7 @@ export async function probeSetupWebhookUrl(
     };
   }
 
-  const targetRejection = await vetProbeTarget(url, lookupImpl, timeoutMs, checkedAt);
+  const targetRejection = await vetProbeTarget(url, lookupImpl, timeoutMs, deadlineAt, checkedAt);
   if (targetRejection) return targetRejection;
 
   let response: Response;
@@ -490,7 +546,10 @@ export async function probeSetupWebhookUrl(
       // drop the POST body or method along the way.
       redirect: 'manual',
       cache: 'no-store',
-      signal: AbortSignal.timeout(timeoutMs),
+      // Remaining slice of the shared probe budget after DNS vetting, so
+      // DNS + fetch together never exceed timeoutMs. Clamped to 1ms: a
+      // lookup that lands right on the deadline aborts as a plain timeout.
+      signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())),
     });
   } catch (err) {
     const { failureReason, detail } = classifyProbeError(err, timeoutMs);
@@ -532,10 +591,17 @@ export async function probeSetupWebhookUrl(
   }
 
   const expectedEcho = buildSetupWebhookProbeEcho(challenge);
-  const echoValid = typeof echo === 'string'
-    && expectedEcho !== null
-    && echo.length === expectedEcho.length
-    && timingSafeEqual(Buffer.from(echo), Buffer.from(expectedEcho));
+  // Compare BYTE lengths, not string lengths: a multi-byte (non-ASCII) echo
+  // can match the expected hex string's length in UTF-16 code units yet
+  // encode to a longer Buffer, and timingSafeEqual throws RangeError on
+  // unequal-length inputs. Any length mismatch is just a wrong echo.
+  let echoValid = false;
+  if (typeof echo === 'string' && expectedEcho !== null) {
+    const providedEcho = Buffer.from(echo, 'utf8');
+    const wantedEcho = Buffer.from(expectedEcho, 'utf8');
+    echoValid = providedEcho.length === wantedEcho.length
+      && timingSafeEqual(providedEcho, wantedEcho);
+  }
 
   if (!echoValid) {
     return {
@@ -556,7 +622,18 @@ export async function probeSetupWebhookUrl(
   };
 }
 
-let cachedProbe: { result: SetupWebhookReachability; expiresAt: number } | null = null;
+// Probes are stamped with a monotonically increasing sequence at start so
+// cache writes can be ordered by probe START time, not completion time: a
+// forceFresh finalize probe and an older still-in-flight cached poll for the
+// same URL can both be running, and whichever finishes LAST would otherwise
+// win the cache — letting a probe that began before the operator's fix
+// overwrite the fresh verdict with a stale one.
+let probeSequence = 0;
+let cachedProbe: {
+  result: SetupWebhookReachability;
+  expiresAt: number;
+  sequence: number;
+} | null = null;
 let inflightProbe: { url: string; promise: Promise<SetupWebhookReachability> } | null = null;
 
 /**
@@ -569,6 +646,9 @@ let inflightProbe: { url: string; promise: Promise<SetupWebhookReachability> } |
  *   racing multiple outbound requests.
  * - `forceFresh` (finalize) bypasses both the cache and any shared in-flight
  *   probe, then refreshes the cache with the new outcome.
+ * - Cache writes are monotonic in probe START order: an older probe that is
+ *   still in flight when a newer (e.g. forceFresh) probe completes cannot
+ *   later overwrite the cache with its stale verdict.
  */
 export async function getSetupWebhookReachability(
   url: string | null,
@@ -594,6 +674,7 @@ export async function getSetupWebhookReachability(
     }
   }
 
+  const sequence = ++probeSequence;
   const promise = probeSetupWebhookUrl(url, options)
     .catch((): SetupWebhookReachability => ({
       // probeSetupWebhookUrl classifies its own failures; this fallback only
@@ -605,7 +686,13 @@ export async function getSetupWebhookReachability(
       checkedAt: new Date().toISOString(),
     }))
     .then((result) => {
-      cachedProbe = { result, expiresAt: Date.now() + PROBE_CACHE_TTL_MS };
+      // Monotonic write: only a probe that STARTED at or after the cached
+      // entry's probe may replace it. A slower, earlier-started probe that
+      // finishes after a fresher one still returns its own result to its
+      // caller but never regresses the cache.
+      if (!cachedProbe || sequence >= cachedProbe.sequence) {
+        cachedProbe = { result, expiresAt: Date.now() + PROBE_CACHE_TTL_MS, sequence };
+      }
       return result;
     })
     .finally(() => {

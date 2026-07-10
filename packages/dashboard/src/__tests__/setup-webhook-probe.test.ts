@@ -169,6 +169,25 @@ describe('probeSetupWebhookUrl', () => {
     expect(result.failureReason).toBe('echo-mismatch');
   });
 
+  it.each([
+    ['Latin-1 multi-byte', 'é'.repeat(64)],
+    ['surrogate-pair emoji', '\u{1f98a}'.repeat(32)],
+  ])('reports echo-mismatch instead of throwing for a %s echo of matching string length', async (_label, badEcho) => {
+    // Same UTF-16 string length as the real 64-char hex echo, but a longer
+    // UTF-8 byte length. String-length comparison used to let this reach
+    // timingSafeEqual with unequal-length Buffers, which throws RangeError.
+    expect(badEcho.length).toBe(64);
+    const fetchImpl = vi.fn(async () => new Response(
+      JSON.stringify({ status: 'probe', echo: badEcho }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('echo-mismatch');
+  });
+
   it('reports echo-mismatch when a 200 response is not JSON', async () => {
     const fetchImpl = vi.fn(async () => new Response('<html>captive portal</html>', { status: 200 }));
 
@@ -453,6 +472,59 @@ describe('probe target vetting (SSRF guard)', () => {
 
     expect(result.status).toBe('reachable');
   });
+
+  it('bounds a wedged DNS lookup by the probe budget and reports dns-timeout', async () => {
+    const fetchImpl = vi.fn();
+    // A resolver that never answers: without a deadline on the DNS phase
+    // this would hang the probe (and every readiness read awaiting it).
+    const lookupImpl = vi.fn(
+      () => new Promise<Array<{ address: string; family: number }>>(() => {}),
+    );
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl, timeoutMs: 50 });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('dns-timeout');
+    expect(result.detail).toContain('DNS');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('a DNS lookup that rejects after the deadline stays a dns-timeout, not an unhandled rejection', async () => {
+    const fetchImpl = vi.fn();
+    let rejectLookup: ((err: unknown) => void) | undefined;
+    const lookupImpl = vi.fn(
+      () => new Promise<Array<{ address: string; family: number }>>((_resolve, reject) => {
+        rejectLookup = reject;
+      }),
+    );
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl, timeoutMs: 50 });
+    expect(result.failureReason).toBe('dns-timeout');
+
+    // The lookup failing late must not crash anything.
+    rejectLookup!(Object.assign(new Error('late failure'), { code: 'ENOTFOUND' }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('gives the fetch only the budget remaining after DNS so DNS + fetch fit one timeout', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const lookupImpl = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return [{ address: '93.184.216.34', family: 4 }];
+    });
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl, timeoutMs: 5_000 });
+
+    expect(result.status).toBe('reachable');
+    expect(timeoutSpy).toHaveBeenCalledTimes(1);
+    const fetchBudgetMs = timeoutSpy.mock.calls[0][0];
+    expect(fetchBudgetMs).toBeGreaterThan(0);
+    // The ~100ms DNS phase must come out of the fetch's slice of the budget,
+    // never stack on top of it.
+    expect(fetchBudgetMs).toBeLessThanOrEqual(5_000 - 90);
+  });
 });
 
 describe('getSetupWebhookReachability caching', () => {
@@ -591,6 +663,43 @@ describe('getSetupWebhookReachability caching', () => {
     });
     expect(polled).toBe(fresh);
     expect(workingFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a stale in-flight poll that finishes last cannot overwrite a fresher forceFresh verdict', async () => {
+    // Poll 1 starts while the URL is still broken — and is SLOW.
+    let rejectStale: ((err: unknown) => void) | undefined;
+    const staleFetch = vi.fn(
+      () => new Promise<Response>((_resolve, reject) => { rejectStale = reject; }),
+    );
+    const stalePoll = getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: staleFetch,
+      lookupImpl: publicLookup,
+    });
+    await vi.waitFor(() => expect(staleFetch).toHaveBeenCalledTimes(1));
+
+    // Operator fixes the URL; finalize force-probes and completes FIRST.
+    const workingFetch = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const fresh = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: workingFetch,
+      lookupImpl: publicLookup,
+      forceFresh: true,
+    });
+    expect(fresh.status).toBe('reachable');
+
+    // The stale poll finishes LAST with the pre-fix failure verdict. Its own
+    // caller still sees that outcome, but it must not regress the cache.
+    rejectStale!(fetchFailure('ENOTFOUND'));
+    await expect(stalePoll).resolves.toMatchObject({ status: 'unreachable' });
+
+    // Subsequent cached polls see the fresher finalize verdict.
+    const cachedFetch = vi.fn();
+    const polled = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: cachedFetch,
+      lookupImpl: publicLookup,
+    });
+    expect(polled).toBe(fresh);
+    expect(polled.status).toBe('reachable');
+    expect(cachedFetch).not.toHaveBeenCalled();
   });
 
   it('forceFresh does not join an already in-flight cached probe', async () => {
