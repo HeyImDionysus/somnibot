@@ -323,6 +323,75 @@ describe('message_matches_regex — per-event regex budget (PR #269)', () => {
     );
     expect(exhaustionWarns).toHaveLength(1);
   });
+
+  it('holds the aggregate cap when evaluations for one event start in parallel (atomic check-and-reserve)', async () => {
+    // PR #269 follow-up review (P2): the engine fires processAutomation for
+    // all automations of an event WITHOUT awaiting, so evaluations interleave.
+    // Check-and-reserve is synchronous (the vm import is hoisted to module
+    // level), so each admitted evaluation reserves its worst-case 250ms slice
+    // before any other evaluation can pass the check. With every evaluation
+    // "costing" a full 250ms slice (clock schedule below), the 500ms budget
+    // admits exactly two of four interleaved evaluations; the rest are
+    // skipped fail-closed.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockClock([0, 250, 250, 500]);
+    const budget = createRegexBudget();
+    const run = () =>
+      evaluateConditions(
+        [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+        makeCtx({ messageContent: '123', regexBudget: budget }),
+      );
+    // Start all four before awaiting any — interleaved like the engine does.
+    const results = await Promise.all([run(), run(), run(), run()]);
+    expect(results).toEqual([true, true, false, false]);
+    expect(budget.remainingMs).toBeLessThanOrEqual(0);
+    const exhaustionWarns = warnSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Regex evaluation budget exhausted'),
+    );
+    expect(exhaustionWarns).toHaveLength(1);
+  });
+
+  it('refunds the unused part of the reservation — evaluations only pay their measured cost', async () => {
+    // Each evaluation reserves 250ms up front but "costs" only 100ms (clock
+    // schedule), so after three evaluations 200ms of the 500ms budget remains
+    // — a plain non-refunding reservation would have exhausted it after two.
+    mockClock([0, 100, 100, 200, 200, 300]);
+    const budget = createRegexBudget();
+    const result = await evaluateConditions(
+      [
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+      ],
+      makeCtx({ messageContent: '123', regexBudget: budget }),
+    );
+    expect(result).toBe(true);
+    expect(budget.remainingMs).toBe(200); // 500 − 3 × 100 measured; reservations refunded
+  });
+
+  it('does not mutate a caller-owned context — implicit budget state never leaks across calls', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockClock([0, 600]);
+    // Caller supplies no budget and reuses the SAME context object.
+    const ctx = makeCtx({ messageContent: '123' });
+    // First call exhausts its implicit per-call budget…
+    const first = await evaluateConditions(
+      [
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+        { type: 'message_matches_regex', config: { value: '\\d+' } },
+      ],
+      ctx,
+    );
+    expect(first).toBe(false);
+    // …without writing budget state onto the caller's context…
+    expect(ctx.regexBudget).toBeUndefined();
+    // …so a later independent evaluation reusing the context starts fresh.
+    const second = await evaluateConditions(
+      [{ type: 'message_matches_regex', config: { value: '\\d+' } }],
+      ctx,
+    );
+    expect(second).toBe(true);
+  });
 });
 
 describe('time_window', () => {
