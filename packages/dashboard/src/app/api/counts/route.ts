@@ -19,6 +19,8 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requirePermission } from '@/lib/rbac';
 import type { AuthContext } from '@/lib/rbac';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
+import { hasPermission } from '@somnibot/shared';
+import type { DashboardPermission } from '@somnibot/shared';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 const ALLOWED_TABLES = [
@@ -41,25 +43,60 @@ type AllowedTable = (typeof ALLOWED_TABLES)[number];
  */
 const OWNER_ONLY_TABLES: ReadonlySet<AllowedTable> = new Set(['action_queue_dlq']);
 
+/**
+ * Per-table permission gate. Each badge count mirrors the permission that
+ * gates its own dashboard page/API (see ROUTE_PERMISSIONS in shared/rbac),
+ * so a delegated user with only an unrelated permission cannot read
+ * operational/commerce volume for pages they cannot open. `full_access`
+ * (owners) satisfies every entry via hasPermission(). `action_queue_dlq`
+ * is intentionally absent — it is owner-gated by OWNER_ONLY_TABLES, a
+ * stronger gate than any single permission.
+ */
+const TABLE_PERMISSIONS: Record<
+  Exclude<AllowedTable, 'action_queue_dlq'>,
+  DashboardPermission
+> = {
+  tickets: 'dashboard.manage_tickets', // /tickets
+  orders: 'dashboard.manage_orders', // /store/orders
+  giveaways: 'dashboard.manage_server', // /giveaways
+  infractions: 'dashboard.manage_moderation', // /moderation/infractions
+  incidents: 'dashboard.manage_incidents', // /incidents
+};
+
 /** V7 Audit §7.P3a — Zod-validated single-table query param for /api/counts */
 const countsQuerySchema = z.object({
   table: z.enum(ALLOWED_TABLES),
 });
 
 /**
+ * Whether the caller is authorized to read the count for `table`. Owner-only
+ * tables require the guild owner; every other table requires the same
+ * permission that gates its own dashboard page, so the badge never exposes
+ * volume for an area the user cannot open. Returns false (→ count 0) rather
+ * than erroring so an unauthorized badge simply renders nothing.
+ */
+function canCountTable(ctx: AuthContext, table: AllowedTable): boolean {
+  if (OWNER_ONLY_TABLES.has(table)) return ctx.isOwner;
+  const required = TABLE_PERMISSIONS[table as Exclude<AllowedTable, 'action_queue_dlq'>];
+  return hasPermission(ctx.permissions, required);
+}
+
+/**
  * Run the count query for a single allowed table, applying the same
- * status filters used across the dashboard. Returns 0 for owner-only
- * tables when the caller is not the guild owner so their presence/volume
- * stays hidden from non-owners (the badge renders nothing at 0).
+ * status filters used across the dashboard. Returns 0 for any table the
+ * caller is not authorized to read (owner-only DLQ, or a table whose page
+ * permission the delegated user lacks) so its presence/volume stays hidden
+ * (the badge renders nothing at 0).
  */
 async function countForTable(
   supabase: SupabaseClient,
   ctx: AuthContext,
   table: AllowedTable,
 ): Promise<number> {
-  // Owner-only tables (e.g. the DLQ, which can hold plaintext license
-  // keys) must not leak their volume to non-owner dashboard users.
-  if (OWNER_ONLY_TABLES.has(table) && !ctx.isOwner) {
+  // Gate each table behind its matching authorization (owner for the DLQ,
+  // otherwise the same permission that protects its dashboard page) so the
+  // count never leaks operational/commerce volume to users blocked from it.
+  if (!canCountTable(ctx, table)) {
     return 0;
   }
 

@@ -58,14 +58,29 @@ function makeRequest(params: Record<string, string>) {
   return new NextRequest(url);
 }
 
-/** Set the auth context returned by requirePermission for a test. */
-function setAuth(overrides: Partial<{ isOwner: boolean; guildId: string }> = {}) {
+/**
+ * Set the auth context returned by requirePermission for a test.
+ *
+ * Owners get ['dashboard.full_access'] by default (matching getAuthContext,
+ * which always grants owners full access), so per-table permission gates are
+ * satisfied. Pass `permissions` to model a delegated non-owner with a narrow
+ * set of grants.
+ */
+function setAuth(
+  overrides: Partial<{
+    isOwner: boolean;
+    guildId: string;
+    permissions: string[];
+  }> = {},
+) {
+  const isOwner = overrides.isOwner ?? true;
   (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
     guildId: overrides.guildId ?? 'guild-123',
     userId: 'user-789',
     discordId: 'discord-1',
-    isOwner: overrides.isOwner ?? true,
-    permissions: [],
+    isOwner,
+    permissions:
+      overrides.permissions ?? (isOwner ? ['dashboard.full_access'] : []),
   });
 }
 
@@ -232,7 +247,9 @@ describe('GET /api/counts (batch: ?tables=a,b,c)', () => {
   });
 
   it('owner-gates the DLQ within the batch: non-owner gets 0 and no DLQ query', async () => {
-    setAuth({ isOwner: false });
+    // Non-owner who CAN see tickets (delegated manage_tickets) but is still
+    // blocked from the owner-only DLQ.
+    setAuth({ isOwner: false, permissions: ['dashboard.manage_tickets'] });
     mockFrom.mockImplementation((table: string) =>
       makeChain({ count: table === 'tickets' ? 4 : 9, error: null }),
     );
@@ -275,5 +292,93 @@ describe('GET /api/counts (batch: ?tables=a,b,c)', () => {
     const body = await res.json();
     expect(body.counts).toEqual({});
     expect(body.count).toBeUndefined();
+  });
+});
+
+describe('GET /api/counts — per-table permission gating', () => {
+  it('returns 0 (no query) for a table whose page permission the delegated user lacks', async () => {
+    // Delegated non-owner with ONLY analytics — no ticket permission.
+    setAuth({ isOwner: false, permissions: ['dashboard.view_analytics'] });
+    const chain = makeChain({ count: 12, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest({ table: 'tickets' }));
+    const body = await res.json();
+
+    expect(body.count).toBe(0);
+    // Must not even query a table the user cannot access.
+    expect(mockFrom).not.toHaveBeenCalledWith('tickets');
+  });
+
+  it('counts a table the delegated user IS permitted to see', async () => {
+    setAuth({ isOwner: false, permissions: ['dashboard.manage_tickets'] });
+    const chain = makeChain({ count: 6, error: null });
+    mockFrom.mockReturnValue(chain);
+
+    const res = await GET(makeRequest({ table: 'tickets' }));
+    const body = await res.json();
+
+    expect(body.count).toBe(6);
+    expect(mockFrom).toHaveBeenCalledWith('tickets');
+  });
+
+  it('gates each requested table independently in the batch form', async () => {
+    // finance-style role: orders yes, tickets no.
+    setAuth({
+      isOwner: false,
+      permissions: ['dashboard.manage_orders', 'dashboard.view_analytics'],
+    });
+    mockFrom.mockImplementation((table: string) =>
+      makeChain({ count: table === 'orders' ? 8 : 99, error: null }),
+    );
+
+    const res = await GET(
+      makeRequest({ tables: 'tickets,orders,giveaways' }),
+    );
+    const body = await res.json();
+
+    // Permitted → real count; unpermitted → 0 and never queried.
+    expect(body.counts.orders).toBe(8);
+    expect(body.counts.tickets).toBe(0);
+    expect(body.counts.giveaways).toBe(0);
+    expect(mockFrom).toHaveBeenCalledWith('orders');
+    expect(mockFrom).not.toHaveBeenCalledWith('tickets');
+    expect(mockFrom).not.toHaveBeenCalledWith('giveaways');
+  });
+
+  it('full_access (owner) satisfies every per-table gate', async () => {
+    setAuth({ isOwner: true, permissions: ['dashboard.full_access'] });
+    mockFrom.mockImplementation((table: string) =>
+      makeChain({ count: table === 'orders' ? 2 : table === 'infractions' ? 5 : 1, error: null }),
+    );
+
+    const res = await GET(
+      makeRequest({ tables: 'tickets,orders,giveaways,infractions,incidents' }),
+    );
+    const body = await res.json();
+
+    expect(body.counts).toEqual({
+      tickets: 1,
+      orders: 2,
+      giveaways: 1,
+      infractions: 5,
+      incidents: 1,
+    });
+  });
+
+  it('maps giveaways to manage_server and infractions to manage_moderation', async () => {
+    // manage_server grants giveaways; NOT moderation → infractions blocked.
+    setAuth({ isOwner: false, permissions: ['dashboard.manage_server'] });
+    mockFrom.mockImplementation((table: string) =>
+      makeChain({ count: 3, error: null }),
+    );
+
+    const res = await GET(makeRequest({ tables: 'giveaways,infractions' }));
+    const body = await res.json();
+
+    expect(body.counts.giveaways).toBe(3);
+    expect(body.counts.infractions).toBe(0);
+    expect(mockFrom).toHaveBeenCalledWith('giveaways');
+    expect(mockFrom).not.toHaveBeenCalledWith('infractions');
   });
 });
