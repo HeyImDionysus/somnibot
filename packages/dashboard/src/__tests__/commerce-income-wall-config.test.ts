@@ -26,6 +26,7 @@ vi.mock('@/lib/paypal', () => ({
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
 
 import { POST as productsPOST, PUT as productsPUT } from '@/app/api/store/products/route';
+import { POST as plansPOST, PUT as plansPUT } from '@/app/api/store/plans/route';
 import { POST as roleIncomePOST } from '@/app/api/economy/role-income/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -39,18 +40,23 @@ import { buildRequest, mockAuthSuccess, mockRateLimitPass } from './helpers';
 const GUILD = 'guild-1';
 
 /**
- * A thenable per-table query chain that records the .eq()/.in()/.neq()/
- * .overlaps() filters applied and resolves to a caller-supplied result when
- * awaited or terminated with .single()/.maybeSingle().
+ * A thenable per-table query chain that records the .eq()/.neq()/.or()
+ * filters applied and resolves to a caller-supplied result when awaited or
+ * terminated with .single()/.maybeSingle().
  */
 function makeChain(result: { data?: unknown; error?: unknown }) {
-  const state = { filters: {} as Record<string, unknown> };
+  const state = {
+    filters: {} as Record<string, unknown>,
+    neqFilters: {} as Record<string, unknown>,
+    orFilters: [] as string[],
+  };
   const chain: Record<string, unknown> = {
     _state: state,
     select: vi.fn(() => chain),
     eq: vi.fn((c: string, v: unknown) => { state.filters[c] = v; return chain; }),
-    neq: vi.fn(() => chain),
+    neq: vi.fn((c: string, v: unknown) => { state.neqFilters[c] = v; return chain; }),
     in: vi.fn(() => chain),
+    or: vi.fn((expr: string) => { state.orFilters.push(expr); return chain; }),
     overlaps: vi.fn(() => chain),
     order: vi.fn(() => chain),
     limit: vi.fn(() => chain),
@@ -135,6 +141,78 @@ describe('PRODUCT SIDE — /api/store/products rejects income-earning roles on p
     // Free product is not blocked by the wall — income lookup is skipped.
     expect(res.status).toBe(200);
     expect(incomeTable.select).not.toHaveBeenCalled();
+  });
+
+  it('POST: a STAGED (inactive) paid product with an income role is allowed — not yet buyable', async () => {
+    // Calibration: active=false means no one can buy it, so the wall must not
+    // block staging it. Reactivating later re-runs the wall via the PUT path.
+    const incomeTable = makeChain({ data: [{ role_id: '111111111111111111' }] });
+    const productsTable = makeChain({ data: { id: 'prod-1' } });
+    const supabase = makeSupabase({ economy_role_income: incomeTable, products: productsTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+    // The staged product still provisions its PayPal catalog entry (priced
+    // one-time products always do) — only the WALL must not fire.
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ id: 'PAYPAL-CATALOG-1' }),
+    })));
+
+    const res = await productsPOST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        name: 'Staged Pass', type: 'one_time', delivery_type: 'access_pass',
+        price_cents: 2500, currency: 'USD', active: false,
+        granted_role_ids: ['111111111111111111'], granted_channel_ids: [],
+      },
+    }));
+
+    expect(res.status).toBe(200);
+    // Wall short-circuits before the income lookup (product not buyable).
+    expect(incomeTable.select).not.toHaveBeenCalled();
+    expect(productsTable.insert).toHaveBeenCalled();
+  });
+
+  it('POST: a zero-price one-time product with an income role is allowed — charges no money', async () => {
+    const incomeTable = makeChain({ data: [{ role_id: '111111111111111111' }] });
+    const productsTable = makeChain({ data: { id: 'prod-1' } });
+    const supabase = makeSupabase({ economy_role_income: incomeTable, products: productsTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await productsPOST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        name: 'Free-In-Effect', type: 'one_time', delivery_type: 'access_pass',
+        price_cents: 0, currency: 'USD',
+        granted_role_ids: ['111111111111111111'], granted_channel_ids: [],
+      },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(incomeTable.select).not.toHaveBeenCalled();
+  });
+
+  it('POST: an ACTIVE subscription with an income role is still 409 even at product price 0 (plans can charge)', async () => {
+    // Blocked direction preserved: a non-free active subscription is treated
+    // as chargeable — its plans (existing or future) charge real money.
+    const incomeTable = makeChain({ data: [{ role_id: '111111111111111111' }] });
+    const productsTable = makeChain({ data: null });
+    const supabase = makeSupabase({ economy_role_income: incomeTable, products: productsTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+    vi.stubGlobal('fetch', vi.fn());
+
+    const res = await productsPOST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        name: 'Sub', type: 'subscription', delivery_type: 'access_pass',
+        price_cents: 0, currency: 'USD',
+        granted_role_ids: ['111111111111111111'], granted_channel_ids: [],
+      },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(String(body.error).toLowerCase()).toContain('compliance');
+    expect(productsTable.insert).not.toHaveBeenCalled();
   });
 
   it('PUT: 409 when adding an income-earning role to an existing paid product', async () => {
@@ -356,6 +434,31 @@ describe('ROLE-INCOME SIDE — /api/economy/role-income rejects paid-product rol
     expect(incomeTable.upsert).not.toHaveBeenCalled();
   });
 
+  it('POST: queries only BUYABLE products — inactive and zero-price-one-time products cannot block', async () => {
+    // Calibration proof at the query level: both grant-vector lookups must
+    // constrain to active=true, type!=free, and chargeable (subscription OR
+    // price>0), so a deactivated or free-in-effect product never conflicts.
+    const productsTable = makeChain({ data: [] });
+    const incomeTable = makeChain({ error: null });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await roleIncomePOST(buildRequest('/api/economy/role-income', {
+      method: 'POST',
+      body: { role_id: '888888888888888888', amount: 100, interval_minutes: 60 },
+    }));
+
+    expect(res.status).toBe(200);
+    const state = (productsTable as { _state: { filters: Record<string, unknown>; neqFilters: Record<string, unknown>; orFilters: string[] } })._state;
+    expect(state.filters.active).toBe(true);
+    expect(state.neqFilters.type).toBe('free');
+    expect(state.orFilters).toContain('type.eq.subscription,price_cents.gt.0');
+    // Both vector queries (array overlap + metadata) carry the filters.
+    expect(productsTable.eq).toHaveBeenCalledWith('active', true);
+    expect(productsTable.or).toHaveBeenCalledTimes(2);
+    expect(incomeTable.upsert).toHaveBeenCalled();
+  });
+
   it('POST: 400 rejects a zero-amount role-income rule at the schema boundary', async () => {
     // A zero-amount rule would burn the collection cooldown and then fail
     // creditWallet — reject it before any DB work.
@@ -371,5 +474,160 @@ describe('ROLE-INCOME SIDE — /api/economy/role-income rejects paid-product rol
 
     expect(res.status).toBe(400);
     expect(incomeTable.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('PLANS SIDE — /api/store/plans re-runs the wall when a plan makes a product chargeable', () => {
+  const PRODUCT_ID = '00000000-0000-0000-0000-00000000000a';
+  const PLAN_ID = '00000000-0000-0000-0000-00000000000b';
+  const ROLE = '999999999999999999';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD });
+    mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('POST: 409 when a PAID active plan lands on an active product granting an income role', async () => {
+    // A plan price change is the one path that makes a subscription chargeable
+    // without touching the product row — the wall must fire here.
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: true, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const incomeTable = makeChain({ data: [{ role_id: ROLE }] });
+    const plansTable = makeChain({ data: { id: PLAN_ID } });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPOST(buildRequest('/api/store/plans', {
+      method: 'POST',
+      body: { product_id: PRODUCT_ID, name: 'Monthly', interval_unit: 'MONTH', price_cents: 999 },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(String(body.error).toLowerCase()).toContain('compliance');
+    expect(plansTable.insert).not.toHaveBeenCalled();
+  });
+
+  it('POST: a ZERO-price plan is allowed without consulting the wall (charges no money)', async () => {
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: true, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const incomeTable = makeChain({ data: [{ role_id: ROLE }] });
+    const plansTable = makeChain({ data: { id: PLAN_ID } });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPOST(buildRequest('/api/store/plans', {
+      method: 'POST',
+      body: { product_id: PRODUCT_ID, name: 'Free Tier', interval_unit: 'MONTH', price_cents: 0 },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(productsTable.select).not.toHaveBeenCalled();
+    expect(plansTable.insert).toHaveBeenCalled();
+  });
+
+  it('POST: a paid plan on an INACTIVE parent product is allowed — reactivation re-runs the product wall', async () => {
+    // Staged product: cannot be bought while inactive. Flipping it active goes
+    // through /api/store/products PUT, which treats a non-free subscription as
+    // chargeable and blocks the collision there.
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: false, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const incomeTable = makeChain({ data: [{ role_id: ROLE }] });
+    const plansTable = makeChain({ data: { id: PLAN_ID } });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPOST(buildRequest('/api/store/plans', {
+      method: 'POST',
+      body: { product_id: PRODUCT_ID, name: 'Monthly', interval_unit: 'MONTH', price_cents: 999 },
+    }));
+
+    expect(res.status).toBe(200);
+    // Parent fetched, but income lookup skipped (parent not buyable).
+    expect(incomeTable.select).not.toHaveBeenCalled();
+    expect(plansTable.insert).toHaveBeenCalled();
+  });
+
+  it('POST: 404 when the parent product does not belong to this guild (wall cannot be evaluated)', async () => {
+    const productsTable = makeChain({ data: null }); // guild-scoped lookup misses
+    const plansTable = makeChain({ data: { id: PLAN_ID } });
+    const supabase = makeSupabase({ products: productsTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPOST(buildRequest('/api/store/plans', {
+      method: 'POST',
+      body: { product_id: PRODUCT_ID, name: 'Monthly', interval_unit: 'MONTH', price_cents: 999 },
+    }));
+
+    expect(res.status).toBe(404);
+    expect(plansTable.insert).not.toHaveBeenCalled();
+  });
+
+  it('PUT: 409 when re-pricing a plan 0→paid while the parent grants an income role', async () => {
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: true, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const incomeTable = makeChain({ data: [{ role_id: ROLE }] });
+    // Stored plan row: currently free, active.
+    const plansTable = makeChain({ data: { product_id: PRODUCT_ID, price_cents: 0, active: true } });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPUT(buildRequest('/api/store/plans', {
+      method: 'PUT',
+      body: { id: PLAN_ID, price_cents: 1500 },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(String(body.error).toLowerCase()).toContain('compliance');
+    expect(plansTable.update).not.toHaveBeenCalled();
+  });
+
+  it('PUT: DEACTIVATING a paid plan is allowed — the effective state opens no purchase path', async () => {
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: true, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const incomeTable = makeChain({ data: [{ role_id: ROLE }] });
+    const plansTable = makeChain({ data: { product_id: PRODUCT_ID, price_cents: 1500, active: true } });
+    const supabase = makeSupabase({ products: productsTable, economy_role_income: incomeTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPUT(buildRequest('/api/store/plans', {
+      method: 'PUT',
+      body: { id: PLAN_ID, active: false },
+    }));
+
+    expect(res.status).toBe(200);
+    // Effective active=false → wall never consults the parent product.
+    expect(productsTable.select).not.toHaveBeenCalled();
+    expect(plansTable.update).toHaveBeenCalled();
+  });
+
+  it('PUT: a name-only change never consults the wall', async () => {
+    const productsTable = makeChain({
+      data: { type: 'subscription', active: true, granted_role_ids: [ROLE], metadata: {} },
+    });
+    const plansTable = makeChain({ data: { product_id: PRODUCT_ID, price_cents: 1500, active: true } });
+    const supabase = makeSupabase({ products: productsTable, plans: plansTable });
+    (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(supabase);
+
+    const res = await plansPUT(buildRequest('/api/store/plans', {
+      method: 'PUT',
+      body: { id: PLAN_ID, name: 'Renamed' },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(productsTable.select).not.toHaveBeenCalled();
+    // No trigger field touched → not even the stored plan row is fetched.
+    // (The update path calls .select() for RETURNING, so assert on the
+    // stored-row terminator instead.)
+    expect(plansTable.maybeSingle).not.toHaveBeenCalled();
+    expect(plansTable.update).toHaveBeenCalled();
   });
 });

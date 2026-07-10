@@ -72,6 +72,45 @@ describe('getCommerceHeldRoleIds', () => {
     expect([...held]).toEqual(['role-paid']);
   });
 
+  it('does NOT flag roles held only via comped entitlements (giveaway/manual/automation)', async () => {
+    // Calibration: these sources moved no real money — a giveaway winner or an
+    // admin-comped user legitimately collects income on the role.
+    const supabase = makeSupabase({
+      customers: { data: [{ id: 'cust-1' }] },
+      entitlements: { data: [
+        { granted_role_ids: ['role-giveaway'], source: 'giveaway' },
+        { granted_role_ids: ['role-manual'], source: 'manual' },
+        { granted_role_ids: ['role-auto'], source: 'automation' },
+      ] },
+      temp_role_grants: { data: [] },
+      products: { data: [] },
+    });
+    const held = await getCommerceHeldRoleIds(
+      supabase as any, GUILD, USER, ['role-giveaway', 'role-manual', 'role-auto'],
+    );
+    expect(held.size).toBe(0);
+  });
+
+  it('flags source=purchase and fails CLOSED on NULL/unknown entitlement sources', async () => {
+    // Only positively-known non-purchase sources are exempt: a purchase, a
+    // NULL (DB default is purchase) or an unrecognised future source value
+    // must all stay commerce-held.
+    const supabase = makeSupabase({
+      customers: { data: [{ id: 'cust-1' }] },
+      entitlements: { data: [
+        { granted_role_ids: ['role-bought'], source: 'purchase' },
+        { granted_role_ids: ['role-null-src'], source: null },
+        { granted_role_ids: ['role-unknown-src'], source: 'mystery_source' },
+      ] },
+      temp_role_grants: { data: [] },
+      products: { data: [] },
+    });
+    const held = await getCommerceHeldRoleIds(
+      supabase as any, GUILD, USER, ['role-bought', 'role-null-src', 'role-unknown-src'],
+    );
+    expect([...held].sort()).toEqual(['role-bought', 'role-null-src', 'role-unknown-src']);
+  });
+
   it('flags a role held via an unexpired commerce temp_role_grant', async () => {
     const supabase = makeSupabase({
       customers: { data: [] }, // no entitlements path
@@ -223,6 +262,22 @@ describe('handleCollectIncome — compliance wall at collection', () => {
     expect(mgr.creditWallet).not.toHaveBeenCalled();
     const reply = int.reply.mock.calls[0][0].content as string;
     expect(reply.toLowerCase()).toContain('store purchase');
+  });
+
+  it('pays a GIVEAWAY-granted role in full — comped entitlements are not commerce holds', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { data: [{ role_id: 'role-comped', amount: 150, interval_minutes: 60 }] },
+      customers: { data: [{ id: 'cust-1' }] },
+      entitlements: { data: [{ granted_role_ids: ['role-comped'], source: 'giveaway' }] },
+      temp_role_grants: { data: [] },
+      products: { data: [] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-comped']);
+
+    await handleEconomyCommand(int as any, mgr as any);
+
+    expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 150);
   });
 
   it('pays a normally-earned role in full when no commerce grant is present', async () => {

@@ -15,19 +15,11 @@ import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError } from '@/lib/api/response';
-import { assertProductRolesNotIncomeEarning } from '@/lib/api/commerce-income-wall';
-
-/**
- * Extract the single role a product grants via `metadata.grant_role_id` (the
- * bot's purchase.completed → grantPurchaseRole path), as a 0-or-1-element array
- * so callers can spread it alongside `granted_role_ids`. Non-string / missing
- * values yield [].
- */
-function metadataGrantRoleIds(metadata: unknown): string[] {
-  if (!metadata || typeof metadata !== 'object') return [];
-  const roleId = (metadata as Record<string, unknown>).grant_role_id;
-  return typeof roleId === 'string' && roleId.length > 0 ? [roleId] : [];
-}
+import {
+  assertProductRolesNotIncomeEarning,
+  isBuyableProduct,
+  metadataGrantRoleIds,
+} from '@/lib/api/commerce-income-wall';
 
 // ── PayPal Helpers ─────────────────────────────────────
 
@@ -268,11 +260,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Compliance wall: a PAID product's granted roles must not earn role-income
-  // (real money → wagerable currency). Checked before any PayPal call or DB
-  // write so a rejected product creates nothing. Cover BOTH grant vectors:
-  // the `granted_role_ids` array and the single `metadata.grant_role_id` role
-  // that the bot's purchase.completed → grantPurchaseRole path acts on.
+  // Compliance wall: a BUYABLE product's granted roles must not earn
+  // role-income (real money → wagerable currency). Checked before any PayPal
+  // call or DB write so a rejected product creates nothing. Cover BOTH grant
+  // vectors: the `granted_role_ids` array and the single `metadata.grant_role_id`
+  // role that the bot's purchase.completed → grantPurchaseRole path acts on.
+  //
+  // CALIBRATION: gate on the same buyability predicate as the PUT wall below,
+  // not on `type !== 'free'` alone — creating a STAGED product (active=false)
+  // or a zero-price one-time product is not a real-money purchase path and
+  // must not be blocked. This is safe because the PUT wall re-checks whenever
+  // `active`/`price_cents`/`type` change (flipping the staged product live
+  // re-runs the wall with effective values), and the plans route re-checks
+  // before a paid active plan lands.
   const rolesToGrant = [
     ...(granted_role_ids ?? []),
     ...metadataGrantRoleIds(metadata),
@@ -281,7 +281,7 @@ export async function POST(req: NextRequest) {
     supabase,
     guildId,
     rolesToGrant,
-    type !== 'free',
+    isBuyableProduct({ type, active: active ?? true, price_cents }),
   );
   if (!wall.ok) {
     return apiError(wall.message, 409);
@@ -473,23 +473,17 @@ export async function PUT(req: NextRequest) {
       ...metadataGrantRoleIds(effectiveMetadata),
     ];
 
-    // Buyable = a real-money purchase path: non-free type, active, and able to
-    // charge. One-time products charge `price_cents`, so they are buyable only
-    // when priced > 0. Subscriptions charge through PayPal plans (product-level
-    // price_cents may be 0), so a non-free active subscription is always treated
-    // as buyable — we cannot rule out a paid plan from this row alone.
-    const chargesRealMoney =
-      effectiveType === 'subscription' || (effectivePrice ?? 0) > 0;
-    const isBuyable =
-      effectiveType !== 'free' &&
-      effectiveActive !== false &&
-      chargesRealMoney;
-
+    // Buyable = a real-money purchase path — see isBuyableProduct() for the
+    // shared calibration (non-free type, active, chargeable).
     const wall = await assertProductRolesNotIncomeEarning(
       supabase,
       guildId,
       effectiveRoles,
-      isBuyable,
+      isBuyableProduct({
+        type: effectiveType,
+        active: effectiveActive,
+        price_cents: effectivePrice,
+      }),
     );
     if (!wall.ok) {
       return apiError(wall.message, 409);

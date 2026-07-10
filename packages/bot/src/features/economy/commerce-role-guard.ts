@@ -14,9 +14,13 @@
  * user holds via a commerce grant.
  *
  * A user holds a role via commerce when ANY of:
- *   1. An active/grace entitlement of theirs lists the role in
- *      `entitlements.granted_role_ids` — linked to the user through
- *      `customers.discord_id`. (EntitlementService.grant path.)
+ *   1. An active/grace entitlement of theirs WITH A REAL-MONEY SOURCE lists
+ *      the role in `entitlements.granted_role_ids` — linked to the user
+ *      through `customers.discord_id`. (EntitlementService.grant path.)
+ *      Entitlements whose `source` is a known non-purchase grant (giveaway /
+ *      manual / automation — comped, no money moved) do NOT make the role
+ *      commerce-held: a giveaway winner or admin-comped user legitimately
+ *      collects income on the role.
  *   2. An unexpired `temp_role_grants` row with a commerce source grants them
  *      the role directly by Discord `user_id`. (CrossFeatureBridge.grantPurchaseRole
  *      TEMPORARY path — only written when metadata.role_duration_hours is set.)
@@ -35,6 +39,19 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 /** Entitlement statuses under which a commerce-granted role is still held. */
 const ACTIVE_ENTITLEMENT_STATUSES = ['active', 'grace_period'] as const;
+
+/**
+ * `entitlements.source` values that are NOT real-money purchases. The DB CHECK
+ * allows exactly ('purchase', 'giveaway', 'manual', 'automation') with DEFAULT
+ * 'purchase' (initial_schema), matching EntitlementService.grant's source
+ * union. This is a DENY-list on purpose: only sources we positively know moved
+ * no real money are exempt, so a NULL or any future/unknown source value fails
+ * CLOSED (treated as a purchase and blocked from income), consistent with this
+ * module's favour-not-paying stance.
+ */
+export const NON_PURCHASE_ENTITLEMENT_SOURCES = ['giveaway', 'manual', 'automation'] as const;
+
+const NON_PURCHASE_SOURCE_SET: ReadonlySet<string> = new Set(NON_PURCHASE_ENTITLEMENT_SOURCES);
 
 /** `temp_role_grants.source` values that denote a real-money commerce grant. */
 export const COMMERCE_TEMP_ROLE_SOURCES = ['commerce_purchase', 'purchase'] as const;
@@ -74,7 +91,7 @@ export async function getCommerceHeldRoleIds(
     if (customerIds.length > 0) {
       const { data: entitlements, error: entErr } = await supabase
         .from('entitlements')
-        .select('granted_role_ids')
+        .select('granted_role_ids, source')
         .eq('guild_id', guildId)
         .in('customer_id', customerIds)
         .in('status', ACTIVE_ENTITLEMENT_STATUSES as unknown as string[])
@@ -82,6 +99,14 @@ export async function getCommerceHeldRoleIds(
       if (entErr) throw new Error(`entitlements lookup failed: ${entErr.message}`);
 
       for (const ent of entitlements ?? []) {
+        // Only real-money entitlements make a role commerce-held. Comped
+        // grants (giveaway/manual/automation) moved no money — the holder may
+        // collect income. Filtered in JS (not `.eq('source','purchase')`) so a
+        // NULL/unknown source fails CLOSED as a purchase rather than being
+        // silently dropped by the SQL filter.
+        const source = (ent as { source?: string | null }).source;
+        if (source != null && NON_PURCHASE_SOURCE_SET.has(source)) continue;
+
         const roleIds = (ent.granted_role_ids as string[] | null) ?? [];
         for (const roleId of roleIds) {
           if (candidates.has(roleId)) commerceHeld.add(roleId);
@@ -114,6 +139,18 @@ export async function getCommerceHeldRoleIds(
     // paid product grants via metadata is treated as commerce-held here. We only
     // query for the candidate roles (roles the user both holds and has income
     // configured for), so this stays cheap.
+    //
+    // DELIBERATELY BROADER than the dashboard's config-time wall: the config
+    // wall (commerce-income-wall.ts) exempts inactive/zero-price products
+    // because they cannot CURRENTLY be bought and every reactivation path
+    // re-checks. This layer must NOT mirror that calibration — a permanent
+    // metadata grant leaves no per-user record, so a role bought while the
+    // product was active and paid is indistinguishable from a manually-added
+    // one AFTER the owner deactivates or re-prices the product. Filtering on
+    // active/price here would let those historical real-money holders collect
+    // income (laundering path). The cost of staying broad: a staged (inactive,
+    // never-sold) product's metadata role also never pays income via this
+    // layer — the wall favours not paying over paying.
     const { data: metaProducts, error: metaErr } = await supabase
       .from('products')
       .select('metadata')
