@@ -531,6 +531,123 @@ describe('validateUndoPayload', () => {
     if (!res.ok) expect(res.reason).toContain('entries');
   });
 
+  // ── Exhaustive root-fix (12:05+): the settable set for every table must equal
+  // the columns its dashboard route(s) legitimately write. The cases below pin
+  // down EVERY column dropped in the exhaustive audit so no bot-owned / runtime /
+  // locator / sync / identifier column can be set via undo, and so tables with
+  // no dashboard write path can never be targeted at all. ────────────────────
+
+  // Non-settable columns that must be rejected in `data`, grouped by table.
+  // Each entry lists a valid `match` for that table so the rejection is proven to
+  // be about the data column, not the match shape.
+  const NON_SETTABLE_BY_TABLE: Record<
+    string,
+    { match: Record<string, unknown>; columns: string[] }
+  > = {
+    // PayPal catalog locator — assigned once by the create route, trusted by
+    // checkout/webhook routing; never written by the product update.
+    products: {
+      match: { id: 'p-1', guild_id: 'guild-1' },
+      columns: ['paypal_product_id'],
+    },
+    // Read back from an RPC at license-validation time; the config upsert never
+    // writes it.
+    product_license_config: {
+      match: { product_id: 'prod-1' },
+      columns: ['device_policy'],
+    },
+    // active is set only on create; the update typedPick omits it.
+    reaction_roles: {
+      match: { id: 'rr-1', guild_id: 'guild-1' },
+      columns: ['active'],
+    },
+    // priority orders bot enforcement; sync_to_discord is a Discord-sync flag the
+    // bot reads. Neither is in the dashboard update.
+    automod_rules: {
+      match: { id: 'ar-1', guild_id: 'guild-1' },
+      columns: ['priority', 'sync_to_discord'],
+    },
+    // Registered Discord slash-command id — a Discord-side locator.
+    custom_commands: {
+      match: { id: 'cc-1', guild_id: 'guild-1' },
+      columns: ['discord_command_id'],
+    },
+    // message_id is the bot-posted panel locator; the forum/intake columns are
+    // schema fields no dashboard route writes.
+    ticket_panels: {
+      match: { id: 'tp-1', guild_id: 'guild-1' },
+      columns: [
+        'message_id',
+        'forum_config',
+        'intake_form_enabled',
+        'intake_form_fields',
+      ],
+    },
+    // message_id is the bot-posted giveaway locator; entries is the bot-owned
+    // entrant list; required_entitlement_product_id is never written.
+    giveaways: {
+      match: { id: 'g-1', guild_id: 'guild-1' },
+      columns: ['message_id', 'entries', 'required_entitlement_product_id'],
+    },
+    // acknowledged_by/auto_resolved are bot/DB-owned; details belongs to
+    // audit_logs — no dashboard route writes any of them to alerts.
+    alerts: {
+      match: { id: 'al-1', guild_id: 'guild-1' },
+      columns: ['acknowledged_by', 'auto_resolved', 'details'],
+    },
+    // action (dashboard uses auto_action instead), plus the runtime counters the
+    // fraud engine maintains.
+    fraud_rules: {
+      match: { id: 'fr-1', guild_id: 'guild-1' },
+      columns: ['action', 'last_triggered', 'trigger_count'],
+    },
+  };
+
+  it('rejects every bot-owned / runtime / locator / sync column dropped from the settable set', () => {
+    for (const [table, { match, columns }] of Object.entries(NON_SETTABLE_BY_TABLE)) {
+      const spec = UNDO_TABLE_COLUMNS.get(table);
+      expect(spec, `${table} present`).toBeDefined();
+      for (const col of columns) {
+        // It must be gone from the settable allowlist entirely…
+        expect(spec?.data.has(col), `${table}.data has ${col}`).toBe(false);
+        // …and a payload trying to SET it must be rejected, naming the column.
+        const res = validateUndoPayload(
+          { table, data: { [col]: 'x' }, match },
+          CTX,
+        );
+        expect(res.ok, `${table}.${col} accepted`).toBe(false);
+        if (!res.ok) expect(res.reason).toContain(col);
+      }
+    }
+  });
+
+  it('keeps legitimately-settable config columns after the audit', () => {
+    // Spot-check that narrowing did not strip real config columns.
+    expect(UNDO_TABLE_COLUMNS.get('products')?.data.has('price_cents')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('reaction_roles')?.data.has('emoji')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('automod_rules')?.data.has('enabled')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('custom_commands')?.data.has('actions')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('ticket_panels')?.data.has('panel_message')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('giveaways')?.data.has('prize')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('alerts')?.data.has('acknowledged')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('fraud_rules')?.data.has('auto_action')).toBe(true);
+    expect(UNDO_TABLE_COLUMNS.get('product_license_config')?.data.has('max_devices')).toBe(true);
+  });
+
+  it('does not list tables that have no dashboard write path as undoable', () => {
+    // polls/predictions are bot-owned; channel_templates/role_templates are
+    // seed-only. None has a dashboard write path, so none may be an undo target.
+    for (const table of ['polls', 'predictions', 'channel_templates', 'role_templates']) {
+      expect(UNDOABLE_TABLES.has(table), `${table} undoable`).toBe(false);
+      const res = validateUndoPayload(
+        { table, data: { status: 'x' }, match: { id: 'x-1', guild_id: 'guild-1' } },
+        CTX,
+      );
+      expect(res.ok, `${table} accepted`).toBe(false);
+      if (!res.ok) expect(res.reason).toContain(table);
+    }
+  });
+
   // ── Finding (05:40): product_license_config has no guild column, so undo
   // must defer a parent-table ownership check to the route. ──────────────
   it('emits a tenancy lookup for guild-less product_license_config', () => {

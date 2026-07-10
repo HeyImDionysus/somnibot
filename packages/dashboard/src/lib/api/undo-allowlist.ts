@@ -10,13 +10,25 @@
  * This map is the single source of truth for what undo may touch. Each entry
  * splits its columns into two sets:
  *   - `data`  = the only columns undo may SET (the `.update(data)` payload).
- *               These are the mutable, dashboard-writable columns of the table.
+ *               These are EXACTLY the columns the table's dashboard write
+ *               route(s) legitimately set (the create insert + the update
+ *               typedPick/payload, plus `updated_at` where the route stamps it).
  *               Identity / tenant columns (`id`, `guild_id`) and immutable
  *               `created_at` are deliberately excluded — undo replays a value
  *               change, it must never re-key a row or move it between tenants.
- *               Columns the dashboard never writes (bot-owned counters like
- *               `scheduled_messages.current_sends` / `last_sent_at`) are also
- *               excluded so a tampered undo can't rewind scheduler state.
+ *               Every column the dashboard does NOT write is excluded, namely:
+ *               bot-owned runtime counters/timestamps (e.g.
+ *               `scheduled_messages.current_sends` / `last_sent_at`,
+ *               `stats_channels.last_value`, `fraud_rules.trigger_count`),
+ *               Discord/runtime locators the bot writes back (e.g.
+ *               `ticket_panels.message_id`, `giveaways.message_id`,
+ *               `products.paypal_product_id`, file locators on `product_files`),
+ *               Discord-sync flags (`automod_rules.sync_to_discord`), and
+ *               execution-ordering / identifier columns the bot owns
+ *               (`automod_rules.priority`, `custom_commands.discord_command_id`).
+ *               Tables with NO dashboard write path at all (bot-owned `polls` /
+ *               `predictions`, seed-only `channel_templates` / `role_templates`)
+ *               are omitted entirely so undo can never target them.
  *   - `match` = the only columns undo may MATCH on (the `.match(match)` filter).
  *               These are the identity / tenant columns used to locate the row.
  *
@@ -293,6 +305,13 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "products",
     {
+      // paypal_product_id is EXCLUDED: it is a PayPal Catalog identifier assigned
+      // once by the create route (store/products POST, from the PayPal API
+      // response) and never written by the product UPDATE (schemas.product.update
+      // has no such field). Checkout/webhook routing TRUSTS it to map a product to
+      // its PayPal catalog entry, so letting a tampered undo rewrite it could
+      // repoint a product at an attacker-chosen PayPal catalog id. Only the
+      // columns schemas.product.update actually sets remain settable.
       data: new Set([
         "active",
         "currency",
@@ -302,7 +321,6 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "granted_role_ids",
         "metadata",
         "name",
-        "paypal_product_id",
         "price_cents",
         "sort_order",
         "type",
@@ -345,8 +363,10 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
     "product_license_config",
     {
       // Keyed by product_id (its primary key), not a surrogate id.
+      // device_policy is EXCLUDED: the config upsert
+      // (license/config/[productId] PUT) never writes it — it is read back from
+      // an RPC result at license-validation time, not a dashboard-settable field.
       data: new Set([
-        "device_policy",
         "feature_flags",
         "heartbeat_interval_seconds",
         "license_mode",
@@ -392,8 +412,11 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "reaction_roles",
     {
+      // active is EXCLUDED: it is set to true once on create (reaction-roles POST)
+      // and is not part of the update typedPick (reaction-roles PUT only sets the
+      // config columns below). Undo must not toggle a mapping's active state,
+      // which it never legitimately produced.
       data: new Set([
-        "active",
         "channel_id",
         "emoji",
         "exclusive_group",
@@ -412,6 +435,13 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "automod_rules",
     {
+      // priority and sync_to_discord are EXCLUDED. Neither is written by the
+      // dashboard PUT (moderation/rules typedPick sets only the config columns
+      // below + updated_at). priority is consumed by the bot's automod-engine to
+      // order rule execution, and sync_to_discord is a Discord-sync flag the bot's
+      // automod-sync service reads to decide which rules to push to Discord's
+      // native AutoMod. Letting a tampered undo rewrite either could reorder
+      // enforcement or silently toggle native-Discord syncing.
       data: new Set([
         "action",
         "config",
@@ -421,8 +451,6 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "log_to_mod_channel",
         "mute_duration_minutes",
         "name",
-        "priority",
-        "sync_to_discord",
         "type",
         "updated_at",
       ]),
@@ -433,6 +461,10 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "custom_commands",
     {
+      // discord_command_id is EXCLUDED: it is the registered Discord slash-command
+      // identifier, not written by the dashboard create/update (custom-commands
+      // POST insert and PUT typedPick set only the config columns below +
+      // updated_at). It is a Discord-side locator, so undo must never rewrite it.
       data: new Set([
         "actions",
         "allowed_channels",
@@ -441,7 +473,6 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
         "denied_channels",
         "denied_roles",
         "description",
-        "discord_command_id",
         "enabled",
         "ephemeral",
         "name",
@@ -454,19 +485,22 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "ticket_panels",
     {
+      // message_id is EXCLUDED: the bot's panel-manager posts the panel message
+      // and writes message_id back (features/tickets/panel-manager.ts), so it is a
+      // bot-owned Discord locator. forum_config / intake_form_enabled /
+      // intake_form_fields are EXCLUDED too: they are schema columns not wired to
+      // any dashboard write (neither the POST insert nor the PUT typedPick sets
+      // them). Only the columns tickets/panels PUT actually sets (typedPick +
+      // updated_at) remain settable.
       data: new Set([
         "active",
         "channel_id",
         "closed_category_id",
         "dm_transcript_to_creator",
-        "forum_config",
         "input_mode",
-        "intake_form_enabled",
-        "intake_form_fields",
         "introduction_message",
         "manager_roles",
         "max_open_per_user",
-        "message_id",
         "name",
         "open_category_id",
         "panel_message",
@@ -623,22 +657,13 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       ...ID_AND_GUILD_SCOPE,
     },
   ],
-  [
-    "channel_templates",
-    {
-      data: new Set([
-        "base_template_id",
-        "description",
-        "is_builtin",
-        "name",
-        "overrides",
-        "target_channel_type",
-        "updated_at",
-      ]),
-      match: ID_AND_GUILD,
-      ...ID_AND_GUILD_SCOPE,
-    },
-  ],
+  // NOTE: channel_templates and role_templates are intentionally NOT undoable.
+  // They are seed-only tables (populated by packages/supabase/seed.sql with
+  // is_builtin rows) and have no dashboard write path — server-setup only reads
+  // them (.select('*')). Since no dashboard admin change ever produces an undo
+  // payload for them, listing them here would only let a tampered undo rewrite
+  // shared builtin template definitions (permissions, overrides, is_builtin).
+  // They are omitted so any such payload is rejected as a non-allowlisted table.
   [
     "giveaways",
     {
@@ -649,16 +674,20 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       // never touches entries. Letting a tampered undo inject or remove
       // participants would change who is eligible for prizes / product
       // entitlements before the bot ends the giveaway.
+      // message_id is EXCLUDED: the bot's giveaway-manager posts the giveaway
+      // message and writes message_id back (features/giveaways/giveaway-manager.ts)
+      // — a bot-owned Discord locator. required_entitlement_product_id is
+      // EXCLUDED: it is never written by the dashboard (neither the POST insert
+      // nor the PUT typedPick sets it). Only the columns the dashboard create/PUT
+      // actually write remain settable.
       data: new Set([
         "channel_id",
         "created_by",
         "ended_at",
         "ends_at",
-        "message_id",
         "prize",
         "prize_license_count",
         "prize_product_id",
-        "required_entitlement_product_id",
         "required_level",
         "required_role_id",
         "status",
@@ -669,42 +698,14 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       ...ID_AND_GUILD_SCOPE,
     },
   ],
-  [
-    "polls",
-    {
-      data: new Set([
-        "allow_multiple",
-        "channel_id",
-        "closed_at",
-        "creator_user_id",
-        "description",
-        "ends_at",
-        "message_id",
-        "status",
-        "title",
-      ]),
-      match: ID_AND_GUILD,
-      ...ID_AND_GUILD_SCOPE,
-    },
-  ],
-  [
-    "predictions",
-    {
-      data: new Set([
-        "channel_id",
-        "creator_user_id",
-        "locked_at",
-        "message_id",
-        "resolved_at",
-        "status",
-        "title",
-        "total_pool",
-        "winning_option_id",
-      ]),
-      match: ID_AND_GUILD,
-      ...ID_AND_GUILD_SCOPE,
-    },
-  ],
+  // NOTE: polls and predictions are intentionally NOT undoable. They have no
+  // dashboard write path at all — the only dashboard route (economy/polls GET)
+  // reads them, while every row and every column mutation is owned by the bot's
+  // polls-manager (create/close/resolve, message_id, status, *_at, total_pool,
+  // winning_option_id). Because no dashboard admin change ever produces an undo
+  // payload for these tables, listing them here would only expose bot-owned
+  // runtime state to a tampered undo. They are omitted so any such payload is
+  // rejected as a non-allowlisted table.
   [
     "tutorial_configs",
     {
@@ -730,33 +731,22 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
       ...ID_AND_GUILD_SCOPE,
     },
   ],
-  [
-    "role_templates",
-    {
-      data: new Set([
-        "base_template_id",
-        "description",
-        "is_builtin",
-        "name",
-        "permission_details",
-        "permissions",
-        "tier",
-        "updated_at",
-      ]),
-      match: ID_AND_GUILD,
-      ...ID_AND_GUILD_SCOPE,
-    },
-  ],
+  // role_templates: see the seed-only NOTE above channel_templates — same
+  // rationale, intentionally NOT undoable.
   [
     "alerts",
     {
+      // Bot- and system-owned fields are EXCLUDED. The interactive dashboard
+      // write (alerts PATCH) only sets acknowledged/acknowledged_at or
+      // resolved/resolved_at (+ updated_at); the license/paypal-webhook routes
+      // that also raise alerts write alert_type/severity/title/message/metadata.
+      // acknowledged_by, auto_resolved and details are never written by ANY
+      // dashboard route (acknowledged_by/auto_resolved are bot/DB-owned, details
+      // belongs to audit_logs), so they are dropped from the settable set.
       data: new Set([
         "acknowledged",
         "acknowledged_at",
-        "acknowledged_by",
         "alert_type",
-        "auto_resolved",
-        "details",
         "message",
         "metadata",
         "resolved",
@@ -772,16 +762,19 @@ export const UNDO_TABLE_COLUMNS: ReadonlyMap<string, UndoTableSpec> = new Map<
   [
     "fraud_rules",
     {
+      // action, last_triggered and trigger_count are EXCLUDED. The dashboard
+      // create/update (fraud/rules POST + PATCH) sets only name/description/
+      // rule_type/enabled/config/auto_action (+ updated_at) — it uses auto_action,
+      // never the separate `action` column. last_triggered / trigger_count are
+      // runtime fields the fraud engine maintains as rules fire; a tampered undo
+      // must not rewind them or resurrect a stale enforcement `action`.
       data: new Set([
-        "action",
         "auto_action",
         "config",
         "description",
         "enabled",
-        "last_triggered",
         "name",
         "rule_type",
-        "trigger_count",
         "updated_at",
       ]),
       match: ID_AND_GUILD,
