@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 114 migration files in packages/supabase/migrations/
+ * Source: 123 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -1499,6 +1499,10 @@ export interface DbEconomyHeistParticipants {
   role: string;
   payout: number;
   joined_at: string;
+  paid_at: string | null;
+  payout_failed: boolean;
+  claimed_at: string | null;
+  entry_fee_paid: number | null;
 }
 
 export interface DbEconomyHeists {
@@ -1508,11 +1512,12 @@ export interface DbEconomyHeists {
   status: 'recruiting' | 'in_progress' | 'success' | 'failed' | 'cancelled';
   target_name: string;
   target_payout: number;
-  participants: string[];
-  success_chance: number;
   resolved_at: string | null;
   expires_at: string;
   created_at: string;
+  payout_each: number | null;
+  resolution: 'success' | 'failed' | 'cancelled' | null;
+  base_success_chance: number | null;
 }
 
 export interface DbEconomyInventory {
