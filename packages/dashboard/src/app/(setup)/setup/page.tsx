@@ -49,6 +49,14 @@ interface SetupStatus {
   paypalWebhookReady?: boolean;
   paypalWebhookUrlReady?: boolean;
   paypalWebhookError?: string | null;
+  paypalWebhookReachable?: boolean;
+  paypalWebhookReachability?: {
+    status: 'reachable' | 'unreachable' | 'skipped';
+    failureReason?: string | null;
+    detail?: string | null;
+    checkedUrl?: string | null;
+    checkedAt?: string | null;
+  } | null;
   paypalCredentialsConfigured?: boolean;
   paypalWebhookIdConfigured?: boolean;
   publicCallbackRequired?: boolean;
@@ -544,6 +552,26 @@ export default function SetupWizardPage() {
                     {status.paypalWebhookError
                       || status.paypalWebhookUrl
                       || 'A public dashboard URL will generate this automatically.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <StatusIcon ok={status.paypalWebhookReachability?.status === 'reachable'} />
+                <div>
+                  <p className="text-sm font-medium text-discord-text-primary">
+                    {status.paypalWebhookReachability?.status === 'reachable'
+                      ? 'Webhook URL reachable'
+                      : status.paypalWebhookReachability?.status === 'unreachable'
+                        ? 'Webhook URL unreachable'
+                        : 'Webhook reachability not proven yet'}
+                  </p>
+                  <p
+                    role={status.paypalWebhookReachability?.status === 'unreachable' ? 'alert' : undefined}
+                    className={`mt-1 break-all text-sm ${status.paypalWebhookReachability?.status === 'unreachable' ? 'text-yellow-300' : 'text-discord-text-secondary'}`}
+                  >
+                    {status.paypalWebhookReachability?.detail
+                      || 'The dashboard probes its public webhook URL with a signed challenge once one is ready. This checks the dashboard’s own path only — not PayPal’s.'}
                   </p>
                 </div>
               </div>

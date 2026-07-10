@@ -20,9 +20,13 @@ vi.mock('@/lib/paypal', () => ({
   getPayPalToken: vi.fn(),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+// Keep readiness reads network-free: the reachability probe is exercised for
+// real in setup-webhook-probe.test.ts and paypal-webhook-probe.test.ts.
+vi.mock('@/lib/setup-webhook-probe', () => ({ getSetupWebhookReachability: vi.fn() }));
 
 import { createClient } from '@supabase/supabase-js';
 import { GET as getSetupStatus } from '@/app/api/setup/route';
+import { getSetupWebhookReachability } from '@/lib/setup-webhook-probe';
 import { POST as createStoreProduct } from '@/app/api/store/products/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
@@ -195,6 +199,23 @@ describe('owner setup readiness path', () => {
     });
     (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
     (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('paypal-token');
+    (getSetupWebhookReachability as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: string | null) => (url
+        ? {
+          status: 'reachable',
+          failureReason: null,
+          detail: 'Signed probe echo verified.',
+          checkedUrl: url,
+          checkedAt: new Date().toISOString(),
+        }
+        : {
+          status: 'skipped',
+          failureReason: 'no-public-url',
+          detail: 'Waiting on a validated public webhook URL.',
+          checkedUrl: null,
+          checkedAt: null,
+        }),
+    );
   });
 
   afterEach(() => {
@@ -289,6 +310,11 @@ describe('owner setup readiness path', () => {
       publicCallbackReady: true,
       discordCredentialsPresent: true,
       discordAuthProviderReady: true,
+      paypalWebhookReachable: true,
+      paypalWebhookReachability: expect.objectContaining({
+        status: 'reachable',
+        checkedUrl: PAYPAL_WEBHOOK_URL,
+      }),
     });
     expect(launcherStatus.primaryAction).toEqual({
       label: 'Set Up & Start',
@@ -402,6 +428,8 @@ describe('owner setup readiness path', () => {
       paypalWebhookUrl: null,
       paypalWebhookReady: false,
       paypalWebhookError: 'Public callback URL must use HTTPS before setup can finalize.',
+      paypalWebhookReachable: false,
+      paypalWebhookReachability: expect.objectContaining({ status: 'skipped' }),
     });
     expect(launcherStatus.firstBlockingStepId).toBe('regular-callback');
     expect(launcherStatus.primaryAction).toMatchObject({

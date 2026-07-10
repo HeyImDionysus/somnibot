@@ -19,6 +19,11 @@ import { z } from 'zod';
 import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { rateLimits } from '@/lib/api/rate-limit';
+import {
+  SETUP_WEBHOOK_PROBE_HEADER,
+  buildSetupWebhookProbeEcho,
+  verifySetupWebhookProbeChallenge,
+} from '@/lib/setup-webhook-probe';
 
 import { isInternalReplay, verifyWebhookSignature } from './verify';
 import {
@@ -133,6 +138,29 @@ export async function POST(req: NextRequest) {
   const rl = await rateLimits.paypalWebhook(clientIp);
   if (rl.limited) {
     return NextResponse.json({ error: 'Too many requests' }, { status: 429 });
+  }
+
+  // ── Setup reachability probe short-circuit ─────────
+  // The first-run setup wizard proves the public webhook URL routes back to
+  // this deployment by POSTing a signed, short-lived challenge (see
+  // @/lib/setup-webhook-probe). Probes are handled before the body is even
+  // read: they never touch PayPal signature verification, never create
+  // webhook_events rows, and never reach fulfillment handlers.
+  const probeChallenge = req.headers.get(SETUP_WEBHOOK_PROBE_HEADER);
+  if (probeChallenge !== null) {
+    // Invalid, expired, or forged challenges are rejected outright instead
+    // of falling through to normal processing, so the probe header can never
+    // be used to influence real webhook handling. Verification is a
+    // constant-time HMAC compare.
+    const echo = verifySetupWebhookProbeChallenge(probeChallenge)
+      ? buildSetupWebhookProbeEcho(probeChallenge)
+      : null;
+    if (!echo) {
+      return NextResponse.json({ error: 'Invalid probe challenge' }, { status: 401 });
+    }
+    // The echo is HMAC-signed so the prober can tell that *this* deployment
+    // answered — a 200 from a captive portal or stale deployment won't do.
+    return NextResponse.json({ status: 'probe', echo }, { status: 200 });
   }
 
   const rawBody = await req.text();

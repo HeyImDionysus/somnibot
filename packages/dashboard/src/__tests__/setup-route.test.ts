@@ -11,12 +11,25 @@ vi.mock('@/lib/supabase/auto-config', () => ({
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/api/rate-limit', () => ({ readValkeyKey: vi.fn() }));
+// The reachability probe performs real outbound HTTPS requests; unit tests
+// for the probe itself live in setup-webhook-probe.test.ts. Here it is mocked
+// so /api/setup tests stay network-free.
+vi.mock('@/lib/setup-webhook-probe', () => ({
+  getSetupWebhookReachability: vi.fn(async (url: string | null) => ({
+    status: 'skipped' as const,
+    failureReason: 'no-public-url' as const,
+    detail: 'probe skipped in tests',
+    checkedUrl: url,
+    checkedAt: null,
+  })),
+}));
 
 import { createClient } from '@supabase/supabase-js';
 import { GET, POST } from '@/app/api/setup/route';
 import { ensureDiscordAuthProvider, getDiscordAuthProviderStatus } from '@/lib/supabase/auto-config';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { readValkeyKey } from '@/lib/api/rate-limit';
+import { getSetupWebhookReachability } from '@/lib/setup-webhook-probe';
 import {
   getSetupPayPalWebhookUrlError,
   isSetupPayPalWebhookUrl,
@@ -398,6 +411,48 @@ describe('POST /api/setup finalize', () => {
       authError: null,
       setupLocked: true,
     });
+  });
+
+  it('records the webhook reachability outcome during finalize without blocking setup', async () => {
+    configureReadyPayPalEnv();
+    configureFinalizeOwnerProof(mock);
+    const instanceSettingsTable = registerTable(mock, 'instance_settings');
+    (ensureDiscordAuthProvider as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      alreadyConfigured: true,
+    });
+    (getSetupWebhookReachability as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'unreachable',
+      failureReason: 'timeout',
+      detail: 'The webhook URL did not respond in time.',
+      checkedUrl: 'https://dashboard.example.com/api/paypal/webhook',
+      checkedAt: '2026-07-09T00:00:00.000Z',
+    });
+
+    const res = await POST(buildRequest('/api/setup', {
+      method: 'POST',
+      body: { action: 'finalize' },
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    // The probe is advisory: an unreachable webhook is recorded and surfaced,
+    // but does not brick finalize (hairpin-NAT setups legitimately cannot
+    // reach their own public URL even though PayPal can).
+    expect(body.ok).toBe(true);
+    expect(getSetupWebhookReachability).toHaveBeenCalledWith('https://dashboard.example.com/api/paypal/webhook');
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: 'paypal_webhook_reachability',
+        section: 'paypal',
+        value: expect.stringContaining('"unreachable"'),
+      }),
+      { onConflict: 'key' },
+    );
+    expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ key: 'setup_completed_at' }),
+      { onConflict: 'key' },
+    );
   });
 
   it('does not treat launcher local mode as active without a session token', async () => {
@@ -1788,6 +1843,67 @@ describe('GET /api/setup status', () => {
     expect(body.publicCallbackRequired).toBe(true);
     expect(body.publicCallbackReady).toBe(true);
     expect(body.publicCallbackError).toBeNull();
+  });
+
+  it('reports webhook reachability when the probe verified the signed echo', async () => {
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
+    (getSetupWebhookReachability as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'reachable',
+      failureReason: null,
+      detail: 'Signed probe echo verified.',
+      checkedUrl: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      checkedAt: '2026-07-09T00:00:00.000Z',
+    });
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(getSetupWebhookReachability).toHaveBeenCalledWith('https://somnibot.tailnet.ts.net/api/paypal/webhook');
+    expect(body.paypalWebhookReachable).toBe(true);
+    expect(body.paypalWebhookReachability).toMatchObject({
+      status: 'reachable',
+      failureReason: null,
+      checkedUrl: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+    });
+  });
+
+  it('reports the probe failure reason when the webhook URL is unreachable', async () => {
+    vi.stubEnv('SOMNIBOT_PUBLIC_CALLBACK_BASE_URL', 'https://somnibot.tailnet.ts.net/');
+    vi.stubEnv('PAYPAL_CLIENT_ID', 'paypal-client-id');
+    vi.stubEnv('PAYPAL_CLIENT_SECRET', 'paypal-client-secret');
+    vi.stubEnv('PAYPAL_WEBHOOK_ID', 'WH-123');
+    (getSetupWebhookReachability as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      status: 'unreachable',
+      failureReason: 'dns',
+      detail: 'DNS lookup for the webhook hostname failed (ENOTFOUND).',
+      checkedUrl: 'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      checkedAt: '2026-07-09T00:00:00.000Z',
+    });
+
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.paypalWebhookReachable).toBe(false);
+    expect(body.paypalWebhookReachability).toMatchObject({
+      status: 'unreachable',
+      failureReason: 'dns',
+    });
+    expect(body.paypalWebhookReachability.detail).toContain('DNS');
+  });
+
+  it('skips the reachability probe until a validated public webhook URL exists', async () => {
+    const res = await GET(buildRequest('/api/setup'));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(getSetupWebhookReachability).toHaveBeenCalledWith(null);
+    expect(body.paypalWebhookReachable).toBe(false);
+    expect(body.paypalWebhookReachability).toMatchObject({ status: 'skipped' });
   });
 });
 
