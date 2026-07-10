@@ -335,8 +335,13 @@ export class CrossFeatureBridge {
       const roleDurationHours = metadata?.role_duration_hours as number | undefined;
       const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
 
-      await member.roles.add(roleId, 'SomniBot economy purchase — role item');
-      log.info(`Granted role ${roleId} to ${userId} via economy purchase`);
+      // This path is reached from the commerce `purchase.completed` event and
+      // resolves `productId` against the REAL-money `products` table (see V10
+      // H-2 above), so the audit provenance must be commerce-accurate — never
+      // the play-money game-economy label 'economy_purchase'. Conflating the
+      // two money systems mislabels real-money records as game events.
+      await member.roles.add(roleId, 'SomniBot commerce purchase — role item');
+      log.info(`Granted role ${roleId} to ${userId} via commerce purchase`);
 
       // If temporary role, schedule removal
       if (durationMs) {
@@ -346,7 +351,7 @@ export class CrossFeatureBridge {
           user_id: userId,
           role_id: roleId,
           expires_at: expiresAt,
-          source: 'economy_purchase',
+          source: 'commerce_purchase',
           source_id: productId,
         });
         log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
