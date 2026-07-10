@@ -151,9 +151,16 @@ function isExempt(
  * Returns true if the message was handled (deleted/action taken).
  */
 // V11 Re-Audit L-3: Per-message aggregate time budget.
-// Individual regex rules are capped at 50ms each, but N rules × 50ms can still
-// block the event loop for an unacceptable duration. This deadline caps the total
-// time spent checking ALL rules on a single message.
+// Individual regex evaluations are capped at 250ms each (see checkWordFilter),
+// but N rules can still block the event loop for an unacceptable duration in
+// aggregate. This deadline caps the total time spent checking ALL rules on a
+// single message; a rule whose regexes hit their timeout burns budget and the
+// remaining rules are skipped with a warning.
+// PR #269 review (P2): the same deadline is also enforced BETWEEN WORDS
+// inside checkWordFilter — config.words is owner-editable with no per-rule
+// cap, so without the word-level check a single regex-mode rule with a few
+// pathological entries could block for words.length × 250ms before the
+// between-rules check ever ran.
 const MESSAGE_RULE_BUDGET_MS = 500;
 
 export async function processMessage(
@@ -184,7 +191,7 @@ export async function processMessage(
 
     if (isExempt(member, rule, channelId)) continue;
 
-    const violation = await checkRule(client, message, rule);
+    const violation = await checkRule(client, message, rule, deadline);
     if (violation) {
       await executeAutoModAction(client, message, rule, violation, modConfig);
       return true;
@@ -197,15 +204,20 @@ export async function processMessage(
 /**
  * Check a single rule against a message.
  * Returns the violation description, or null if no violation.
+ *
+ * @param deadline - Wall-clock deadline (epoch ms) from processMessage's
+ *                   per-message budget; enforced between words in
+ *                   checkWordFilter (PR #269 review).
  */
 async function checkRule(
   client: SomniClient,
   message: Message,
   rule: DbAutomodRule,
+  deadline: number,
 ): Promise<string | null> {
   switch (rule.type) {
     case 'word_filter':
-      return checkWordFilter(message.content, rule.config as WordFilterConfig);
+      return checkWordFilter(message.content, rule.config as WordFilterConfig, deadline);
     case 'link_filter':
       return checkLinkFilter(message.content, rule.config as LinkFilterConfig);
     case 'invite_filter':
@@ -235,12 +247,27 @@ async function checkRule(
 function checkWordFilter(
   content: string,
   config: WordFilterConfig,
+  deadline: number,
 ): string | null {
   if (!config.words || config.words.length === 0) return null;
 
   const text = config.caseSensitive ? content : content.toLowerCase();
 
-  for (const word of config.words) {
+  for (const [index, word] of config.words.entries()) {
+    // PR #269 review (P2): enforce the per-message budget BETWEEN WORDS, not
+    // just between rules. In regex mode each pathological entry can burn a
+    // full 250ms vm timeout while the loop marches on, and config.words is
+    // owner-editable with no per-rule cap. Shares processMessage's wall-clock
+    // deadline (MESSAGE_RULE_BUDGET_MS) and the same `Date.now() > deadline`
+    // check. Fails toward "no match": a budget bail never punishes the user.
+    if (Date.now() > deadline) {
+      log.warn(
+        `Automod word-filter budget exceeded (${MESSAGE_RULE_BUDGET_MS}ms) — ` +
+        `skipped ${config.words.length - index} remaining word(s) in rule; treating as no match`,
+      );
+      return null;
+    }
+
     const target = config.caseSensitive ? word : word.toLowerCase();
 
     switch (config.matchMode) {
@@ -277,7 +304,7 @@ function checkWordFilter(
           const regex = new RegExp(word, config.caseSensitive ? '' : 'i');
 
           // V6 Audit H-5: Run regex in a sandboxed VM context with a hard
-          // 50ms timeout. The previous approach checked elapsed time AFTER
+          // timeout. The previous approach checked elapsed time AFTER
           // regex.test() completed, which didn't protect against catastrophic
           // backtracking blocking the event loop. This matches the approach
           // used in automations/condition-evaluator.ts.
@@ -287,11 +314,20 @@ function checkWordFilter(
           // is a hardcoded string, never user input. microtaskMode ensures
           // microtasks scheduled inside the context are drained within the
           // same timeout boundary, preventing a class of timeout bypass.
+          // TIMEOUT: 250ms. The original 50ms was an uncalibrated bound:
+          // under heavy CPU contention (parallel test workers, busy host)
+          // vm context setup + scheduling alone can exceed 50ms, so even
+          // trivial patterns misclassified as timeouts — flaky tests, and in
+          // production a loaded host could make legit rules silently fail to
+          // match. Rules are guild-owner configured (dashboard writes are
+          // requireGuildOwner-gated), known-catastrophic shapes are rejected
+          // above, and input is sliced, so 250ms still firmly bounds
+          // backtracking. Keep in sync with condition-evaluator.ts.
           const input = content.slice(0, 2000);
           const matched = runInNewContext(
             'regex.test(input)',
             { regex, input },
-            { timeout: 50, microtaskMode: 'afterEvaluate' },
+            { timeout: 250, microtaskMode: 'afterEvaluate' },
           );
 
           if (matched) {
@@ -300,7 +336,7 @@ function checkWordFilter(
         } catch (err) {
           // Timeout, invalid regex, or other error — skip
           if (err instanceof Error && err.message?.includes('timed out')) {
-            log.warn(`Regex pattern "${word}" timed out after 50ms — skipping for safety`);
+            log.warn(`Regex pattern "${word}" timed out after 250ms — skipping for safety`);
           }
         }
         break;
