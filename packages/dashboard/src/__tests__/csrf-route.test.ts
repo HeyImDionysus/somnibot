@@ -31,6 +31,13 @@ function requestWithCookie(cookieValue: string): NextRequest {
   return req;
 }
 
+/** Build a request with no CSRF cookie (fresh-token path). */
+function bareRequest(): NextRequest {
+  return new NextRequest('http://localhost:3000/api/csrf', {
+    headers: { host: 'localhost:3000' },
+  });
+}
+
 describe('GET /api/csrf', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -50,7 +57,7 @@ describe('GET /api/csrf', () => {
   it('does not use local fixed session when SESSION_TOKEN lacks launcher marker', async () => {
     process.env.SESSION_TOKEN = 'accidental-cloud-token';
 
-    const response = await GET();
+    const response = await GET(bareRequest());
 
     expect(mockCreateServerSupabase).toHaveBeenCalled();
     expect(response.headers.get('set-cookie')).toContain('1234567890abcdef');
@@ -60,7 +67,7 @@ describe('GET /api/csrf', () => {
     process.env.SOMNIBOT_DASHBOARD_LOCAL_MODE = '1';
     process.env.SESSION_TOKEN = 'launcher-token';
 
-    const response = await GET();
+    const response = await GET(bareRequest());
 
     expect(mockCreateServerSupabase).not.toHaveBeenCalled();
     expect(response.headers.get('set-cookie')).toContain('local-session');
@@ -130,7 +137,7 @@ describe('GET /api/csrf', () => {
   });
 
   it('still works when called with no request (mints a fresh random token)', async () => {
-    const res = await GET();
+    const res = await GET(bareRequest());
     const { token } = await res.json();
     const cookie = csrfCookieFromResponse(res.headers.get('set-cookie') ?? '');
     const nonce = cookie.slice(0, cookie.indexOf(':'));
@@ -146,7 +153,7 @@ describe('GET /api/csrf', () => {
       ),
     );
 
-    const response = await GET();
+    const response = await GET(bareRequest());
     const body = await response.json();
 
     expect(body.token).toEqual(expect.any(String));

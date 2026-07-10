@@ -22,7 +22,7 @@ import {
   CSRF_COOKIE_NAME,
 } from '@/lib/api/csrf';
 
-export async function GET(request?: NextRequest) {
+export async function GET(request: NextRequest) {
   // Get session identifier
   let sessionId: string;
 
@@ -62,7 +62,7 @@ export async function GET(request?: NextRequest) {
   // cookie when its embedded session matches the authenticated session, so a
   // stale cross-session cookie (post logout/login) can never seed the new
   // session's token; that case falls through to a fresh random token.
-  const existingCookie = request?.cookies.get(CSRF_COOKIE_NAME)?.value;
+  const existingCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
   const reuseExisting =
     existingCookie !== undefined && csrfCookieSessionId(existingCookie) === sessionId;
 
