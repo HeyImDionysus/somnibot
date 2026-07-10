@@ -61,6 +61,7 @@ function makeStatefulDb(opts: {
   status: string;
   resolution?: string | null;
   payoutEach?: number | null;
+  refundEach?: number | null;
   participants: string[];
   successChance?: number;
   targetPayout?: number;
@@ -68,14 +69,23 @@ function makeStatefulDb(opts: {
   // mutable Set still contains them, so a test can clear it to model a
   // transient failure that heals on the next resume.
   failCreditFor?: Set<string>;
+  // When set, the frozen-crew SELECT (`.not('claimed_at','is',null)`) returns an
+  // error while the flag holds — models a transient read failure that must be
+  // treated as retryable, NOT as "no one to pay/refund". Cleared by a test to
+  // heal the read on the next resume.
+  failCrewRead?: { on: boolean };
 }) {
   const failCreditFor = opts.failCreditFor ?? new Set<string>();
+  const failCrewRead = opts.failCrewRead ?? { on: false };
   const heist: any = {
     id: 'h1',
     guild_id: 'g1',
     status: opts.status,
     resolution: opts.resolution ?? null,
     payout_each: opts.payoutEach ?? null,
+    // Frozen per-member refund. A pre-claimed cancelled in_progress row carries
+    // it (the claim stamped it); recruiting rows have it stamped by the claim RPC.
+    refund_each: opts.refundEach ?? null,
     target_name: 'Corner Store',
     target_payout: opts.targetPayout ?? 250,
     success_chance: opts.successChance ?? 40,
@@ -136,6 +146,12 @@ function makeStatefulDb(opts: {
       single: () => Promise.resolve({ data: null, error: null }),
       maybeSingle: () => Promise.resolve({ data: null, error: null }),
       then: (res: (v: unknown) => void) => {
+        // Inject a transient failure on the frozen-crew read only (the settle
+        // pass filters on claimed_at). A failed read must be retryable, never
+        // interpreted as an empty crew.
+        if (claimedOnly && failCrewRead.on) {
+          return Promise.resolve({ data: null, error: { message: 'injected crew read failure' } }).then(res);
+        }
         const rows = parts
           .filter((p) => (claimedOnly ? p.claimed_at != null : true))
           .map((p) => ({ ...p }));
@@ -164,7 +180,7 @@ function makeStatefulDb(opts: {
       if (fn === 'heist_claim_for_resolution') {
         // Single-shot: only the caller that observes 'recruiting' claims.
         if (heist.status !== 'recruiting') {
-          return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null }], error: null });
+          return Promise.resolve({ data: [{ claimed: false, outcome: null, participant_count: 0, payout_each: null, refund_each: null }], error: null });
         }
         // Freeze the crew: stamp claimed_at on unstamped rows, then count only
         // stamped rows — mirrors the migration's UPDATE ... WHERE claimed_at IS
@@ -178,17 +194,19 @@ function makeStatefulDb(opts: {
           // resolution='cancelled' (not terminal), so a failed refund stays
           // retryable; heist_finalize_resolution moves it to terminal 'cancelled'
           // only after every refund committed. Mirrors 20260710120000 §B.
-          heist.status = 'in_progress'; heist.resolution = 'cancelled';
-          return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null }], error: null });
+          // The per-member refund is FROZEN from the passed entry fee (mirrors
+          // 20260710130000 §2), so later retries read a stable amount off the row.
+          heist.status = 'in_progress'; heist.resolution = 'cancelled'; heist.refund_each = args.p_entry_fee;
+          return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null, refund_each: args.p_entry_fee }], error: null });
         }
         const isSuccess = (heist.success_chance ?? 0) > 0; // deterministic for tests
         if (isSuccess) {
           const each = Math.floor(heist.target_payout / count);
           heist.status = 'in_progress'; heist.resolution = 'success'; heist.payout_each = each;
-          return Promise.resolve({ data: [{ claimed: true, outcome: 'success', participant_count: count, payout_each: each }], error: null });
+          return Promise.resolve({ data: [{ claimed: true, outcome: 'success', participant_count: count, payout_each: each, refund_each: null }], error: null });
         }
         heist.status = 'in_progress'; heist.resolution = 'failed'; heist.payout_each = 0;
-        return Promise.resolve({ data: [{ claimed: true, outcome: 'failed', participant_count: count, payout_each: 0 }], error: null });
+        return Promise.resolve({ data: [{ claimed: true, outcome: 'failed', participant_count: count, payout_each: 0, refund_each: null }], error: null });
       }
       if (fn === 'heist_credit_participant') {
         const p = parts.find((x) => x.user_id === args.p_user_id);
@@ -601,5 +619,114 @@ describe('heist resume idempotency', () => {
     // No failure (or any) announcement for the legacy heist.
     expect(send.mock.calls.filter(
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist'))).toHaveLength(0);
+  });
+
+  // ── Newest finding (a): a failed frozen-crew read is retryable, not "no one to pay" ──
+  it('a failed frozen-crew read does NOT finalise a success — it stays retryable', async () => {
+    // The claim has frozen a 2-member crew and rolled success; the settle pass's
+    // participant SELECT then errors. Treating that empty/errored read as "no one
+    // to pay" would finalise the heist to terminal 'success' while crediting
+    // nobody — every frozen member silently loses their share (paid_at stays NULL
+    // and no terminal heist is ever revisited). The heist must instead stay
+    // in_progress and retryable.
+    const failCrewRead = { on: true };
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250, failCrewRead,
+    });
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // crew read errors → must NOT finalise, must NOT credit
+
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.heist.resolution).toBe('success');
+    expect(db.credits).toHaveLength(0);
+    // No success announcement while the crew could not even be read.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(0);
+
+    // The read heals; the next resume reads the frozen crew and pays both once.
+    failCrewRead.on = false;
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('success');
+    expect(db.credits).toHaveLength(2);
+    expect(db.credits.map((c) => c.user_id).sort()).toEqual(['u1', 'u2']);
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+  });
+
+  it('a failed frozen-crew read does NOT finalise a cancel — the refund stays retryable', async () => {
+    // Same defect on the cancel path: an under-crewed heist whose frozen-crew
+    // read errors must not be flipped to terminal 'cancelled' with zero refunds
+    // (which would forfeit the frozen member's entry fee). It must stay
+    // in_progress/retryable, then refund once the read heals.
+    const failCrewRead = { on: true };
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'cancelled', refundEach: 100,
+      participants: ['u1'], failCrewRead,
+    });
+    // Pre-claimed cancelled row: its single crew member was frozen (claimed_at set).
+    db.parts[0].claimed_at = new Date().toISOString();
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // crew read errors → must stay in_progress, no refund
+
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.heist.resolution).toBe('cancelled');
+    expect(db.credits).toHaveLength(0);
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(0);
+
+    // Read heals → the frozen crew member is refunded exactly once and finalised.
+    failCrewRead.on = false;
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('cancelled');
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]);
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(1);
+  });
+
+  // ── Newest finding (b): the cancel refund amount is FROZEN at claim time ──
+  it('the claim freezes refund_each on the row and the refund uses that frozen value', async () => {
+    // The under-crewed claim must persist the per-member refund (the entry fee it
+    // was passed) on the heist row, and the settle pass must refund exactly that
+    // frozen amount — establishing the value the resume test proves is immune to
+    // later config drift.
+    const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 100 });
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // 1 < min(2) → cancel; claim freezes refund_each = 100
+
+    expect(db.heist.status).toBe('cancelled');
+    expect(db.heist.refund_each).toBe(100); // frozen on the row at claim time
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]); // refunded the frozen value
+  });
+
+  it('a resumed cancelled heist refunds the frozen refund_each off the row (not config)', async () => {
+    // A crash left the heist in_progress/cancelled with refund_each=100 frozen on
+    // the row. Even if config now reads a different entry fee, the resume refunds
+    // the frozen 100.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'cancelled', refundEach: 100,
+      participants: ['u1'],
+    });
+    db.parts[0].claimed_at = new Date().toISOString(); // frozen crew member
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    CONFIG.economy_heist_entry_fee = 999;
+    try {
+      await mgr.resumePendingHeists('g1');
+    } finally {
+      CONFIG.economy_heist_entry_fee = 100;
+    }
+
+    expect(db.heist.status).toBe('cancelled');
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]);
   });
 });

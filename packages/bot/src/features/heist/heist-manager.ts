@@ -602,9 +602,15 @@ export class HeistManager {
     // claim and fall through to the idempotent settle/finalise below.
     let outcome: 'success' | 'failed' | 'cancelled' | null = null;
     if (heist.status === 'recruiting') {
+      // Pass the entry fee so the claim can FREEZE the per-member refund on the
+      // row (refund_each) the same way it freezes payout_each for a success.
+      // Every later refund retry then reads that frozen amount off the row, so a
+      // guild_config entry-fee edit after the claim can neither inflate nor
+      // shrink an in-flight refund.
       const { data: claimData, error: claimErr } = await this.supabase.rpc('heist_claim_for_resolution', {
         p_heist_id: heistId,
         p_min_participants: minParticipants,
+        p_entry_fee: entryFee,
       });
       if (claimErr) {
         log.error(`heist_claim_for_resolution failed for ${heistId}:`, claimErr.message);
@@ -615,17 +621,27 @@ export class HeistManager {
         // Another resolver owns this heist. If it is mid-resolution
         // (in_progress), re-read so the settle/finalise pass below can finish
         // a crashed payout idempotently; otherwise it is already terminal.
-        const { data: fresh } = await this.supabase
+        const { data: fresh, error: freshErr } = await this.supabase
           .from('economy_heists').select('*').eq('id', heistId).single();
+        // A failed re-read is transient, not "already terminal": returning here
+        // just leaves the heist in_progress for a later resume — never finalise
+        // or settle on a read we could not perform.
+        if (freshErr) {
+          log.error(`Re-read of claim-lost heist ${heistId} failed:`, freshErr.message);
+          return;
+        }
         if (!fresh || fresh.status !== 'in_progress') return;
         Object.assign(heist, fresh);
         outcome = (fresh.resolution as typeof outcome) ?? null;
       } else {
         outcome = claim.outcome as typeof outcome;
         heist.payout_each = claim.payout_each;
+        heist.refund_each = claim.refund_each;
       }
     } else if (heist.status === 'in_progress') {
       // Crashed after claim, before finalisation — resume the stored decision.
+      // payout_each / refund_each are already frozen on the row read above, so
+      // the settle pass uses those and never re-derives money from config.
       outcome = (heist.resolution as typeof outcome) ?? null;
     } else {
       return;  // success / failed / cancelled — already terminal
@@ -647,23 +663,43 @@ export class HeistManager {
     // the claim is unstamped, so it is neither paid a success share nor
     // refunded/announced as part of an under-crewed cancellation — the settled
     // crew is exactly the v_count the claim decided the payout for.
-    const { data: partRows } = await this.supabase
+    const { data: partRows, error: partErr } = await this.supabase
       .from('economy_heist_participants')
       .select('user_id, role')
       .eq('heist_id', heistId)
       .not('claimed_at', 'is', null)
       .limit(1000);
+    // A failed crew read must NEVER be treated as "no one to pay/refund".
+    // Finalising on an empty list here would flip the heist terminal and
+    // silently forfeit every frozen member's payout or refund (they still carry
+    // paid_at IS NULL, and no terminal heist is ever revisited). The row is
+    // still in_progress with its decision + frozen amounts persisted, so leave
+    // it retryable: schedule an in-process retry and let resumePendingHeists
+    // recover it on restart. This mirrors a failed credit — a transient read is
+    // just as retryable as a transient write.
+    if (partErr) {
+      log.error(`Frozen-crew read failed for heist ${heistId} (outcome=${outcome}) — leaving in_progress for retry:`, partErr.message);
+      this.scheduleResolveRetry(guildId, heistId, channelId);
+      return;
+    }
     const partList = (partRows ?? []) as Array<{ user_id: string; role: string }>;
     const participants = partList.map((r) => r.user_id);
 
     if (outcome === 'cancelled') {
-      // Refund entry fees idempotently — heist_credit_participant pays each
-      // crew member at most once (guarded by paid_at), so a re-resolve after
-      // a crash does not double-refund.
+      // Refund the FROZEN entry fee, read off the heist row (refund_each stamped
+      // by the claim), NOT re-derived from guild_config. A fee edit between the
+      // claim and this (possibly retried/resumed) refund therefore cannot change
+      // what a frozen crew member gets back — they are refunded exactly what was
+      // charged. refund_each is guaranteed non-NULL on a 'cancelled' heist (the
+      // claim always stamps it); the ?? entryFee is a defensive fallback for a
+      // legacy pre-freeze row and is never the value for heists claimed by this
+      // code. heist_credit_participant is idempotent (paid_at guard), so a
+      // re-resolve after a crash does not double-refund.
+      const refundEach = heist.refund_each ?? entryFee;
       const failedRefunds: string[] = [];
       for (const uid of participants) {
         const { error: refundErr } = await this.supabase.rpc('heist_credit_participant', {
-          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
+          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: refundEach,
         });
         if (refundErr) {
           log.error(`Failed to refund ${uid}:`, refundErr.message);
