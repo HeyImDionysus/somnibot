@@ -20,21 +20,28 @@
  *       commerce-held: a giveaway winner or admin-comped user legitimately
  *       collects income. NULL/unknown sources fail CLOSED as purchases.
  *
- *   L2  An unexpired `temp_role_grants` row with a commerce source grants
- *       them the role directly by Discord `user_id`.
+ *   L2  An EXISTING `temp_role_grants` row with a commerce source grants them
+ *       the role directly by Discord `user_id`. Keyed on the ROW's existence,
+ *       NOT on `expires_at`: the sweeper (events/handler.ts) deletes the row
+ *       only AFTER it removes the Discord role, so a row that still exists —
+ *       whether its expiry just passed and the sweep hasn't run, or removal
+ *       failed and the row is awaiting retry — means the paid role is STILL on
+ *       the member and must stay excluded until removal actually succeeds.
  *       (CrossFeatureBridge.grantPurchaseRole TEMPORARY path — written only
  *       when `metadata.role_duration_hours` is set. Temporary metadata grants
- *       are COMPLETELY covered by this layer: they have per-user rows and an
- *       expiry, so L3 must not match them — doing so would keep excluding a
- *       user whose temp grant already expired, or who never bought at all.)
+ *       are COMPLETELY covered by this layer: they have per-user rows deleted
+ *       on successful removal, so L3 must not match them — doing so would keep
+ *       excluding a user whose grant was removed, or who never bought at all.)
  *
  *   L3  Product-level evidence for PERMANENT metadata grants, which leave NO
  *       per-user record (grantPurchaseRole just adds the Discord role):
  *         V3 — the role is the PERMANENT `metadata.grant_role_id` of a
  *              product with at least one REAL-MONEY ONE-TIME sale (an
  *              `orders` row: amount_cents > 0, source purchase/NULL,
- *              paypal_subscription_id NULL, status other than
- *              pending/cancelled). The evidence is judged on ORDERS, not on
+ *              paypal_subscription_id NULL, status NOT in the never-fulfilled
+ *              set pending/cancelled/pending_review — a pending_review order
+ *              parked on an amount mismatch never granted the role). The
+ *              evidence is judged on ORDERS, not on
  *              the product's current type/active/price: historical buyers
  *              keep the role after the owner deactivates, re-prices, or
  *              re-types the product, and only the sale record proves they
@@ -76,13 +83,27 @@ const NON_PURCHASE_SOURCE_SET: ReadonlySet<string> = new Set(NON_PURCHASE_ENTITL
 export const COMMERCE_TEMP_ROLE_SOURCES = ['commerce_purchase', 'purchase'] as const;
 
 /**
- * `orders.status` values that prove NO fulfillment ever ran (checkout was
- * abandoned or cancelled before capture). Everything else — completed,
- * refunded, disputed, pending_review — had money captured; refunds revoke
- * ENTITLEMENT roles but never remove a permanent metadata role, so those
- * orders remain evidence. Deny-list: unknown future statuses fail CLOSED.
+ * `orders.status` values that prove NO fulfillment ever ran, so the metadata
+ * role was never granted to a buyer:
+ *   - pending / cancelled — checkout abandoned or cancelled before capture.
+ *   - pending_review — an amount mismatch parked the order; the webhook
+ *     (handlePaymentCaptured) returns BEFORE queuing fulfillment, so
+ *     `purchase.completed` never fires and the metadata role is never granted.
+ * Everything else — completed, refunded, disputed — had money captured AND
+ * fulfilled: refunds revoke ENTITLEMENT roles but never remove a permanent
+ * metadata role, so those orders remain evidence. Deny-list: unknown future
+ * statuses fail CLOSED (treated as fulfilled, kept as evidence).
  */
-export const NEVER_FULFILLED_ORDER_STATUSES = ['pending', 'cancelled'] as const;
+export const NEVER_FULFILLED_ORDER_STATUSES = ['pending', 'cancelled', 'pending_review'] as const;
+
+/**
+ * `NEVER_FULFILLED_ORDER_STATUSES` rendered as a PostgREST `in` list, e.g.
+ * `("pending","cancelled","pending_review")`, so the sale-evidence query and
+ * the constant above can never drift apart.
+ */
+const NEVER_FULFILLED_ORDER_STATUSES_IN_LIST = `(${NEVER_FULFILLED_ORDER_STATUSES.map(
+  (s) => `"${s}"`,
+).join(',')})`;
 
 /**
  * Mirror of the dashboard matrix's isTemporaryMetadataGrant(): a metadata
@@ -129,7 +150,7 @@ async function findProductsWithRealMoneyOneTimeSales(
       .eq('product_id', productId)
       .gt('amount_cents', 0)
       .is('paypal_subscription_id', null)
-      .not('status', 'in', '("pending","cancelled")')
+      .not('status', 'in', NEVER_FULFILLED_ORDER_STATUSES_IN_LIST)
       .or('source.eq.purchase,source.is.null')
       .limit(1);
     if (error) throw new Error(`orders lookup failed: ${error.message}`);
@@ -195,15 +216,22 @@ export async function getCommerceHeldRoleIds(
       }
     }
 
-    // ── L2: unexpired commerce temp_role_grants (by discord user_id) ──
-    const nowIso = new Date().toISOString();
+    // ── L2: EXISTING commerce temp_role_grants (by discord user_id) ──
+    // Key on the ROW's existence, not on `expires_at`. The sweeper
+    // (events/handler.ts) deletes a temp grant row ONLY AFTER it successfully
+    // removes the Discord role; on removal failure the row survives for retry,
+    // and even in the happy path the row outlives `expires_at` until the next
+    // 15-min sweep. Filtering to future `expires_at` would stop excluding a
+    // role the member STILL holds during that gap, letting them collect income
+    // from a paid role. Since /collect-income only passes roles the member
+    // currently holds, an existing commerce grant row = a real-money role not
+    // yet removed = still commerce-held, expired or not.
     const { data: tempGrants, error: tempErr } = await supabase
       .from('temp_role_grants')
       .select('role_id')
       .eq('guild_id', guildId)
       .eq('user_id', userId)
       .in('source', COMMERCE_TEMP_ROLE_SOURCES as unknown as string[])
-      .gt('expires_at', nowIso)
       .limit(1000);
     if (tempErr) throw new Error(`temp_role_grants lookup failed: ${tempErr.message}`);
 

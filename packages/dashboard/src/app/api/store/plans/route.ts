@@ -62,10 +62,11 @@ async function requireGuildProduct(
 
 /**
  * Compliance-wall check for a plan write. Call only when the EFFECTIVE plan
- * state (stored + updated values) is CHARGEABLE — active with price_cents > 0
- * or with a paypal_plan_id (checkout starts a subscription from the PayPal id
- * alone and charges PayPal's price, not our DB row) — because only a
- * chargeable plan opens a real-money purchase path through its parent.
+ * state (stored + updated values) is CHARGEABLE — active AND carrying a
+ * paypal_plan_id. Checkout starts a subscription from the PayPal id alone and
+ * charges PayPal's price, not our DB row, so a plan WITHOUT a paypal_plan_id
+ * cannot move real money however high its price_cents; only a chargeable plan
+ * opens a real-money purchase path through its parent.
  *
  * Resolves the parent product GUILD-SCOPED and blocks when the parent is an
  * ACTIVE SUBSCRIPTION granting any role that earns role-income. Other parents
@@ -187,11 +188,12 @@ export async function POST(req: NextRequest) {
   const notOwned = await requireGuildProduct(supabase, guildId, product_id);
   if (notOwned) return notOwned;
 
-  // Compliance wall: a CHARGEABLE plan (active, and priced > 0 or carrying a
-  // paypal_plan_id) makes the parent subscription buyable — re-check the
-  // role-income overlap before writing it. Inactive plans, and zero-price
-  // plans with no PayPal id, open no purchase path and are not blocked
-  // (calibration: never block config that moves no real money).
+  // Compliance wall: a CHARGEABLE plan (active AND carrying a paypal_plan_id)
+  // makes the parent subscription buyable — re-check the role-income overlap
+  // before writing it. Inactive plans, and plans with no PayPal id (whatever
+  // their price_cents — checkout cannot start a subscription without the
+  // PayPal id), open no purchase path and are not blocked (calibration: never
+  // block config that moves no real money).
   if (isChargeablePlan({ active: active ?? true, price_cents, paypal_plan_id })) {
     const blocked = await checkPlanWall(supabase, guildId, product_id);
     if (blocked) return blocked;

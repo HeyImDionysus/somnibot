@@ -22,6 +22,7 @@ import {
   metadataGrantRoleIds,
   metadataGrantVectorApplies,
   preserveSoldMetadataGrantHistory,
+  sanitizeClientMetadataHistory,
   type WallCheckResult,
 } from '@/lib/api/commerce-income-wall';
 
@@ -360,7 +361,12 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 2. Create product in database
+  // 2. Create product in database. Strip any client-supplied
+  // `historical_grant_role_ids`: that key is SERVER-OWNED V4 compliance
+  // evidence, only ever written by preserveSoldMetadataGrantHistory() from
+  // verified sale history. A brand-new product has sold nothing, so accepting
+  // an owner-forged history here would let them block income config for
+  // arbitrary roles. See the DECISION MATRIX (V4) in commerce-income-wall.ts.
   const { data, error } = await supabase
     .from('products')
     .insert({
@@ -376,7 +382,7 @@ export async function POST(req: NextRequest) {
       granted_channel_ids: granted_channel_ids ?? [],
       active: active ?? true,
       sort_order: sort_order ?? 0,
-      metadata: metadata ?? {},
+      metadata: sanitizeClientMetadataHistory(metadata),
     })
     .select()
     .single();

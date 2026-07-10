@@ -276,6 +276,7 @@ describe('MATRIX A — role-income POST vs product state', () => {
   const zeroOrder = order({ amount_cents: 0 });
   const pendingOrder = order({ status: 'pending' });
   const cancelledOrder = order({ status: 'cancelled' });
+  const pendingReviewOrder = order({ status: 'pending_review' });
   const refundedOrder = order({ status: 'refunded' });
   const giveawayOrder = order({ source: 'giveaway' });
   const subscriptionOrder = order({ paypal_subscription_id: 'I-SUB1' });
@@ -296,15 +297,18 @@ describe('MATRIX A — role-income POST vs product state', () => {
       products: [product({ type: 'one_time', price_cents: 2500, active: false, granted_role_ids: [ROLE] })], blocked: false },
     { name: 'V1: free product granting R does not block (never buyable)',
       products: [product({ type: 'free', granted_role_ids: [ROLE] })], blocked: false },
-    { name: 'V1: active subscription with an ACTIVE PAID plan blocks',
+    { name: 'V1: active subscription with an ACTIVE chargeable plan (priced + paypal_plan_id) blocks',
       products: [product({ type: 'subscription', granted_role_ids: [ROLE] })],
-      plans: [plan({ price_cents: 999 })], blocked: true },
+      plans: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })], blocked: true },
     { name: 'V1: active subscription with a zero-price plan that HAS a paypal_plan_id blocks (PayPal price is authoritative)',
       products: [product({ type: 'subscription', granted_role_ids: [ROLE] })],
       plans: [plan({ price_cents: 0, paypal_plan_id: 'P-123' })], blocked: true },
     { name: 'V1: active subscription with only a zero-price, no-PayPal-id plan does not block (checkout cannot start it)',
       products: [product({ type: 'subscription', granted_role_ids: [ROLE] })],
       plans: [plan({ price_cents: 0 })], blocked: false },
+    { name: 'V1: active subscription with an active PRICED plan but NO paypal_plan_id does not block (finding #1: checkout rejects it, price_cents cannot charge a subscription)',
+      products: [product({ type: 'subscription', granted_role_ids: [ROLE] })],
+      plans: [plan({ price_cents: 999, paypal_plan_id: null })], blocked: false },
     { name: 'V1: active subscription with only an INACTIVE paid plan does not block',
       products: [product({ type: 'subscription', granted_role_ids: [ROLE] })],
       plans: [plan({ price_cents: 999, active: false })], blocked: false },
@@ -319,9 +323,9 @@ describe('MATRIX A — role-income POST vs product state', () => {
       products: [product({ type: 'one_time', price_cents: 2500, metadata: { grant_role_id: ROLE } })], blocked: true },
     { name: 'V2: buyable one_time with TEMPORARY metadata role blocks too (a temp grant still moves real money)',
       products: [product({ type: 'one_time', price_cents: 2500, metadata: { grant_role_id: ROLE, role_duration_hours: 24 } })], blocked: true },
-    { name: 'V2: paid subscription carrying metadata.grant_role_id does NOT block (subscriptions never consume it)',
+    { name: 'V2: chargeable subscription carrying metadata.grant_role_id does NOT block (subscriptions never consume it)',
       products: [product({ type: 'subscription', metadata: { grant_role_id: ROLE } })],
-      plans: [plan({ price_cents: 999 })], blocked: false },
+      plans: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })], blocked: false },
 
     // ── V3: sold permanent metadata (evidence outlives config) ──
     { name: 'V3: deactivated one_time with permanent metadata role that SOLD still blocks',
@@ -335,6 +339,9 @@ describe('MATRIX A — role-income POST vs product state', () => {
     { name: 'V3: only pending/cancelled orders — does not block (never fulfilled)',
       products: [product({ type: 'one_time', active: false, metadata: { grant_role_id: ROLE } })],
       orders: [pendingOrder, cancelledOrder], blocked: false },
+    { name: 'V3: only a PENDING_REVIEW order — does not block (finding #4: amount mismatch parked it, fulfillment never ran, role never granted)',
+      products: [product({ type: 'one_time', active: false, metadata: { grant_role_id: ROLE } })],
+      orders: [pendingReviewOrder], blocked: false },
     { name: 'V3: a REFUNDED paid order still blocks (refunds never remove a permanent metadata role)',
       products: [product({ type: 'one_time', active: false, metadata: { grant_role_id: ROLE } })],
       orders: [refundedOrder], blocked: true },
@@ -607,10 +614,21 @@ describe('MATRIX B — products PUT', () => {
     expect(fake._writes.products?.[0]?.op).toBe('update');
   });
 
-  it('409 when flipping a subscription active WITH a stored chargeable plan and an income role', async () => {
+  it('finding #1: subscription flip to active with a stored PRICED-but-no-paypal plan is ALLOWED (checkout cannot start it)', async () => {
     const fake = useFake({
       products: { rows: [product({ type: 'subscription', active: false, granted_role_ids: [ROLE] })] },
       plans: { rows: [plan({ price_cents: 999 })] },
+      economy_role_income: { rows: [incomeRow(ROLE)] },
+    });
+    const res = await put({ active: true });
+    expect(res.status).toBe(200);
+    expect(fake._writes.products?.[0]?.op).toBe('update');
+  });
+
+  it('409 when flipping a subscription active WITH a stored chargeable plan (paypal_plan_id) and an income role', async () => {
+    const fake = useFake({
+      products: { rows: [product({ type: 'subscription', active: false, granted_role_ids: [ROLE] })] },
+      plans: { rows: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })] },
       economy_role_income: { rows: [incomeRow(ROLE)] },
     });
     const res = await put({ active: true });
@@ -719,6 +737,63 @@ describe('MATRIX B — products PUT', () => {
     expect(written.metadata?.some_other_key).toBe('x');
   });
 
+  it('finding #3: STRIPS a client-forged historical_grant_role_ids (never-sold role) on PUT — owner cannot fabricate sold-history', async () => {
+    const fake = useFake({
+      // Product has no stored history and has sold nothing.
+      products: { rows: [product({ type: 'one_time', active: false, metadata: {} })] },
+      orders: { rows: [] },
+      economy_role_income: { rows: [] },
+    });
+    const res = await put({ metadata: { historical_grant_role_ids: [OTHER_ROLE], keep_me: 'y' } });
+    expect(res.status).toBe(200);
+    const written = fake._writes.products?.[0]?.payload as { metadata?: Record<string, unknown> };
+    // The forged entry is discarded; the real (empty) server history wins.
+    expect(written.metadata?.historical_grant_role_ids).toBeUndefined();
+    expect(written.metadata?.keep_me).toBe('y');
+  });
+
+  it('finding #3: a client cannot EXTEND real server history with forged entries on PUT', async () => {
+    const fake = useFake({
+      // Server truly recorded ROLE; client tries to also smuggle OTHER_ROLE.
+      products: { rows: [product({ type: 'one_time', active: false, metadata: { historical_grant_role_ids: [ROLE] } })] },
+      orders: { rows: [] },
+      economy_role_income: { rows: [] },
+    });
+    const res = await put({ metadata: { historical_grant_role_ids: [ROLE, OTHER_ROLE] } });
+    expect(res.status).toBe(200);
+    const written = fake._writes.products?.[0]?.payload as { metadata?: Record<string, unknown> };
+    // Only the server-derived ROLE survives; the smuggled OTHER_ROLE is dropped.
+    expect(written.metadata?.historical_grant_role_ids).toEqual([ROLE]);
+  });
+
+  it('finding #3: STRIPS client-forged historical_grant_role_ids on product CREATE (POST)', async () => {
+    // Uses the MATRIX B POST harness inline: a fresh product has sold nothing,
+    // so any history in its metadata is necessarily forged.
+    mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD });
+    mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('token');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ id: 'PAYPAL-1' }) })));
+    const fake = useFake({
+      economy_role_income: { rows: [] },
+      products: { rows: [] },
+      plans: { rows: [] },
+    });
+    const res = await productsPOST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        name: 'Forged', delivery_type: 'access_pass', currency: 'USD', granted_channel_ids: [],
+        type: 'one_time', price_cents: 2500, granted_role_ids: [],
+        metadata: { historical_grant_role_ids: [OTHER_ROLE], other: 'z' },
+      },
+    }));
+    expect(res.status).toBe(200);
+    const written = fake._writes.products?.[0]?.payload as { metadata?: Record<string, unknown> };
+    expect(written.metadata?.historical_grant_role_ids).toBeUndefined();
+    expect(written.metadata?.other).toBe('z');
+    vi.unstubAllGlobals();
+  });
+
   it('FAILS CLOSED: 500 and no update when the sold-history orders lookup errors', async () => {
     const fake = useFake({
       products: { rows: [product({ type: 'one_time', active: false, metadata: { grant_role_id: ROLE } })] },
@@ -758,35 +833,38 @@ describe('MATRIX C — plans POST/PUT', () => {
     income?: Row[];
     expect: number;
   }[] = [
-    { name: 'paid active plan on an active subscription granting an income role → 409',
+    { name: 'chargeable plan (paid + paypal_plan_id) on an active subscription granting an income role → 409',
       parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 409 },
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 409 },
+    { name: 'finding #1: PRICED plan with NO paypal_plan_id on a conflicted subscription is ALLOWED (checkout cannot start it — price_cents cannot charge a subscription)',
+      parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
+      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 200 },
     { name: 'zero-price plan WITH a paypal_plan_id → 409 (chargeable: PayPal price is authoritative)',
       parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
       body: { price_cents: 0, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 409 },
     { name: 'zero-price plan with no PayPal id is allowed without consulting the wall',
       parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
       body: { price_cents: 0 }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'INACTIVE paid plan is allowed (opens no purchase path)',
+    { name: 'INACTIVE chargeable plan is allowed (opens no purchase path)',
       parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
-      body: { price_cents: 999, active: false }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'paid plan on an INACTIVE subscription parent is allowed (reactivation re-runs the product wall)',
+      body: { price_cents: 999, paypal_plan_id: 'P-1', active: false }, income: [incomeRow(ROLE)], expect: 200 },
+    { name: 'chargeable plan on an INACTIVE subscription parent is allowed (reactivation re-runs the product wall)',
       parent: product({ type: 'subscription', active: false, granted_role_ids: [ROLE] }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'paid plan on a ONE_TIME parent is allowed (checkout ignores plans for one-time products)',
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 200 },
+    { name: 'chargeable plan on a ONE_TIME parent is allowed (checkout ignores plans for one-time products)',
       parent: product({ type: 'one_time', price_cents: 0, granted_role_ids: [ROLE] }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'paid plan on a FREE parent is allowed (checkout refuses free products)',
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 200 },
+    { name: 'chargeable plan on a FREE parent is allowed (checkout refuses free products)',
       parent: product({ type: 'free', granted_role_ids: [ROLE] }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'paid plan when the parent grants the income role only via METADATA is allowed (subscriptions never consume it)',
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 200 },
+    { name: 'chargeable plan when the parent grants the income role only via METADATA is allowed (subscriptions never consume it)',
       parent: product({ type: 'subscription', metadata: { grant_role_id: ROLE } }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE)], expect: 200 },
-    { name: 'income row with amount 0 does not block a paid plan',
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE)], expect: 200 },
+    { name: 'income row with amount 0 does not block a chargeable plan',
       parent: product({ type: 'subscription', granted_role_ids: [ROLE] }),
-      body: { price_cents: 999 }, income: [incomeRow(ROLE, 0)], expect: 200 },
+      body: { price_cents: 999, paypal_plan_id: 'P-1' }, income: [incomeRow(ROLE, 0)], expect: 200 },
     { name: '404 when the parent product is not in this guild',
-      parent: null, body: { price_cents: 999 }, expect: 404 },
+      parent: null, body: { price_cents: 999, paypal_plan_id: 'P-1' }, expect: 404 },
   ];
 
   it.each(POST_CASES)('POST: $name', async ({ parent, body, income, expect: expected }) => {
@@ -814,15 +892,26 @@ describe('MATRIX C — plans POST/PUT', () => {
     expect(fake._writes.plans ?? []).toHaveLength(0);
   });
 
-  it('PUT: 409 when re-pricing a plan 0→paid while the parent grants an income role', async () => {
+  it('PUT: 409 when re-pricing an ALREADY-chargeable plan (has paypal_plan_id) under a conflicted parent', async () => {
+    const fake = useFake({
+      products: { rows: [product({ type: 'subscription', granted_role_ids: [ROLE] })] },
+      plans: { rows: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })] },
+      economy_role_income: { rows: [incomeRow(ROLE)] },
+    });
+    const res = await putPlan({ price_cents: 1500 });
+    expect(res.status).toBe(409);
+    expect(fake._writes.plans ?? []).toHaveLength(0);
+  });
+
+  it('finding #1: PUT re-pricing 0→paid on a plan with NO paypal_plan_id is ALLOWED (still not chargeable — checkout cannot start it)', async () => {
     const fake = useFake({
       products: { rows: [product({ type: 'subscription', granted_role_ids: [ROLE] })] },
       plans: { rows: [plan({ price_cents: 0 })] },
       economy_role_income: { rows: [incomeRow(ROLE)] },
     });
     const res = await putPlan({ price_cents: 1500 });
-    expect(res.status).toBe(409);
-    expect(fake._writes.plans ?? []).toHaveLength(0);
+    expect(res.status).toBe(200);
+    expect(fake._writes.plans?.[0]?.op).toBe('update');
   });
 
   it('PUT: 409 when adding a paypal_plan_id to a zero-price active plan (becomes chargeable)', async () => {
@@ -836,20 +925,20 @@ describe('MATRIX C — plans POST/PUT', () => {
     expect(fake._writes.plans ?? []).toHaveLength(0);
   });
 
-  it('PUT: 409 when re-activating a paid plan under a conflicted parent', async () => {
+  it('PUT: 409 when re-activating a chargeable (paypal_plan_id) plan under a conflicted parent', async () => {
     const fake = useFake({
       products: { rows: [product({ type: 'subscription', granted_role_ids: [ROLE] })] },
-      plans: { rows: [plan({ price_cents: 999, active: false })] },
+      plans: { rows: [plan({ price_cents: 999, paypal_plan_id: 'P-1', active: false })] },
       economy_role_income: { rows: [incomeRow(ROLE)] },
     });
     const res = await putPlan({ active: true });
     expect(res.status).toBe(409);
   });
 
-  it('PUT: DEACTIVATING a paid plan is allowed (effective state opens no purchase path)', async () => {
+  it('PUT: DEACTIVATING a chargeable plan is allowed (effective state opens no purchase path)', async () => {
     const fake = useFake({
       products: { rows: [product({ type: 'subscription', granted_role_ids: [ROLE] })] },
-      plans: { rows: [plan({ price_cents: 999 })] },
+      plans: { rows: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })] },
       economy_role_income: { rows: [incomeRow(ROLE)] },
     });
     const res = await putPlan({ active: false });
@@ -864,7 +953,7 @@ describe('MATRIX C — plans POST/PUT', () => {
         product({ type: 'subscription', granted_role_ids: [] }),
         product({ id: OTHER_PRODUCT, type: 'subscription', granted_role_ids: [ROLE] }),
       ] },
-      plans: { rows: [plan({ price_cents: 999 })] },
+      plans: { rows: [plan({ price_cents: 999, paypal_plan_id: 'P-1' })] },
       economy_role_income: { rows: [incomeRow(ROLE)] },
     });
     const res = await putPlan({ product_id: OTHER_PRODUCT });

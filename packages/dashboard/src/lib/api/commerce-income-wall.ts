@@ -23,10 +23,11 @@
  *
  * Verified against the only checkout path (bot /store → handleBuyButton):
  * one-time checkout charges `products.price_cents`; subscription checkout
- * requires an ACTIVE plan with a `paypal_plan_id` and charges the PAYPAL
- * plan's price (the DB `plans.price_cents` is never consulted at checkout, so
- * it cannot be trusted to prove a plan is free). `free` products are refused
- * at checkout.
+ * requires an ACTIVE plan with a `paypal_plan_id` (`if (!plan.paypal_plan_id)
+ * return`) and charges the PAYPAL plan's price (the DB `plans.price_cents` is
+ * never consulted at checkout, so it cannot be trusted to prove a plan is
+ * free — nor to prove one is chargeable). `free` products are refused at
+ * checkout.
  *
  *   type          | active | price/plan state                        | buyable
  *   ------------- | ------ | --------------------------------------- | -------
@@ -36,14 +37,15 @@
  *   one_time      | true   | price_cents > 0                         | YES
  *   subscription  | false  | *                                       | NO
  *   subscription  | true   | no chargeable plan                      | NO
- *   subscription  | true   | >=1 active plan with price_cents > 0    | YES
- *   subscription  | true   |     ... or with a paypal_plan_id        | YES
+ *   subscription  | true   | active plan w/ price>0 but NO paypal id | NO
+ *   subscription  | true   | >=1 active plan with a paypal_plan_id   | YES
  *
- * Chargeable plan = `active` AND (`price_cents > 0` OR `paypal_plan_id` set).
- * The `paypal_plan_id` arm is deliberate fail-closed: checkout starts a
- * subscription from `paypal_plan_id` alone, and PayPal's plan price — not our
- * DB row — is what gets charged, so a zero-`price_cents` plan with a real
- * PayPal id must still count as a purchase path.
+ * Chargeable plan = `active` AND `paypal_plan_id` set. A `paypal_plan_id` is
+ * REQUIRED, not optional: checkout starts a subscription from
+ * `paypal_plan_id` alone, and PayPal's billing plan — not our DB row — is
+ * what charges, so a plan WITHOUT a PayPal id cannot move real money however
+ * high its `price_cents`, while a zero-`price_cents` plan WITH a real PayPal
+ * id can. `price_cents` therefore does not enter the chargeability decision.
  *
  * ── GRANT VECTORS(product, role) — how a purchase grants a role ────────────
  *
@@ -67,17 +69,24 @@
  *   V3 SOLD METADATA     A PERMANENT V2 role on a product that HAS at least
  *                        one real-money one-time sale (an `orders` row with
  *                        amount_cents > 0, source purchase/NULL, no
- *                        paypal_subscription_id, status other than
- *                        pending/cancelled). Historical buyers hold the role
+ *                        paypal_subscription_id, status NOT in the
+ *                        never-fulfilled set pending/cancelled/pending_review).
+ *                        Historical buyers hold the role
  *                        with no per-user record, so V3 applies regardless of
  *                        the product's CURRENT type/active/price — historical
  *                        grants outlive config edits.
  *   V4 RECORDED HISTORY  `products.metadata.historical_grant_role_ids` —
- *                        written by preserveSoldMetadataGrantHistory() when a
- *                        product edit strips a sold permanent V2 role, so the
- *                        evidence survives the metadata change. Append-only
- *                        through the API (client-supplied metadata cannot
- *                        remove entries).
+ *                        SERVER-DERIVED evidence, written ONLY by
+ *                        preserveSoldMetadataGrantHistory() when a product edit
+ *                        strips a permanent V2 role that an `orders` lookup
+ *                        proves was sold, so the evidence survives the metadata
+ *                        change. NEVER trusted from client metadata: every
+ *                        write path (product POST, product PUT) strips a
+ *                        client-supplied `historical_grant_role_ids` and lets
+ *                        only the server rebuild it from stored history plus
+ *                        verified sales — an owner cannot forge sold-history to
+ *                        block a role, nor omit it to hide one. Effectively
+ *                        append-only, but the append is a server decision.
  *
  * ── CONFIG WALL — when is role R blocked from role-income config? ──────────
  *
@@ -199,9 +208,11 @@ export function metadataGrantVectorApplies(type: string | null | undefined): boo
 
 /**
  * The V4 recorded-history roles: `metadata.historical_grant_role_ids`,
- * validated to non-empty strings. Written only by
- * preserveSoldMetadataGrantHistory() when a sold permanent V2 role is
- * stripped by an edit.
+ * validated to non-empty strings. This value is SERVER-DERIVED — written only
+ * by preserveSoldMetadataGrantHistory() from stored history plus a
+ * sale-verified stripped permanent role — and NEVER trusted from an incoming
+ * client metadata object (see sanitizeClientMetadataHistory / the POST path).
+ * Because owners cannot write it, reading it as compliance evidence is safe.
  */
 export function historicalGrantRoleIds(metadata: unknown): string[] {
   if (!metadata || typeof metadata !== 'object') return [];
@@ -211,15 +222,39 @@ export function historicalGrantRoleIds(metadata: unknown): string[] {
 }
 
 /**
+ * Strip any client-supplied `historical_grant_role_ids` from an incoming
+ * metadata object. This key is SERVER-OWNED compliance evidence: it may only
+ * be set by preserveSoldMetadataGrantHistory() from server-verified sale
+ * history, never accepted from an owner/client payload (an owner could
+ * otherwise forge sold-history and block income config for arbitrary roles).
+ * Every write path that accepts client metadata (product POST, and product
+ * PUT before preserveSoldMetadataGrantHistory reconstitutes the true value)
+ * must run the metadata through this first. Returns a cleaned copy; the
+ * original is not mutated.
+ */
+export function sanitizeClientMetadataHistory(metadata: unknown): Record<string, unknown> {
+  if (!metadata || typeof metadata !== 'object') return {};
+  const clean = { ...(metadata as Record<string, unknown>) };
+  delete clean.historical_grant_role_ids;
+  return clean;
+}
+
+/**
  * Chargeable plan = a plan the checkout can start a real-money subscription
- * from. `active !== false` treats a missing flag as active (fail closed).
- * `paypal_plan_id` alone is enough: checkout only requires the PayPal id and
- * PayPal's plan price — not our `price_cents` — is what gets charged.
+ * from. Verified against the only checkout path (payment-handler.ts
+ * handleBuyButton, subscription branch): it selects the active plan, then
+ * `if (!plan.paypal_plan_id) return` — a plan WITHOUT a `paypal_plan_id`
+ * cannot start a subscription no matter what `price_cents` says, because
+ * subscriptions charge through PayPal's billing plan (identified by
+ * `paypal_plan_id`), never through our DB `price_cents` row. So a
+ * `paypal_plan_id` is REQUIRED, not merely sufficient: a manually-staged plan
+ * with `price_cents > 0` but no PayPal id is not yet a purchase path.
+ * `active !== false` treats a missing flag as active (fail closed).
  */
 export function isChargeablePlan(plan: PlanWallFields): boolean {
   const hasPayPalPlan =
     typeof plan.paypal_plan_id === 'string' && plan.paypal_plan_id.length > 0;
-  return plan.active !== false && ((plan.price_cents ?? 0) > 0 || hasPayPalPlan);
+  return plan.active !== false && hasPayPalPlan;
 }
 
 /**
@@ -277,7 +312,9 @@ export async function findIncomeRoles(
 
 /**
  * Of `productIds` (subscription products), the subset with at least one
- * chargeable plan — see isChargeablePlan(). The SQL OR is a prefilter; the
+ * chargeable plan — see isChargeablePlan(): active AND carrying a
+ * `paypal_plan_id` (the only thing checkout can start a subscription from).
+ * The SQL filters (active, paypal_plan_id not null) are a prefilter; the
  * shared predicate makes the final call in JS.
  */
 export async function findSubscriptionsWithChargeablePlan(
@@ -292,7 +329,7 @@ export async function findSubscriptionsWithChargeablePlan(
     .eq('guild_id', guildId)
     .in('product_id', productIds)
     .eq('active', true)
-    .or('price_cents.gt.0,paypal_plan_id.not.is.null')
+    .not('paypal_plan_id', 'is', null)
     .limit(1000);
   if (error) throw new Error(`plans lookup failed: ${error.message}`);
   return new Set(
@@ -311,10 +348,13 @@ export async function findSubscriptionsWithChargeablePlan(
  *                                  the DB default),
  *   - paypal_subscription_id NULL (subscription orders never consume the
  *                                  metadata vector),
- *   - status other than pending/cancelled (those never fulfilled; a
- *     completed order is written BEFORE fulfillment runs, and refunds do NOT
- *     remove a permanent metadata role — only entitlement roles — so
- *     refunded/disputed still count).
+ *   - status NOT in the NEVER-FULFILLED set (pending / cancelled /
+ *     pending_review). Those never granted the metadata role: an amount
+ *     mismatch parks the order in `pending_review` and handlePaymentCaptured
+ *     returns BEFORE queuing fulfillment, so no buyer ever received the role.
+ *     A genuinely-completed order is written BEFORE fulfillment runs, and
+ *     refunds do NOT remove a permanent metadata role — only entitlement
+ *     roles — so refunded/disputed still count.
  * One existence query per product: the candidate set here is tiny (products
  * whose metadata role overlaps the roles under test).
  */
@@ -332,7 +372,7 @@ export async function findProductsWithRealMoneyOneTimeSales(
       .eq('product_id', productId)
       .gt('amount_cents', 0)
       .is('paypal_subscription_id', null)
-      .not('status', 'in', '("pending","cancelled")')
+      .not('status', 'in', '("pending","cancelled","pending_review")')
       .or('source.eq.purchase,source.is.null')
       .limit(1);
     if (error) throw new Error(`orders lookup failed: ${error.message}`);
@@ -506,15 +546,19 @@ export async function assertIncomeRoleNotCommerceGranted(
  * replaced. Returns the metadata object that MUST be written instead of the
  * caller's, or null when the caller's metadata is already correct.
  *
- * Two invariants, both append-only through the API:
- *   1. PRESERVE: `historical_grant_role_ids` already stored on the product
- *      survives any client-supplied metadata (a client write cannot erase
- *      the compliance record).
- *   2. RECORD: when the edit strips the stored PERMANENT `grant_role_id`
- *      (removed, changed, or made temporary) and the product HAS a
- *      real-money one-time sale, the stripped role is appended — its buyers
- *      hold it with no per-user record, so the role must keep blocking
- *      income config (V4) and stay visible to the collection guard.
+ * The `historical_grant_role_ids` list is rebuilt from SERVER TRUTH ONLY —
+ * never from the incoming client metadata (which could forge sold-history to
+ * block arbitrary roles). It is the union of:
+ *   1. PRESERVE: `historical_grant_role_ids` already STORED on the product
+ *      (server-written on a prior edit — survives any client metadata; a
+ *      client write can neither erase nor extend it), and
+ *   2. RECORD: the stored PERMANENT `grant_role_id` when this edit strips it
+ *      (removed, changed, or made temporary) AND an `orders` lookup proves the
+ *      product had a real-money one-time sale. Those buyers hold the role with
+ *      no per-user record, so it must keep blocking income config (V4) and
+ *      stay visible to the collection guard.
+ * Any `historical_grant_role_ids` the client PUT while supplying metadata is
+ * discarded and replaced by this server-derived list.
  *
  * Throws on lookup errors (fail closed — the caller aborts the update).
  */
@@ -525,15 +569,13 @@ export async function preserveSoldMetadataGrantHistory(
   storedMetadata: unknown,
   nextMetadata: unknown,
 ): Promise<Record<string, unknown> | null> {
-  const next =
-    nextMetadata && typeof nextMetadata === 'object'
-      ? { ...(nextMetadata as Record<string, unknown>) }
-      : {};
+  // Drop any client-supplied history from the incoming metadata: this key is
+  // server-owned and rebuilt below from stored history + verified sales only.
+  const next = sanitizeClientMetadataHistory(nextMetadata);
 
-  const keep = new Set<string>([
-    ...historicalGrantRoleIds(storedMetadata),
-    ...historicalGrantRoleIds(next),
-  ]);
+  // Server truth: history already recorded by a prior server write. The
+  // incoming `next` contributes NOTHING to this set.
+  const keep = new Set<string>(historicalGrantRoleIds(storedMetadata));
 
   const storedPermanentRole = permanentMetadataGrantRoleId(storedMetadata);
   const nextPermanentRole = permanentMetadataGrantRoleId(next);
@@ -548,11 +590,22 @@ export async function preserveSoldMetadataGrantHistory(
     if (sold.has(productId)) keep.add(storedPermanentRole);
   }
 
-  const current = historicalGrantRoleIds(next);
   const wanted = [...keep];
-  const unchanged =
-    current.length === wanted.length && wanted.every((r) => current.includes(r));
-  if (unchanged) return null;
+  // The client-supplied metadata (with its forged history already stripped) is
+  // the current write; if the true history is empty we must still return the
+  // sanitized object whenever it differs from what the caller sent, so a
+  // forged `historical_grant_role_ids` never reaches the DB.
+  const clientSuppliedHistory =
+    !!nextMetadata &&
+    typeof nextMetadata === 'object' &&
+    'historical_grant_role_ids' in (nextMetadata as Record<string, unknown>);
+
+  if (wanted.length === 0) {
+    // No server-derived history to record. Return the sanitized metadata only
+    // if the client tried to smuggle a history key in; otherwise it is already
+    // correct and we can skip the write override.
+    return clientSuppliedHistory ? next : null;
+  }
 
   return { ...next, historical_grant_role_ids: wanted };
 }

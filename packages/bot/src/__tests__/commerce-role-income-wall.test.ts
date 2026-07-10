@@ -197,11 +197,17 @@ describe('COLLECTION GUARD MATRIX — getCommerceHeldRoleIds', () => {
     { name: 'L2: unexpired commerce temp grant excludes',
       tables: { temp_role_grants: { rows: [tempGrant('role-temp')] } },
       candidates: ['role-temp', 'role-free'], held: ['role-temp'] },
-    { name: 'L2: EXPIRED commerce temp grant does not exclude',
+    { name: 'finding #2: an EXPIRED-but-still-present commerce temp grant STILL excludes (row exists ⇒ role not yet removed; the sweeper deletes only after removal succeeds)',
       tables: { temp_role_grants: { rows: [tempGrant('role-temp', { expires_at: PAST })] } },
-      candidates: ['role-temp'], held: [] },
-    { name: 'L2: non-commerce temp grant sources do not exclude',
+      candidates: ['role-temp'], held: ['role-temp'] },
+    { name: 'finding #2: an expired commerce temp grant awaiting removal-retry still excludes (candidate = role the member currently holds)',
+      tables: { temp_role_grants: { rows: [tempGrant('role-temp', { source: 'purchase', expires_at: PAST })] } },
+      candidates: ['role-temp'], held: ['role-temp'] },
+    { name: 'L2: non-commerce temp grant sources do not exclude (even if present)',
       tables: { temp_role_grants: { rows: [tempGrant('role-temp', { source: 'level_reward' })] } },
+      candidates: ['role-temp'], held: [] },
+    { name: 'L2: non-commerce EXPIRED temp grant does not exclude',
+      tables: { temp_role_grants: { rows: [tempGrant('role-temp', { source: 'level_reward', expires_at: PAST })] } },
       candidates: ['role-temp'], held: [] },
 
     // ── L3/V3: permanent metadata grants, judged on sale evidence ──
@@ -230,6 +236,12 @@ describe('COLLECTION GUARD MATRIX — getCommerceHeldRoleIds', () => {
       tables: {
         products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
         orders: { rows: [order({ status: 'pending' }), order({ status: 'cancelled' })] },
+      },
+      candidates: ['role-perma'], held: [] },
+    { name: 'finding #4: only a PENDING_REVIEW order — pays (amount mismatch parked it, fulfillment never ran, role never granted)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ status: 'pending_review' })] },
       },
       candidates: ['role-perma'], held: [] },
     { name: 'V3: a REFUNDED paid order still excludes (refunds never remove a permanent metadata role)',
@@ -409,6 +421,36 @@ describe('handleCollectIncome — compliance wall at collection', () => {
     await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 300);
+  });
+
+  it('finding #2: does NOT pay a still-held role whose commerce temp grant expired but has not been removed yet', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { rows: [incomeRule('role-temp', 400)] },
+      // Row still present (sweeper has not removed the Discord role), expiry past.
+      temp_role_grants: { rows: [tempGrant('role-temp', { expires_at: PAST })] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-temp']);
+
+    await handleEconomyCommand(int as never, mgr as never);
+
+    expect(mgr.creditWallet).not.toHaveBeenCalled();
+    const reply = int.reply.mock.calls[0][0].content as string;
+    expect(reply.toLowerCase()).toContain('store purchase');
+  });
+
+  it('finding #4: pays a metadata role whose product only has a PENDING_REVIEW order (never fulfilled)', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { rows: [incomeRule('role-perma', 275)] },
+      products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+      orders: { rows: [order({ status: 'pending_review' })] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-perma']);
+
+    await handleEconomyCommand(int as never, mgr as never);
+
+    expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 275);
   });
 
   it('pays a normally-earned role in full when no commerce grant is present', async () => {
