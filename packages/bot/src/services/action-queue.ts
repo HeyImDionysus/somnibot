@@ -41,6 +41,7 @@ import {
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import {
   ACTION_QUEUE_LANES,
+  COMMERCE_LANE_ACTIONS,
   LANE_CONCURRENCY,
   LANE_DEPTH_ALERT_SEVERITY,
   LANE_PENDING_DEPTH_THRESHOLDS,
@@ -1291,6 +1292,41 @@ const STALE_PROCESSING_TIMEOUT_SECS = 300; // 5 minutes
 const STALE_RECOVERY_INTERVAL_MS = 60_000; // sweep every minute
 const ACTION_QUEUE_MAX_RETRIES = 5;
 
+// Batch cap shared by the pending sweep and the stale-recovery re-fetch.
+// Rows beyond the cap are NOT lost — they stay 'pending' and are picked up
+// by the next periodic sweep (lane-ordered, commerce first).
+const SWEEP_BATCH_LIMIT = 1000;
+// Ids per .in() query in the recovery re-fetch — keeps the request URL
+// bounded when a flood hands the recovery pass thousands of ids.
+const RECOVERY_REFETCH_CHUNK = 200;
+
+/**
+ * Fetch up to `budget` full queue rows by id, in bounded .in() chunks.
+ * A failed chunk is logged and skipped rather than aborting the pass — its
+ * rows are already back in 'pending', so the next lane-ordered sweep picks
+ * them up; nothing strands.
+ */
+async function fetchRecoveredRows(
+  supabase: SupabaseClient,
+  ids: string[],
+  budget: number,
+): Promise<ActionRow[]> {
+  const capped = ids.slice(0, Math.max(budget, 0));
+  const out: ActionRow[] = [];
+  for (let i = 0; i < capped.length; i += RECOVERY_REFETCH_CHUNK) {
+    const { data, error } = await supabase
+      .from('bot_action_queue')
+      .select('*')
+      .in('id', capped.slice(i, i + RECOVERY_REFETCH_CHUNK));
+    if (error) {
+      log.error('Recovered-row re-fetch failed:', error.message);
+      continue;
+    }
+    out.push(...((data ?? []) as ActionRow[]));
+  }
+  return out;
+}
+
 async function recoverStaleActions(
   guild: Guild,
   supabase: SupabaseClient,
@@ -1378,19 +1414,34 @@ async function recoverStaleActions(
     // fires on INSERT — re-fetch and feed them through processAction so
     // they get picked up immediately on this worker instead of waiting
     // for the next restart.
-    const requeuedIds = rows.filter((r) => !r.was_failed).map((r) => r.id);
-    const { data: rows2 } = await supabase
-      .from('bot_action_queue')
-      .select('*')
-      .in('id', requeuedIds)
-      .limit(1000);
-    // Recovered rows keep their lane (the recovery RPC only touches
-    // status/retry bookkeeping). Re-feed commerce rows first, under the
-    // lane budgets, so a crash-recovered game backlog cannot delay a
-    // crash-recovered commerce job.
-    const recoveredRows = ((rows2 ?? []) as ActionRow[])
-      .filter((r) => r.status === 'pending')
-      .sort((a, b) => (laneOf(a) === laneOf(b) ? 0 : laneOf(a) === 'commerce' ? -1 : 1));
+    //
+    // Lane priority must hold at the QUERY level, not in memory: the RPC
+    // returns EVERY stale row (uncapped), so a game flood can hand back more
+    // ids than the re-fetch budget, and a single unordered capped fetch
+    // could fill entirely with game rows — evicting every commerce row
+    // before an in-memory sort ever saw them. The RPC returns each row's
+    // action, and lane is a pure function of the action type (laneForAction
+    // — the same classification the DB trigger stamps, pinned by a unit
+    // test), so partition the ids by lane FIRST and spend the fetch budget
+    // on commerce ids before any game id. Game rows left over stay
+    // 'pending' and are picked up by the next lane-ordered sweep.
+    const requeued = rows.filter((r) => !r.was_failed);
+    const commerceIds: string[] = [];
+    const gameIds: string[] = [];
+    for (const r of requeued) {
+      (laneForAction(r.action) === 'commerce' ? commerceIds : gameIds).push(r.id);
+    }
+    const commerceRows = await fetchRecoveredRows(supabase, commerceIds, SWEEP_BATCH_LIMIT);
+    const gameRows = await fetchRecoveredRows(
+      supabase,
+      gameIds,
+      SWEEP_BATCH_LIMIT - commerceRows.length,
+    );
+    // Commerce rows first by construction; the sequential awaits preserve
+    // that order under the lane budgets shared with the Realtime path, so a
+    // crash-recovered game backlog cannot delay a crash-recovered commerce
+    // job.
+    const recoveredRows = [...commerceRows, ...gameRows].filter((r) => r.status === 'pending');
     for (const r of recoveredRows) {
       await scheduler.run(laneOf(r), () => processAction(guild, supabase, r, scheduler));
     }
@@ -1430,26 +1481,56 @@ async function sweepPendingActions(
     .or(dueFilter)
     .order('lane', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(1000);
+    .limit(SWEEP_BATCH_LIMIT);
 
   if (error) {
     // Lane ordering needs the lane column (migration 20260710020000). In a
     // manually-migrated environment the bot can briefly run ahead of the
-    // migration — fall back to the legacy created_at-only sweep rather than
-    // stranding the whole backlog (which includes paid fulfillment rows).
-    log.error('Lane-ordered sweep failed, falling back to created_at order:', error.message);
-    ({ data: pending, error } = await supabase
+    // migration — fall back rather than stranding the whole backlog (which
+    // includes paid fulfillment rows). The fallback must uphold the same
+    // query-level guarantee as the lane-ordered sweep: a single
+    // created_at-ordered capped query would let a >LIMIT older game backlog
+    // evict every commerce row from the batch. The lane column is missing
+    // here, but lane is a pure function of the action type, so fetch
+    // commerce rows first via the action list (own capped query) and fill
+    // the remaining batch budget with game rows.
+    log.error('Lane-ordered sweep failed, falling back to action-name lanes:', error.message);
+    const commerceActions = [...COMMERCE_LANE_ACTIONS];
+    const { data: commercePending, error: commerceError } = await supabase
       .from('bot_action_queue')
       .select('*')
       .eq('guild_id', guild.id)
       .eq('status', 'pending')
       .or(dueFilter)
+      .in('action', commerceActions)
       .order('created_at', { ascending: true })
-      .limit(1000));
-    if (error) {
-      log.error('Pending sweep query failed:', error.message);
+      .limit(SWEEP_BATCH_LIMIT);
+    if (commerceError) {
+      log.error('Pending sweep query failed:', commerceError.message);
       return;
     }
+
+    const gameBudget = SWEEP_BATCH_LIMIT - (commercePending?.length ?? 0);
+    let gamePending: typeof commercePending = [];
+    if (gameBudget > 0) {
+      const { data: gameRows, error: gameError } = await supabase
+        .from('bot_action_queue')
+        .select('*')
+        .eq('guild_id', guild.id)
+        .eq('status', 'pending')
+        .or(dueFilter)
+        .not('action', 'in', `(${commerceActions.join(',')})`)
+        .order('created_at', { ascending: true })
+        .limit(gameBudget);
+      if (gameError) {
+        // Commerce rows are already in hand — process them rather than
+        // failing the whole sweep; game rows are retried next sweep.
+        log.error('Game-lane fallback sweep failed:', gameError.message);
+      } else {
+        gamePending = gameRows;
+      }
+    }
+    pending = [...(commercePending ?? []), ...(gamePending ?? [])];
   }
 
   if (pending && pending.length > 0) {

@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { COMMERCE_LANE_ACTIONS } from '../../services/action-queue-lanes.js';
 import { requireSupabase } from './helpers.js';
 
 let supa!: SupabaseClient;
@@ -131,6 +132,76 @@ describe('lane stamp trigger on bot_action_queue', () => {
     } finally {
       await supa.from('bot_action_queue').delete().eq('guild_id', floodGuild);
       await supa.from('guild').delete().eq('id', floodGuild);
+    }
+  });
+});
+
+describe('fallback sweep query shapes (pre-migration lane partition)', () => {
+  it('action-name partition fetches commerce first and the not-in game fill excludes commerce', async () => {
+    // When the lane column is missing (bot running ahead of the migration),
+    // the sweep falls back to partitioning by action name: commerce rows via
+    // .in('action', ...), then the remaining batch budget via
+    // .not('action', 'in', '(...)'). The stale-recovery re-fetch fix relies
+    // on the same idea (lane is a pure function of the action type). Pin
+    // both PostgREST filter shapes against the real API — a filter-syntax
+    // error here would silently strand the fallback path.
+    const fbGuild = `${GUILD_ID}-fallback`;
+    await supa.from('guild').insert({
+      id: fbGuild,
+      name: 'Lanes Fallback Guild',
+      owner_discord_id: '123456789',
+    });
+    try {
+      const gameFlood = Array.from({ length: 3 }, (_, i) => ({
+        guild_id: fbGuild,
+        action: 'config_reload',
+        payload: { i },
+        status: 'pending',
+      }));
+      await supa.from('bot_action_queue').insert(gameFlood);
+      // Inserted last → newest created_at, yet must be fetched by phase 1.
+      await supa.from('bot_action_queue').insert({
+        guild_id: fbGuild,
+        action: 'deliver_receipt',
+        payload: {},
+        status: 'pending',
+      });
+
+      const dueFilter = `next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`;
+      const commerceActions = [...COMMERCE_LANE_ACTIONS];
+
+      // Phase 1 — commerce rows only, capped smaller than the game flood.
+      const { data: commerceRows, error: commerceError } = await supa
+        .from('bot_action_queue')
+        .select('action')
+        .eq('guild_id', fbGuild)
+        .eq('status', 'pending')
+        .or(dueFilter)
+        .in('action', commerceActions)
+        .order('created_at', { ascending: true })
+        .limit(2);
+      expect(commerceError).toBeNull();
+      expect(commerceRows).toHaveLength(1);
+      expect(commerceRows![0]!.action).toBe('deliver_receipt');
+
+      // Phase 2 — game fill excludes every commerce action.
+      const { data: gameRows, error: gameError } = await supa
+        .from('bot_action_queue')
+        .select('action')
+        .eq('guild_id', fbGuild)
+        .eq('status', 'pending')
+        .or(dueFilter)
+        .not('action', 'in', `(${commerceActions.join(',')})`)
+        .order('created_at', { ascending: true })
+        .limit(2);
+      expect(gameError).toBeNull();
+      expect(gameRows).toHaveLength(2);
+      for (const row of gameRows!) {
+        expect(row.action).toBe('config_reload');
+      }
+    } finally {
+      await supa.from('bot_action_queue').delete().eq('guild_id', fbGuild);
+      await supa.from('guild').delete().eq('id', fbGuild);
     }
   });
 });

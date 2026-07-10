@@ -26,8 +26,14 @@
  * - DLQ writes do NOT write the lane column from code — the DB trigger derives
  *   it (deploy-skew safety: a code-side lane write would fail with an
  *   undefined-column error wherever the bot runs ahead of the migration)
- * - sweep falls back to legacy created_at ordering if the lane-ordered query
- *   fails (pre-migration environment), instead of stranding the backlog
+ * - sweep falls back to an action-name lane partition if the lane-ordered
+ *   query fails (pre-migration environment), instead of stranding the
+ *   backlog — and that fallback STILL fetches commerce first at the query
+ *   level, so a >LIMIT game backlog cannot evict commerce from the batch
+ * - stale recovery re-feeds commerce rows first at the QUERY level: the
+ *   recovery RPC is uncapped, so the re-fetch budget is spent on commerce
+ *   ids before any game id (an unordered capped fetch could fill entirely
+ *   with game rows and evict commerce before any in-memory sort ran)
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -234,12 +240,15 @@ describe('LaneScheduler', () => {
 // ── Recording supabase mock with DB-ordering emulation ─────
 
 /**
- * Emulates the DB for sweep queries: applies the requested ORDER BY columns
- * (lane, created_at) and LIMIT to the seeded rowset, exactly like Postgres
- * would. If the implementation does NOT ask for lane ordering, rows come back
- * in created_at order — which starves the newer commerce row behind the
- * older game flood. Head/count queries (per-lane depth checks) are answered
- * from the seeded rows without consuming the sweep batch.
+ * Emulates the DB for sweep/recovery queries: applies the requested filters
+ * (eq, in, not-in), ORDER BY columns (lane, created_at) and LIMIT to the
+ * seeded rowset, exactly like Postgres would. If the implementation does NOT
+ * ask for lane ordering (or an equivalent query-level partition), rows come
+ * back in created_at order — which starves the newer commerce row behind the
+ * older game flood. Each seeded row is served at most once across queries
+ * (emulating rows leaving 'pending' once claimed), so multi-phase fetches
+ * and repeat sweeps behave like the real DB. Head/count queries (per-lane
+ * depth checks) are answered from the seeded rows without consuming rows.
  */
 function makeLaneSupa(seedRows: any[] = [], opts: {
   staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
@@ -251,7 +260,7 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
   const inserts: Record<string, any[]> = {};
   const alertUpdates: any[] = [];
   const failedSweepQueries: string[][] = [];
-  let sweepServed = false;
+  const servedIds = new Set<string>();
   const realtime: { handler: ((payload: { new: any }) => Promise<void>) | null } = { handler: null };
 
   const genericChain = () => {
@@ -282,9 +291,22 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
         chain.select = vi.fn((cols?: string, selectOpts?: { count?: string; head?: boolean }) => {
           const inner = genericChain();
           const eqFilters: Record<string, unknown> = {};
+          const inFilters: Record<string, unknown[]> = {};
+          let notInActions: string[] | null = null;
           const orderCols: string[] = [];
           let limitN = Infinity;
           inner.eq = vi.fn((col: string, val: unknown) => { eqFilters[col] = val; return inner; });
+          inner.in = vi.fn((col: string, vals: unknown[]) => { inFilters[col] = vals; return inner; });
+          inner.not = vi.fn((col: string, op: string, val: string) => {
+            // PostgREST not-in filter: .not('action', 'in', '(a,b,c)')
+            if (col === 'action' && op === 'in') {
+              notInActions = val
+                .replace(/^\(|\)$/g, '')
+                .split(',')
+                .map((s) => s.trim().replace(/^"|"$/g, ''));
+            }
+            return inner;
+          });
           inner.order = vi.fn((col: string) => { orderCols.push(col); return inner; });
           inner.limit = vi.fn((n: number) => { limitN = n; return inner; });
           if (cols === 'retry_count') {
@@ -311,9 +333,14 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
                 error: { message: 'column bot_action_queue.lane does not exist' },
               });
             }
-            if (sweepServed) return resolve({ data: [], error: null });
-            sweepServed = true;
-            let rows = [...seedRows];
+            let rows = seedRows.filter((r) =>
+              !servedIds.has(r.id) &&
+              (eqFilters.guild_id === undefined || r.guild_id === eqFilters.guild_id) &&
+              (eqFilters.status === undefined || r.status === eqFilters.status) &&
+              (inFilters.id === undefined || (inFilters.id as string[]).includes(r.id)) &&
+              (inFilters.action === undefined || (inFilters.action as string[]).includes(r.action)) &&
+              (notInActions === null || !notInActions.includes(r.action)),
+            );
             if (orderCols[0] === 'lane') {
               rows.sort((a, b) =>
                 a.lane === b.lane
@@ -323,6 +350,7 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
               rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
             }
             rows = rows.slice(0, limitN);
+            for (const r of rows) servedIds.add(r.id);
             return resolve({ data: rows, error: null });
           };
           return inner;
@@ -414,12 +442,13 @@ describe('sweep lane priority', () => {
     expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to the legacy created_at sweep when the lane column is missing', async () => {
+  it('falls back to an action-name lane partition when the lane column is missing', async () => {
     // A manually-migrated environment can briefly run bot code ahead of
     // migration 20260710020000. The lane-ordered query then fails outright —
-    // the sweep must fall back to the legacy created_at order (rows still
-    // classified in-process via laneForAction) instead of stranding the
-    // offline backlog, which includes paid fulfillment rows.
+    // the sweep must fall back to partitioning by action name (lane is a
+    // pure function of the action type) instead of stranding the offline
+    // backlog, which includes paid fulfillment rows — and the fallback must
+    // still fetch commerce rows FIRST, at the query level.
     const base = Date.now() - 60_000;
     const rows = [
       {
@@ -445,9 +474,96 @@ describe('sweep lane priority', () => {
 
     // The lane-ordered attempt failed at least once …
     expect(supa.__failedSweepQueries.length).toBeGreaterThan(0);
-    // … and the fallback still processed the entire backlog.
-    expect(supa.__claimOrder).toEqual(['legacy-game-1', 'legacy-commerce-1']);
+    // … and the fallback still processed the entire backlog, commerce first.
+    expect(supa.__claimOrder).toEqual(['legacy-commerce-1', 'legacy-game-1']);
     expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+  });
+
+  it('fallback sweep keeps commerce in the batch when the game backlog exceeds the batch limit', async () => {
+    // Pre-migration environment (no lane column) AND a game backlog deeper
+    // than the 1000-row sweep batch limit. A single created_at-ordered
+    // capped query would fill the entire batch with the older game rows and
+    // evict every commerce row — the action-name partition must keep the
+    // query-level guarantee instead.
+    const base = Date.now() - 120_000;
+    const gameRows = Array.from({ length: 1005 }, (_, i) => ({
+      id: `fb-game-${i}`, guild_id: 'guild-1', action: 'refresh_snapshot',
+      status: 'pending', payload: {},
+      created_at: new Date(base + i).toISOString(), retry_count: 0,
+      // no `lane` — the column does not exist pre-migration
+    }));
+    const commerceRows = Array.from({ length: 2 }, (_, i) => ({
+      id: `fb-commerce-${i}`, guild_id: 'guild-1', action: 'deliver_receipt',
+      status: 'pending',
+      payload: {
+        guild_id: 'guild-1', discord_id: `user-${i}`, order_id: `order-${i}`,
+        order_number: `ORD-80${i}`, product_name: 'VIP Pass',
+        amount_cents: 999, currency: 'USD',
+      },
+      // Newest rows — worst case for created_at ordering.
+      created_at: new Date(base + 110_000 + i).toISOString(), retry_count: 0,
+    }));
+    const supa = makeLaneSupa([...gameRows, ...commerceRows], { laneColumnMissing: true });
+
+    await startActionQueueListener(makeGuild(), supa);
+
+    expect(supa.__failedSweepQueries.length).toBeGreaterThan(0);
+    // Every commerce row is in the processed set, ahead of all game rows.
+    expect(supa.__claimOrder.slice(0, 2)).toEqual(['fb-commerce-0', 'fb-commerce-1']);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(2);
+    // The batch still holds its budget: 2 commerce + 998 game. The 7
+    // leftover game rows stay 'pending' for later sweeps (the fire-and-
+    // forget post-subscribe sweep may or may not have drained them yet).
+    expect(supa.__claimOrder.length).toBeGreaterThanOrEqual(1000);
+    expect(new Set(supa.__claimOrder).size).toBe(supa.__claimOrder.length); // no double-claims
+  });
+});
+
+// ── Starvation resistance: stale recovery re-fetch ─────────
+
+describe('stale recovery lane priority', () => {
+  it('re-feeds recovered commerce rows even when a game flood exceeds the re-fetch budget', async () => {
+    // The recovery RPC is uncapped: a crash during a game flood can hand
+    // back MORE re-queued ids than the 1000-row re-fetch budget. With a
+    // single unordered capped fetch, game rows could fill the whole batch
+    // and evict every commerce row before any in-memory prioritization ran.
+    // The budget must be spent on commerce ids FIRST, at the query level.
+    const base = Date.now() - 120_000;
+    const gameRows = Array.from({ length: 1050 }, (_, i) => ({
+      id: `stale-game-${i}`, guild_id: 'guild-1', action: 'refresh_snapshot',
+      lane: 'game', status: 'pending', payload: {},
+      created_at: new Date(base + i).toISOString(), retry_count: 1,
+    }));
+    const commerceRows = Array.from({ length: 3 }, (_, i) => ({
+      id: `stale-commerce-${i}`, guild_id: 'guild-1', action: 'deliver_receipt',
+      lane: 'commerce', status: 'pending',
+      payload: {
+        guild_id: 'guild-1', discord_id: `user-${i}`, order_id: `order-${i}`,
+        order_number: `ORD-90${i}`, product_name: 'VIP Pass',
+        amount_cents: 999, currency: 'USD',
+      },
+      // Newest rows — worst case for created_at ordering.
+      created_at: new Date(base + 110_000 + i).toISOString(), retry_count: 1,
+    }));
+    // Worst case: the RPC returns every game stub BEFORE the commerce stubs.
+    const staleFailed = [
+      ...gameRows.map((r) => ({ id: r.id, action: r.action, was_failed: false })),
+      ...commerceRows.map((r) => ({ id: r.id, action: r.action, was_failed: false })),
+    ];
+    const supa = makeLaneSupa([...gameRows, ...commerceRows], { staleFailed });
+
+    await startActionQueueListener(makeGuild(), supa);
+
+    // Every commerce row survives the cap and is processed FIRST.
+    expect(supa.__claimOrder.slice(0, 3).sort()).toEqual(
+      commerceRows.map((r) => r.id).sort(),
+    );
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(3);
+    // The re-fetch budget still bounds the recovery pass (3 commerce + 997
+    // game); the 53 leftover game rows are NOT lost — the lane-ordered
+    // startup sweep in the same listener start picks them up.
+    expect(supa.__claimOrder).toHaveLength(1053);
+    expect(new Set(supa.__claimOrder).size).toBe(1053); // each row claimed exactly once
   });
 });
 
