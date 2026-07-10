@@ -242,11 +242,15 @@ export async function handleBuyButton(
       ],
     });
   } else {
-    // Subscription — fetch plan
+    // Subscription — fetch plan. MUST be guild-scoped: plan rows carry their
+    // creator's guild_id, and without this filter a zero-price active plan
+    // injected by another guild (pointing at this product_id with an
+    // attacker-controlled paypal_plan_id) would sort first and hijack checkout.
     const { data: plan } = await supabase
       .from('plans')
       .select('*')
       .eq('product_id', productId)
+      .eq('guild_id', guildId)
       .eq('active', true)
       .order('price_cents', { ascending: true })
       .limit(1)

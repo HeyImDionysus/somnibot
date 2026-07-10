@@ -7,12 +7,45 @@
  * DELETE: Delete a plan by ID
  */
 import { NextRequest, NextResponse } from 'next/server';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError } from '@/lib/api/response';
+import { dbError, apiError } from '@/lib/api/response';
+
+/**
+ * Verify the target product exists AND belongs to the caller's guild.
+ *
+ * Every plan write that binds a plan to a product (POST create, PUT
+ * product_id change) must pass this check regardless of the plan's
+ * price/active state. The plan row always carries the CALLER'S guild_id but
+ * product_id comes straight from the request body — without this check, a
+ * plan created in guild B can attach to guild A's product, and the bot's
+ * checkout (cheapest active plan for the product) would happily select it.
+ *
+ * Returns null when the write may proceed, or a 404/500 error response.
+ */
+async function requireGuildProduct(
+  supabase: SupabaseClient,
+  guildId: string,
+  productId: string,
+): Promise<NextResponse | null> {
+  const { data: product, error } = await supabase
+    .from('products')
+    .select('id')
+    .eq('id', productId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+  if (error) {
+    return dbError(error, 'store/plans');
+  }
+  if (!product) {
+    return apiError('Product not found for this guild', 404);
+  }
+  return null;
+}
 
 
 export async function GET(req: NextRequest) {
@@ -76,6 +109,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Cross-guild injection guard: ALWAYS verify product ownership before
+  // insert — for zero-price and inactive plans too, not only chargeable ones.
+  const notOwned = await requireGuildProduct(supabase, guildId, product_id);
+  if (notOwned) return notOwned;
+
   const { data, error } = await supabase
     .from('plans')
     .insert({
@@ -118,6 +156,13 @@ export async function PUT(req: NextRequest) {
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing plan id' }, { status: 400 });
+  }
+
+  // Cross-guild injection guard on re-parenting: changing product_id must
+  // never point this guild's plan at another guild's product.
+  if (updates.product_id) {
+    const notOwned = await requireGuildProduct(supabase, guildId, updates.product_id);
+    if (notOwned) return notOwned;
   }
 
   const { data, error } = await supabase
