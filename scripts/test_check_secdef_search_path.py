@@ -328,9 +328,10 @@ AS $$ BEGIN PERFORM 1; END; $$;
         )
         with tmp:
             # Two different signatures -> two effective defs; only f(int) flags.
+            # The signature is canonicalized: INT -> integer (see finding #5).
             self.assertEqual(n_funcs, 2)
             self.assertEqual(len(violations), 1)
-            self.assertEqual(violations[0].function.signature, ("int",))
+            self.assertEqual(violations[0].function.signature, ("integer",))
 
     def test_same_signature_latest_wins(self):
         sql_old = """\
@@ -864,6 +865,348 @@ $$;
             self.assertEqual(
                 tables, ["economy_transactions", "economy_wallets"]
             )
+
+
+# ===========================================================================
+# Second codex round — parser-correctness robustness (findings 1-5).
+# ===========================================================================
+
+
+def _ext_body(body_sql, search_path="''", secdef=True):
+    """Audit a single SECDEF+empty function with the given body; return the
+    ext-function symbols flagged."""
+    sd = "SECURITY DEFINER" if secdef else ""
+    sql = f"""\
+CREATE OR REPLACE FUNCTION f(p INT)
+RETURNS void LANGUAGE plpgsql
+{sd}
+SET search_path = {search_path}
+AS $$
+BEGIN
+{body_sql}
+END;
+$$;
+"""
+    violations, _, _, tmp = _audit_sql(("20260101000000_f.sql", sql))
+    with tmp:
+        return [x.symbol for x in violations if x.kind == "extension-function"]
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 (:232) — the -- line-comment stripper must respect string literals.
+# A `--` inside a single-quoted literal is DATA, not a comment start; treating
+# it as one truncates the literal and can blank the closing quote / dollar
+# delimiter, skipping a function or blanking a live ext call after it.
+# ---------------------------------------------------------------------------
+class TestLineCommentRespectsStringLiterals(unittest.TestCase):
+    def test_dashes_in_string_do_not_truncate_following_call(self):
+        # 'a -- b' is a string; the real gen_random_bytes AFTER it must survive.
+        v = _ext_body(
+            "  RAISE NOTICE 'a -- b';\n"
+            "  PERFORM gen_random_bytes(16);"
+        )
+        self.assertEqual(v, ["gen_random_bytes"])
+
+    def test_dashes_in_string_do_not_blank_closing_delimiter(self):
+        # The whole body on one line: a naive find('--') would blank from the
+        # dashes to EOL, eating the closing '; $$;' and dropping the function.
+        sql = (
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $$ BEGIN RAISE NOTICE 'x -- y'; PERFORM gen_random_bytes(1); END; $$;"
+        )
+        violations, _, _, tmp = _audit_sql(("20260101000000_f.sql", sql))
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+        self.assertEqual(syms, ["gen_random_bytes"])
+
+    def test_real_line_comment_still_stripped_inside_body(self):
+        # A genuine `--` comment inside the dollar body is still a comment: prose
+        # mentioning the function must not be flagged.
+        v = _ext_body(
+            "  -- gen_random_bytes() here would fail; we qualify below\n"
+            "  PERFORM extensions.gen_random_bytes(4);"
+        )
+        self.assertEqual(v, [])
+
+    def test_apostrophe_in_comment_does_not_swallow_rest_of_file(self):
+        # An apostrophe inside a -- comment must not flip string state and
+        # suppress later stripping / scanning.
+        sql = (
+            "-- author's note about gen_random_bytes\n"
+            "CREATE OR REPLACE FUNCTION f(p INT) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;"
+        )
+        violations, _, _, tmp = _audit_sql(("20260101000000_f.sql", sql))
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+        self.assertEqual(syms, ["gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 (:580) — block-commented function DDL must NOT be replayed.
+# A commented-out CREATE/DROP/ALTER FUNCTION could otherwise overwrite or
+# remove a real (buggy) definition and make the gate pass wrongly.
+# ---------------------------------------------------------------------------
+class TestBlockCommentedDDLNotReplayed(unittest.TestCase):
+    def test_block_commented_clean_create_does_not_overwrite_bug(self):
+        sql = """\
+CREATE OR REPLACE FUNCTION g(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+/*
+CREATE OR REPLACE FUNCTION g(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;
+*/
+"""
+        violations, n_funcs, _, tmp = _audit_sql(("20260101000000_g.sql", sql))
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(n_funcs, 1)
+            self.assertEqual(syms, ["gen_random_bytes"])
+
+    def test_block_commented_drop_does_not_remove_bug(self):
+        sql = """\
+CREATE OR REPLACE FUNCTION g(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+/* DROP FUNCTION g(int); */
+"""
+        violations, n_funcs, _, tmp = _audit_sql(("20260101000000_g.sql", sql))
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(n_funcs, 1)
+            self.assertEqual(syms, ["gen_random_bytes"])
+
+    def test_real_drop_after_block_comment_still_applies(self):
+        # A real (uncommented) DROP still works when a block comment precedes it.
+        sql = """\
+CREATE OR REPLACE FUNCTION g(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+/* note: dropping the helper below */
+DROP FUNCTION g(int);
+"""
+        violations, n_funcs, _, tmp = _audit_sql(("20260101000000_g.sql", sql))
+        with tmp:
+            self.assertEqual(n_funcs, 0)
+            self.assertEqual(violations, [])
+
+    def test_create_inside_string_literal_not_replayed(self):
+        # DDL text sitting inside a string literal is data, not an event.
+        sql = """\
+CREATE OR REPLACE FUNCTION g(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+INSERT INTO public.audit_log (note)
+VALUES ('DROP FUNCTION g(int); -- historical');
+"""
+        violations, n_funcs, _, tmp = _audit_sql(("20260101000000_g.sql", sql))
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+            self.assertEqual(n_funcs, 1)
+            self.assertEqual(syms, ["gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 (:463) — dynamic SQL (EXECUTE '...') is SCANNED, not blanked.
+# An unqualified ext call in dynamic SQL fails at runtime the same way.
+# ---------------------------------------------------------------------------
+class TestDynamicSQLScanning(unittest.TestCase):
+    def test_execute_literal_dynamic_sql_is_scanned(self):
+        v = _ext_body("  EXECUTE 'SELECT gen_random_bytes(1)';")
+        self.assertEqual(v, ["gen_random_bytes"])
+
+    def test_execute_qualified_dynamic_sql_is_clean(self):
+        v = _ext_body("  EXECUTE 'SELECT extensions.gen_random_bytes(1)';")
+        self.assertEqual(v, [])
+
+    def test_execute_format_dynamic_sql_is_scanned(self):
+        v = _ext_body("  EXECUTE format('SELECT gen_random_bytes(%s)', 1);")
+        self.assertEqual(v, ["gen_random_bytes"])
+
+    def test_non_execute_string_still_not_flagged(self):
+        # A diagnostic that merely mentions the name is not dynamic SQL.
+        v = _ext_body("  RAISE NOTICE 'gen_random_bytes(1)';")
+        self.assertEqual(v, [])
+
+    def test_nested_quoted_data_inside_dynamic_sql_not_flagged(self):
+        # The ext-fn name here is nested-quoted DATA inside the dynamic SQL, not
+        # an executable call, so it must NOT be flagged.
+        v = _ext_body("  EXECUTE 'RAISE NOTICE ''gen_random_bytes(1)''';")
+        self.assertEqual(v, [])
+
+    def test_execute_then_real_inline_call_both_paths(self):
+        # A dynamic-SQL call AND a following inline call are both caught. Inside
+        # the dynamic SQL, `digest(...)` is a real unqualified call (its ''x''
+        # args are nested-quoted data), so it is flagged too.
+        v = _ext_body(
+            "  EXECUTE 'SELECT digest(''x'', ''sha256'')';\n"
+            "  PERFORM gen_random_bytes(1);"
+        )
+        self.assertEqual(sorted(v), ["digest", "gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Finding #4 (:553) — ALTER that RELAXES options must CLEAR tracked flags.
+# RESET search_path / SET search_path = <nonempty> / SECURITY INVOKER move a
+# function out of scope; a stale True flag would wrongly keep flagging it.
+# ---------------------------------------------------------------------------
+class TestAlterRelaxesClearsFlags(unittest.TestCase):
+    BUGGY = """\
+CREATE OR REPLACE FUNCTION f(a INT)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;
+"""
+
+    def _after_alter(self, alter_sql):
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_c.sql", self.BUGGY),
+            ("20260102000000_alter.sql", alter_sql),
+        )
+        with tmp:
+            return [v.symbol for v in violations if v.kind == "extension-function"]
+
+    def test_reset_search_path_clears_empty(self):
+        self.assertEqual(
+            self._after_alter("ALTER FUNCTION f(INT) RESET search_path;\n"), []
+        )
+
+    def test_reset_all_clears_empty(self):
+        self.assertEqual(
+            self._after_alter("ALTER FUNCTION f(INT) RESET ALL;\n"), []
+        )
+
+    def test_set_search_path_nonempty_clears_empty(self):
+        self.assertEqual(
+            self._after_alter("ALTER FUNCTION f(INT) SET search_path = public;\n"),
+            [],
+        )
+
+    def test_security_invoker_clears_secdef(self):
+        self.assertEqual(
+            self._after_alter("ALTER FUNCTION f(INT) SECURITY INVOKER;\n"), []
+        )
+
+    def test_unrelated_alter_leaves_flag_set(self):
+        # An ALTER that touches nothing this gate tracks must NOT clear the bug.
+        self.assertEqual(
+            self._after_alter("ALTER FUNCTION f(INT) OWNER TO postgres;\n"),
+            ["gen_random_bytes"],
+        )
+
+    def test_relax_then_reharden_reflags(self):
+        # Relaxed by one migration, re-pinned to '' by a later one -> flagged.
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_c.sql", self.BUGGY),
+            ("20260102000000_relax.sql", "ALTER FUNCTION f(INT) RESET search_path;\n"),
+            ("20260103000000_reharden.sql", "ALTER FUNCTION f(INT) SET search_path = '';\n"),
+        )
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+        self.assertEqual(syms, ["gen_random_bytes"])
+
+
+# ---------------------------------------------------------------------------
+# Finding #5 (:362) — canonicalize argument types before keying functions so
+# the SAME Postgres identity is not tracked as two different functions.
+# ---------------------------------------------------------------------------
+class TestArgTypeCanonicalization(unittest.TestCase):
+    def _canon(self, args):
+        return checker._normalize_signature(args)
+
+    def test_int_aliases_canonicalize_to_integer(self):
+        self.assertEqual(self._canon("a int"), ("integer",))
+        self.assertEqual(self._canon("a int4"), ("integer",))
+        self.assertEqual(self._canon("integer"), ("integer",))
+        self.assertEqual(self._canon("int"), ("integer",))
+
+    def test_bigint_smallint_aliases(self):
+        self.assertEqual(self._canon("a int8"), ("bigint",))
+        self.assertEqual(self._canon("a int2"), ("smallint",))
+
+    def test_varchar_canonicalizes_and_typmod_dropped(self):
+        self.assertEqual(self._canon("a varchar(255)"), ("character varying",))
+        self.assertEqual(self._canon("character varying"), ("character varying",))
+
+    def test_numeric_typmod_dropped(self):
+        self.assertEqual(self._canon("a numeric(10, 2)"), ("numeric",))
+        self.assertEqual(self._canon("decimal"), ("numeric",))
+
+    def test_double_precision_with_and_without_name_match(self):
+        # The crux: a two-word type must not have its first word mistaken for a
+        # parameter name.
+        self.assertEqual(self._canon("double precision"), ("double precision",))
+        self.assertEqual(self._canon("a double precision"), ("double precision",))
+        self.assertEqual(self._canon("float8"), ("double precision",))
+
+    def test_timestamp_with_time_zone_variants(self):
+        self.assertEqual(
+            self._canon("timestamp with time zone"), ("timestamp with time zone",)
+        )
+        self.assertEqual(
+            self._canon("ts timestamp with time zone"),
+            ("timestamp with time zone",),
+        )
+        self.assertEqual(self._canon("timestamptz"), ("timestamp with time zone",))
+
+    def test_array_types_canonicalize(self):
+        self.assertEqual(self._canon("a int[]"), ("integer[]",))
+        self.assertEqual(self._canon("a text array"), ("text[]",))
+
+    def test_same_identity_int_vs_integer_latest_wins(self):
+        # int and integer name the same function; the later (fixed) def wins.
+        sql_bug = (
+            "CREATE OR REPLACE FUNCTION f(a int) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;"
+        )
+        sql_fix = (
+            "CREATE OR REPLACE FUNCTION f(a integer) RETURNS void LANGUAGE plpgsql\n"
+            "SECURITY DEFINER SET search_path = ''\n"
+            "AS $$ BEGIN PERFORM extensions.gen_random_bytes(1); END; $$;"
+        )
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_a.sql", sql_bug),
+            ("20260102000000_b.sql", sql_fix),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 1, "int/integer are one effective identity")
+            self.assertEqual(violations, [])
+
+    def test_drop_with_canonical_type_matches_alias_create(self):
+        # CREATE f(double precision) dropped by DROP f(float8) — same identity.
+        create = (
+            "CREATE OR REPLACE FUNCTION f(a double precision) RETURNS void\n"
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;"
+        )
+        drop = "DROP FUNCTION f(float8);\n"
+        violations, n_funcs, _, tmp = _audit_sql(
+            ("20260101000000_a.sql", create),
+            ("20260102000000_b.sql", drop),
+        )
+        with tmp:
+            self.assertEqual(n_funcs, 0, "float8 == double precision -> dropped")
+            self.assertEqual(violations, [])
+
+    def test_alter_with_alias_type_matches_create(self):
+        # ALTER f(varchar) hardening a CREATE f(character varying).
+        create = (
+            "CREATE OR REPLACE FUNCTION f(a character varying) RETURNS void\n"
+            "LANGUAGE plpgsql SECURITY DEFINER\n"
+            "AS $$ BEGIN PERFORM gen_random_bytes(1); END; $$;"
+        )
+        alter = "ALTER FUNCTION f(varchar) SET search_path = '';\n"
+        violations, _, _, tmp = _audit_sql(
+            ("20260101000000_a.sql", create),
+            ("20260102000000_b.sql", alter),
+        )
+        with tmp:
+            syms = [v.symbol for v in violations if v.kind == "extension-function"]
+        self.assertEqual(syms, ["gen_random_bytes"])
 
 
 if __name__ == "__main__":

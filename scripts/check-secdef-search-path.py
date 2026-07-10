@@ -46,13 +46,17 @@ each function is evaluated, so a historical buggy definition that a later
 migration fixes, drops, or hardens produces no noise on a clean main — but
 reverting that fix immediately re-flags the bug.
 
-Non-code regions are ignored before matching: -- line comments, /* */ block
-comments, and single-quoted string literals are blanked (positions preserved),
-so a name that appears only in data (`'Buy something from the shop'`) or a
-diagnostic (`RAISE NOTICE 'gen_random_bytes(16)'`) is never mistaken for a live
-reference. Both dollar-quoted (`$$`/`$tag$`) and single-quoted (`AS '...'`)
-function bodies are parsed, and option clauses are read whether they precede or
-trail the body.
+Non-code regions are ignored before matching: -- line comments (honoring string
+literals, so a `--` inside `'...'` is data not a comment), /* */ block comments,
+and non-executable single-quoted string literals are blanked (positions
+preserved), so a name that appears only in data (`'Buy something from the shop'`)
+or a diagnostic (`RAISE NOTICE 'gen_random_bytes(16)'`) is never mistaken for a
+live reference. Dynamic SQL is the exception: an `EXECUTE '... gen_random_bytes(
+...'` string runs under the SAME empty search_path and IS scanned (nested `''`
+data inside it is still blanked). Both dollar-quoted (`$$`/`$tag$`) and
+single-quoted (`AS '...'`) function bodies are parsed, and option clauses are
+read whether they precede or trail the body. Block-commented and string-embedded
+CREATE/DROP/ALTER FUNCTION statements are NOT replayed into effective state.
 
 Exit code 0 = clean, 1 = gating violations found, 2 = usage/parse error.
 """
@@ -226,35 +230,68 @@ def _strip_line_comments(sql):
     "gen_random_bytes without extensions. prefix would fail") must not trip the
     scanner. Newlines and character count are preserved so reported line numbers
     stay accurate.
+
+    A `--` is only a comment when it is NOT inside a single-quoted string
+    literal. `RAISE NOTICE '--';` and `'Buy -- now'` contain dashes that are
+    string DATA, not a comment: a naive per-line `find("--")` would truncate at
+    those dashes, blanking the literal's closing quote (or a dollar delimiter
+    that follows on the same physical line), which corrupts body extraction and
+    can skip a function or blank a live `gen_random_bytes(...)` after it.
+
+    Inside a dollar-quoted plpgsql body, `--` IS still a comment — dollar quoting
+    delimits the body but the body is code — so we do NOT suppress `--`
+    stripping there; we only need to keep tracking single-quote literals (where
+    `'...'` inside the body is a plpgsql string in which `--` is data). Tracking
+    single-quote state alone (with `''` escapes) handles all of this correctly.
     """
-    out = []
-    for line in sql.split("\n"):
-        idx = line.find("--")
-        if idx == -1:
-            out.append(line)
-        else:
-            out.append(line[:idx] + " " * (len(line) - idx))
-    return "\n".join(out)
+    out = list(sql)
+    i = 0
+    n = len(sql)
+    in_string = False  # inside a single-quoted '...' literal
+    while i < n:
+        ch = sql[i]
+        if in_string:
+            if ch == "'":
+                if i + 1 < n and sql[i + 1] == "'":
+                    i += 2  # doubled '' escape — stay inside the literal
+                    continue
+                in_string = False
+            i += 1
+            continue
+        if ch == "'":
+            in_string = True
+            i += 1
+            continue
+        if ch == "\n":
+            in_string = False  # a runaway quote cannot swallow later lines
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            # Blank from here to end of line (positions/newlines preserved).
+            j = i
+            while j < n and sql[j] != "\n":
+                out[j] = " "
+                j += 1
+            i = j
+            continue
+        i += 1
+    return "".join(out)
 
 
-def _blank_strings_and_block_comments(text):
-    """Replace single-quoted string literals and /* */ block comments with
-    spaces, preserving length and newlines so line/column positions are exact.
+def _blank_noncode_for_statements(text):
+    """Blank strings, block comments AND dollar-quoted bodies, preserving
+    positions, so top-level statement scanning (CREATE/DROP/ALTER FUNCTION event
+    collection) sees only real code.
 
-    Names mentioned inside data (`'Buy something from the shop'`) or diagnostics
-    (`RAISE NOTICE 'gen_random_bytes(16)'`) or block comments
-    (`/* gen_random_bytes(16) */`) are NOT executable references and must not be
-    matched by the table / extension-function scanners. Blanking them before
-    scanning eliminates that entire false-positive class.
-
-    Postgres string-literal rules honored:
-      * a doubled quote ('') inside a literal is an escaped quote, not a
-        terminator;
-      * dollar-quoted regions are NOT treated as strings here — this runs on a
-        function body that has already been extracted between its dollar tags,
-        and any *inner* dollar-quoted block is left intact (dollar-quoted text
-        rarely holds a false ref, and treating it as a string could hide a real
-        `EXECUTE $q$ ... gen_random_bytes( ... $q$` call).
+    Event collection must NOT peer into a function body: a `CREATE FUNCTION` that
+    appears there is either dynamic-SQL DDL (out of scope for effective-state
+    replay) or plain text, and leaving the body intact risks a stray quote there
+    mispairing and corrupting a following real DDL statement. Blanking the whole
+    body — matching opening dollar tag to its identical closing tag — removes
+    that hazard while keeping line/column numbers exact (so `create` events
+    still line up with `parse_functions`). The per-body scanner
+    (`_prepare_body_for_scan`) is the counterpart that DOES look inside bodies
+    and dynamic SQL for unqualified references.
     """
     out = list(text)
     i = 0
@@ -266,12 +303,10 @@ def _blank_strings_and_block_comments(text):
             while j < n:
                 if text[j] == "'":
                     if j + 1 < n and text[j + 1] == "'":
-                        j += 2  # escaped '' — stay inside the literal
+                        j += 2
                         continue
                     break
                 j += 1
-            # Blank the literal contents (keep the quote chars themselves so a
-            # bare '' empty-search_path marker elsewhere is unaffected).
             for k in range(i + 1, min(j, n)):
                 if out[k] != "\n":
                     out[k] = " "
@@ -286,6 +321,104 @@ def _blank_strings_and_block_comments(text):
                 if out[k] != "\n":
                     out[k] = " "
             i = end
+            continue
+        if ch == "$":
+            m = _DOLLAR_TAG_RE.match(text, i)
+            if m is not None:
+                tag = m.group(0)
+                close = text.find(tag, i + len(tag))
+                if close == -1:
+                    end = n  # unterminated body — blank to EOF
+                else:
+                    end = close + len(tag)
+                for k in range(i, end):
+                    if out[k] != "\n":
+                        out[k] = " "
+                i = end
+                continue
+        i += 1
+    return "".join(out)
+
+
+# A single-quoted string literal is dynamic SQL (executable) when it is the
+# operand of EXECUTE — either `EXECUTE '...'` or `EXECUTE format('...', ...)`.
+# Such a string runs under the SAME empty search_path, so an unqualified
+# `gen_random_bytes(` inside it fails at runtime exactly like inline code and
+# MUST be scanned, not blanked. `\s*` allows the `format(` wrapper.
+_EXECUTE_LEADIN_RE = re.compile(r"\bEXECUTE\s+(?:format\s*\(\s*)?$", re.IGNORECASE)
+
+
+def _prepare_body_for_scan(body):
+    """Prepare a function body for the extension/table scanners.
+
+    Blanks block comments and NON-executable string literals (data,
+    diagnostics), but PRESERVES the code inside dynamic-SQL strings that are the
+    operand of `EXECUTE` / `EXECUTE format(...)` so an unqualified extension call
+    hidden in dynamic SQL is still caught. Positions (line/column) are preserved
+    throughout so reported line numbers stay accurate.
+
+    False-positive safety inside dynamic SQL: a nested single-quoted literal
+    (written `''`-doubled inside the outer string) is data within the dynamic
+    SQL — e.g. `EXECUTE 'RAISE NOTICE ''gen_random_bytes(1)'''` — so its
+    contents are blanked too. Only bare (unquoted) references in the dynamic SQL
+    remain, which is precisely the runtime-failing form.
+    """
+    out = list(body)
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "/" and i + 1 < n and body[i + 1] == "*":
+            j = i + 2
+            while j < n and not (body[j] == "*" and j + 1 < n and body[j + 1] == "/"):
+                j += 1
+            end = min(j + 2, n)
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+            i = end
+            continue
+        if ch == "'":
+            # Find the matching close quote, honoring '' escapes.
+            j = i + 1
+            while j < n:
+                if body[j] == "'":
+                    if j + 1 < n and body[j + 1] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            # Is this string the operand of EXECUTE [format(]?  Look at the
+            # code immediately before the opening quote.
+            is_dynamic = _EXECUTE_LEADIN_RE.search(body[:i]) is not None
+            if is_dynamic:
+                # Keep code, but blank NESTED '' data inside the dynamic SQL.
+                k = i + 1
+                while k < min(j, n):
+                    if body[k] == "'" and k + 1 < min(j, n) and body[k + 1] == "'":
+                        # A nested quote pair: blank until the closing pair.
+                        out[k] = " "
+                        out[k + 1] = " "
+                        p = k + 2
+                        while p < min(j, n):
+                            if body[p] == "'" and p + 1 < min(j, n) and body[p + 1] == "'":
+                                out[p] = " "
+                                out[p + 1] = " "
+                                k = p + 2
+                                break
+                            if out[p] != "\n":
+                                out[p] = " "
+                            p += 1
+                        else:
+                            k = p
+                        continue
+                    k += 1
+            else:
+                # Non-executable literal — blank contents (keep quotes).
+                for k in range(i + 1, min(j, n)):
+                    if out[k] != "\n":
+                        out[k] = " "
+            i = j + 1
             continue
         i += 1
     return "".join(out)
@@ -321,11 +454,109 @@ _ALTER_FUNC_RE = re.compile(
 )
 
 
+# Canonical spellings for the built-in types whose common aliases / short forms
+# would otherwise make the SAME function signature look like two. Postgres treats
+# these as identical for function identity, so we normalize them to one form.
+# (Keys and values are lowercase, whitespace-collapsed.)
+_TYPE_ALIASES = {
+    "int": "integer",
+    "int4": "integer",
+    "int2": "smallint",
+    "int8": "bigint",
+    "serial": "integer",  # domains over int, but callers overload on the int
+    "bigserial": "bigint",
+    "smallserial": "smallint",
+    "bool": "boolean",
+    "float4": "real",
+    "float8": "double precision",
+    "float": "double precision",
+    "double": "double precision",  # bare "double" is only ever "double precision"
+    "decimal": "numeric",
+    "varchar": "character varying",
+    "char": "character",
+    "bpchar": "character",
+    "varbit": "bit varying",
+    "timetz": "time with time zone",
+    "timestamptz": "timestamp with time zone",
+}
+
+# Multi-word canonical type names, longest first, so a param name preceding one
+# (`p timestamp with time zone`) is separable from the bare type
+# (`timestamp with time zone`). Used to decide whether a leading token is a
+# parameter name or part of the type.
+_MULTIWORD_TYPES = (
+    "timestamp with time zone",
+    "timestamp without time zone",
+    "time with time zone",
+    "time without time zone",
+    "double precision",
+    "character varying",
+    "bit varying",
+)
+
+
+def _canonical_type(type_str):
+    """Canonicalize a single type expression to a stable comparable form.
+
+    Collapses whitespace, lowercases, drops typmods (`numeric(10,2)`->`numeric`,
+    `varchar(255)`->`character varying`), normalizes array suffixes, and maps
+    known aliases (`int4`->`integer`). Postgres ignores typmod and treats these
+    aliases as one type for function identity, so this makes `f(int)` and
+    `f(integer)` (and `f(varchar(10))` / `f(character varying)`) one key.
+    """
+    t = type_str.strip().lower()
+    # Normalize array markers: `int[]`, `int array` -> canonical base + "[]".
+    array = False
+    t = re.sub(r"\s+array\b", "[]", t)
+    while t.endswith("[]"):
+        array = True
+        t = t[:-2].strip()
+    # Drop a trailing typmod like (255) or (10, 2) — not part of identity.
+    t = re.sub(r"\s*\([^)]*\)\s*$", "", t).strip()
+    t = re.sub(r"\s+", " ", t)
+    t = _TYPE_ALIASES.get(t, t)
+    if array:
+        t += "[]"
+    return t
+
+
+def _extract_type(tokens):
+    """Given the tokens of one argument (name/markers already stripped for
+    IN/OUT/VARIADIC), return the canonical type, discarding a leading parameter
+    name if present.
+
+    A leading token is a parameter name only if what follows is itself a valid
+    type. We detect a bare multi-word type (`double precision`) so we do NOT
+    mistake its first word for a name, and otherwise fall back to: if there are
+    >= 2 tokens, the first is the name. Single-token args are the type.
+    """
+    joined = " ".join(tokens).strip()
+    low = re.sub(r"\s+", " ", joined.lower())
+    # If the WHOLE thing is a bare multi-word type, there is no parameter name.
+    base_for_match = re.sub(r"\s*\([^)]*\)\s*$", "", low).strip()
+    base_for_match = re.sub(r"(\s*\[\s*\])+$|\s+array$", "", base_for_match).strip()
+    for mw in _MULTIWORD_TYPES:
+        if base_for_match == mw:
+            return _canonical_type(joined)
+    # If it ENDS with a multi-word type preceded by a name (`p double precision`),
+    # strip the leading name tokens and keep the type.
+    for mw in _MULTIWORD_TYPES:
+        if base_for_match.endswith(" " + mw):
+            return _canonical_type(mw)
+    # Otherwise: >= 2 tokens -> first is a param name, rest is the (single-word,
+    # possibly typmodded/array) type; 1 token -> it is the type.
+    if len(tokens) >= 2:
+        return _canonical_type(" ".join(tokens[1:]))
+    return _canonical_type(joined)
+
+
 def _normalize_signature(args_raw):
     """Reduce an argument list to a comparable ordered type signature.
 
-    Drops parameter names, IN/OUT/VARIADIC markers and DEFAULTs; keeps the base
-    type tokens. Enough to distinguish overloads.
+    Drops parameter names, IN/OUT/VARIADIC markers and DEFAULTs, then
+    CANONICALIZES each type (alias + typmod + whitespace + array) so the same
+    Postgres function identity produces one key regardless of how the argument
+    was spelled. Enough to distinguish overloads while collapsing spelling noise.
     """
     args = args_raw.strip()
     if not args:
@@ -354,13 +585,17 @@ def _normalize_signature(args_raw):
         if not p:
             continue
         p = re.split(r"\bDEFAULT\b", p, flags=re.IGNORECASE)[0].strip()
+        p = p.rstrip(",").strip()
+        # Drop typmod parens (`numeric(10, 2)` -> `numeric`) BEFORE tokenizing so
+        # the space inside `(10, 2)` does not split one type into two tokens.
+        # Typmod is not part of Postgres function identity.
+        p = re.sub(r"\s*\([^)]*\)", "", p).strip()
         tokens = p.split()
         while tokens and tokens[0].upper() in ("IN", "OUT", "INOUT", "VARIADIC"):
             tokens.pop(0)
         if not tokens:
             continue
-        type_tokens = tokens[1:] if len(tokens) >= 2 else tokens
-        sig.append(" ".join(type_tokens).lower().rstrip(","))
+        sig.append(_extract_type(tokens))
     return tuple(sig)
 
 
@@ -426,6 +661,22 @@ _SECDEF_RE = re.compile(r"\bSECURITY\s+DEFINER\b", re.IGNORECASE)
 _SEARCH_PATH_EMPTY_RE = re.compile(
     r"\bSET\s+\"?search_path\"?\s*(?:=|\bTO\b)\s*''(?!\S)", re.IGNORECASE
 )
+# SECURITY INVOKER — the inverse of SECURITY DEFINER. An ALTER that switches a
+# function to INVOKER takes it out of scope for this gate.
+_SEC_INVOKER_RE = re.compile(r"\bSECURITY\s+INVOKER\b", re.IGNORECASE)
+# ALTER FUNCTION forms that STOP the search_path from being the empty string:
+#   * SET search_path = <nonempty>   (e.g. public) — a non-'' value;
+#   * RESET search_path              — clears the per-function setting;
+#   * RESET ALL                      — clears every per-function SET, incl.
+#                                      search_path.
+# These must clear a previously-tracked empty search_path so a later relaxation
+# of a once-buggy function does not keep flagging it.
+_SEARCH_PATH_SET_NONEMPTY_RE = re.compile(
+    r"\bSET\s+\"?search_path\"?\s*(?:=|\bTO\b)\s*(?!''(?!\S))\S", re.IGNORECASE
+)
+_SEARCH_PATH_RESET_RE = re.compile(
+    r"\bRESET\s+(?:\"?search_path\"?|ALL)\b", re.IGNORECASE
+)
 
 
 def parse_functions(sql, filename):
@@ -458,9 +709,11 @@ def parse_functions(sql, filename):
 
         fn.security_definer = _SECDEF_RE.search(options) is not None
         fn.search_path_empty = _SEARCH_PATH_EMPTY_RE.search(options) is not None
-        # Blank string literals / block comments in the body so data and
-        # diagnostics that merely mention a name are not matched as references.
-        fn.body = _blank_strings_and_block_comments(body)
+        # Blank non-executable string literals / block comments in the body so
+        # data and diagnostics that merely mention a name are not matched as
+        # references — but KEEP code inside EXECUTE '...' dynamic SQL, which runs
+        # under the same empty search_path and fails the same way.
+        fn.body = _prepare_body_for_scan(body)
         fn.body_line_offset = clean.count("\n", 0, body_start) + 1
         functions.append(fn)
     return functions
@@ -544,14 +797,46 @@ def _apply_drop(effective, schema, name, args):
 
 
 def _apply_alter(effective, schema, name, args, opts):
-    """Apply ALTER FUNCTION option changes (SET search_path='' / SECURITY
-    DEFINER) to the tracked effective definition(s)."""
+    """Apply ALTER FUNCTION option changes to the tracked effective definition(s).
+
+    Both DIRECTIONS matter for effective-schema semantics — an ALTER can pull a
+    function INTO scope or OUT of it:
+
+      * `SET search_path = ''`            -> search_path_empty = True
+      * `SET search_path = <nonempty>`    -> search_path_empty = False
+      * `RESET search_path` / `RESET ALL` -> search_path_empty = False
+      * `SECURITY DEFINER`                -> security_definer = True
+      * `SECURITY INVOKER`                -> security_definer = False
+
+    If a later migration relaxes a once-buggy function (RESETs its search_path,
+    points it at a real schema, or switches it to SECURITY INVOKER), the earlier
+    True flags MUST be cleared — otherwise the audit reports a violation for a
+    function that no longer runs in the failing configuration, blocking a valid
+    fix.
+    """
     schema = _normalize_schema(schema)
     name = name.lower()
-    sets_empty = _SEARCH_PATH_EMPTY_RE.search(opts) is not None
-    sets_secdef = _SECDEF_RE.search(opts) is not None
-    if not sets_empty and not sets_secdef:
-        return
+
+    # Resolve each option to True / False / None (None = "not mentioned, leave
+    # the tracked value alone").
+    new_empty = None
+    if _SEARCH_PATH_EMPTY_RE.search(opts) is not None:
+        new_empty = True
+    elif (
+        _SEARCH_PATH_SET_NONEMPTY_RE.search(opts) is not None
+        or _SEARCH_PATH_RESET_RE.search(opts) is not None
+    ):
+        new_empty = False
+
+    new_secdef = None
+    if _SECDEF_RE.search(opts) is not None:
+        new_secdef = True
+    elif _SEC_INVOKER_RE.search(opts) is not None:
+        new_secdef = False
+
+    if new_empty is None and new_secdef is None:
+        return  # no option this gate tracks — e.g. ALTER ... OWNER TO / COST
+
     if args is not None:
         sig = _normalize_signature(args)
         targets = [(schema, name, sig)] if (schema, name, sig) in effective else []
@@ -559,10 +844,10 @@ def _apply_alter(effective, schema, name, args, opts):
         targets = [k for k in effective if k[0] == schema and k[1] == name]
     for k in targets:
         fn = effective[k]
-        if sets_empty:
-            fn.search_path_empty = True
-        if sets_secdef:
-            fn.security_definer = True
+        if new_empty is not None:
+            fn.search_path_empty = new_empty
+        if new_secdef is not None:
+            fn.security_definer = new_secdef
 
 
 def _apply_statements(effective, sql, path):
@@ -570,10 +855,15 @@ def _apply_statements(effective, sql, path):
     the effective-state map, in document order.
 
     Document order matters within a single file: a CREATE then a later ALTER in
-    the same migration must both land. Line comments are stripped first so a
-    `-- DROP FUNCTION ...` note is not treated as a real drop.
+    the same migration must both land. Non-code regions are blanked first so
+    neither a `-- DROP FUNCTION ...` line-comment note NOR a block-commented
+    `/* CREATE OR REPLACE FUNCTION ... */` (nor DDL text sitting inside a string
+    literal) is mistaken for a real event. A commented-out qualified CREATE that
+    was replayed could otherwise overwrite a real buggy definition with a clean
+    one (or a commented DROP could remove it), making the gate pass while
+    production still ships the bad function.
     """
-    clean = _strip_line_comments(sql)
+    clean = _blank_noncode_for_statements(_strip_line_comments(sql))
     events = []
     for m in _FUNC_HEADER_RE.finditer(clean):
         events.append((m.start(), "create", m))
