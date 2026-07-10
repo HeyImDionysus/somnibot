@@ -181,12 +181,48 @@ describe('GamesManager distributed game lock', () => {
     expect(third).not.toBeNull();
   });
 
-  it('falls back to the in-memory Set when a Valkey SET throws', async () => {
+  it('fails closed (denies the lock) when Valkey is configured but SET throws', async () => {
+    // A transient Valkey error is ambiguous: the NX may have applied
+    // server-side, or an earlier acquire (recorded only in Valkey) may still be
+    // live.  Falling back to the in-memory Set would double-grant or orphan the
+    // remote key, so a configured-Valkey manager must deny instead of degrade.
     valkey.set.mockRejectedValueOnce(new Error('ECONNREFUSED'));
     const mgr = new GamesManager(makeSupa(), valkey as any);
     const first = await (mgr as any).acquireGameLock('guild-1', 'user-1');
-    // Degraded acquire still succeeds via the in-memory Set.
-    expect(first).not.toBeNull();
+    expect(first).toBeNull();
+  });
+
+  it('does not grant a local lock when Valkey already holds one and a later SET throws', async () => {
+    // Mixed healthy→degraded (codex P2 finding, games-manager.ts:216):
+    // T1 acquires successfully via Valkey; the token is recorded ONLY remotely.
+    // T2 arrives while Valkey is momentarily unreachable.  If the fallback
+    // consulted the (empty) in-memory Set it would grant a second concurrent
+    // lock and reintroduce the daily-loss TOCTOU.  It must fail closed.
+    const mgr = new GamesManager(makeSupa(), valkey as any);
+    const first = await (mgr as any).acquireGameLock('guild-1', 'user-1');
+    expect(first).not.toBeNull(); // recorded only in Valkey, not activeGames
+    valkey.set.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    const second = await (mgr as any).acquireGameLock('guild-1', 'user-1');
+    expect(second).toBeNull(); // no second concurrent lock
+    // The in-memory Set was never used, so it holds no key for this user.
+    expect((mgr as any).activeGames.has('games:lock:guild-1:user-1')).toBe(false);
+  });
+
+  it('does not orphan the remote key: an ambiguous SET failure yields no local token', async () => {
+    // Ambiguous SET (codex P2 finding, games-manager.ts:211): the NX applied on
+    // the server but the client saw a drop.  Returning IN_MEMORY_TOKEN would
+    // make release skip the Lua delete, orphaning the remote key until its TTL.
+    // Simulate: the key is already set in Valkey, then the client's SET throws.
+    (valkey as any)._store.set('games:lock:guild-1:user-1', { value: 'server-side-token', expireAt: null });
+    valkey.set.mockRejectedValueOnce(new Error('socket hang up'));
+    const mgr = new GamesManager(makeSupa(), valkey as any);
+    const token = await (mgr as any).acquireGameLock('guild-1', 'user-1');
+    expect(token).toBeNull(); // never an IN_MEMORY_TOKEN
+    // Release with the (null) token is a no-op and does not disturb the remote key.
+    await (mgr as any).releaseGameLock('guild-1', 'user-1', token);
+    expect((valkey as any)._store.has('games:lock:guild-1:user-1')).toBe(true);
+    // eval (the Lua delete) was never invoked for a fail-closed acquire.
+    expect(valkey.eval).not.toHaveBeenCalled();
   });
 
   it('validateBet acquires the lock and rejects a second concurrent game command', async () => {
