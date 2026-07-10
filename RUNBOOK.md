@@ -49,8 +49,33 @@ or private network. Caddy serves the public HTTPS dashboard domain.
 ### CI
 All required GitHub checks must pass before merging: install, migration lint,
 database security audit, typecheck, lint, build, unit tests, integration tests,
-security checks, and the final CI gate. The database type drift check still
-runs in CI, but it is warn-only until the generated DB types are fully aligned.
+security checks, the DB type drift check, and the final CI gate.
+
+#### DB type drift check (required)
+The `type-drift` job is a **required, fail-on-drift gate**. It regenerates a
+schema snapshot from the SQL migrations and fails the build if the committed
+snapshot at `packages/shared/src/types/database.generated.ts` is stale:
+
+```bash
+python scripts/generate-db-types.py --check   # CI runs this; non-zero on drift
+python scripts/generate-db-types.py           # refresh the snapshot, then commit
+```
+
+`database.generated.ts` is a **drift tripwire, not the app's type source**.
+Application code imports the hand-maintained `packages/shared/src/types/
+database.ts`; the snapshot exists only to force a review whenever a migration
+changes the schema. When a migration adds/removes a column or table, regenerate
+the snapshot and — if the change touches a table the hand-maintained
+`database.ts` models — update `database.ts` in the same PR.
+
+The generator (`scripts/generate-db-types.py`) is a best-effort SQL parser. It
+tracks `CREATE TABLE`, `ALTER TABLE ... ADD/DROP COLUMN` (including
+schema-qualified names and idempotent `DO $$ ... $$` guards), `ADD PRIMARY KEY`,
+and `DROP TABLE`. Known limitations (why the snapshot is a tripwire, not the
+source of truth): it does **not** track `ALTER COLUMN` type/nullability changes,
+`DROP/ADD CONSTRAINT` (so enum unions reflect only the original `CHECK`), or
+`CREATE TYPE`/enums. Column ordering follows migration order, not the curated
+order in `database.ts`.
 
 ## Rollback
 
