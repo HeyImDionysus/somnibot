@@ -99,9 +99,9 @@ describe('evaluateSetupGate', () => {
     expect(result.message).toContain('https://ops.example.com');
   });
 
-  it('does not throw and stays wizard-usable when instance_settings reads fail', async () => {
-    // Table missing / transient error → degrade to the safest usable state.
-    // With a token in env we must keep the wizard able to verify the bot.
+  it('treats a missing table (42P01) as a clean first-boot absence, staying wizard-usable', async () => {
+    // Table not created yet → this is an EXPECTED absence, not a read failure.
+    // With a token in env the wizard must still be able to verify the bot.
     const supabase = makeSupabase({}, { error: { code: '42P01' } });
     const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
 
@@ -109,8 +109,32 @@ describe('evaluateSetupGate', () => {
     expect(result.shouldLogin).toBe(true);
   });
 
-  it('degrades to "not_started" on read failure when no token is present', async () => {
+  it('degrades to "not_started" on a missing table when no token is present', async () => {
     const supabase = makeSupabase({}, { error: { code: '42P01' } });
+    const result = await evaluateSetupGate(supabase, {} as any);
+
+    expect(result.state).toBe('not_started');
+    expect(result.shouldLogin).toBe(false);
+  });
+
+  it('does NOT downgrade a finalized bot to verification mode on a transient read error', async () => {
+    // A transient PostgREST/RLS error (not 42P01) on the setup_completed_at
+    // lookup must NOT be treated as "setup incomplete": with a token present we
+    // fall through to normal full boot instead of verification-only mode.
+    const supabase = makeSupabase({ setup_completed_at: '2026-07-10T00:00:00.000Z' }, {
+      error: { code: 'PGRST301' },
+    });
+    const result = await evaluateSetupGate(supabase, { DISCORD_TOKEN: 'env-token' } as any);
+
+    expect(result.state).toBe('complete');
+    expect(result.shouldLogin).toBe(true);
+    expect(result.shouldRunFullInit).toBe(true);
+  });
+
+  it('stays "not_started" on a transient read error when no token is present', async () => {
+    // No token to log in with even if state is unknown → idle rather than
+    // crash-loop by attempting a Discord login.
+    const supabase = makeSupabase({}, { error: { code: 'PGRST301' } });
     const result = await evaluateSetupGate(supabase, {} as any);
 
     expect(result.state).toBe('not_started');

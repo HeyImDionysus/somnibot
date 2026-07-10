@@ -334,4 +334,42 @@ describe('events/handler', () => {
       expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
   });
 
+  // ── Codex finding #1: the periodic crons unconditionally call
+  // client.router.all(). Setup-verification mode installs an EMPTY GuildRouter
+  // before returning precisely so those sweeps do not throw
+  // "Cannot read properties of undefined". This test proves an empty router
+  // makes the crons harmless no-ops (they iterate zero contexts and do not
+  // throw) rather than crashing the process every interval.
+  it('periodic crons are safe no-ops when the router has no contexts (verification mode)', async () => {
+    const { expireInfractions } = await import('../features/moderation/index.js');
+    vi.useFakeTimers();
+    try {
+      const cronClient = makeClient();
+      // Empty placeholder router, exactly like setup-verification mode installs.
+      cronClient.router = {
+        all: () => [][Symbol.iterator](),
+      };
+      // Supabase stub covering the temp-role-sweep and prune crons that query
+      // Supabase directly (no router iteration): all resolve empty.
+      cronClient.supabase = {
+        from: vi.fn(() => ({
+          select: vi.fn(() => ({
+            lt: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
+          })),
+        })),
+        rpc: vi.fn(async () => ({ data: {}, error: null })),
+      };
+
+      registerEvents(cronClient);
+
+      // Advance well past the 15-min and 30-min cron intervals; must not throw.
+      await expect(vi.advanceTimersByTimeAsync(31 * 60 * 1000)).resolves.not.toThrow();
+
+      // Router had zero contexts → the per-guild cron work never ran.
+      expect(expireInfractions).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 });

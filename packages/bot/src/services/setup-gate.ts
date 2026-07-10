@@ -89,14 +89,40 @@ export function resolveDashboardUrl(env: NodeJS.ProcessEnv = process.env): strin
 }
 
 /**
- * Read a single instance_settings value. Returns null when the row is missing,
- * the value is blank, the table does not exist yet (first boot, code 42P01),
- * or the query fails for any reason — callers treat "unknown" as "absent".
+ * Postgres "relation does not exist" — the instance_settings table has not
+ * been created yet on a genuinely fresh instance. This is an EXPECTED first-boot
+ * condition (the row is legitimately absent), not a transient read failure, so
+ * it is reported as `readFailed: false`.
+ */
+const RELATION_MISSING_CODE = '42P01';
+
+interface InstanceSettingRead {
+  /** The trimmed non-blank value, or null when the row is missing/blank. */
+  value: string | null;
+  /**
+   * True when the read did NOT complete successfully (transient PostgREST/RLS
+   * error, network failure, thrown exception) — as opposed to the setting
+   * simply being absent. Callers must NOT treat a failed read as "absent":
+   * doing so would let a transient error on a finalized bot's
+   * `setup_completed_at` lookup boot it in verification-only mode.
+   *
+   * The benign "table does not exist yet" case (42P01) is reported as a clean
+   * absence (`value: null, readFailed: false`) so first boot still classifies
+   * as not_started/in_progress rather than an unknown-state fail path.
+   */
+  readFailed: boolean;
+}
+
+/**
+ * Read a single instance_settings value, distinguishing "row is missing/blank"
+ * from "the read failed". Returns `{ value: null, readFailed: false }` when the
+ * row is absent, blank, or the table does not exist yet (first boot, 42P01);
+ * returns `{ value: null, readFailed: true }` when the query errors or throws.
  */
 async function readInstanceSetting(
   supabase: SupabaseClient,
   key: string,
-): Promise<string | null> {
+): Promise<InstanceSettingRead> {
   try {
     const { data, error } = (await supabase
       .from(INSTANCE_SETTINGS_TABLE)
@@ -104,11 +130,20 @@ async function readInstanceSetting(
       .eq('key', key)
       .maybeSingle()) as { data: { value: string | null } | null; error: { code?: string } | null };
 
-    if (error) return null;
+    if (error) {
+      // A missing table on a fresh instance is an expected absence, not a
+      // transient failure — classify it as a clean "row absent".
+      if (error.code === RELATION_MISSING_CODE) {
+        return { value: null, readFailed: false };
+      }
+      return { value: null, readFailed: true };
+    }
     const value = data?.value;
-    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+    const trimmed =
+      typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+    return { value: trimmed, readFailed: false };
   } catch {
-    return null;
+    return { value: null, readFailed: true };
   }
 }
 
@@ -121,6 +156,31 @@ async function readInstanceSetting(
  */
 function hasDiscordTokenInEnv(env: NodeJS.ProcessEnv): boolean {
   return typeof env.DISCORD_TOKEN === 'string' && env.DISCORD_TOKEN.trim().length > 0;
+}
+
+/** Build the 'complete' evaluation (normal full boot). */
+function completeEvaluation(dashboardUrl: string): SetupGateEvaluation {
+  return {
+    state: 'complete',
+    shouldLogin: true,
+    shouldRunFullInit: true,
+    message: null,
+    dashboardUrl,
+  };
+}
+
+/** Build the 'not_started' evaluation (idle, no Discord login). */
+function notStartedEvaluation(dashboardUrl: string): SetupGateEvaluation {
+  return {
+    state: 'not_started',
+    // No token to log in with — attempting a Discord login would only error.
+    shouldLogin: false,
+    shouldRunFullInit: false,
+    message:
+      `Setup not complete — no Discord bot token is configured yet. ` +
+      `Finish setup at ${dashboardUrl} before the bot can run.`,
+    dashboardUrl,
+  };
 }
 
 /**
@@ -142,20 +202,29 @@ export async function evaluateSetupGate(
 ): Promise<SetupGateEvaluation> {
   const dashboardUrl = resolveDashboardUrl(env);
 
-  const completedAt = await readInstanceSetting(supabase, SETUP_COMPLETED_KEY);
-  if (completedAt) {
-    return {
-      state: 'complete',
-      shouldLogin: true,
-      shouldRunFullInit: true,
-      message: null,
-      dashboardUrl,
-    };
+  const completed = await readInstanceSetting(supabase, SETUP_COMPLETED_KEY);
+  if (completed.value) {
+    return completeEvaluation(dashboardUrl);
   }
 
-  const tokenPresent =
-    hasDiscordTokenInEnv(env) ||
-    (await readInstanceSetting(supabase, DISCORD_BOT_TOKEN_KEY)) !== null;
+  // The setup_completed_at lookup did NOT complete (transient PostgREST/RLS
+  // error, not a genuinely missing row). Do NOT treat unknown setup state as
+  // "incomplete": that would boot an already-finalized production bot in
+  // verification-only mode on a blip. If a token is present we can log in, so
+  // fall through to normal boot; without a token there is nothing to run, so
+  // stay 'not_started' and idle rather than crash-loop.
+  if (completed.readFailed) {
+    if (hasDiscordTokenInEnv(env)) {
+      return completeEvaluation(dashboardUrl);
+    }
+    return notStartedEvaluation(dashboardUrl);
+  }
+
+  const tokenInEnv = hasDiscordTokenInEnv(env);
+  const dbToken = tokenInEnv
+    ? { value: null as string | null, readFailed: false }
+    : await readInstanceSetting(supabase, DISCORD_BOT_TOKEN_KEY);
+  const tokenPresent = tokenInEnv || dbToken.value !== null;
 
   if (tokenPresent) {
     return {
@@ -172,14 +241,5 @@ export async function evaluateSetupGate(
     };
   }
 
-  return {
-    state: 'not_started',
-    // No token to log in with — attempting a Discord login would only error.
-    shouldLogin: false,
-    shouldRunFullInit: false,
-    message:
-      `Setup not complete — no Discord bot token is configured yet. ` +
-      `Finish setup at ${dashboardUrl} before the bot can run.`,
-    dashboardUrl,
-  };
+  return notStartedEvaluation(dashboardUrl);
 }

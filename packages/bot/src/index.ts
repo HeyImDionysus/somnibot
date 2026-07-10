@@ -26,6 +26,10 @@ import { startHealthServer, setAwaitingSetup } from './services/health-server.js
 import { HeartbeatService } from './services/heartbeat.js';
 import { evaluateSetupGate, createBootstrapSupabase } from './services/setup-gate.js';
 import { runSetupVerificationBoot, writeGuildRecord } from './services/setup-verification-boot.js';
+import {
+  startSetupCompletionWatcher as startWatcher,
+  type SetupCompletionWatcher,
+} from './services/setup-completion-watcher.js';
 import { startLauncherIpcHeartbeat, stopLauncherIpcHeartbeat } from './services/launcher-ipc.js';
 import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
@@ -184,46 +188,207 @@ async function main(): Promise<void> {
     // reachable to verify "bot online" + "guild detected" before it can
     // finalize — so we DO come online, write the guild record, and heartbeat,
     // but we SKIP the heavy per-guild feature init that would spam errors
-    // while config is incomplete. Once the owner finalizes setup and the bot
-    // restarts, the gate reports 'complete' and the normal boot below runs.
+    // while config is incomplete. Once the owner finalizes setup, a poller
+    // (started here) detects it and transitions this SAME process into the
+    // full boot below — no manual restart required.
     if (setupGate && setupGate.state === 'in_progress') {
       log.warn(setupGate.message ?? 'Setup not complete — running in setup-verification mode.');
+
+      // Provide a real (empty) GuildRouter before returning. registerEvents()
+      // has already scheduled periodic crons that unconditionally call
+      // client.router.all() (see events/handler.ts). Without a router those
+      // sweeps throw "Cannot read properties of undefined" every interval —
+      // reintroducing the error spam this gate is meant to prevent. An empty
+      // router's all() yields nothing, so the crons are harmless no-ops until
+      // full boot replaces it. It is torn down on transition/shutdown.
+      client.router = createGuildRouter(client);
+      log.info('Empty GuildRouter installed for setup-verification mode (crons safe)');
+
       try {
-        const verifyHeartbeat = await runSetupVerificationBoot(client);
-        if (verifyHeartbeat) botLevelServices.heartbeat = verifyHeartbeat;
+        const verifyServices = await runSetupVerificationBoot(client);
+        if (verifyServices) botLevelServices.heartbeat = verifyServices;
       } catch (err) {
         log.error('Setup-verification boot failed', { error: String(err) });
+      }
+
+      // ── Transition watcher: full boot once setup finalizes ──
+      // The desktop launcher does NOT restart the bot when the dashboard writes
+      // setup_completed_at, and the setup page only advances to its "done" step.
+      // So without this, the owner finishes setup but the bot stays gated (no
+      // GuildRouter features, commands, presence, diagnostics) until a manual
+      // restart. Poll the gate; when it reports 'complete', tear down the
+      // verification-only services and run the full boot in-process.
+      startSetupCompletionWatcher(client, botLevelServices);
+      return;
+    }
+
+    await runFullBoot(client, botLevelServices);
+  });
+
+  // ── New guild joined: auto-initialize via GuildRouter ──
+  client.on('guildCreate', async (guild) => {
+    log.info('Bot joined new guild', { name: guild.name, id: guild.id });
+
+    // Setup-verification mode: full feature init is gated off (the router is
+    // an empty placeholder). The owner commonly invites the bot mid-setup, so
+    // we still write the guild record here — otherwise the wizard's "guild
+    // detected" check would never see the just-invited guild and setup could
+    // not finish.
+    if (setupGate && setupGate.state === 'in_progress' && !fullBootStarted) {
+      try {
+        await writeGuildRecord(guild, client.supabase);
+        // If the bot booted with no guilds, no verification heartbeat was
+        // started. Now that a guild exists, start one so the wizard's
+        // "bot online" check (which reads the bot-level heartbeat) can pass.
+        if (!botLevelServices.heartbeat) {
+          const verifyServices = await runSetupVerificationBoot(client);
+          if (verifyServices) botLevelServices.heartbeat = verifyServices;
+        }
+      } catch (err) {
+        log.error('Failed to record guild during setup verification', { id: guild.id, error: String(err) });
       }
       return;
     }
 
-    // ── Auto-detect guild ID if not set ──
-    if (!client.guildId) {
-      const guilds = client.guilds.cache;
-      if (guilds.size === 0) {
-        log.error('Bot is not in any guild. Invite the bot first, then restart.');
-        log.info('Waiting for guild... (bot will remain online for setup wizard)');
-        return;
-      }
-      const detectedGuild = guilds.first()!;
-      Object.defineProperty(client, 'guildId', { value: detectedGuild.id, writable: false });
-      log.info('Auto-detected guild', { name: detectedGuild.name, id: detectedGuild.id });
+    try {
+      await client.router.getContext(guild.id);
+      log.info('New guild initialized', { name: guild.name, id: guild.id });
+    } catch (err) {
+      log.error('Failed to initialize new guild', { name: guild.name, id: guild.id, error: String(err) });
+    }
+  });
+
+  // ── Guild removed: destroy context ──
+  client.on('guildDelete', (guild) => {
+    log.info('Bot removed from guild', { name: guild.name, id: guild.id });
+    // In setup-verification mode the router is an empty placeholder with no
+    // contexts to tear down.
+    if (!client.router) return;
+    const ctx = client.router.getContextSync(guild.id);
+    if (ctx) {
+      destroyGuildServices(ctx);
+      client.router.remove(guild.id);
+    }
+  });
+
+  // ── Graceful shutdown ──
+  const shutdown = async (signal: string) => {
+    stopSetupCompletionWatcher();
+    stopLauncherIpcHeartbeat();
+    await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+/**
+ * Construct a GuildRouter wired to the client's shared services, with the
+ * per-guild feature-init callback. Used for both the normal full boot and the
+ * empty placeholder installed during setup-verification mode.
+ */
+function createGuildRouter(client: SomniClient): GuildRouter {
+  return new GuildRouter(
+    client,
+    client.supabase,
+    client.valkey,
+    client.eventBus,
+    async (ctx) => {
+      // This callback runs once per guild when first accessed.
+      // It registers all feature managers, timers, and services.
+      const commands = await initGuildFeatures(ctx, client);
+      await registerGuildCommands(client, ctx.guildId, commands);
+    },
+  );
+}
+
+/** Guard so a mid-setup guildCreate does not double-run once full boot begins. */
+let fullBootStarted = false;
+
+/** Active setup-completion watcher (verification mode only), stopped on shutdown. */
+let setupCompletionWatcher: SetupCompletionWatcher | null = null;
+
+/**
+ * Start watching for setup finalization while in verification mode. Once the
+ * gate reports 'complete', tear down the verification-only services and run the
+ * full boot in this same process, so the owner does not have to manually
+ * restart the bot to get real features.
+ */
+function startSetupCompletionWatcher(
+  client: SomniClient,
+  botLevelServices: BotLevelServices,
+): void {
+  stopSetupCompletionWatcher();
+  const bootstrapSupabase = createBootstrapSupabase();
+  if (!bootstrapSupabase) {
+    log.warn('Cannot watch for setup completion — no bootstrap Supabase; a manual restart will be needed after setup.');
+    return;
+  }
+
+  setupCompletionWatcher = startWatcher(bootstrapSupabase, async () => {
+    if (fullBootStarted) return;
+
+    // Stop verification-only signals (heartbeat + health-snapshot refresher)
+    // and drop the empty placeholder router before the full boot rebuilds it.
+    try {
+      botLevelServices.heartbeat?.stop();
+    } catch (err) {
+      log.warn('Failed stopping verification heartbeat during transition', { error: String(err) });
+    }
+    botLevelServices.heartbeat = null;
+    try {
+      client.router?.destroyAll();
+    } catch (err) {
+      log.warn('Failed tearing down placeholder router during transition', { error: String(err) });
     }
 
-    // ── Initialize GuildRouter with per-guild feature init callback ──
-    client.router = new GuildRouter(
-      client,
-      client.supabase,
-      client.valkey,
-      client.eventBus,
-      async (ctx) => {
-        // This callback runs once per guild when first accessed.
-        // It registers all feature managers, timers, and services.
-        const commands = await initGuildFeatures(ctx, client);
-        await registerGuildCommands(client, ctx.guildId, commands);
-      },
-    );
-    log.info('GuildRouter initialized with multi-guild initCallback');
+    await runFullBoot(client, botLevelServices);
+  });
+}
+
+function stopSetupCompletionWatcher(): void {
+  setupCompletionWatcher?.stop();
+  setupCompletionWatcher = null;
+}
+
+/**
+ * Full post-ready initialization: auto-detect the guild, build the GuildRouter,
+ * init every guild's features/commands, and start bot-level services
+ * (heartbeat, anti-raid pruner, presence). Runs either directly on ClientReady
+ * for an already-finalized instance, or after the setup-completion watcher sees
+ * setup finalize in a formerly-verification-mode process.
+ */
+async function runFullBoot(
+  client: SomniClient,
+  botLevelServices: BotLevelServices,
+): Promise<void> {
+  if (fullBootStarted) return;
+  fullBootStarted = true;
+
+  // ── Auto-detect guild ID if not set ──
+  if (!client.guildId) {
+    const guilds = client.guilds.cache;
+    if (guilds.size === 0) {
+      log.error('Bot is not in any guild. Invite the bot first.');
+      log.info('Waiting for guild... (bot will remain online; a guildCreate will drive full init)');
+      // Ensure a real GuildRouter is present so the guildCreate handler's
+      // getContext() path is safe once a guild is invited, and so the periodic
+      // crons (which call client.router.all()) never touch an undefined router.
+      client.router = createGuildRouter(client);
+      // Not fatal: allow a later guildCreate to complete full init. Reset the
+      // guard so re-entry can proceed once a guild is present.
+      fullBootStarted = false;
+      return;
+    }
+    const detectedGuild = guilds.first()!;
+    Object.defineProperty(client, 'guildId', { value: detectedGuild.id, writable: false });
+    log.info('Auto-detected guild', { name: detectedGuild.name, id: detectedGuild.id });
+  }
+
+  // ── Initialize GuildRouter with per-guild feature init callback ──
+  // Replaces any empty placeholder router installed during verification mode.
+  client.router = createGuildRouter(client);
+  log.info('GuildRouter initialized with multi-guild initCallback');
 
     // ── Start deploy listener (global, not per-guild) ──
     startDeployListener(client);
@@ -335,60 +500,6 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn('First-boot DM check skipped', { error: (err as Error).message });
     }
-  });
-
-  // ── New guild joined: auto-initialize via GuildRouter ──
-  client.on('guildCreate', async (guild) => {
-    log.info('Bot joined new guild', { name: guild.name, id: guild.id });
-
-    // Setup-verification mode: the router does not exist yet (full init is
-    // gated off). The owner commonly invites the bot mid-setup, so we still
-    // write the guild record here — otherwise the wizard's "guild detected"
-    // check would never see the just-invited guild and setup could not finish.
-    if (setupGate && setupGate.state === 'in_progress') {
-      try {
-        await writeGuildRecord(guild, client.supabase);
-        // If the bot booted with no guilds, no verification heartbeat was
-        // started. Now that a guild exists, start one so the wizard's
-        // "bot online" check (which reads the bot-level heartbeat) can pass.
-        if (!botLevelServices.heartbeat) {
-          const verifyHeartbeat = await runSetupVerificationBoot(client);
-          if (verifyHeartbeat) botLevelServices.heartbeat = verifyHeartbeat;
-        }
-      } catch (err) {
-        log.error('Failed to record guild during setup verification', { id: guild.id, error: String(err) });
-      }
-      return;
-    }
-
-    try {
-      await client.router.getContext(guild.id);
-      log.info('New guild initialized', { name: guild.name, id: guild.id });
-    } catch (err) {
-      log.error('Failed to initialize new guild', { name: guild.name, id: guild.id, error: String(err) });
-    }
-  });
-
-  // ── Guild removed: destroy context ──
-  client.on('guildDelete', (guild) => {
-    log.info('Bot removed from guild', { name: guild.name, id: guild.id });
-    // In setup-verification mode no router/contexts exist to tear down.
-    if (!client.router) return;
-    const ctx = client.router.getContextSync(guild.id);
-    if (ctx) {
-      destroyGuildServices(ctx);
-      client.router.remove(guild.id);
-    }
-  });
-
-  // ── Graceful shutdown ──
-  const shutdown = async (signal: string) => {
-    stopLauncherIpcHeartbeat();
-    await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
-  };
-
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch((error) => {
