@@ -112,6 +112,60 @@ describe('getPayPalToken', () => {
   });
 });
 
+describe('getPayPalTokenResult', () => {
+  it('classifies a 5xx from the token endpoint as retriable', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503 });
+
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    const result = await getPayPalTokenResult();
+
+    expect(result).toEqual({ ok: false, retriable: true, reason: 'token endpoint returned 503' });
+  });
+
+  it('classifies rejected credentials (401) as non-retriable', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    const result = await getPayPalTokenResult();
+
+    expect(result).toEqual({ ok: false, retriable: false, reason: 'token endpoint returned 401' });
+  });
+
+  it('classifies a network error as retriable without leaking credentials', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('socket hang up'));
+
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    const result = await getPayPalTokenResult();
+
+    expect(result).toMatchObject({ ok: false, retriable: true });
+    const reason = (result as { reason: string }).reason;
+    expect(reason).toContain('socket hang up');
+    expect(reason).not.toContain('<<mock>>');
+  });
+
+  it('classifies missing credentials as non-retriable without any fetch', async () => {
+    delete process.env.PAYPAL_CLIENT_ID;
+    delete process.env.PAYPAL_CLIENT_SECRET;
+    mockSavedPayPalSettings([]);
+
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    const result = await getPayPalTokenResult();
+
+    expect(result).toMatchObject({ ok: false, retriable: false });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns the token on success', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ access_token: 'tok_result' }),
+    });
+
+    const { getPayPalTokenResult } = await import('@/lib/paypal');
+    await expect(getPayPalTokenResult()).resolves.toEqual({ ok: true, token: 'tok_result' });
+  });
+});
+
 describe('PAYPAL_API_BASE', () => {
   it('exports the API base URL', async () => {
     const { PAYPAL_API_BASE } = await import('@/lib/paypal');
@@ -144,7 +198,7 @@ describe('verifyWebhookSignature', () => {
       JSON.stringify({ id: 'EVT-1', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: {} }),
     );
 
-    expect(verified).toBe(false);
+    expect(verified).toEqual({ outcome: 'invalid' });
     expect(createAdminSupabase).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith('[Webhook] PayPal signature headers are missing — refusing to process');
@@ -170,7 +224,7 @@ describe('verifyWebhookSignature', () => {
       JSON.stringify({ id: 'EVT-1', event_type: 'PAYMENT.CAPTURE.COMPLETED', resource: {} }),
     );
 
-    expect(verified).toBe(false);
+    expect(verified).toEqual({ outcome: 'invalid' });
     expect(mockFetch).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith('[Webhook] PAYPAL_WEBHOOK_ID is not configured — refusing to process');
     errorSpy.mockRestore();

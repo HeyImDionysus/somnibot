@@ -16,6 +16,13 @@
  * - refresh_snapshot: Force a guild snapshot refresh
  * - send_embed: Send an embed template to a Discord channel
  * - test_welcome: Send a test welcome/goodbye message to a Discord channel
+ *
+ * Lane segregation: every row is classified into a 'commerce' or 'game' lane
+ * (see services/action-queue-lanes.ts and migration 20260710020000). Commerce
+ * rows — real-money fulfillment, receipt delivery, entitlement revocation —
+ * are always claimed before game rows in sweeps, and the Realtime path runs
+ * under per-lane concurrency budgets so a game-job flood can never starve or
+ * delay commerce processing.
  */
 
 import { ChannelType, EmbedBuilder, PermissionsBitField, type Guild, type GuildChannel, type TextChannel } from 'discord.js';
@@ -32,6 +39,17 @@ import {
   type ReceiptDeliveryPayload,
 } from './commerce-fulfillment.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import {
+  ACTION_QUEUE_LANES,
+  COMMERCE_LANE_ACTIONS,
+  LANE_CONCURRENCY,
+  LANE_DEPTH_ALERT_SEVERITY,
+  LANE_PENDING_DEPTH_THRESHOLDS,
+  LaneScheduler,
+  laneDepthAlertType,
+  laneForAction,
+  type ActionQueueLane,
+} from './action-queue-lanes.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
@@ -49,6 +67,19 @@ interface ActionRow {
   action: string;
   payload: Record<string, unknown>;
   status: string;
+  /** 'commerce' | 'game' — stamped by the DB trigger at insert. */
+  lane?: string;
+}
+
+/**
+ * Lane of a queue row. Prefers the DB-stamped lane column (authoritative —
+ * set by the BEFORE INSERT trigger); falls back to classifying the action
+ * type for rows that predate the lane migration.
+ */
+function laneOf(action: Pick<ActionRow, 'action' | 'lane'>): ActionQueueLane {
+  return action.lane === 'commerce' || action.lane === 'game'
+    ? action.lane
+    : laneForAction(action.action);
 }
 
 interface ActionResult {
@@ -1062,6 +1093,12 @@ async function deadLetterReceiptDelivery(
 
   let payloadPreserved = false;
   try {
+    // Lane is intentionally NOT written here: the BEFORE INSERT trigger on
+    // action_queue_dlq (migration 20260710020000) derives it from `action`,
+    // and lane is a pure function of the action type, so the original lane
+    // is always preserved. Writing the column from code would make this
+    // insert fail (undefined column) if the bot ever runs ahead of the
+    // migration — and this row is the only remaining copy of the payload.
     const { error } = await supabase.from('action_queue_dlq').insert({
       guild_id: guild.id,
       action: action.action,
@@ -1093,6 +1130,7 @@ async function processAction(
   guild: Guild,
   supabase: SupabaseClient,
   action: ActionRow,
+  scheduler: LaneScheduler,
 ): Promise<void> {
   // V48-C3: atomic claim. Two paths feed processAction (the startup
   // `pending` sweep and the Realtime INSERT subscription), and a third
@@ -1171,13 +1209,15 @@ async function processAction(
         })
         .eq('id', action.id);
 
-      // Re-process after backoff (non-blocking)
-      setTimeout(async () => {
-        try {
-          await processAction(guild, supabase, action);
-        } catch (e) {
-          log.error(`Retry #${retryCount} failed for ${action.id}:`, e);
-        }
+      // Re-process after backoff (non-blocking). Retries run under the same
+      // per-lane budget as fresh work — a burst of retrying game jobs must
+      // not consume commerce capacity either.
+      setTimeout(() => {
+        scheduler
+          .run(laneOf(action), () => processAction(guild, supabase, action, scheduler))
+          .catch((e) => {
+            log.error(`Retry #${retryCount} failed for ${action.id}:`, e);
+          });
       }, backoffMs);
 
       return; // Don't mark as failed yet — retry scheduled
@@ -1252,9 +1292,45 @@ const STALE_PROCESSING_TIMEOUT_SECS = 300; // 5 minutes
 const STALE_RECOVERY_INTERVAL_MS = 60_000; // sweep every minute
 const ACTION_QUEUE_MAX_RETRIES = 5;
 
+// Batch cap shared by the pending sweep and the stale-recovery re-fetch.
+// Rows beyond the cap are NOT lost — they stay 'pending' and are picked up
+// by the next periodic sweep (lane-ordered, commerce first).
+const SWEEP_BATCH_LIMIT = 1000;
+// Ids per .in() query in the recovery re-fetch — keeps the request URL
+// bounded when a flood hands the recovery pass thousands of ids.
+const RECOVERY_REFETCH_CHUNK = 200;
+
+/**
+ * Fetch up to `budget` full queue rows by id, in bounded .in() chunks.
+ * A failed chunk is logged and skipped rather than aborting the pass — its
+ * rows are already back in 'pending', so the next lane-ordered sweep picks
+ * them up; nothing strands.
+ */
+async function fetchRecoveredRows(
+  supabase: SupabaseClient,
+  ids: string[],
+  budget: number,
+): Promise<ActionRow[]> {
+  const capped = ids.slice(0, Math.max(budget, 0));
+  const out: ActionRow[] = [];
+  for (let i = 0; i < capped.length; i += RECOVERY_REFETCH_CHUNK) {
+    const { data, error } = await supabase
+      .from('bot_action_queue')
+      .select('*')
+      .in('id', capped.slice(i, i + RECOVERY_REFETCH_CHUNK));
+    if (error) {
+      log.error('Recovered-row re-fetch failed:', error.message);
+      continue;
+    }
+    out.push(...((data ?? []) as ActionRow[]));
+  }
+  return out;
+}
+
 async function recoverStaleActions(
   guild: Guild,
   supabase: SupabaseClient,
+  scheduler: LaneScheduler,
 ): Promise<void> {
   const { data: recovered, error } = await (
     supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
@@ -1293,6 +1369,10 @@ async function recoverStaleActions(
           .maybeSingle();
         fullRow = data;
         if (fullRow) {
+          // Lane preserved via the DLQ's BEFORE INSERT trigger (it derives
+          // lane from `action`, which is exactly the original row's lane) —
+          // not written from code, so this insert cannot break if the bot
+          // runs ahead of the lane migration.
           const { error: dlqInsertError } = await supabase.from('action_queue_dlq').insert({
             guild_id: guild.id,
             action: fullRow.action,
@@ -1334,16 +1414,36 @@ async function recoverStaleActions(
     // fires on INSERT — re-fetch and feed them through processAction so
     // they get picked up immediately on this worker instead of waiting
     // for the next restart.
-    const requeuedIds = rows.filter((r) => !r.was_failed).map((r) => r.id);
-    const { data: rows2 } = await supabase
-      .from('bot_action_queue')
-      .select('*')
-      .in('id', requeuedIds)
-      .limit(1000);
-    for (const r of (rows2 ?? []) as ActionRow[]) {
-      if (r.status === 'pending') {
-        await processAction(guild, supabase, r);
-      }
+    //
+    // Lane priority must hold at the QUERY level, not in memory: the RPC
+    // returns EVERY stale row (uncapped), so a game flood can hand back more
+    // ids than the re-fetch budget, and a single unordered capped fetch
+    // could fill entirely with game rows — evicting every commerce row
+    // before an in-memory sort ever saw them. The RPC returns each row's
+    // action, and lane is a pure function of the action type (laneForAction
+    // — the same classification the DB trigger stamps, pinned by a unit
+    // test), so partition the ids by lane FIRST and spend the fetch budget
+    // on commerce ids before any game id. Game rows left over stay
+    // 'pending' and are picked up by the next lane-ordered sweep.
+    const requeued = rows.filter((r) => !r.was_failed);
+    const commerceIds: string[] = [];
+    const gameIds: string[] = [];
+    for (const r of requeued) {
+      (laneForAction(r.action) === 'commerce' ? commerceIds : gameIds).push(r.id);
+    }
+    const commerceRows = await fetchRecoveredRows(supabase, commerceIds, SWEEP_BATCH_LIMIT);
+    const gameRows = await fetchRecoveredRows(
+      supabase,
+      gameIds,
+      SWEEP_BATCH_LIMIT - commerceRows.length,
+    );
+    // Commerce rows first by construction; the sequential awaits preserve
+    // that order under the lane budgets shared with the Realtime path, so a
+    // crash-recovered game backlog cannot delay a crash-recovered commerce
+    // job.
+    const recoveredRows = [...commerceRows, ...gameRows].filter((r) => r.status === 'pending');
+    for (const r of recoveredRows) {
+      await scheduler.run(laneOf(r), () => processAction(guild, supabase, r, scheduler));
     }
   }
 }
@@ -1365,20 +1465,178 @@ async function recoverStaleActions(
 async function sweepPendingActions(
   guild: Guild,
   supabase: SupabaseClient,
+  scheduler: LaneScheduler,
 ): Promise<void> {
-  const { data: pending } = await supabase
+  const dueFilter = `next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`;
+  // Lane priority: 'commerce' < 'game' lexicographically (the lane values
+  // are chosen so ASC order IS priority order — pinned by a unit test).
+  // This MUST happen in the query, not in memory: with a game flood deeper
+  // than the batch limit, an in-memory sort would never even see the
+  // commerce row and it would starve until the game backlog drained.
+  let { data: pending, error } = await supabase
     .from('bot_action_queue')
     .select('*')
     .eq('guild_id', guild.id)
     .eq('status', 'pending')
-    .or(`next_retry_at.is.null,next_retry_at.lte.${new Date().toISOString()}`)
+    .or(dueFilter)
+    .order('lane', { ascending: true })
     .order('created_at', { ascending: true })
-    .limit(1000);
+    .limit(SWEEP_BATCH_LIMIT);
+
+  if (error) {
+    // Lane ordering needs the lane column (migration 20260710020000). In a
+    // manually-migrated environment the bot can briefly run ahead of the
+    // migration — fall back rather than stranding the whole backlog (which
+    // includes paid fulfillment rows). The fallback must uphold the same
+    // query-level guarantee as the lane-ordered sweep: a single
+    // created_at-ordered capped query would let a >LIMIT older game backlog
+    // evict every commerce row from the batch. The lane column is missing
+    // here, but lane is a pure function of the action type, so fetch
+    // commerce rows first via the action list (own capped query) and fill
+    // the remaining batch budget with game rows.
+    log.error('Lane-ordered sweep failed, falling back to action-name lanes:', error.message);
+    const commerceActions = [...COMMERCE_LANE_ACTIONS];
+    const { data: commercePending, error: commerceError } = await supabase
+      .from('bot_action_queue')
+      .select('*')
+      .eq('guild_id', guild.id)
+      .eq('status', 'pending')
+      .or(dueFilter)
+      .in('action', commerceActions)
+      .order('created_at', { ascending: true })
+      .limit(SWEEP_BATCH_LIMIT);
+    if (commerceError) {
+      log.error('Pending sweep query failed:', commerceError.message);
+      return;
+    }
+
+    const gameBudget = SWEEP_BATCH_LIMIT - (commercePending?.length ?? 0);
+    let gamePending: typeof commercePending = [];
+    if (gameBudget > 0) {
+      const { data: gameRows, error: gameError } = await supabase
+        .from('bot_action_queue')
+        .select('*')
+        .eq('guild_id', guild.id)
+        .eq('status', 'pending')
+        .or(dueFilter)
+        .not('action', 'in', `(${commerceActions.join(',')})`)
+        .order('created_at', { ascending: true })
+        .limit(gameBudget);
+      if (gameError) {
+        // Commerce rows are already in hand — process them rather than
+        // failing the whole sweep; game rows are retried next sweep.
+        log.error('Game-lane fallback sweep failed:', gameError.message);
+      } else {
+        gamePending = gameRows;
+      }
+    }
+    pending = [...(commercePending ?? []), ...(gamePending ?? [])];
+  }
 
   if (pending && pending.length > 0) {
     log.info(`Processing ${pending.length} pending action(s)`);
     for (const action of pending) {
-      await processAction(guild, supabase, action as ActionRow);
+      const row = action as ActionRow;
+      // Sequential await keeps the sweep itself single-file (commerce rows
+      // sorted first), while counting against the lane budgets shared with
+      // the Realtime path. If the game lane is saturated by a Realtime
+      // flood, the sweep waits AFTER all commerce rows are already done.
+      await scheduler.run(laneOf(row), () => processAction(guild, supabase, row, scheduler));
+    }
+  }
+}
+
+/**
+ * Per-lane pending-depth alerts — replaces the old single ">100 pending"
+ * queue-depth threshold. Runs from the periodic sweep timer. Exported for
+ * tests.
+ *
+ * Commerce depth is checked against a much tighter threshold (>10, critical):
+ * a commerce backlog means paying customers are waiting on fulfillment,
+ * receipts, or revocations. Game depth keeps the old >100 bar (warning).
+ *
+ * Dedupe is atomic at the DB: insert first, and treat a 23505
+ * unique-violation (uniq_alerts_unresolved_action_queue_depth — at most one
+ * unresolved alert per guild per lane) as "already alerted", refreshing the
+ * existing row instead. No check-then-insert race across bot restarts or
+ * concurrent processes. Alerts auto-resolve once the lane drains back under
+ * its threshold.
+ */
+export async function checkLanePendingDepthAlerts(
+  guild: Guild,
+  supabase: SupabaseClient,
+): Promise<void> {
+  for (const lane of ACTION_QUEUE_LANES) {
+    const threshold = LANE_PENDING_DEPTH_THRESHOLDS[lane];
+    const alertType = laneDepthAlertType(lane);
+
+    const { count, error } = await supabase
+      .from('bot_action_queue')
+      .select('id', { count: 'exact', head: true })
+      .eq('guild_id', guild.id)
+      .eq('lane', lane)
+      .eq('status', 'pending');
+
+    if (error) {
+      // Unknown depth — neither fire nor resolve on bad data.
+      log.error(`Lane depth check failed for ${lane}:`, error.message);
+      continue;
+    }
+
+    const depth = count ?? 0;
+    const now = new Date().toISOString();
+
+    if (depth > threshold) {
+      const severity = LANE_DEPTH_ALERT_SEVERITY[lane];
+      const title =
+        lane === 'commerce'
+          ? `Commerce action queue backing up — ${depth} pending`
+          : `Game action queue backing up — ${depth} pending`;
+      const message =
+        lane === 'commerce'
+          ? `${depth} commerce-lane actions are pending (threshold: ${threshold}). ` +
+            'Paid fulfillment, receipt delivery, or entitlement revocation is not keeping up — ' +
+            'check for stuck processing rows (bot_action_queue_recover_stale) and the DLQ.'
+          : `${depth} game-lane actions are pending (threshold: ${threshold}). ` +
+            'Game-economy/infra jobs are backing up; commerce processing is unaffected (separate lane).';
+      const metadata = { lane, depth, threshold };
+
+      const { error: insertErr } = await supabase.from('alerts').insert({
+        guild_id: guild.id,
+        alert_type: alertType,
+        severity,
+        title,
+        message,
+        metadata,
+      });
+      if (insertErr) {
+        if (insertErr.code === '23505') {
+          // Lost the dedupe race (or the alert already exists) — refresh the
+          // existing unresolved alert with the latest depth.
+          const { error: refreshErr } = await supabase
+            .from('alerts')
+            .update({ severity, title, message, metadata, updated_at: now })
+            .eq('guild_id', guild.id)
+            .eq('alert_type', alertType)
+            .eq('resolved', false);
+          if (refreshErr) {
+            log.error(`Failed to refresh ${alertType} alert:`, refreshErr.message);
+          }
+        } else {
+          log.error(`Failed to write ${alertType} alert:`, insertErr.message);
+        }
+      }
+    } else {
+      // Lane drained — auto-resolve any outstanding alert (no-op otherwise).
+      const { error: resolveErr } = await supabase
+        .from('alerts')
+        .update({ resolved: true, resolved_at: now, updated_at: now })
+        .eq('guild_id', guild.id)
+        .eq('alert_type', alertType)
+        .eq('resolved', false);
+      if (resolveErr) {
+        log.error(`Failed to resolve ${alertType} alert:`, resolveErr.message);
+      }
     }
   }
 }
@@ -1393,29 +1651,43 @@ export async function startActionQueueListener(
 ): Promise<ActionQueueHandle> {
   log.info('Starting action queue listener');
 
+  // Per-lane concurrency budgets shared by every processing path (sweeps,
+  // Realtime events, in-process retries). One scheduler per guild listener.
+  const scheduler = new LaneScheduler(LANE_CONCURRENCY);
+
   // V48-C3: before processing pending rows, recover anything stuck in
   // 'processing' from a previous bot crash. This is the DLQ-equivalent —
   // exhausted retries become 'failed', everything else flips back to
   // 'pending' and is picked up by the loop below.
-  await recoverStaleActions(guild, supabase);
+  await recoverStaleActions(guild, supabase, scheduler);
 
   // Process any pending actions from while the bot was offline
-  await sweepPendingActions(guild, supabase);
+  await sweepPendingActions(guild, supabase, scheduler);
 
   // Periodic sweep (runs in addition to the startup pass so long-running
-  // deployments don't accumulate stuck rows). Two jobs:
+  // deployments don't accumulate stuck rows). Three jobs:
   // 1. recoverStaleActions — rows stuck in 'processing' after a crash.
   // 2. sweepPendingActions — 'pending' rows whose backoff (next_retry_at)
   //    has elapsed. The in-process retry timer normally handles these, but
   //    it dies with the process; without this catch-up, a restart during a
   //    backoff window would strand the row (the startup/subscribe sweeps
   //    intentionally skip rows still inside their backoff window).
+  // 3. checkLanePendingDepthAlerts — per-lane pending-depth alerting.
+  //    All three run concurrently (fire-and-forget), so the depth check
+  //    observes the instantaneous pending depth at tick time — deliberately
+  //    NOT sequenced after the sweep: a sweep blocked on a saturated lane
+  //    must never suppress depth alerting, which matters most during
+  //    exactly such a backlog. A burst the sweep drains immediately may
+  //    fire one alert that auto-resolves on the next tick.
   const staleRecoveryTimer = setInterval(() => {
-    recoverStaleActions(guild, supabase).catch((err) => {
+    recoverStaleActions(guild, supabase, scheduler).catch((err) => {
       log.error('Stale recovery sweep error:', { error: String(err) });
     });
-    sweepPendingActions(guild, supabase).catch((err) => {
+    sweepPendingActions(guild, supabase, scheduler).catch((err) => {
       log.error('Due-retry sweep error:', { error: String(err) });
+    });
+    checkLanePendingDepthAlerts(guild, supabase).catch((err) => {
+      log.error('Lane depth alert check error:', { error: String(err) });
     });
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();
@@ -1441,7 +1713,18 @@ export async function startActionQueueListener(
         async (payload) => {
           const action = payload.new as ActionRow;
           if (action.status === 'pending') {
-            await processAction(guild, supabase, action);
+            // Realtime dispatches each INSERT callback fire-and-forget
+            // (phoenix invokes bindings without awaiting them), so a
+            // game-job flood becomes N concurrent handler invocations that
+            // would otherwise occupy every in-process slot. Admission goes
+            // through the per-lane budgets: game events over budget wait
+            // in-process WITHOUT claiming their rows (they stay 'pending'
+            // and crash-safe), while commerce events are admitted
+            // immediately under the commerce budget — waiting here can not
+            // delay dispatch of later events.
+            await scheduler.run(laneOf(action), () =>
+              processAction(guild, supabase, action, scheduler),
+            );
           }
         },
       )
@@ -1459,7 +1742,7 @@ export async function startActionQueueListener(
           // live; the atomic claim in processAction makes any overlap with
           // Realtime deliveries safe. This also heals INSERTs missed while
           // a dropped subscription was reconnecting.
-          sweepPendingActions(guild, supabase).catch((sweepErr) => {
+          sweepPendingActions(guild, supabase, scheduler).catch((sweepErr) => {
             log.error('Post-subscribe pending sweep failed:', { error: String(sweepErr) });
           });
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {

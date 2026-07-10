@@ -20,7 +20,11 @@ import { randomBytes } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { rateLimits } from '@/lib/api/rate-limit';
 
-import { isInternalReplay, verifyWebhookSignature } from './verify';
+import {
+  isInternalReplay,
+  raisePayPalVerifyUnavailableAlert,
+  verifyWebhookSignature,
+} from './verify';
 import {
   handleOrderApproved,
   handlePaymentCaptured,
@@ -162,8 +166,24 @@ export async function POST(req: NextRequest) {
   const replay = isInternalReplay(req);
 
   if (!replay) {
-    const valid = await verifyWebhookSignature(req, rawBody);
-    if (!valid) {
+    const verification = await verifyWebhookSignature(req, rawBody);
+
+    if (verification.outcome === 'unavailable') {
+      // W2: verification INFRASTRUCTURE failed (token fetch / verify API
+      // timeout or 5xx after in-request retries) — we never learned whether
+      // the signature is valid. Respond 503, not 401: PayPal redelivers
+      // failed (non-2xx) webhook deliveries, and the event was NOT recorded
+      // in webhook_events yet, so the redelivery processes cleanly through
+      // dedup instead of the paid order being lost as "unauthorized".
+      console.error('[Webhook] Signature verification unavailable:', verification.reason);
+      await raisePayPalVerifyUnavailableAlert(supabase, verification.reason);
+      return NextResponse.json(
+        { error: 'Signature verification temporarily unavailable' },
+        { status: 503, headers: { 'Retry-After': '60' } },
+      );
+    }
+
+    if (verification.outcome !== 'verified') {
       console.error('[Webhook] Signature verification failed');
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
