@@ -184,6 +184,11 @@ export async function PUT(req: NextRequest) {
     const graceEnds = new Date();
     graceEnds.setDate(graceEnds.getDate() + 3);
     updateData.grace_period_ends_at = graceEnds.toISOString();
+  } else if (status === 'active') {
+    // Mirrors EntitlementService.reactivate: returning to active clears the
+    // grace deadline. Terminal statuses keep it as a trace of when the
+    // window lapsed (parity with revoke() and the reconciliation sweep).
+    updateData.grace_period_ends_at = null;
   }
 
   // V47-C2: scope by guild so another owner cannot toggle entitlement
@@ -198,6 +203,65 @@ export async function PUT(req: NextRequest) {
 
   if (error) {
     return dbError(error, 'customers/entitlements');
+  }
+
+  // W2 review: manual status changes must replicate the
+  // EntitlementService.suspend/reactivate alert lifecycle — otherwise a
+  // manual suspension raises no operator alert and a manual reactivation
+  // strands the 'entitlement_grace_period' alert unresolved forever. Alert
+  // writes are non-fatal: the status change above has already committed.
+  if (status === 'grace_period') {
+    // Same deduped raise as EntitlementService.suspend: the partial unique
+    // index uniq_alerts_unresolved_entitlement_grace permits one unresolved
+    // alert per entitlement, so a 23505 means it already exists (dedupe
+    // success — e.g. re-entering grace, or racing the bot's suspend()).
+    const { error: alertError } = await supabase.from('alerts').insert({
+      guild_id: guildId,
+      alert_type: 'entitlement_grace_period',
+      severity: 'warning',
+      title: 'Paid entitlement entered payment grace period',
+      message:
+        `Entitlement ${entitlement_id} was manually moved into a grace period ending ` +
+        `${updateData.grace_period_ends_at}. If payment is not recovered by then, ` +
+        'access will be revoked automatically.',
+      metadata: {
+        entitlement_id,
+        customer_id: data?.customer_id ?? null,
+        product_id: data?.product_id ?? null,
+        order_id: data?.order_id ?? null,
+        grace_period_ends_at: updateData.grace_period_ends_at,
+        source: 'dashboard.entitlements.update',
+      },
+    });
+    if (alertError && alertError.code !== '23505') {
+      console.error(
+        '[customers/entitlements] Failed to write grace-period alert:',
+        alertError.message,
+      );
+    }
+  } else {
+    // Every other status this route allows (active, cancelled, expired,
+    // revoked, pending) means the entitlement is no longer in grace —
+    // resolve any outstanding alert. Same entitlement-scoped filters as
+    // EntitlementService.reactivate/revoke and the reconciliation sweep;
+    // a no-op when none exists.
+    const { error: alertError } = await supabase
+      .from('alerts')
+      .update({
+        resolved: true,
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('guild_id', guildId)
+      .eq('alert_type', 'entitlement_grace_period')
+      .eq('metadata->>entitlement_id', entitlement_id)
+      .eq('resolved', false);
+    if (alertError) {
+      console.error(
+        '[customers/entitlements] Failed to resolve grace-period alert:',
+        alertError.message,
+      );
+    }
   }
 
   return NextResponse.json({ success: true, data });

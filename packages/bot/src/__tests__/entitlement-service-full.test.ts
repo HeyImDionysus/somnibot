@@ -321,6 +321,171 @@ describe('EntitlementService.revoke', () => {
   });
 });
 
+describe('EntitlementService grace-alert lifecycle (suspend → revoke)', () => {
+  const entData = {
+    id: 'ent1',
+    customer_id: 'cust1',
+    product_id: 'prod1',
+    order_id: 'ord1',
+    granted_role_ids: ['r1'],
+    license_key_id: null,
+    products: { name: 'Test Product' },
+  };
+
+  /**
+   * Stateful in-memory `alerts` table: insert enforces the partial unique
+   * index uniq_alerts_unresolved_entitlement_grace (one unresolved grace
+   * alert per entitlement → 23505 on duplicates) and update applies the
+   * patch to every row matching the captured eq filters — so the test
+   * exercises the real raise/resolve semantics instead of just call shapes.
+   */
+  function makeLifecycleSupabase() {
+    const alertRows: any[] = [];
+
+    const alertsChain: any = supaChain();
+    alertsChain.insert = vi.fn(async (row: any) => {
+      const dup = alertRows.find(
+        (r) =>
+          r.alert_type === row.alert_type &&
+          r.resolved === false &&
+          r.metadata?.entitlement_id === row.metadata?.entitlement_id,
+      );
+      if (dup) return { error: { code: '23505', message: 'duplicate key' } };
+      alertRows.push({ ...row, resolved: false });
+      return { error: null };
+    });
+    alertsChain.update = vi.fn((patch: any) => {
+      const filters: Array<[string, unknown]> = [];
+      const c2: any = {};
+      c2.eq = vi.fn((k: string, v: unknown) => {
+        filters.push([k, v]);
+        return c2;
+      });
+      c2.then = (resolve: any) => {
+        for (const r of alertRows) {
+          const matches = filters.every(([k, v]) =>
+            k === 'metadata->>entitlement_id' ? r.metadata?.entitlement_id === v : r[k] === v,
+          );
+          if (matches) Object.assign(r, patch);
+        }
+        resolve({ data: null, error: null });
+      };
+      return c2;
+    });
+
+    // One entitlements chain serving both flows: suspend's guarded
+    // UPDATE ... SELECT and revoke's SELECT ... single() + UPDATE.
+    const entChain: any = supaChain(entData);
+    entChain.update = vi.fn(() => {
+      const c2: any = supaChain();
+      c2.then = (resolve: any) => resolve({ data: [entData], error: null });
+      return c2;
+    });
+
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') return entChain;
+        if (table === 'alerts') return alertsChain;
+        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        return supaChain();
+      }),
+    } as any;
+
+    return { supabase, alertRows };
+  }
+
+  const unresolvedGrace = (rows: any[]) =>
+    rows.filter((r) => r.alert_type === 'entitlement_grace_period' && r.resolved === false);
+
+  it('suspend raises the alert, revoke resolves it — zero unresolved grace alerts remain', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+    const { supabase, alertRows } = makeLifecycleSupabase();
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    expect(await service.suspend('ent1', 3)).toBe(true);
+    expect(unresolvedGrace(alertRows)).toHaveLength(1);
+
+    expect(await service.revoke('ent1', 'cancelled')).toBe(true);
+    expect(unresolvedGrace(alertRows)).toHaveLength(0);
+
+    // Resolved, not deleted — the operator trail is preserved.
+    expect(alertRows).toHaveLength(1);
+    expect(alertRows[0].resolved).toBe(true);
+    expect(alertRows[0].resolved_at).toEqual(expect.any(String));
+  });
+
+  it('revoke resolves the alert with entitlement-scoped, unresolved-only filters', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+
+    const alertsUpdateChain: any = supaChain();
+    alertsUpdateChain.then = (resolve: any) => resolve({ data: null, error: null });
+    const alertsChain: any = supaChain();
+    alertsChain.update = vi.fn(() => alertsUpdateChain);
+
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.update = vi.fn(() => {
+            const c2: any = supaChain();
+            c2.then = (resolve: any) => resolve({ error: null });
+            return c2;
+          });
+          return chain;
+        }
+        if (table === 'alerts') return alertsChain;
+        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+    expect(await service.revoke('ent1', 'refund')).toBe(true);
+
+    expect(alertsChain.update).toHaveBeenCalledWith(
+      expect.objectContaining({ resolved: true, resolved_at: expect.any(String) }),
+    );
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('guild_id', 'g1');
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('alert_type', 'entitlement_grace_period');
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('metadata->>entitlement_id', 'ent1');
+    expect(alertsUpdateChain.eq).toHaveBeenCalledWith('resolved', false);
+  });
+
+  it('a failed alert resolve is non-fatal — the revocation itself still succeeds', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+
+    const alertsUpdateChain: any = supaChain();
+    alertsUpdateChain.then = (resolve: any) =>
+      resolve({ data: null, error: { message: 'alerts table unavailable' } });
+    const alertsChain: any = supaChain();
+    alertsChain.update = vi.fn(() => alertsUpdateChain);
+
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.update = vi.fn(() => {
+            const c2: any = supaChain();
+            c2.then = (resolve: any) => resolve({ error: null });
+            return c2;
+          });
+          return chain;
+        }
+        if (table === 'alerts') return alertsChain;
+        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+    expect(await service.revoke('ent1', 'expired')).toBe(true);
+    expect(alertsChain.update).toHaveBeenCalled();
+  });
+});
+
 describe('EntitlementService.suspend', () => {
   const suspendedRow = { id: 'ent1', customer_id: 'cust1', product_id: 'prod1', order_id: 'ord1' };
 

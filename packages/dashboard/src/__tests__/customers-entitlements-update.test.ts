@@ -9,6 +9,11 @@
  * writer of `status: 'grace_period'` (schemas.entitlement.update permits
  * it), so it must supply the deadline — otherwise every manual transition
  * into grace would fail the constraint at the DB.
+ *
+ * W2 review: the route must also replicate the EntitlementService
+ * suspend/reactivate ALERT lifecycle — entering grace raises the deduped
+ * 'entitlement_grace_period' operator alert, any other transition resolves
+ * it — or manual reactivations strand the alert unresolved forever.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -44,11 +49,17 @@ function setup() {
   const mock = createMockSupabase();
   const entitlementsQuery = registerTable(mock, 'entitlements');
   entitlementsQuery.single.mockResolvedValue({
-    data: { id: ENTITLEMENT_ID },
+    data: {
+      id: ENTITLEMENT_ID,
+      customer_id: 'cust-1',
+      product_id: 'prod-1',
+      order_id: 'ord-1',
+    },
     error: null,
   });
+  const alertsQuery = registerTable(mock, 'alerts');
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-  return { entitlementsQuery };
+  return { entitlementsQuery, alertsQuery };
 }
 
 beforeEach(() => {
@@ -82,7 +93,7 @@ describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () =>
     expect(entitlementsQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
   });
 
-  it('does not touch the grace deadline for non-grace transitions', async () => {
+  it('clears the grace deadline on manual reactivation (parity with EntitlementService.reactivate)', async () => {
     const { entitlementsQuery } = setup();
 
     const res = await PUT(putReq('active') as never);
@@ -90,6 +101,91 @@ describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () =>
 
     const payload = (entitlementsQuery.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(payload.status).toBe('active');
+    expect(payload.grace_period_ends_at).toBeNull();
+  });
+
+  it('leaves the grace deadline untouched for terminal transitions (trace of when the window lapsed)', async () => {
+    const { entitlementsQuery } = setup();
+
+    const res = await PUT(putReq('cancelled') as never);
+    expect(res.status).toBe(200);
+
+    const payload = (entitlementsQuery.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.status).toBe('cancelled');
     expect(payload).not.toHaveProperty('grace_period_ends_at');
+  });
+});
+
+describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 review)', () => {
+  it('raises the deduped operator alert when manually entering grace_period', async () => {
+    const { alertsQuery } = setup();
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
+
+    expect(alertsQuery.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guild_id: 'guild-1',
+        alert_type: 'entitlement_grace_period',
+        severity: 'warning',
+        title: expect.any(String),
+        metadata: expect.objectContaining({
+          entitlement_id: ENTITLEMENT_ID,
+          customer_id: 'cust-1',
+          product_id: 'prod-1',
+          order_id: 'ord-1',
+          grace_period_ends_at: new Date(NOW.getTime() + THREE_DAYS_MS).toISOString(),
+          source: 'dashboard.entitlements.update',
+        }),
+      }),
+    );
+    // Entering grace must not also resolve the alert it just raised.
+    expect(alertsQuery.update).not.toHaveBeenCalled();
+  });
+
+  // Every non-grace status this route can set means "no longer in grace" —
+  // each must resolve any outstanding grace alert (a no-op when none exists).
+  it.each(['active', 'cancelled', 'expired', 'revoked', 'pending'])(
+    'resolves the outstanding grace alert when transitioning to %s',
+    async (status) => {
+      const { alertsQuery } = setup();
+
+      const res = await PUT(putReq(status) as never);
+      expect(res.status).toBe(200);
+
+      expect(alertsQuery.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resolved: true,
+          resolved_at: NOW.toISOString(),
+        }),
+      );
+      // Entitlement-scoped, unresolved-only — same filters as
+      // EntitlementService.reactivate/revoke and the reconciliation sweep.
+      expect(alertsQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
+      expect(alertsQuery.eq).toHaveBeenCalledWith('alert_type', 'entitlement_grace_period');
+      expect(alertsQuery.eq).toHaveBeenCalledWith('metadata->>entitlement_id', ENTITLEMENT_ID);
+      expect(alertsQuery.eq).toHaveBeenCalledWith('resolved', false);
+      expect(alertsQuery.insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it('treats a 23505 on the alert insert as dedupe success (still 200)', async () => {
+    const { alertsQuery } = setup();
+    alertsQuery.insert.mockResolvedValue({
+      error: { code: '23505', message: 'duplicate key value violates unique constraint' },
+    });
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
+  });
+
+  it('a genuine alert-insert failure is non-fatal — the committed status change still returns 200', async () => {
+    const { alertsQuery } = setup();
+    alertsQuery.insert.mockResolvedValue({
+      error: { code: '42501', message: 'permission denied' },
+    });
+
+    const res = await PUT(putReq('grace_period') as never);
+    expect(res.status).toBe(200);
   });
 });

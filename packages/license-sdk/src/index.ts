@@ -145,6 +145,25 @@ export class SomniLicense {
     return this.mono() - this.serverTimeAnchor.localMono;
   }
 
+  /**
+   * Place a server-side ISO deadline on the local monotonic timeline.
+   *
+   * Uses the server-time anchor when available (immune to local clock
+   * manipulation, V7 §3.P3a); falls back to the wall clock when no anchor
+   * exists. The fallback is acceptable here because the result only ever
+   * SHORTENS a cache window — the server stays authoritative either way.
+   * Returns null when the deadline is absent or unparseable.
+   */
+  private serverDeadlineToMono(iso: string | null | undefined): number | null {
+    if (!iso) return null;
+    const epoch = new Date(iso).getTime();
+    if (isNaN(epoch)) return null;
+    if (this.serverTimeAnchor) {
+      return this.serverTimeAnchor.localMono + (epoch - this.serverTimeAnchor.serverEpoch);
+    }
+    return this.mono() + (epoch - Date.now());
+  }
+
   constructor(config: SomniLicenseConfig) {
     this.config = {
       cacheTtlMs: 60_000,
@@ -181,12 +200,24 @@ export class SomniLicense {
 
       if (data.valid) {
         this.cachedResult = data;
-        // V5 Audit §3.1: monotonic clock for cache TTL
-        this.cacheExpiry = this.mono() + (this.config.cacheTtlMs ?? 60_000);
         this.sessionId = data.session_id ?? null;
 
-        // V7 Audit §3.P3a — anchor server time on successful validation
+        // V7 Audit §3.P3a — anchor server time on successful validation.
+        // (Anchored before the cache-expiry math below, which uses the
+        // anchor to place the server-side grace deadline on the local
+        // monotonic timeline.)
         this.anchorServerTime(res);
+
+        // V5 Audit §3.1: monotonic clock for cache TTL.
+        // W2 review: a grace_period response carries a hard server-side
+        // deadline (grace_period_ends_at) after which the server rejects
+        // the key — never cache past it. Otherwise a validation moments
+        // before the deadline would keep a revoked customer "valid" from
+        // cache for the remainder of the full TTL.
+        const ttlExpiry = this.mono() + (this.config.cacheTtlMs ?? 60_000);
+        const graceDeadline = this.serverDeadlineToMono(data.grace_period_ends_at);
+        this.cacheExpiry =
+          graceDeadline !== null ? Math.min(ttlExpiry, graceDeadline) : ttlExpiry;
 
         // Auto-start heartbeat — prefer config override, then server-provided interval.
         // V5 Audit §3.P3a: heartbeatIntervalSeconds config option.

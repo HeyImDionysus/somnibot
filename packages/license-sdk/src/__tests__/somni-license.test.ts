@@ -179,6 +179,118 @@ describe('SomniLicense', () => {
     });
   });
 
+  // ────────── grace-period deadline caps the cache ──────────
+
+  describe('validate() — grace deadline caps the cache (W2 review)', () => {
+    // Pin the fake clock to a whole second: the HTTP Date header (the
+    // server-time anchor) has 1s precision, so a sub-second start time
+    // would skew the deadline-to-monotonic conversion by up to 999ms.
+    const T0 = new Date('2026-07-09T12:00:00.000Z');
+
+    it('re-validates once the grace deadline passes, even within the cache TTL', async () => {
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(
+          validationOk({
+            status: 'grace_period',
+            grace_period_ends_at: new Date(Date.now() + 10_000).toISOString(),
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({ valid: false, status: 'expired', error: 'Payment grace period has ended' }),
+        );
+      const client = sdk({ cacheTtlMs: 60_000 });
+
+      const first = await client.validate();
+      expect(first.valid).toBe(true);
+      expect(first.status).toBe('grace_period');
+
+      // 12s later: past the 10s grace deadline but well inside the 60s TTL.
+      // Must NOT serve the cached grace success — the server has revoked.
+      vi.advanceTimersByTime(12_000);
+      const second = await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(second.valid).toBe(false);
+      expect(second.status).toBe('expired');
+      client.destroy();
+    });
+
+    it('still serves the cached result before the grace deadline', async () => {
+      vi.setSystemTime(T0);
+      vi.mocked(fetch).mockResolvedValueOnce(
+        validationOk({
+          status: 'grace_period',
+          grace_period_ends_at: new Date(Date.now() + 30_000).toISOString(),
+        }),
+      );
+      const client = sdk({ cacheTtlMs: 60_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(20_000); // < 30s deadline
+      const cached = await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(1); // no second fetch
+      expect(cached.valid).toBe(true);
+      expect(cached.status).toBe('grace_period');
+      client.destroy();
+    });
+
+    it('a distant grace deadline never EXTENDS the cache past the TTL (min, not max)', async () => {
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(
+          validationOk({
+            status: 'grace_period',
+            grace_period_ends_at: new Date(Date.now() + 3_600_000).toISOString(),
+          }),
+        )
+        .mockResolvedValueOnce(validationOk());
+      const client = sdk({ cacheTtlMs: 10_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(11_000); // past TTL, far before deadline
+      await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      client.destroy();
+    });
+
+    it('isValid() flips false at the grace deadline (no refetch)', async () => {
+      vi.setSystemTime(T0);
+      vi.mocked(fetch).mockResolvedValueOnce(
+        validationOk({
+          status: 'grace_period',
+          grace_period_ends_at: new Date(Date.now() + 5_000).toISOString(),
+        }),
+      );
+      const client = sdk({ cacheTtlMs: 60_000 });
+
+      await client.validate();
+      expect(client.isValid()).toBe(true);
+
+      vi.advanceTimersByTime(6_000);
+      expect(client.isValid()).toBe(false);
+      client.destroy();
+    });
+
+    it('an unparseable grace deadline falls back to the plain TTL', async () => {
+      vi.setSystemTime(T0);
+      vi.mocked(fetch).mockResolvedValueOnce(
+        validationOk({ status: 'grace_period', grace_period_ends_at: 'not-a-date' }),
+      );
+      const client = sdk({ cacheTtlMs: 30_000 });
+
+      await client.validate();
+      vi.advanceTimersByTime(20_000); // within TTL
+      const cached = await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(cached.valid).toBe(true);
+      client.destroy();
+    });
+  });
+
   // ────────── offline grace period ──────────
 
   describe('validate() — offline grace (server-time anchored)', () => {

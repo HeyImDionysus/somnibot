@@ -145,6 +145,27 @@ export class EntitlementService {
       return false;
     }
 
+    // W2 review: revoke() is a terminal transition for grace_period rows
+    // (subscription cancellation and refunds select them), and every target
+    // status above is non-grace — so an unresolved 'entitlement_grace_period'
+    // operator alert raised by suspend() is now stale. Resolve it with the
+    // same entitlement-scoped filters as reactivate() and the reconciliation
+    // sweep (a no-op when none exists). Non-fatal: the revocation committed.
+    const { error: graceAlertError } = await this.supabase
+      .from('alerts')
+      .update({
+        resolved: true,
+        resolved_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('guild_id', guildId)
+      .eq('alert_type', 'entitlement_grace_period')
+      .eq('metadata->>entitlement_id', entitlementId)
+      .eq('resolved', false);
+    if (graceAlertError) {
+      log.error('Failed to resolve grace-period alert on revoke:', graceAlertError.message);
+    }
+
     // Get customer discord_id — scoped to guild_id
     const { data: customer } = await this.supabase
       .from('customers')
