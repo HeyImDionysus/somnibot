@@ -263,62 +263,75 @@ describe('HeistManager', () => {
       );
     });
 
-    it('handles heist insert unique violation (concurrent start)', async () => {
-      let heistCallCount = 0;
+    it('handles concurrent-start rejection from heist_start (duplicate_active)', async () => {
+      // Row-derived-crew: startHeist creates the heist + initiator row atomically
+      // via the heist_start RPC. A concurrent start loses the unique-active-heist
+      // index race, so heist_start returns status='duplicate_active' (the whole tx
+      // rolled back — nothing half-inserted). The bot refunds and surfaces the
+      // "just started a heist" reply.
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
         }
         if (table === 'economy_heists') {
-          heistCallCount++;
-          if (heistCallCount <= 2) return chainBuilder({ data: null, error: null }); // no recent/active
-          // Insert fails with unique violation
-          return chainBuilder({ data: null, error: { code: '23505', message: 'dup' } });
+          return chainBuilder({ data: null, error: null }); // no recent/active
         }
         if (table === 'economy_wallets') {
           return chainBuilder({ data: { wallet: 500 }, error: null });
         }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: null, error: null }); // fee deduct + refund
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: [{ status: 'duplicate_active', heist_id: null }], error: null });
+        }
+        return Promise.resolve({ data: null, error: null }); // fee deduct + refund
+      });
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('just started a heist') }),
       );
+      // No separate participant insert — the initiator row is inserted inside the
+      // atomic RPC, not a second statement.
+      expect(
+        supabase.from.mock.calls.some((c: any[]) => c[0] === 'economy_heist_participants'),
+      ).toBe(false);
     });
 
-    it('starts heist successfully', async () => {
-      let heistCallCount = 0;
+    it('starts heist successfully via the atomic heist_start RPC', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
           return chainBuilder({ data: { ...defaultConfig }, error: null });
         }
         if (table === 'economy_heists') {
-          heistCallCount++;
-          if (heistCallCount <= 2) return chainBuilder({ data: null, error: null }); // no recent/active
-          // Insert success. The row now carries the immutable base_success_chance
-          // anchor instead of a mutable success_chance counter; crew membership
-          // lives only in economy_heist_participants rows (no participants[]).
-          return chainBuilder({
-            data: { id: 'h1', base_success_chance: 40, target_name: 'Corner Store', target_payout: 250 },
-            error: null,
-          });
+          return chainBuilder({ data: null, error: null }); // no recent/active
         }
         if (table === 'economy_wallets') {
           return chainBuilder({ data: { wallet: 500 }, error: null });
         }
-        if (table === 'economy_heist_participants') {
-          return chainBuilder({ data: null, error: null }); // insert participant
-        }
         return chainBuilder();
       });
-      supabase.rpc.mockResolvedValue({ data: null, error: null });
+      // heist_start returns 'started' with the new heist id; the initiator
+      // participant row is inserted inside the SAME transaction (no second insert).
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_start') {
+          return Promise.resolve({ data: [{ status: 'started', heist_id: 'h1' }], error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
       const interaction = makeInteraction();
       await mgr.startHeist(interaction as any);
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ embeds: expect.any(Array) }),
       );
+      // The initiator row is NOT a separate table insert — the atomic RPC owns it.
+      expect(
+        supabase.from.mock.calls.some((c: any[]) => c[0] === 'economy_heist_participants'),
+      ).toBe(false);
+      expect(
+        supabase.rpc.mock.calls.some((c: any[]) => c[0] === 'heist_start'),
+      ).toBe(true);
     });
   });
 

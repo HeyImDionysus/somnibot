@@ -6,7 +6,6 @@
  * Roles are randomly assigned: Hacker, Muscle, Lookout, Driver, Demolitions.
  */
 import { randomPick } from '../../utils/random.js';
-import { hasErrorCode } from '../../utils/db-helpers.js';
 import {
   EmbedBuilder,
   type ChatInputCommandInteraction,
@@ -258,41 +257,52 @@ export class HeistManager {
     // this base (LEAST(95, GREATEST(0, base + 0)) with base in 25..40).
     const baseChance = (config.economy_heist_success_base_pct ?? 40) + target.difficultyMod;
 
-    // V48-M2: create heist with a unique-violation refund path.
-    // The "no active heist" check above is racy — two concurrent
-    // /heist start invocations could both pass it before either
-    // INSERTs. The new partial unique index
-    // `uniq_active_heist_per_guild` makes the loser's INSERT fail with
-    // 23505. We refund their entry fee and surface a clean error so
-    // they aren't charged for a heist they didn't get to start.
-    const { data: heist, error: heistErr } = await this.supabase
-      .from('economy_heists')
-      .insert({
-        guild_id: guildId,
-        initiator_id: userId,
-        target_name: target.name,
-        target_payout: basePayout,
-        // Single source of truth for the chance: the immutable base anchor. Crew
-        // membership lives ONLY in economy_heist_participants rows (the initiator
-        // row is inserted below) — there is no denormalized participants[] array.
-        base_success_chance: baseChance,
-        expires_at: expiresAt,
-      })
-      .select()
-      .single();
+    // V48-M2 / row-derived-crew: create the heist AND the initiator participant row
+    // ATOMICALLY. Crew membership is now DERIVED from economy_heist_participants
+    // rows, so the initiator's row MUST exist the moment the heist becomes
+    // derivable — a two-statement "insert heist, then insert initiator" left a gap
+    // where a concurrent /heist join saw the recruiting heist with ZERO crew rows,
+    // could fill it to max, and then the initiator insert would exceed max / derive
+    // the wrong count. heist_start does both inserts in ONE transaction. The partial
+    // unique index `uniq_active_heist_per_guild` still guards the racy "no active
+    // heist" check above: if another /heist start already committed an active heist,
+    // heist_start raises 23505, rolls the whole tx back (nothing half-inserted), and
+    // returns 'duplicate_active'. We refund the pre-debited entry fee on any failure
+    // so the loser isn't charged for a heist they didn't get to start.
+    const role = randomPick(HEIST_ROLES);
+    const { data: startData, error: startErr } = await this.supabase.rpc('heist_start', {
+      p_guild_id: guildId,
+      p_user_id: userId,
+      p_target_name: target.name,
+      p_target_payout: basePayout,
+      // Single source of truth for the chance: the immutable base anchor. Crew
+      // membership lives ONLY in economy_heist_participants rows (the initiator row
+      // is inserted in the SAME tx) — there is no denormalized participants[] array.
+      p_base_chance: baseChance,
+      p_expires_at: expiresAt,
+      p_role: role,
+      // Freeze the exact fee this member paid on the row. Keeps entry_fee_paid
+      // uniformly populated so no reconcile falls back to mutable config.
+      p_entry_fee: entryFee,
+    });
 
-    if (heistErr || !heist) {
-      const code = hasErrorCode(heistErr) ? heistErr.code : undefined;
-      // Always refund the entry fee — we charged it before the insert.
+    const startResult = (Array.isArray(startData) ? startData[0] : startData) as
+      | { status: string; heist_id: string | null }
+      | null;
+    const heistId = startResult?.heist_id ?? null;
+
+    if (startErr || !startResult || startResult.status !== 'started' || !heistId) {
+      const duplicate = startResult?.status === 'duplicate_active';
+      // Always refund the entry fee — we charged it before the atomic insert.
       const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
         p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
       });
       if (refundErr) {
-        log.error('CRITICAL: heist insert failed AND refund failed', {
-          guildId, userId, entryFee, heistErr, refundErr,
+        log.error('CRITICAL: heist_start failed AND refund failed', {
+          guildId, userId, entryFee, startErr, refundErr,
         });
       }
-      if (code === '23505') {
+      if (duplicate) {
         await interaction.reply({
           content: '❌ Someone else just started a heist! Use `/heist join` to join it. Your entry fee was refunded.',
           ephemeral: true,
@@ -306,38 +316,15 @@ export class HeistManager {
       return;
     }
 
-    // V53-C10: Add initiator as participant — check error, refund if insert fails
-    const role = randomPick(HEIST_ROLES);
-    const { error: initInsertErr } = await this.supabase.from('economy_heist_participants').insert({
-      heist_id: heist.id,
-      guild_id: guildId,
-      user_id: userId,
-      role,
-      // Freeze the exact fee this member paid on the row. A stranded late-join
-      // (which this initiator never is) is refunded its own entry_fee_paid on any
-      // outcome; freezing it here keeps the column uniformly populated so no
-      // reconcile ever has to fall back to mutable config for a post-migration row.
-      entry_fee_paid: entryFee,
-    });
-    if (initInsertErr) {
-      log.error('Failed to insert initiator participant:', initInsertErr.message);
-      // Refund entry fee
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      })).catch((e: unknown) => { log.warn('Operation failed:', (e as Error)?.message ?? e); });
-      await interaction.reply({ content: '❌ Failed to join the heist. Your entry fee was refunded.', ephemeral: true });
-      return;
-    }
-
     // Schedule resolution
     const timer = setTimeout(async () => {
       try {
-        await this.resolveHeist(guildId, heist.id, interaction.channelId);
+        await this.resolveHeist(guildId, heistId, interaction.channelId);
       } catch (err) {
-        log.error(`Failed to resolve heist ${heist.id} in guild ${guildId}:`, err);
+        log.error(`Failed to resolve heist ${heistId} in guild ${guildId}:`, err);
       }
     }, joinWindowSecs * 1000);
-    this.resolveTimers.set(heist.id, timer);
+    this.resolveTimers.set(heistId, timer);
 
     const maxParticipants = config.economy_heist_max_participants ?? 8;
 

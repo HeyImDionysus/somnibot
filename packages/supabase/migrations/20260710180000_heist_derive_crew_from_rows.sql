@@ -64,6 +64,36 @@
 ALTER TABLE economy_heists
   ADD COLUMN IF NOT EXISTS base_success_chance INTEGER;
 
+-- ─── 1a. BACKFILL the anchor from the stored counter BEFORE the drop ───────────
+-- The DB is greenfield in CI, but a real deploy could run this while a heist is
+-- mid-recruiting/in_progress. The new base_success_chance starts NULL and the
+-- mutable success_chance is dropped in section 10 — so without this backfill an
+-- in-flight heist would resolve via heist_claim_for_resolution with the base
+-- COALESCEd to 0, recomputing its odds as (crew-1)*7 and LOSING the target/config
+-- base chance it was recruiting under. Reverse the derivation to recover the
+-- anchor from the stored counter that the old code kept in sync:
+--     success_chance = LEAST(95, GREATEST(0, base + (member_count - 1) * 7))
+--   ⇒ base           = success_chance - (member_count - 1) * 7
+-- member_count is the crew the resolver will actually count: the FROZEN rows
+-- (claimed_at IS NOT NULL) for an already-claimed in_progress heist, else the
+-- live recruiting rows. Anchor at least the base-only floor via GREATEST so a
+-- fully-clamped counter (success_chance = 95) still leaves a sane positive base.
+-- Only heists that still resolve (recruiting / in_progress) matter; terminal rows
+-- are historical and never re-rolled, but we backfill them too for a faithful
+-- dashboard reconstruction. success_chance still exists at this point (dropped in
+-- §10), so this reads it directly.
+UPDATE economy_heists h
+   SET base_success_chance = GREATEST(
+         0,
+         h.success_chance - (GREATEST(
+           (SELECT COUNT(*)
+              FROM economy_heist_participants p
+             WHERE p.heist_id = h.id
+               AND (h.status <> 'in_progress' OR p.claimed_at IS NOT NULL)
+           ), 1) - 1) * 7
+       )
+ WHERE h.base_success_chance IS NULL;
+
 -- ─── 2. heist_join — derive membership + count from rows; no array, no counter ──
 -- Same atomic, serialized join under the heist-row FOR UPDATE lock the round-9
 -- migration (20260710170000) established — the SAME lock heist_claim_for_resolution
@@ -791,24 +821,43 @@ $$;
 REVOKE ALL ON FUNCTION public.purge_member_data(text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.purge_member_data(text, text) TO service_role;
 
--- ─── 8. cleanup_member_economy — ban/leave forfeiture: stop touching the array ─
+-- ─── 8. cleanup_member_economy — ban/leave forfeiture: REMOVE from derived crew ─
 -- The V53 ban/leave cleanup (20260531000000) forfeits a departing member's active
 -- heist participation. It zeroed their payout on the participant rows AND ran a
 -- trailing `UPDATE economy_heists SET participants = array_remove(participants,
--- p_user_id)` to keep the denormalized array consistent. With the array column
--- dropped, that UPDATE would ERROR at call time (this RPC fires on every
--- ban/kick/leave via cross-feature-bridge.ts), so it must go. The participant-row
--- update is the whole forfeiture now that the rows are the single source of truth.
+-- p_user_id)` to strip them from the denormalized crew array. With crew membership
+-- now DERIVED from economy_heist_participants rows, `payout = 0` is INERT: the
+-- resolver counts every claimed row (inflating the frozen crew size, chance, and
+-- split denominator) and heist_credit_participant OVERWRITES payout with the real
+-- share on the success path — so a forfeited member would still boost the odds and
+-- be PAID. The forfeiture must remove them from the DERIVED crew, i.e. remove their
+-- ROW (or make it unpayable), which is exactly what array_remove did for the array.
 --
--- Re-created VERBATIM from 20260531000000 with two changes, both forced by the
--- column drop and nothing else:
---   * the `UPDATE economy_heists SET participants = array_remove(...)` is removed;
---   * `v_heists_forfeited` (used only for a log line — see cross-feature-bridge.ts)
---     is now the COUNT of the member's participant rows in recruiting/in_progress
---     heists, the exact set the removed array UPDATE used to touch, instead of that
---     UPDATE's ROW_COUNT. Same number, derived from the rows.
--- search_path, grants, and all other behavior (listing cancel + item refund,
--- payout zero-out, wallet suspend, return shape) are unchanged.
+-- Money rule preserved from 20260531000000: forfeiture removes WITHOUT refund (the
+-- old code dropped them from the array + zeroed payout and never credited an entry
+-- fee back). We keep that: no entry fee is returned on a ban/kick/leave forfeiture.
+--
+-- Race-correct because it takes the SAME heist-row FOR UPDATE lock the resolver
+-- (heist_claim_for_resolution) and the join (heist_join) take, so this serialises
+-- against them. Per affected heist, decide by the participant row's freeze/pay
+-- state:
+--   * recruiting, row unclaimed (claimed_at IS NULL, paid_at IS NULL)
+--       → DELETE the row. This is the whole removal from the derived crew before
+--         the claim can freeze it — the exact analogue of the old array_remove.
+--   * already frozen for resolution (claimed_at IS NOT NULL) but unpaid
+--       (paid_at IS NULL)
+--       → do NOT delete (the claim already counted this row into the frozen v_count
+--         it sized payout_each for; deleting mid-resolution would corrupt that
+--         count). Instead stamp paid_at = now(), payout = 0: heist_credit_participant
+--         skips any row with paid_at IS NOT NULL, so the resolver never pays them —
+--         their share is forfeited to the treasury. Idempotent and never double-pays.
+--   * already paid (paid_at IS NOT NULL)
+--       → leave it. The payout already settled; a best-effort cleanup does not claw
+--         back a completed credit (same best-effort semantics as before).
+-- v_heists_forfeited (a log-line count — see cross-feature-bridge.ts) is the number
+-- of active-heist rows this forfeiture touched (deleted or paid_at-stamped).
+-- search_path, grants, and all other behavior (listing cancel + item refund, wallet
+-- suspend, return shape) are unchanged.
 CREATE OR REPLACE FUNCTION public.cleanup_member_economy(
   p_guild_id text,
   p_user_id  text,
@@ -825,6 +874,9 @@ DECLARE
   v_wallet_suspended   boolean := false;
   v_items_refunded     jsonb := '[]'::jsonb;
   v_listing            record;
+  v_heist_id           uuid;
+  v_claimed_at         timestamptz;
+  v_paid_at            timestamptz;
 BEGIN
   -- ── Cancel active market listings and refund items ────────
   FOR v_listing IN
@@ -854,35 +906,63 @@ BEGIN
   END LOOP;
 
   -- ── Forfeit active heist participation ────────────────────
-  -- Count the member's rows in still-active heists FIRST (this is the set the old
-  -- array_remove UPDATE used to touch — the reported "heists_forfeited"), then
-  -- zero their payout. Deleting the rows is NOT done here: this is a forfeiture,
-  -- not a purge, and the settle/reconcile paths still expect the (now zero-payout)
-  -- row to exist so the member is accounted for on resolution.
-  SELECT count(*) INTO v_heists_forfeited
-  FROM economy_heist_participants
-  WHERE guild_id = p_guild_id
-    AND user_id = p_user_id
-    AND heist_id IN (
-      SELECT id FROM economy_heists
-      WHERE guild_id = p_guild_id
-        AND status IN ('recruiting', 'in_progress')
-    );
+  -- Remove the member from every DERIVED crew of a still-active heist. Lock each
+  -- heist row FOR UPDATE (serialising against heist_join / heist_claim_for_resolution)
+  -- so the claimed_at / paid_at we read below reflect a settled freeze decision and
+  -- no resolver can interleave with our remove.
+  FOR v_heist_id IN
+    SELECT p.heist_id
+      FROM economy_heist_participants p
+      JOIN economy_heists h ON h.id = p.heist_id
+     WHERE p.guild_id = p_guild_id
+       AND p.user_id  = p_user_id
+       AND h.guild_id = p_guild_id
+       AND h.status IN ('recruiting', 'in_progress')
+  LOOP
+    -- Take the heist-row lock (same lock the resolver/join take).
+    PERFORM 1 FROM economy_heists h WHERE h.id = v_heist_id FOR UPDATE;
 
-  UPDATE economy_heist_participants
-  SET payout = 0
-  WHERE guild_id = p_guild_id
-    AND user_id = p_user_id
-    AND heist_id IN (
-      SELECT id FROM economy_heists
-      WHERE guild_id = p_guild_id
-        AND status IN ('recruiting', 'in_progress')
-    );
+    -- Re-read the participant row under the lock to decide by its freeze/pay state.
+    SELECT p.claimed_at, p.paid_at
+      INTO v_claimed_at, v_paid_at
+      FROM economy_heist_participants p
+     WHERE p.heist_id = v_heist_id
+       AND p.user_id  = p_user_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+      CONTINUE;  -- row already gone (a concurrent settle/purge removed it)
+    END IF;
+
+    IF v_paid_at IS NOT NULL THEN
+      -- Already settled — do not claw back a completed credit.
+      CONTINUE;
+    END IF;
+
+    IF v_claimed_at IS NULL THEN
+      -- Still recruiting / unclaimed: DELETE the row — the whole removal from the
+      -- derived crew, before any claim can freeze it. No refund (forfeiture).
+      DELETE FROM economy_heist_participants p
+       WHERE p.heist_id = v_heist_id
+         AND p.user_id  = p_user_id;
+    ELSE
+      -- Frozen for resolution but unpaid: mark unpayable (paid_at + payout 0) so
+      -- heist_credit_participant skips them; their share is forfeited, not paid.
+      UPDATE economy_heist_participants p
+         SET paid_at = now(),
+             payout  = 0
+       WHERE p.heist_id = v_heist_id
+         AND p.user_id  = p_user_id;
+    END IF;
+
+    v_heists_forfeited := v_heists_forfeited + 1;
+  END LOOP;
 
   -- NOTE: the former `UPDATE economy_heists SET participants =
   -- array_remove(participants, p_user_id)` that stood here is intentionally
-  -- REMOVED — crew membership lives only in economy_heist_participants now and the
-  -- participants[] column no longer exists.
+  -- REMOVED — crew membership lives only in economy_heist_participants now (and the
+  -- participants[] column no longer exists). Deleting / stamping the row above IS
+  -- the whole removal from the derived crew.
 
   -- ── Suspend wallet ────────────────────────────────────────
   UPDATE economy_wallets
@@ -924,3 +1004,76 @@ DROP FUNCTION IF EXISTS array_append_heist_participant(UUID, TEXT);
 ALTER TABLE economy_heists
   DROP COLUMN IF EXISTS participants,
   DROP COLUMN IF EXISTS success_chance;
+
+-- ─── 11. heist_start — insert the heist AND the initiator row ATOMICALLY ────────
+-- Now that crew membership is DERIVED from economy_heist_participants rows, the
+-- initiator's row MUST exist atomically with (or before) the heist row becomes
+-- visible/derivable. The bot previously INSERTed the heist row (committing it,
+-- exposing status='recruiting') and THEN inserted the initiator participant row in
+-- a second statement. In the gap between them the crew derives with the initiator
+-- MISSING: a concurrent /heist join reads the recruiting heist, counts 0 rows, and
+-- can fill up to p_max — then the initiator insert adds one more, exceeding max and
+-- deriving the wrong crew count/chance; and a resolution that raced the gap would
+-- freeze a crew that excludes the initiator.
+--
+-- This RPC does BOTH inserts in ONE transaction, so the heist row and the
+-- initiator participant row commit together — the heist is never derivable without
+-- its initiator. The partial unique index uniq_active_heist_per_guild still guards
+-- the "one active heist per guild" race: if a concurrent /heist start already
+-- committed a recruiting/in_progress heist, THIS insert raises 23505, the whole tx
+-- (including the initiator row) rolls back, and we surface 'duplicate_active' so
+-- the bot refunds the entry fee — nothing is half-inserted. The fee was already
+-- debited by the caller (kept there so an insufficient-funds check short-circuits
+-- before we touch heist state); on any failure the bot refunds it, exactly as the
+-- two-statement path did.
+DROP FUNCTION IF EXISTS heist_start(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, TEXT, INTEGER);
+
+CREATE OR REPLACE FUNCTION heist_start(
+  p_guild_id    TEXT,
+  p_user_id     TEXT,
+  p_target_name TEXT,
+  p_target_payout INTEGER,
+  p_base_chance INTEGER,
+  p_expires_at  TEXT,
+  p_role        TEXT,
+  p_entry_fee   INTEGER
+)
+RETURNS TABLE (
+  status   TEXT,
+  heist_id UUID
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_heist_id UUID;
+BEGIN
+  -- Insert the heist row. The partial unique index makes this fail with 23505 if
+  -- another active heist already exists for the guild; we catch it below.
+  INSERT INTO public.economy_heists
+    (guild_id, initiator_id, target_name, target_payout, base_success_chance, expires_at)
+  VALUES
+    (p_guild_id, p_user_id, p_target_name, p_target_payout, p_base_chance, p_expires_at::timestamptz)
+  RETURNING id INTO v_heist_id;
+
+  -- Insert the initiator participant row in the SAME transaction with the frozen
+  -- entry fee they paid. Committed together with the heist row above, so the crew
+  -- is NEVER derived without the initiator.
+  INSERT INTO public.economy_heist_participants
+    (heist_id, guild_id, user_id, role, entry_fee_paid)
+  VALUES
+    (v_heist_id, p_guild_id, p_user_id, p_role, p_entry_fee);
+
+  RETURN QUERY SELECT 'started'::TEXT, v_heist_id;
+EXCEPTION
+  WHEN unique_violation THEN
+    -- Another active heist won the race (uniq_active_heist_per_guild) OR a
+    -- duplicate initiator row — either way the whole tx rolls back; nothing was
+    -- inserted. The bot refunds the entry fee.
+    RETURN QUERY SELECT 'duplicate_active'::TEXT, NULL::UUID;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION heist_start(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION heist_start(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, TEXT, INTEGER) TO service_role;

@@ -1957,8 +1957,17 @@ export interface DbHeist {
   status: HeistStatus;
   target_name: string;
   target_payout: number;
-  participants: string[];
-  success_chance: number;
+  // ONE-SOURCE-OF-TRUTH refactor (20260710180000): the denormalized
+  // participants[] array and the mutable success_chance counter were DROPPED.
+  // Crew membership + the live/frozen success chance are DERIVED from the
+  // economy_heist_participants ROWS anchored on base_success_chance (the immutable
+  // single-member chance = economy_heist_success_base_pct + target difficulty mod).
+  base_success_chance: number | null;
+  // Resolution state frozen at claim time (20260710060000): the per-person success
+  // payout and the decision carried on the intermediate in_progress row so a
+  // crash/resume settles the same frozen outcome. NULL while recruiting.
+  payout_each: number | null;
+  resolution: 'success' | 'failed' | 'cancelled' | null;
   resolved_at: string | null;
   expires_at: string;
   created_at: string;
@@ -1971,6 +1980,13 @@ export interface DbHeistParticipant {
   user_id: string;
   role: string;
   payout: number;
+  // Per-participant idempotency + freeze markers (20260710060000).
+  paid_at: string | null;
+  payout_failed: boolean;
+  claimed_at: string | null;
+  // Frozen entry fee this member actually paid (20260710150000); refunds read this
+  // per-row so a config edit after the debit never over/under-refunds.
+  entry_fee_paid: number | null;
   joined_at: string;
 }
 
