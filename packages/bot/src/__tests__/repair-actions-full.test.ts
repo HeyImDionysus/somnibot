@@ -354,6 +354,179 @@ describe('repairDriftItem — MISSING_RESOURCE', () => {
   });
 });
 
+// ── HIERARCHY_DRIFT (manual dashboard repair) ────────────────
+// Codex round-2: the manual repair switch had no HIERARCHY_DRIFT case, so
+// clicking "Repair" on a hierarchy drift item fell through to "Unknown drift
+// type". These prove the dashboard path now performs the reorder the item
+// advertises, and reports honest failures when the reorder is impossible.
+describe('repairDriftItem — HIERARCHY_DRIFT', () => {
+  // Guild whose roles cache carries positions + a bot highest role position.
+  function makeHierarchyGuild(
+    roles: Array<{ id: string; name: string; position: number; managed?: boolean }>,
+    botHighestPosition: number,
+    setPositions: ReturnType<typeof vi.fn>,
+  ): any {
+    const cache = new MockCollection();
+    cache.set('everyone', { id: 'everyone', name: '@everyone', position: 0 });
+    for (const r of roles) cache.set(r.id, { managed: false, ...r });
+    return {
+      id: 'g1',
+      roles: { cache, everyone: cache.get('everyone'), setPositions },
+      channels: { cache: new MockCollection() },
+      members: { me: { roles: { highest: { id: 'bot-role', position: botHighestPosition } } } },
+    };
+  }
+
+  // Supabase returning desired roles (guild_desired_state.roles) and role
+  // mappings (discord_id_map list query).
+  function makeHierarchySupabase(desiredRoles: any[], mappings: any[]): any {
+    return {
+      from: vi.fn((table: string) => {
+        if (table === 'guild_desired_state') return supaChain({ roles: desiredRoles });
+        if (table === 'discord_id_map') return supaChain(mappings);
+        return supaChain();
+      }),
+    };
+  }
+
+  it('reorders roles to desired relative positions via setPositions', async () => {
+    const desiredRoles = [
+      { template_key: 'role:admin', name: 'Admin', position: 2 },
+      { template_key: 'role:mod', name: 'Mod', position: 1 },
+      { template_key: 'role:member', name: 'Member', position: 0 },
+    ];
+    const mappings = [
+      { template_key: 'role:admin', discord_id: 'r-admin' },
+      { template_key: 'role:mod', discord_id: 'r-mod' },
+      { template_key: 'role:member', discord_id: 'r-member' },
+    ];
+    const setPositions = vi.fn(async (_updates: Array<{ role: string; position: number }>) => {});
+    const guild = makeHierarchyGuild(
+      [
+        { id: 'r-admin', name: 'Admin', position: 3 },
+        { id: 'r-mod', name: 'Mod', position: 10 }, // drifted above admin
+        { id: 'r-member', name: 'Member', position: 5 },
+      ],
+      50,
+      setPositions,
+    );
+    const supabase = makeHierarchySupabase(desiredRoles, mappings);
+
+    const result = await repairDriftItem(guild, supabase, {
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'role',
+      entityName: 'Role hierarchy',
+      entityDiscordId: 'r-mod',
+      templateKey: 'mod',
+    } as any);
+
+    expect(result.success).toBe(true);
+    expect(setPositions).toHaveBeenCalledTimes(1);
+    const updates = setPositions.mock.calls[0][0] as Array<{ role: string; position: number }>;
+    const byRole = new Map(updates.map((u) => [u.role, u.position]));
+    expect(byRole.get('r-member')!).toBeLessThan(byRole.get('r-mod')!);
+    expect(byRole.get('r-mod')!).toBeLessThan(byRole.get('r-admin')!);
+    expect(writeAuditLog).toHaveBeenCalled();
+  });
+
+  it('is idempotent — no setPositions call when already ordered', async () => {
+    const desiredRoles = [
+      { template_key: 'role:admin', name: 'Admin', position: 1 },
+      { template_key: 'role:member', name: 'Member', position: 0 },
+    ];
+    const mappings = [
+      { template_key: 'role:admin', discord_id: 'r-admin' },
+      { template_key: 'role:member', discord_id: 'r-member' },
+    ];
+    const setPositions = vi.fn(async () => {});
+    const guild = makeHierarchyGuild(
+      [
+        { id: 'r-admin', name: 'Admin', position: 12 },
+        { id: 'r-member', name: 'Member', position: 10 },
+      ],
+      50,
+      setPositions,
+    );
+    const supabase = makeHierarchySupabase(desiredRoles, mappings);
+
+    const result = await repairDriftItem(guild, supabase, {
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'role',
+      entityName: 'Role hierarchy',
+      entityDiscordId: 'r-admin',
+      templateKey: 'admin',
+    } as any);
+
+    expect(result.success).toBe(true);
+    expect(setPositions).not.toHaveBeenCalled();
+  });
+
+  it('fails when a participating desired role sits at/above the bot (no false success)', async () => {
+    // Desired member < admin. member is above the bot, admin below. The
+    // representative target is admin (movable), but member cannot be moved, so a
+    // correct full reorder is impossible — must report failure, not reorder only
+    // admin and claim success.
+    const desiredRoles = [
+      { template_key: 'role:admin', name: 'Admin', position: 1 },
+      { template_key: 'role:member', name: 'Member', position: 0 },
+    ];
+    const mappings = [
+      { template_key: 'role:admin', discord_id: 'r-admin' },
+      { template_key: 'role:member', discord_id: 'r-member' },
+    ];
+    const setPositions = vi.fn(async () => {});
+    const guild = makeHierarchyGuild(
+      [
+        { id: 'r-admin', name: 'Admin', position: 5 },   // below bot (10)
+        { id: 'r-member', name: 'Member', position: 20 }, // above bot → blocker
+      ],
+      10,
+      setPositions,
+    );
+    const supabase = makeHierarchySupabase(desiredRoles, mappings);
+
+    const result = await repairDriftItem(guild, supabase, {
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'role',
+      entityName: 'Role hierarchy',
+      entityDiscordId: 'r-admin', // movable target
+      templateKey: 'admin',
+    } as any);
+
+    expect(result.success).toBe(false);
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(result.error).toContain('at or above the bot');
+  });
+
+  it('rejects hierarchy repair for non-role entities', async () => {
+    const guild = makeGuild();
+    const supabase = makeSupabase();
+    const result = await repairDriftItem(guild, supabase, {
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'channel',
+      entityName: 'nope',
+    } as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Hierarchy repair not supported');
+  });
+});
+
+// ── EXTERNAL_CHANGE on a category (no persisted desired state) ────────
+describe('repairDriftItem — EXTERNAL_CHANGE (category)', () => {
+  it('reports manual review instead of misrouting to the channel helper', async () => {
+    const guild = makeGuild();
+    const supabase = makeSupabase();
+    const result = await repairDriftItem(guild, supabase, {
+      type: 'EXTERNAL_CHANGE',
+      entityType: 'category',
+      entityName: 'My Category',
+      entityDiscordId: 'cat1',
+    } as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('manual review');
+  });
+});
+
 describe('repairDriftItem — unknown type', () => {
   it('returns error for unknown drift type', async () => {
     const guild = makeGuild();

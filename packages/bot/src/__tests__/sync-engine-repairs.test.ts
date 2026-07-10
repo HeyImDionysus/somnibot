@@ -238,6 +238,54 @@ describe('auto-repair: HIERARCHY_DRIFT', () => {
     expect(result.repaired).toBe(1); // idempotent no-op still counts as repaired/consistent
   });
 
+  it('surfaces manual_required when a non-target participating role is above the bot', async () => {
+    // Codex round-2: the drift target is movable, but another desired role that
+    // participates in the ordering sits above the bot. Silently dropping it and
+    // reordering only the remainder would falsely report success while the
+    // hierarchy stays drifted. Desired: member(0) < admin(1). admin (the target)
+    // is below the bot; member is above it → the full reorder is impossible.
+    const desired = {
+      roles: [
+        { key: 'admin', name: 'Admin', position: 1 },
+        { key: 'member', name: 'Member', position: 0 },
+      ],
+      channels: [],
+    };
+    const mappings = [
+      { template_key: 'role:admin', discord_id: 'r-admin' },
+      { template_key: 'role:member', discord_id: 'r-member' },
+    ];
+    const setPositions = vi.fn(async () => {});
+    const guild = makeGuild({
+      botHighestPosition: 10,
+      setPositions,
+      roles: [
+        { id: 'r-admin', name: 'Admin', position: 5 },   // below bot → movable target
+        { id: 'r-member', name: 'Member', position: 20 }, // above bot → blocker
+      ],
+    });
+
+    mockClassifyDrift.mockReturnValueOnce([
+      {
+        type: 'HIERARCHY_DRIFT',
+        severity: 'warning',
+        entityType: 'role',
+        entityName: 'Admin',
+        entityDiscordId: 'r-admin', // movable target
+        templateKey: 'admin',
+        description: 'Role position drifted',
+        suggestedAction: 'repair',
+      },
+    ]);
+
+    const supabase = makeSupabase({ desired, mappings });
+    const result = await runSyncCycle(guild, supabase, bus, makeConfig());
+
+    // Must NOT reorder and must NOT count as repaired — the drift is unfixable.
+    expect(setPositions).not.toHaveBeenCalled();
+    expect(result.repaired).toBe(0);
+  });
+
   it('surfaces manual_required when the target role is at or above the bot', async () => {
     const desired = {
       roles: [
@@ -392,6 +440,48 @@ describe('auto-repair: EXTERNAL_CHANGE', () => {
         entityDiscordId: 'r-ghost',
         templateKey: 'ghost',
         description: 'Role "Ghost" was modified outside the dashboard',
+        suggestedAction: 'repair',
+      },
+    ]);
+
+    const supabase = makeSupabase({ desired, mappings });
+    const result = await runSyncCycle(guild, supabase, bus, makeConfig());
+
+    expect(editSpy).not.toHaveBeenCalled();
+    expect(result.repaired).toBe(0);
+  });
+
+  it('does not misroute a category external change into the channel helper', async () => {
+    // Codex round-2: categories are not persisted in guild_desired_state, so a
+    // category EXTERNAL_CHANGE has no desired name to restore. It must surface as
+    // manual_required rather than searching the channels array and editing a
+    // channel that happens to share the category's Discord ID.
+    const desired = {
+      roles: [],
+      channels: [
+        // A channel row that would be (wrongly) matched if the category were
+        // routed into the channel helper by shared ID.
+        { key: 'cat', name: 'renamed-channel', topic: 'x', slowmode: 0, nsfw: false },
+      ],
+    };
+    const mappings = [{ template_key: 'category:cat', discord_id: 'cat1' }];
+    const editSpy = vi.fn(async (_opts: Record<string, unknown>) => {});
+    const guild = makeGuild({ botHighestPosition: 50 });
+    guild.channels.cache.set('cat1', {
+      id: 'cat1',
+      name: 'My Category',
+      edit: editSpy,
+    });
+
+    mockClassifyDrift.mockReturnValueOnce([
+      {
+        type: 'EXTERNAL_CHANGE',
+        severity: 'info',
+        entityType: 'category',
+        entityName: 'My Category',
+        entityDiscordId: 'cat1',
+        templateKey: 'cat',
+        description: 'Category "My Category" was modified outside the dashboard',
         suggestedAction: 'repair',
       },
     ]);

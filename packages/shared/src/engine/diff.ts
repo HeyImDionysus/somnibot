@@ -306,8 +306,12 @@ export function computeStateDiff(
   // --- Role hierarchy drift ---
   // Compare the desired relative ordering of mapped roles against their actual
   // Discord positions. Only roles that resolve to a live, non-managed actual
-  // role participate. If sorting by desired position yields a sequence whose
-  // actual positions are not strictly increasing, the hierarchy has drifted.
+  // role participate. Drift is a genuine *inversion*: a role that should sit
+  // higher (greater desired position) actually sits strictly lower than the one
+  // below it. Discord role positions are NOT guaranteed unique, so two adjacent
+  // desired roles can legitimately share the same numeric position — a tie is
+  // not an inversion and must not be reported as drift (otherwise the signal
+  // fires forever and the auto-repair can never clear it).
   let roleHierarchyDrift = false;
   let roleHierarchyDriftId: string | undefined;
   let roleHierarchyDriftKey: string | undefined;
@@ -340,7 +344,9 @@ export function computeStateDiff(
     if (mapped.length >= 2) {
       const sorted = [...mapped].sort((a, b) => a.desiredPos - b.desiredPos);
       for (let i = 1; i < sorted.length; i++) {
-        if (sorted[i].actualPos <= sorted[i - 1].actualPos) {
+        // Strict inversion only: equal actual positions (a tie) are treated as
+        // correctly ordered, since Discord does not guarantee unique positions.
+        if (sorted[i].actualPos < sorted[i - 1].actualPos) {
           roleHierarchyDrift = true;
           // Report the higher-desired role as the representative target.
           roleHierarchyDriftId = sorted[i].discordId;

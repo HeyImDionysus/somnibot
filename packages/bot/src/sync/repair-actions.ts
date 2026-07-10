@@ -250,10 +250,28 @@ export async function repairDriftItem(
         ) {
           return { success: false, error: `${driftItem.entityType} permission drift repair requires manual review` };
         }
-        if ((driftItem.entityType === 'channel' || driftItem.entityType === 'category') && driftItem.entityDiscordId) {
+        if (driftItem.type === 'EXTERNAL_CHANGE' && driftItem.entityType === 'category') {
+          // Categories are not persisted in guild_desired_state (only roles/channels
+          // are stored), so there is no desired category name to restore. Routing
+          // this into repairChannel only yields a misleading "not in desired state"
+          // error — surface it honestly for manual review instead.
+          return { success: false, error: 'Category external changes have no persisted desired state to restore — manual review required' };
+        }
+        if (driftItem.entityType === 'channel' && driftItem.entityDiscordId) {
           return await repairChannel(guild, supabase, driftItem);
         }
         return { success: false, error: 'Unknown entity type for repair' };
+      }
+
+      case 'HIERARCHY_DRIFT': {
+        // Role positions drifted from the desired ordering — reorder back to
+        // desired. Mirrors the sync engine's auto-repair (reorderRolesToDesired)
+        // so the dashboard "Repair" button actually performs the reorder the
+        // drift item advertises instead of falling through to "Unknown drift type".
+        if (driftItem.entityType !== 'role') {
+          return { success: false, error: `Hierarchy repair not supported for ${driftItem.entityType}` };
+        }
+        return await repairHierarchy(guild, supabase, driftItem);
       }
 
       case 'MISSING_RESOURCE': {
@@ -632,6 +650,126 @@ async function removeDriftFromDb(
       drift_details: filtered,
     })
     .eq('guild_id', guildId);
+}
+
+/**
+ * Reorder mapped roles back to their desired relative hierarchy.
+ *
+ * Mirrors the sync engine's auto-repair: assign a contiguous band of absolute
+ * positions immediately below the bot's highest role, preserving desired
+ * relative order. Discord only lets the bot move roles strictly below its own
+ * highest role, so a desired role that resolves to a live, non-managed role
+ * sitting at/above the bot is a blocker — we surface it for manual attention
+ * rather than silently reordering the remainder and claiming success.
+ */
+async function repairHierarchy(
+  guild: Guild,
+  supabase: SupabaseClient,
+  driftItem: DriftItem,
+): Promise<{ success: boolean; error?: string }> {
+  const botHighest = guild.members.me?.roles.highest.position;
+  if (typeof botHighest !== 'number') {
+    return { success: false, error: "Bot's highest role position is unknown" };
+  }
+
+  // The representative drift target must itself be below the bot to be movable.
+  if (driftItem.entityDiscordId) {
+    const targetRole = guild.roles.cache.get(driftItem.entityDiscordId);
+    if (targetRole && targetRole.position >= botHighest) {
+      return { success: false, error: `Role "${targetRole.name}" is at or above the bot's highest role — the bot cannot move it` };
+    }
+  }
+
+  const { data: state } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .maybeSingle();
+
+  const desiredRoles = (state?.roles as Record<string, unknown>[]) ?? [];
+  if (desiredRoles.length === 0) {
+    return { success: false, error: 'No desired roles configured' };
+  }
+
+  // Load role ID mappings so desired keys resolve to live Discord roles.
+  const { data: mappings } = await supabase
+    .from('discord_id_map')
+    .select('template_key, discord_id')
+    .eq('guild_id', guild.id)
+    .eq('entity_type', 'role')
+    .limit(1000);
+
+  const idMap = new Map<string, string>();
+  for (const m of (mappings ?? []) as Array<{ template_key: string; discord_id: string }>) {
+    idMap.set(m.template_key, m.discord_id);
+  }
+
+  const resolveRoleId = (rawKey: string): string | undefined => {
+    const bare = unprefixedTemplateKey(rawKey);
+    return (
+      idMap.get(`role:${bare}`) ??
+      idMap.get(bare) ??
+      idMap.get(rawKey) ??
+      idMap.get(`role:${rawKey}`)
+    );
+  };
+
+  // Resolve each desired role to a live Discord role, in desired order.
+  const sorted = [...desiredRoles].sort(
+    (a, b) => ((a.position as number) ?? 0) - ((b.position as number) ?? 0),
+  );
+  const movable: Array<{ id: string; currentPosition: number }> = [];
+  for (const def of sorted) {
+    const rawKey = (def.template_key ?? def.templateKey ?? def.key) as string | undefined;
+    if (!rawKey) continue;
+    const discordId = resolveRoleId(rawKey);
+    if (!discordId) continue;
+    const role = guild.roles.cache.get(discordId);
+    if (!role) continue;
+    if (role.managed) continue;
+    if (role.position >= botHighest) {
+      // Blocker: this desired role cannot be moved, so a correct full reorder is
+      // impossible — do not silently exclude it and report a false success.
+      return { success: false, error: `Role "${role.name}" is at or above the bot's highest role — the bot cannot reorder the hierarchy while it stays there` };
+    }
+    movable.push({ id: discordId, currentPosition: role.position });
+  }
+
+  if (movable.length === 0) {
+    return { success: false, error: 'No movable roles resolved from desired state' };
+  }
+
+  const positionUpdates = movable.map((entry, index) => ({
+    role: entry.id,
+    position: Math.max(1, botHighest - movable.length + index),
+  }));
+
+  // Idempotent: equal actual positions count as ordered (Discord positions are
+  // not guaranteed unique); only a strict decrease is a genuine inversion.
+  const alreadyOrdered = movable.every((entry, index) => {
+    if (index === 0) return true;
+    return entry.currentPosition >= movable[index - 1].currentPosition;
+  });
+  if (alreadyOrdered) {
+    await removeDriftFromDb(supabase, guild.id, driftItem);
+    return { success: true };
+  }
+
+  await guild.roles.setPositions(positionUpdates);
+
+  await removeDriftFromDb(supabase, guild.id, driftItem);
+
+  await writeAuditLog(supabase, {
+    guildId: guild.id,
+    actorType: 'bot',
+    actorId: 'sync-engine',
+    action: 'drift.repaired',
+    targetType: 'role',
+    targetId: driftItem.entityDiscordId ?? '',
+    details: { type: 'HIERARCHY_DRIFT', reordered: positionUpdates.length },
+  });
+
+  return { success: true };
 }
 
 async function repairRole(

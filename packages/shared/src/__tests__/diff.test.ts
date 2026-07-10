@@ -520,6 +520,60 @@ describe('computeStateDiff — role hierarchy drift', () => {
     expect(diff.roleHierarchyDrift).toBe(true);
   });
 
+  it('does NOT flag drift when adjacent roles share the same actual position (tie)', () => {
+    // Discord role positions are not guaranteed unique. Two desired roles that
+    // legitimately resolve to the same numeric position are NOT an inversion —
+    // reporting drift here would fire forever and the repair could never clear it.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 7 }),
+        makeActualRole('r-member', { position: 7 }), // tie with admin
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
+  it('flags drift on a strict inversion even when another pair ties', () => {
+    // member(0) < mod(1) < admin(2) desired. Actual: member ties mod (both 5),
+    // but admin sits strictly below mod → a real inversion at admin.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 3 }), // below mod → inversion
+        makeActualRole('r-mod', { position: 5 }),
+        makeActualRole('r-member', { position: 5 }), // ties mod, benign
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+  });
+
   it('ignores managed roles when evaluating hierarchy order', () => {
     const desired = baseDesiredState({
       roles: [

@@ -369,8 +369,21 @@ async function repairDriftItem(
       if (item.entityType === 'role') {
         return await reapplyRoleDesiredState(guild, supabase, item, idMap);
       }
-      if (item.entityType === 'channel' || item.entityType === 'category') {
+      if (item.entityType === 'channel') {
         return await reapplyChannelDesiredState(guild, supabase, item, idMap);
+      }
+      if (item.entityType === 'category') {
+        // Categories are not persisted in guild_desired_state (only `roles` and
+        // `channels` JSONB columns exist — category defs are derived from channel
+        // `categoryKey`s at deploy time and never stored). There is therefore no
+        // desired category name to restore to, so routing this through the
+        // channel helper would only ever return a misleading "not in desired
+        // state" error. Surface it honestly for manual attention instead.
+        return {
+          success: false,
+          action: 'manual_required',
+          reason: 'Category external changes have no persisted desired state to restore — manual review required',
+        };
       }
       return { success: false, action: 'manual_required', reason: `External change repair not supported for ${item.entityType}` };
     }
@@ -551,7 +564,12 @@ async function reorderRolesToDesired(
     return { success: false, action: 'manual_required', reason: 'No desired roles configured' };
   }
 
-  // Resolve each desired role to a live, movable Discord role (below the bot).
+  // Resolve each desired role to a live Discord role. A desired role that
+  // resolves to a live, non-managed role sitting at/above the bot is a *blocker*:
+  // the bot cannot move it, so the full desired ordering is unachievable. We must
+  // NOT silently drop such a role and reorder only the remainder — doing so can
+  // turn an impossible repair into a false success (the excluded role keeps the
+  // hierarchy drifted while the movable subset looks "already ordered").
   const sorted = [...desiredRoles].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
   const movable: Array<{ id: string; currentPosition: number }> = [];
   for (const def of sorted) {
@@ -562,8 +580,16 @@ async function reorderRolesToDesired(
     if (!discordId) continue;
     const role = guild.roles.cache.get(discordId);
     if (!role) continue;
-    if (role.managed) continue;
-    if (role.position >= botHighest) continue; // cannot move roles at/above the bot
+    if (role.managed) continue; // managed roles are Discord-controlled, not part of the reorder
+    if (role.position >= botHighest) {
+      // A desired, movable-in-principle role that is currently at/above the bot
+      // blocks a correct reorder — surface it for manual attention.
+      return {
+        success: false,
+        action: 'manual_required',
+        reason: `Role "${role.name}" is at or above the bot's highest role — the bot cannot reorder the hierarchy while it stays there`,
+      };
+    }
     movable.push({ id: discordId, currentPosition: role.position });
   }
 
@@ -579,11 +605,12 @@ async function reorderRolesToDesired(
   }));
 
   // Idempotent: skip the API call when the current relative ordering already
-  // matches the desired ordering. Compare the sequence of current positions —
-  // if it is already strictly increasing in desired order, nothing to do.
+  // matches the desired ordering. The diff engine treats equal actual positions
+  // as ordered (Discord positions are not guaranteed unique), so a tie is not an
+  // inversion here either — only a strict decrease means the hierarchy drifted.
   const alreadyOrdered = movable.every((entry, index) => {
     if (index === 0) return true;
-    return entry.currentPosition > movable[index - 1].currentPosition;
+    return entry.currentPosition >= movable[index - 1].currentPosition;
   });
   if (alreadyOrdered) {
     return { success: true, action: 'Role hierarchy already matches desired order' };
