@@ -25,6 +25,10 @@ interface HeistRecord {
   status: string;
   target_name: string;
   target_payout: number;
+  // Derived by /api/economy/heist from the participant ROWS (the single source of
+  // truth) + base_success_chance — the economy_heists.participants[] array and the
+  // stored success_chance counter were dropped (migration 20260710180000). The API
+  // synthesizes these two fields so this shape is unchanged for the UI.
   participants: string[];
   success_chance: number;
   created_at: string;

@@ -114,6 +114,51 @@ describe('HeistManager deep', () => {
     expect(responded).toBe(true);
   });
 
+  it('startHeist creates heist + initiator atomically via heist_start (finding 2)', async () => {
+    // Wallet has funds; no active heist; no cooldown. heist_start returns 'started'.
+    const supa = makeSupa({
+      guild_config: { guild_id: 'guild-1', economy_heist_enabled: true, economy_heist_entry_fee: 100 },
+      economy_wallets: { wallet: 5000 },
+    });
+    supa.rpc = vi.fn(async (fn: string) => {
+      if (fn === 'heist_start') return { data: [{ status: 'started', heist_id: 'heist-atomic-1' }], error: null };
+      return { data: null, error: null };
+    });
+    const mgr = new HeistManager(supa, makeClient());
+    const interaction = makeInteraction();
+    await mgr.startHeist(interaction);
+
+    // The initiator row is inserted by the atomic RPC, NOT a separate table insert.
+    const rpcNames = supa.rpc.mock.calls.map((c: any[]) => c[0]);
+    expect(rpcNames).toContain('heist_start');
+    // No second-statement participant insert (the gap that let a concurrent join
+    // fill the crew before the initiator row existed).
+    const participantInserts = supa.from.mock.calls.filter(
+      (c: any[]) => c[0] === 'economy_heist_participants',
+    );
+    expect(participantInserts.length).toBe(0);
+    expect(interaction.reply).toHaveBeenCalled();
+  });
+
+  it('startHeist refunds the entry fee when heist_start reports duplicate_active (finding 2)', async () => {
+    const supa = makeSupa({
+      guild_config: { guild_id: 'guild-1', economy_heist_enabled: true, economy_heist_entry_fee: 100 },
+      economy_wallets: { wallet: 5000 },
+    });
+    supa.rpc = vi.fn(async (fn: string) => {
+      if (fn === 'heist_start') return { data: [{ status: 'duplicate_active', heist_id: null }], error: null };
+      return { data: null, error: null };
+    });
+    const mgr = new HeistManager(supa, makeClient());
+    const interaction = makeInteraction();
+    await mgr.startHeist(interaction);
+
+    // The pre-debited entry fee is refunded via economy_add_balance.
+    const refunds = supa.rpc.mock.calls.filter((c: any[]) => c[0] === 'economy_add_balance');
+    expect(refunds.length).toBe(1);
+    expect(interaction.reply).toHaveBeenCalled();
+  });
+
   it('cleanup clears timers', () => {
     const supa = makeSupa();
     const mgr = new HeistManager(supa, makeClient());
