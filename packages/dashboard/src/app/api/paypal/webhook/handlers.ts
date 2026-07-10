@@ -87,6 +87,48 @@ async function hasQueuedRoleRevocation(
   });
 }
 
+/**
+ * W2 codex round 2: retry-dedupe probe for cancellation/suspension
+ * fulfillments. A failed BILLING.SUBSCRIPTION.CANCELLED / .SUSPENDED /
+ * .PAYMENT.FAILED event is resumable (RESUMABLE_FAILED_EVENT_TYPES), and the
+ * failed attempt may already have queued the fulfillment (insert committed
+ * but the response was lost, or the process died before recording success).
+ * The bot-side entitlement effects are idempotent, but the user DM / event
+ * emission are not — so a resumed retry must not queue a second action.
+ * The probe is scoped by the triggering webhook event id (stamped into the
+ * payload) so a fulfillment queued by an EARLIER suspension episode of the
+ * same order never suppresses a genuinely new one.
+ */
+async function hasQueuedOrderFulfillment(
+  supabase: ReturnType<typeof createAdminSupabase>,
+  input: {
+    guildId: string;
+    action: string;
+    orderId: string;
+    fulfillmentType: string;
+    webhookEventId?: string;
+  },
+): Promise<boolean> {
+  const payloadFilter: Record<string, string> = {
+    order_id: input.orderId,
+    fulfillment_type: input.fulfillmentType,
+  };
+  if (input.webhookEventId) {
+    payloadFilter.webhook_event_id = input.webhookEventId;
+  }
+
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id')
+    .eq('guild_id', input.guildId)
+    .eq('action', input.action)
+    .in('status', ['pending', 'processing', 'completed'])
+    .contains('payload', payloadFilter)
+    .limit(1000);
+  requireSupabaseSuccess(error, `Failed to inspect queued ${input.action}`);
+  return Array.isArray(data) && data.length > 0;
+}
+
 async function hasQueuedSubscriptionExpiredAuditEvent(
   supabase: ReturnType<typeof createAdminSupabase>,
   input: {
@@ -511,9 +553,16 @@ export async function handleSubscriptionActivated(
 
 // ── Subscription Cancelled ──────────────────────────
 
+export interface SubscriptionQueueOptions {
+  retryingFailedEvent?: boolean;
+  /** Webhook event id — stamped into the fulfillment payload for retry dedupe. */
+  webhookEventId?: string;
+}
+
 export async function handleSubscriptionCancelled(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: SubscriptionQueueOptions = {},
 ) {
   const subscriptionId = resource.id as string;
   if (!subscriptionId) return;
@@ -540,6 +589,24 @@ export async function handleSubscriptionCancelled(
 
   if (!customer?.discord_id) return;
 
+  // W2 codex round 2: on a resumed retry the failed attempt may already have
+  // queued this fulfillment — don't queue a duplicate (double DM / event).
+  if (options.retryingFailedEvent) {
+    const alreadyQueued = await hasQueuedOrderFulfillment(supabase, {
+      guildId: order.guild_id,
+      action: 'fulfill_cancellation',
+      orderId: order.id,
+      fulfillmentType: 'subscription_cancelled',
+      webhookEventId: options.webhookEventId,
+    });
+    if (alreadyQueued) {
+      console.info(
+        `[Webhook] Subscription cancellation fulfillment already queued for ${subscriptionId}, skipping duplicate`,
+      );
+      return;
+    }
+  }
+
   const queued = await queueFulfillment(supabase, 'fulfill_cancellation', order.guild_id, {
     fulfillment_type: 'subscription_cancelled',
     guild_id: order.guild_id,
@@ -554,12 +621,14 @@ export async function handleSubscriptionCancelled(
     granted_role_ids: [],
     granted_channel_ids: [],
     entitlement_type: 'subscription',
+    ...(options.webhookEventId ? { webhook_event_id: options.webhookEventId } : {}),
   });
   // W2: a failed queue insert used to be logged and swallowed — the
   // cancellation (and the bot-side entitlement revocation it drives) was
-  // silently lost. Throw so the webhook records an error and can be retried;
-  // the bot-side revoke is a no-op for already-revoked entitlements, so a
-  // retry cannot double-revoke.
+  // silently lost. Throw so the webhook records an error and PayPal's
+  // redelivery re-processes it (BILLING.SUBSCRIPTION.CANCELLED is in
+  // RESUMABLE_FAILED_EVENT_TYPES); the bot-side revoke is a no-op for
+  // already-revoked entitlements, so a retry cannot double-revoke.
   if (!queued) {
     throw new Error('Failed to queue subscription cancellation fulfillment');
   }
@@ -822,6 +891,7 @@ export async function handleSubscriptionExpired(
 export async function handleSubscriptionSuspended(
   supabase: ReturnType<typeof createAdminSupabase>,
   resource: Record<string, unknown>,
+  options: SubscriptionQueueOptions = {},
 ) {
   const subscriptionId = resource.id as string;
   if (!subscriptionId) return;
@@ -848,6 +918,23 @@ export async function handleSubscriptionSuspended(
 
   if (!customer?.discord_id) return;
 
+  // W2 codex round 2: same retry dedupe as handleSubscriptionCancelled.
+  if (options.retryingFailedEvent) {
+    const alreadyQueued = await hasQueuedOrderFulfillment(supabase, {
+      guildId: order.guild_id,
+      action: 'fulfill_suspension',
+      orderId: order.id,
+      fulfillmentType: 'subscription_suspended',
+      webhookEventId: options.webhookEventId,
+    });
+    if (alreadyQueued) {
+      console.info(
+        `[Webhook] Subscription suspension fulfillment already queued for ${subscriptionId}, skipping duplicate`,
+      );
+      return;
+    }
+  }
+
   const queued = await queueFulfillment(supabase, 'fulfill_suspension', order.guild_id, {
     fulfillment_type: 'subscription_suspended',
     guild_id: order.guild_id,
@@ -862,10 +949,13 @@ export async function handleSubscriptionSuspended(
     granted_role_ids: [],
     granted_channel_ids: [],
     entitlement_type: 'subscription',
+    ...(options.webhookEventId ? { webhook_event_id: options.webhookEventId } : {}),
   });
   // W2: same reasoning as handleSubscriptionCancelled — losing this insert
   // silently means the entitlement never enters its grace period. The
-  // bot-side suspend targets 'active' entitlements only, so retries are safe.
+  // bot-side suspend targets 'active' entitlements only, so retries are safe
+  // (BILLING.SUBSCRIPTION.SUSPENDED / .PAYMENT.FAILED are in
+  // RESUMABLE_FAILED_EVENT_TYPES).
   if (!queued) {
     throw new Error('Failed to queue subscription suspension fulfillment');
   }
@@ -908,7 +998,11 @@ export async function handleSubscriptionPayment(
     guild_id: order.guild_id,
     paypal_payment_id: resource.id as string,
     amount_cents: amountCents,
-    currency: 'USD',
+    // W2 codex round 2: persist the sale's actual currency instead of a
+    // hardcoded 'USD' — the refund currency-mismatch guard compares against
+    // this value, and a wrong label turned legitimate partial refunds on
+    // non-USD plans into full revocations.
+    currency: sale.amount?.currency ?? 'USD',
     status: 'completed',
   });
 
@@ -1003,6 +1097,13 @@ interface RefundAmountInfo {
   refundCurrency: string | null;
   /** PayPal's cumulative refunded total for the parent capture/sale. */
   paypalTotalRefundedCents: number | null;
+  /**
+   * Currency of PayPal's cumulative refunded total. PayPal issues refunds in
+   * the parent sale's currency, so this is the payload's own statement of the
+   * sale's actual currency — used to tolerate legacy payments rows whose
+   * currency label was persisted as a hardcoded 'USD'.
+   */
+  paypalTotalRefundedCurrency: string | null;
 }
 
 function resolveRefundAmounts(
@@ -1012,7 +1113,12 @@ function resolveRefundAmounts(
   if (eventType.startsWith('PAYMENT.CAPTURE.')) {
     const parsed = paypalCaptureResourceSchema.safeParse(resource);
     if (!parsed.success) {
-      return { refundAmountCents: null, refundCurrency: null, paypalTotalRefundedCents: null };
+      return {
+        refundAmountCents: null,
+        refundCurrency: null,
+        paypalTotalRefundedCents: null,
+        paypalTotalRefundedCurrency: null,
+      };
     }
     return {
       refundAmountCents: parseAmountToCents(parsed.data.amount?.value),
@@ -1020,17 +1126,25 @@ function resolveRefundAmounts(
       paypalTotalRefundedCents: parseAmountToCents(
         parsed.data.seller_payable_breakdown?.total_refunded_amount?.value,
       ),
+      paypalTotalRefundedCurrency:
+        parsed.data.seller_payable_breakdown?.total_refunded_amount?.currency_code ?? null,
     };
   }
 
   const parsed = paypalSaleResourceSchema.safeParse(resource);
   if (!parsed.success) {
-    return { refundAmountCents: null, refundCurrency: null, paypalTotalRefundedCents: null };
+    return {
+      refundAmountCents: null,
+      refundCurrency: null,
+      paypalTotalRefundedCents: null,
+      paypalTotalRefundedCurrency: null,
+    };
   }
   return {
     refundAmountCents: parseAmountToCents(parsed.data.amount?.total),
     refundCurrency: parsed.data.amount?.currency ?? null,
     paypalTotalRefundedCents: parseAmountToCents(parsed.data.total_refunded_amount?.value),
+    paypalTotalRefundedCurrency: parsed.data.total_refunded_amount?.currency ?? null,
   };
 }
 
@@ -1050,11 +1164,23 @@ type RefundScope = { kind: 'full'; reason: FullRefundReason } | { kind: 'partial
  * pre-W2 behavior:
  *   - .REVERSED events are chargebacks/reversals — always full.
  *   - Unparseable/missing amounts can't be compared — full.
- *   - A refund in a different currency can't be compared — full.
+ *   - A refund in a different currency can't be compared — full, EXCEPT for
+ *     legacy mislabeled subscription payments (see below).
  *   - A payment recorded with amount_cents <= 0 (e.g. a subscription sale
  *     whose amount lookup failed) has no baseline — full.
  * Otherwise the cumulative refunded total (max of PayPal's authoritative
  * total and the locally recorded payment_refunds sum) decides.
+ *
+ * Legacy tolerance (W2 codex round 2): handleSubscriptionPayment used to
+ * persist a hardcoded 'USD' currency label while amount_cents was parsed
+ * from the sale payload in the plan's actual currency — the recorded CENTS
+ * are right, only the label is wrong. PayPal always issues refunds in the
+ * parent sale's currency, so when a PAYMENT.SALE.* refund against a
+ * USD-labeled payment carries a signature-verified payload whose cumulative
+ * refunded total is in the refund's own currency, the payload — not our
+ * label — is authoritative and the cents comparison remains valid. Capture
+ * refunds keep the strict fail-safe: their payments rows were always
+ * persisted with the checkout currency.
  */
 function classifyRefundScope(input: {
   eventType: string;
@@ -1062,6 +1188,7 @@ function classifyRefundScope(input: {
   paymentCurrency: string | null;
   refundAmountCents: number | null;
   refundCurrency: string | null;
+  paypalTotalRefundedCurrency: string | null;
   cumulativeRefundedCents: number;
 }): RefundScope {
   if (input.eventType.endsWith('.REVERSED')) {
@@ -1075,7 +1202,14 @@ function classifyRefundScope(input: {
     input.paymentCurrency &&
     input.refundCurrency.toUpperCase() !== input.paymentCurrency.toUpperCase()
   ) {
-    return { kind: 'full', reason: 'currency_mismatch' };
+    const legacyMislabeledSalePayment =
+      input.eventType.startsWith('PAYMENT.SALE.') &&
+      input.paymentCurrency.toUpperCase() === 'USD' &&
+      input.paypalTotalRefundedCurrency != null &&
+      input.paypalTotalRefundedCurrency.toUpperCase() === input.refundCurrency.toUpperCase();
+    if (!legacyMislabeledSalePayment) {
+      return { kind: 'full', reason: 'currency_mismatch' };
+    }
   }
   if (typeof input.paymentAmountCents !== 'number' || input.paymentAmountCents <= 0) {
     return { kind: 'full', reason: 'no_payment_baseline' };
@@ -1209,6 +1343,7 @@ async function handleExternalPaymentRefunded(
     paymentCurrency: typeof payment.currency === 'string' ? payment.currency : null,
     refundAmountCents: amounts.refundAmountCents,
     refundCurrency: amounts.refundCurrency,
+    paypalTotalRefundedCurrency: amounts.paypalTotalRefundedCurrency,
     cumulativeRefundedCents,
   });
 

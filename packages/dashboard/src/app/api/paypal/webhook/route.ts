@@ -48,6 +48,17 @@ const RESUMABLE_FAILED_EVENT_TYPES = new Set([
   'PAYMENT.CAPTURE.REVERSED',
   'PAYMENT.SALE.REFUNDED',
   'PAYMENT.SALE.REVERSED',
+  // W2 codex round 2: cancellation/suspension handlers throw when the bot
+  // fulfillment can't be queued. Without being resumable here, that
+  // transient failure records result='error' and PayPal's redelivery hits
+  // failed_requires_manual_replay — the event is permanently lost. The
+  // handlers are retry-safe: the fulfillment payload is stamped with the
+  // webhook event id and a resumed retry probes bot_action_queue for it
+  // before queueing again (exactly-once), while the bot-side handlers only
+  // touch active/grace-period entitlements.
+  'BILLING.SUBSCRIPTION.CANCELLED',
+  'BILLING.SUBSCRIPTION.SUSPENDED',
+  'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
 ]);
 
 type PayPalWebhookEvent = {
@@ -325,16 +336,20 @@ export async function POST(req: NextRequest) {
         await handleSubscriptionActivated(supabase, event.resource);
         break;
       case 'BILLING.SUBSCRIPTION.CANCELLED':
-        await handleSubscriptionCancelled(supabase, event.resource);
+        await handleSubscriptionCancelled(supabase, event.resource, {
+          retryingFailedEvent,
+          webhookEventId: resolvedEventId,
+        });
         break;
       case 'BILLING.SUBSCRIPTION.EXPIRED':
         await handleSubscriptionExpired(supabase, event.resource, { retryingFailedEvent });
         break;
       case 'BILLING.SUBSCRIPTION.SUSPENDED':
-        await handleSubscriptionSuspended(supabase, event.resource);
-        break;
       case 'BILLING.SUBSCRIPTION.PAYMENT.FAILED':
-        await handleSubscriptionSuspended(supabase, event.resource);
+        await handleSubscriptionSuspended(supabase, event.resource, {
+          retryingFailedEvent,
+          webhookEventId: resolvedEventId,
+        });
         break;
       case 'PAYMENT.SALE.COMPLETED':
         await handleSubscriptionPayment(supabase, event.resource);

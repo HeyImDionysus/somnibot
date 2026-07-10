@@ -987,6 +987,167 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
   });
 });
 
+describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale payments)', () => {
+  it('PAYMENT.SALE.COMPLETED persists the sale currency instead of hardcoded USD', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: { id: 'order-sub-eur', customer_id: 'customer-1', guild_id: 'guild-1' },
+        error: null,
+      },
+      payments: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.COMPLETED',
+      resource: {
+        id: 'SALE-EUR-1',
+        billing_agreement_id: 'SUB-EUR-1',
+        amount: { total: '9.99', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-COMPLETED-EUR',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts).toContainEqual({
+      table: 'payments',
+      payload: expect.objectContaining({
+        paypal_payment_id: 'SALE-EUR-1',
+        amount_cents: 999,
+        currency: 'EUR',
+        status: 'completed',
+      }),
+    });
+  });
+
+  it('partial sale refund on a legacy USD-labeled payment stays partial when the payload confirms the sale currency', async () => {
+    const { inserts, updates } = useWebhookRows({
+      // Legacy row: amount_cents parsed from the EUR sale payload, but the
+      // currency label was persisted as hardcoded 'USD'.
+      payments: { data: basePayment, error: null },
+      payment_refunds: [
+        { data: null, error: null },
+        { data: [{ amount_cents: 250 }], error: null },
+      ],
+      alerts: { data: null, error: null },
+      audit_logs: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-EUR-PARTIAL',
+        sale_id: 'SALE-1',
+        amount: { total: '2.50', currency: 'EUR' },
+        total_refunded_amount: { value: '2.50', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-REFUND-EUR-PARTIAL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    // Access retained: no revocations, operator review raised instead
+    expect(updates.filter((u) => u.table !== 'webhook_events')).toEqual([]);
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({ table: 'bot_action_queue' }),
+    );
+    expect(inserts).toContainEqual({
+      table: 'alerts',
+      payload: expect.objectContaining({ alert_type: 'partial_refund_review' }),
+    });
+    expect(inserts).toContainEqual({
+      table: 'audit_logs',
+      payload: expect.objectContaining({
+        action: 'order.refund_partial',
+        details: expect.objectContaining({
+          decision: 'access_retained_pending_review',
+        }),
+      }),
+    });
+  });
+
+  it('sale refund in a different currency WITHOUT payload confirmation is still treated as full', async () => {
+    const { updates, inserts } = useWebhookRows({
+      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payment_refunds: [
+        { data: null, error: null },
+        { data: [{ amount_cents: 250 }], error: null },
+      ],
+      entitlements: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: [{ data: [], error: null }, { data: null, error: null }],
+      audit_logs: { data: null, error: null },
+      orders: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.REFUNDED',
+      resource: {
+        id: 'REFUND-SALE-EUR-NOCONF',
+        sale_id: 'SALE-1',
+        amount: { total: '2.50', currency: 'EUR' },
+        // no total_refunded_amount → the payload does not confirm the sale
+        // currency, so the mismatch stays a fail-safe full revocation
+      },
+      id: 'EVT-SALE-REFUND-EUR-NOCONF',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(updates).toContainEqual({
+      table: 'payments',
+      payload: expect.objectContaining({ status: 'refunded' }),
+    });
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({ table: 'alerts' }),
+    );
+  });
+
+  it('capture refund keeps the strict currency fail-safe even when the payload self-confirms its currency', async () => {
+    const { updates, inserts } = useWebhookRows({
+      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payment_refunds: [
+        { data: null, error: null },
+        { data: [{ amount_cents: 250 }], error: null },
+      ],
+      entitlements: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: [{ data: [], error: null }, { data: null, error: null }],
+      audit_logs: { data: null, error: null },
+      orders: { data: null, error: null },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-CAPTURE-EUR-CONF',
+        amount: { value: '2.50', currency_code: 'EUR' },
+        seller_payable_breakdown: {
+          total_refunded_amount: { value: '2.50', currency_code: 'EUR' },
+        },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-CAPTURE-REFUND-EUR-CONF',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    // Capture payments always persisted the checkout currency — the legacy
+    // tolerance is sale-only, so this stays a full revocation.
+    expect(updates).toContainEqual({
+      table: 'payments',
+      payload: expect.objectContaining({ status: 'refunded' }),
+    });
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({ table: 'alerts' }),
+    );
+  });
+});
+
 describe('PayPal webhook — subscription cancellation/suspension queue reliability', () => {
   it('subscription cancellation returns 500 when the bot fulfillment cannot be queued', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -1044,5 +1205,201 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
     const res = await POST(req as never);
     expect(res.status).toBe(500);
     errorSpy.mockRestore();
+  });
+
+  function useResumedSubscriptionRows(input: {
+    eventId: string;
+    orderId: string;
+    queueProbe: MockRowResult;
+  }) {
+    return useWebhookRows({
+      webhook_events: [
+        { data: [], error: null }, // upsert conflicts (row already exists)
+        { data: { result: 'error', processed_at: new Date().toISOString() }, error: null },
+        { data: { event_id: input.eventId }, error: null }, // claim
+        { data: null, error: null },
+      ],
+      orders: [
+        {
+          // guild resolution lookup (list shape)
+          data: [
+            { guild_id: 'guild-1', status: 'completed', created_at: '2026-07-01T00:00:00.000Z' },
+          ],
+          error: null,
+        },
+        {
+          // handler order lookup
+          data: {
+            id: input.orderId,
+            order_number: `ORD-${input.orderId}`,
+            guild_id: 'guild-1',
+            customer_id: 'customer-1',
+            product_id: 'product-1',
+          },
+          error: null,
+        },
+      ],
+      products: { data: { name: 'Subscription' }, error: null },
+      customers: { data: { discord_id: 'discord-1' }, error: null },
+      bot_action_queue: [
+        input.queueProbe, // retry dedupe probe
+        { data: null, error: null }, // fulfillment insert
+      ],
+    });
+  }
+
+  it('errored BILLING.SUBSCRIPTION.CANCELLED is resumable — redelivery queues the fulfillment exactly once', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts, updates } = useResumedSubscriptionRows({
+        eventId: 'EVT-SUB-CANCEL-RETRY',
+        orderId: 'order-cancel-retry',
+        queueProbe: { data: [], error: null }, // failed attempt queued nothing
+      });
+
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        resource: { id: 'SUB-CANCEL-RETRY' },
+        id: 'EVT-SUB-CANCEL-RETRY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      const fulfillmentInserts = inserts.filter(
+        (i) =>
+          i.table === 'bot_action_queue' &&
+          (i.payload as { action?: string }).action === 'fulfill_cancellation',
+      );
+      expect(fulfillmentInserts).toHaveLength(1);
+      expect(fulfillmentInserts[0]!.payload).toEqual(
+        expect.objectContaining({
+          guild_id: 'guild-1',
+          action: 'fulfill_cancellation',
+          payload: expect.objectContaining({
+            fulfillment_type: 'subscription_cancelled',
+            order_id: 'order-cancel-retry',
+            discord_id: 'discord-1',
+            webhook_event_id: 'EVT-SUB-CANCEL-RETRY',
+          }),
+          status: 'pending',
+        }),
+      );
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ result: 'success' }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('resumed cancellation retry does not queue a duplicate fulfillment already queued by the failed attempt', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts, updates } = useResumedSubscriptionRows({
+        eventId: 'EVT-SUB-CANCEL-RETRY-DUP',
+        orderId: 'order-cancel-retry-dup',
+        queueProbe: { data: [{ id: 'queued-cancel-1' }], error: null },
+      });
+
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.CANCELLED',
+        resource: { id: 'SUB-CANCEL-RETRY-DUP' },
+        id: 'EVT-SUB-CANCEL-RETRY-DUP',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inserts).not.toContainEqual(
+        expect.objectContaining({
+          table: 'bot_action_queue',
+          payload: expect.objectContaining({ action: 'fulfill_cancellation' }),
+        }),
+      );
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ result: 'success' }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('errored BILLING.SUBSCRIPTION.SUSPENDED is resumable — redelivery queues the suspension fulfillment', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts } = useResumedSubscriptionRows({
+        eventId: 'EVT-SUB-SUSPEND-RETRY',
+        orderId: 'order-suspend-retry',
+        queueProbe: { data: [], error: null },
+      });
+
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.SUSPENDED',
+        resource: { id: 'SUB-SUSPEND-RETRY' },
+        id: 'EVT-SUB-SUSPEND-RETRY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inserts).toContainEqual({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({
+          action: 'fulfill_suspension',
+          payload: expect.objectContaining({
+            fulfillment_type: 'subscription_suspended',
+            order_id: 'order-suspend-retry',
+            webhook_event_id: 'EVT-SUB-SUSPEND-RETRY',
+          }),
+        }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('errored BILLING.SUBSCRIPTION.PAYMENT.FAILED is resumable — redelivery queues the suspension fulfillment', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts } = useResumedSubscriptionRows({
+        eventId: 'EVT-SUB-PAYFAIL-RETRY',
+        orderId: 'order-payfail-retry',
+        queueProbe: { data: [], error: null },
+      });
+
+      const req = makeSignedWebhook({
+        event_type: 'BILLING.SUBSCRIPTION.PAYMENT.FAILED',
+        resource: { id: 'SUB-PAYFAIL-RETRY' },
+        id: 'EVT-SUB-PAYFAIL-RETRY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inserts).toContainEqual({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({
+          action: 'fulfill_suspension',
+          payload: expect.objectContaining({
+            fulfillment_type: 'subscription_suspended',
+            order_id: 'order-payfail-retry',
+            webhook_event_id: 'EVT-SUB-PAYFAIL-RETRY',
+          }),
+        }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });
