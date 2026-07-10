@@ -175,6 +175,17 @@ export async function PUT(req: NextRequest) {
     updateData.cancelled_at = new Date().toISOString();
   }
 
+  // W2: the entitlements_grace_period_has_deadline CHECK requires every
+  // grace_period row to carry a deadline — a deadline-less row is invisible
+  // to the reconciliation sweep (it would decay forever). Manual/admin
+  // transitions into grace get the same default window as
+  // EntitlementService.suspend (3 days).
+  if (status === 'grace_period') {
+    const graceEnds = new Date();
+    graceEnds.setDate(graceEnds.getDate() + 3);
+    updateData.grace_period_ends_at = graceEnds.toISOString();
+  }
+
   // V47-C2: scope by guild so another owner cannot toggle entitlement
   // status (e.g. silently reactivate a refunded entitlement) by id alone.
   const { data, error } = await supabase

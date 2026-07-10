@@ -173,9 +173,13 @@ export async function runReconciliation(
         }
 
         for (const ent of allGracePeriod) {
-          // Expire the entitlement. Guarded on the current status so a
-          // payment that recovered between the page query and this update
-          // (reactivate → 'active') is never clobbered back to expired.
+          // Expire the entitlement. Guarded on the current status AND a
+          // re-check of the deadline so neither concurrent path is clobbered:
+          // a payment that recovered between the page query and this update
+          // (reactivate → 'active') fails the status guard, and one that
+          // recovered and then re-entered a NEW grace window (reactivate +
+          // suspend → 'grace_period' with a future deadline) fails the
+          // deadline guard.
           const { data: transitioned, error: expireError } = await supabase
             .from('entitlements')
             .update({
@@ -184,6 +188,7 @@ export async function runReconciliation(
             })
             .eq('id', ent.id)
             .eq('status', 'grace_period')
+            .lt('grace_period_ends_at', now)
             .select('id');
 
           if (expireError) {

@@ -164,12 +164,18 @@ describe('runReconciliation — grace-period expiry', () => {
     expect(findings.grace_periods_expired).toBe(1);
 
     // Status transition is guarded on the current status — a concurrent
-    // reactivation must never be clobbered (TOCTOU).
+    // reactivation must never be clobbered (TOCTOU) — and re-checks the
+    // deadline so a row that re-entered a NEW grace window (reactivate +
+    // suspend between the page query and this update) is never expired
+    // while its fresh window is still open.
     const update = supabase.calls.find((c) => c.table === 'entitlements' && c.op === 'update');
     expect(update).toBeDefined();
     expect(update!.values).toMatchObject({ status: 'expired' });
     expect(update!.filters).toContainEqual(['eq', 'id', 'e1']);
     expect(update!.filters).toContainEqual(['eq', 'status', 'grace_period']);
+    expect(
+      update!.filters.some(([m, col]) => m === 'lt' && col === 'grace_period_ends_at'),
+    ).toBe(true);
 
     // Audit trail for the automatic revocation, including when the grace
     // window actually ended.
@@ -340,5 +346,10 @@ describe('runReconciliation — grace-period expiry', () => {
     );
     expect(graceSelect).toBeDefined();
     expect(graceSelect!.filters).toContainEqual(['lt', 'grace_period_ends_at', frozen.toISOString()]);
+
+    // The guarded update re-checks the deadline against the same cutoff.
+    const update = supabase.calls.find((c) => c.table === 'entitlements' && c.op === 'update');
+    expect(update).toBeDefined();
+    expect(update!.filters).toContainEqual(['lt', 'grace_period_ends_at', frozen.toISOString()]);
   });
 });
