@@ -685,6 +685,32 @@ export class HeistManager {
     const partList = (partRows ?? []) as Array<{ user_id: string; role: string }>;
     const participants = partList.map((r) => r.user_id);
 
+    // Reconcile crash-stranded late joins BEFORE terminalizing (any outcome).
+    // heist_settle_missed_join only runs inline in joinHeist; if the bot crashed
+    // after a /heist join debited the fee and inserted the participant row but
+    // before joinHeist reached that RPC, the row survives with claimed_at IS NULL
+    // and paid_at IS NULL. The frozen-crew read above (claimed_at IS NOT NULL)
+    // excludes it, so without this sweep the heist would finalize with that late
+    // joiner neither paid nor refunded and the entry fee stranded forever (no
+    // terminal heist is ever revisited). heist_reconcile_stranded_joins deletes
+    // every such row and refunds its frozen entry fee atomically under the
+    // heist-row lock. Idempotent: a frozen member (claimed_at set) is never
+    // touched, an already-settled join is already gone, and a re-run finds
+    // nothing — so this composes with retry/resume without double-refunding.
+    // The refund amount is the frozen refund_each on a cancelled heist, else the
+    // entry fee, consistent with the frozen-amount design. A failed reconcile is
+    // treated exactly like the frozen-crew read failure: retryable, NEVER a
+    // terminal flip — a stranded fee must not be lost to a transient error.
+    const strandedRefundEach = heist.refund_each ?? entryFee;
+    const { error: reconcileErr } = await this.supabase.rpc('heist_reconcile_stranded_joins', {
+      p_heist_id: heistId, p_refund_amount: strandedRefundEach,
+    });
+    if (reconcileErr) {
+      log.error(`Stranded-join reconcile failed for heist ${heistId} (outcome=${outcome}) — leaving in_progress for retry:`, reconcileErr.message);
+      this.scheduleResolveRetry(guildId, heistId, channelId);
+      return;
+    }
+
     if (outcome === 'cancelled') {
       // Refund the FROZEN entry fee, read off the heist row (refund_each stamped
       // by the claim), NOT re-derived from guild_config. A fee edit between the

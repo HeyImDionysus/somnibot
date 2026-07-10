@@ -74,9 +74,14 @@ function makeStatefulDb(opts: {
   // treated as retryable, NOT as "no one to pay/refund". Cleared by a test to
   // heal the read on the next resume.
   failCrewRead?: { on: boolean };
+  // When set, heist_reconcile_stranded_joins errors while the flag holds —
+  // models a transient reconcile failure that must be retryable, NOT a terminal
+  // flip that strands a late joiner's fee. Cleared by a test to heal it.
+  failReconcile?: { on: boolean };
 }) {
   const failCreditFor = opts.failCreditFor ?? new Set<string>();
   const failCrewRead = opts.failCrewRead ?? { on: false };
+  const failReconcile = opts.failReconcile ?? { on: false };
   const heist: any = {
     id: 'h1',
     guild_id: 'g1',
@@ -207,6 +212,24 @@ function makeStatefulDb(opts: {
         }
         heist.status = 'in_progress'; heist.resolution = 'failed'; heist.payout_each = 0;
         return Promise.resolve({ data: [{ claimed: true, outcome: 'failed', participant_count: count, payout_each: 0, refund_each: null }], error: null });
+      }
+      if (fn === 'heist_reconcile_stranded_joins') {
+        // Sweep every crash-stranded late-join row (claimed_at NULL AND paid_at
+        // NULL): delete it, drop its participants[] slot, refund the frozen
+        // per-member amount — mirrors heist_reconcile_stranded_joins under the
+        // heist-row lock. A frozen crew member (claimed_at set) is untouched; a
+        // re-run finds nothing (rows already deleted) so it is idempotent.
+        if (failReconcile.on) {
+          return Promise.resolve({ data: null, error: { message: 'injected reconcile failure' } });
+        }
+        const stranded = parts.filter((p) => p.claimed_at == null && p.paid_at == null);
+        for (const p of stranded) {
+          const idx = parts.indexOf(p);
+          if (idx >= 0) parts.splice(idx, 1);
+          heist.participants = heist.participants.filter((u: string) => u !== p.user_id);
+          if (args.p_refund_amount > 0) credits.push({ user_id: p.user_id, amount: args.p_refund_amount });
+        }
+        return Promise.resolve({ data: stranded.length, error: null });
       }
       if (fn === 'heist_credit_participant') {
         const p = parts.find((x) => x.user_id === args.p_user_id);
@@ -385,7 +408,7 @@ describe('heist resume idempotency', () => {
   });
 
   // ── Finding 1: settle only the frozen (claimed) crew ────────────────────
-  it('a late joiner inserted after the claim is not paid a success share', async () => {
+  it('a late joiner inserted after the claim is not paid a success share (its fee is reconciled)', async () => {
     const db = makeStatefulDb({ status: 'recruiting', participants: ['u1', 'u2'], successChance: 100, targetPayout: 250 });
     const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
@@ -399,19 +422,24 @@ describe('heist resume idempotency', () => {
     await resolve(mgr);
 
     expect(db.heist.status).toBe('success');
-    // payout_each was frozen at 250/2 = 125; only the two claimed members get it.
-    expect(db.credits).toHaveLength(2);
-    expect(db.credits.map((c) => c.user_id).sort()).toEqual(['u1', 'u2']);
-    expect(db.credits.every((c) => c.amount === 125)).toBe(true);
-    // The late joiner is never credited.
-    expect(db.credits.some((c) => c.user_id === 'late')).toBe(false);
+    // The two FROZEN members get the frozen success share (250/2 = 125 each);
+    // the late joiner is never paid a success share.
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 125 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
+    expect(db.credits.some((c) => c.user_id === 'late' && c.amount === 125)).toBe(false);
+    // But the stranded late-join row is reconciled (not left unsettled): its entry
+    // fee is refunded exactly once and the row removed from the crew.
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
+    expect(db.heist.participants).not.toContain('late');
   });
 
   it('an under-crewed cancellation refunds/announces only the frozen crew', async () => {
-    // The heist is already claimed-cancelled with one stamped crew member; a
-    // later unstamped row (a join that raced past the claim) is present when the
-    // refund pass reads participants. It must be excluded from both the refund
-    // and the announced crew count.
+    // The heist is claimed-cancelled with one stamped crew member; a later
+    // unstamped row (a join that raced past the claim) is present when the refund
+    // pass reads participants. It must be excluded from the announced crew count,
+    // but its stranded entry fee must still be reconciled (refunded) rather than
+    // lost — it is not part of the FROZEN crew's cancel refund.
     const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 100 });
     db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
     // Mark the late row so the claim fake does not stamp it (models an insert
@@ -420,15 +448,19 @@ describe('heist resume idempotency', () => {
     const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
-    await resolve(mgr); // claims (freezes u1 only), cancels, refunds the frozen crew
+    await resolve(mgr); // claims (freezes u1 only), reconciles the late row, cancels, refunds u1
 
     expect(db.heist.status).toBe('cancelled');
-    // Only u1 (the frozen crew) is refunded; the late joiner is not.
-    expect(db.credits).toHaveLength(1);
-    expect(db.credits[0]).toEqual({ user_id: 'u1', amount: 100 });
+    // The frozen crew member u1 is refunded the frozen fee (100)…
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 100 }]);
+    // …and the stranded late joiner is reconciled (fee refunded once, row removed),
+    // never silently forfeited.
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
     const cancelSends = send.mock.calls.filter(
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'));
-    // Announced once, and the crew size in the message reflects the frozen 1.
+    // Announced once, and the crew size in the message reflects the frozen 1
+    // (the late joiner is not part of the announced crew).
     expect(cancelSends).toHaveLength(1);
     expect(String(cancelSends[0][0]?.embeds?.[0]?.data?.description ?? '')).toContain('got 1');
   });
@@ -728,5 +760,121 @@ describe('heist resume idempotency', () => {
 
     expect(db.heist.status).toBe('cancelled');
     expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]);
+  });
+
+  // ── Newest finding: reconcile crash-stranded late joins before terminalizing ──
+  it('a late-join row stranded by a crash is refunded once on resume and the heist finalises cleanly', async () => {
+    // Model the crash window: a /heist join debited the fee and inserted the
+    // participant row AFTER the claim froze the crew, but the bot crashed before
+    // joinHeist reached heist_settle_missed_join — so the row survives with
+    // claimed_at = NULL and paid_at = NULL. The heist is already claimed-success
+    // (frozen crew u1,u2). On resume the stranded 'late' row must be reconciled
+    // (fee refunded exactly once) and the heist must finalise to success.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    // u1,u2 are the frozen crew (in_progress preseeds claimed_at). Add the
+    // stranded 'late' row: unstamped + unpaid, and present in participants[].
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.heist.participants.push('late');
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('success');
+    // Frozen crew paid their success share once each…
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toEqual([{ user_id: 'u1', amount: 125 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
+    // …and the stranded joiner's fee is refunded exactly once (entry fee 100).
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    // The stranded row is removed from the crew and the participants[] array.
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
+    expect(db.heist.participants).not.toContain('late');
+    const successSends = send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'));
+    expect(successSends).toHaveLength(1);
+  });
+
+  it('re-running the resolve does not double-refund a reconciled stranded join (idempotent)', async () => {
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.heist.participants.push('late');
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr);  // reconciles + refunds 'late', pays crew, finalises
+    await resolve(mgr);  // a second resolve must find nothing stranded to refund
+
+    expect(db.heist.status).toBe('success');
+    // 'late' refunded exactly once across both resolves (the row was deleted, so
+    // the second reconcile sweep finds nothing).
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    // Frozen crew each paid exactly once.
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toHaveLength(1);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toHaveLength(1);
+  });
+
+  it('a normally-settled (already paid) missed join is not swept or re-refunded', async () => {
+    // A participant row that is unstamped (claimed_at NULL) but ALREADY settled
+    // (paid_at set) — e.g. a missed join that heist_settle_missed_join already
+    // refunded, or any credited row — must be left untouched by the reconcile
+    // sweep (which only targets claimed_at NULL AND paid_at NULL). No double refund.
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250,
+    });
+    // Add an unstamped-but-already-settled row; it must NOT be swept/refunded.
+    db.parts.push({ heist_id: 'h1', user_id: 'settled', role: 'Hacker', payout: 100, paid_at: new Date().toISOString(), payout_failed: false, claimed_at: null });
+    const { client } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr);
+
+    expect(db.heist.status).toBe('success');
+    // The already-settled row is never credited again by the reconcile sweep.
+    expect(db.credits.some((c) => c.user_id === 'settled')).toBe(false);
+    // It is also not deleted (it was legitimately settled, not stranded).
+    expect(db.parts.some((p) => p.user_id === 'settled')).toBe(true);
+  });
+
+  it('a failed stranded-join reconcile leaves the heist in_progress and retries (never strands a fee)', async () => {
+    // A transient reconcile RPC error must be treated like the frozen-crew read
+    // failure: retryable, NEVER a terminal flip that would strand the late
+    // joiner's fee. The heist stays in_progress; a resume once the failure heals
+    // reconciles + refunds and finalises.
+    const failReconcile = { on: true };
+    const db = makeStatefulDb({
+      status: 'in_progress', resolution: 'success', payoutEach: 125,
+      participants: ['u1', 'u2'], targetPayout: 250, failReconcile,
+    });
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null });
+    db.heist.participants.push('late');
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // reconcile errors → must NOT finalise, must NOT credit
+
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.heist.resolution).toBe('success');
+    expect(db.credits).toHaveLength(0);
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(0);
+
+    // The failure heals; the next resume reconciles the stranded fee once, pays
+    // the frozen crew, and finalises.
+    failReconcile.on = false;
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('success');
+    expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    expect(db.credits.filter((c) => c.user_id === 'u1')).toHaveLength(1);
+    expect(db.credits.filter((c) => c.user_id === 'u2')).toHaveLength(1);
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
   });
 });
