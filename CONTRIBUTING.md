@@ -208,8 +208,9 @@ Example: `20260601000004_v53_dead_table_cleanup.sql`
    (e.g. `extensions.gen_random_bytes`); `pg_catalog` functions such as `gen_random_uuid`
    are implicit and need no prefix. This class of bug caused a full lottery outage and a
    broken GDPR purge function. CI's `db-security-audit` checks that these functions set a
-   `search_path`; **it does not (yet) inspect function bodies for unqualified names**, so
-   reviewers must verify every reference is schema-qualified by hand.
+   `search_path`, and the `migration-lint` job runs `scripts/check-secdef-search-path.py`,
+   which **flags unqualified references in `SECURITY DEFINER` bodies** and fails the build
+   on any hit — so this class of bug is now caught automatically in CI.
 7. **RLS policies must be role-scoped.** Never `CREATE POLICY ... FOR ALL USING (true)`
    without a `TO` clause on a table holding sensitive data — combined with the legacy
    anon default-grant window, that lets anyone with the publishable key read (and often
