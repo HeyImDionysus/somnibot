@@ -447,6 +447,86 @@ describe('HeistManager', () => {
         expect.objectContaining({ content: expect.stringContaining('coins to join') }),
       );
     });
+
+    it('refunds a join that raced past the atomic claim (missed join)', async () => {
+      // The join reads the heist as recruiting, charges the fee and inserts the
+      // participant — but resolution froze the crew before the insert committed.
+      // heist_settle_missed_join returns true (row stranded + removed); the join
+      // path must refund the entry fee and tell the user recruiting closed
+      // instead of announcing a false "Joined".
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: true, error: null });
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      // Entry fee refunded via economy_add_balance.
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'economy_add_balance',
+        expect.objectContaining({ p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 }),
+      );
+      // User told recruiting already closed; no "Joined" embed.
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ content: expect.stringContaining('already got underway') }),
+      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+    });
+
+    it('does not refund a join that made it into the frozen crew', async () => {
+      // heist_settle_missed_join returns false — the participant is either still
+      // recruiting or already stamped into the crew. The normal "Joined" flow runs.
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        if (table === 'economy_heist_participants') {
+          const c = chainBuilder({ data: null, error: null });
+          (c as any).count = 2;
+          return c;
+        }
+        return chainBuilder();
+      });
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: false, error: null });
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      // No refund; normal "Joined" embed sent.
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_add_balance', expect.anything(),
+      );
+      expect(interaction.reply).toHaveBeenCalledWith(
+        expect.objectContaining({ embeds: expect.any(Array) }),
+      );
+    });
   });
 
   describe('viewHeist', () => {

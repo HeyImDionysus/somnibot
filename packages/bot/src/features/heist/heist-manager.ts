@@ -83,6 +83,13 @@ export class HeistManager {
   private valkey: Valkey | null;
   private configCache = new Map<string, DbGuildConfig>();
   private resolveTimers = new Map<string, NodeJS.Timeout>();
+  // In-process retry timers for heists left 'in_progress' by a transient payout
+  // /finalise error. Without these, a stranded heist would only be retried by
+  // resumePendingHeists on the NEXT bot restart, while /heist start treats
+  // 'in_progress' as an active heist — a transient DB blip would otherwise block
+  // the guild from running heists until a manual restart.
+  private retryTimers = new Map<string, NodeJS.Timeout>();
+  private retryAttempts = new Map<string, number>();
 
   constructor(supabase: SupabaseClient, client: Client, valkey?: Valkey) {
     this.supabase = supabase;
@@ -95,6 +102,48 @@ export class HeistManager {
   cleanup(): void {
     for (const timer of this.resolveTimers.values()) clearTimeout(timer);
     this.resolveTimers.clear();
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
+    this.retryAttempts.clear();
+  }
+
+  // Bounded in-process retry for a heist stranded 'in_progress' by a transient
+  // payout/finalise error. resolveHeist is fully idempotent (paid_at guard on
+  // credits, single-shot finalise), so a retry only settles the still-unpaid
+  // crew and announces at most once. Exponential backoff, capped attempts; once
+  // exhausted the heist is left for resumePendingHeists on the next restart (it
+  // is never lost — the frozen decision persists on the row).
+  private static readonly MAX_RETRY_ATTEMPTS = 5;
+  private scheduleResolveRetry(guildId: string, heistId: string, channelId: string): void {
+    // A resolve timer already owns this heist (e.g. re-scheduled elsewhere) —
+    // don't stack a second one.
+    if (this.retryTimers.has(heistId)) return;
+    const attempt = (this.retryAttempts.get(heistId) ?? 0) + 1;
+    if (attempt > HeistManager.MAX_RETRY_ATTEMPTS) {
+      log.error(`Heist ${heistId} still in_progress after ${HeistManager.MAX_RETRY_ATTEMPTS} in-process retries — leaving for next restart's resume`);
+      this.retryAttempts.delete(heistId);
+      return;
+    }
+    this.retryAttempts.set(heistId, attempt);
+    const delayMs = Math.min(30_000, 1_000 * 2 ** (attempt - 1)); // 1s,2s,4s,8s,16s (cap 30s)
+    const timer = setTimeout(async () => {
+      this.retryTimers.delete(heistId);
+      try {
+        await this.resolveHeist(guildId, heistId, channelId);
+      } catch (err) {
+        log.error(`In-process retry for heist ${heistId} threw:`, err);
+      }
+    }, delayMs);
+    // Do not keep the event loop alive solely for a retry.
+    if (typeof timer.unref === 'function') timer.unref();
+    this.retryTimers.set(heistId, timer);
+  }
+
+  /** Cancel any pending in-process retry and drop its attempt counter. */
+  private clearRetryState(heistId: string): void {
+    const timer = this.retryTimers.get(heistId);
+    if (timer) { clearTimeout(timer); this.retryTimers.delete(heistId); }
+    this.retryAttempts.delete(heistId);
   }
 
   private async getConfig(guildId: string): Promise<DbGuildConfig | null> {
@@ -388,6 +437,29 @@ export class HeistManager {
       }).eq('id', heist.id);
     }
 
+    // Reconcile a join that raced past the atomic claim. We read the heist as
+    // 'recruiting' above, but resolution freezes the crew (stamps claimed_at)
+    // under the heist-row lock. If our participant insert committed AFTER that
+    // freeze, our row is unstamped and would be excluded from BOTH payout and
+    // refund — we would have charged the entry fee for a seat that is never
+    // settled. heist_settle_missed_join detects that (heist no longer
+    // recruiting AND our row unstamped/unsettled) under the same lock; when it
+    // returns true it has removed the stranded row, so we refund the fee and
+    // tell the user recruiting already closed instead of a false "Joined".
+    const { data: missedJoin } = await this.supabase.rpc('heist_settle_missed_join', {
+      p_heist_id: heist.id, p_user_id: userId,
+    });
+    if (missedJoin === true) {
+      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
+        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
+      })).catch((e: unknown) => { log.warn('missed-join refund failed:', (e as Error)?.message ?? e); });
+      await interaction.reply({
+        content: '❌ The heist already got underway before you could join. Your entry fee was refunded.',
+        ephemeral: true,
+      });
+      return;
+    }
+
     // Re-read actual participant count for accurate display
     const { count: crewCount } = await this.supabase
       .from('economy_heist_participants')
@@ -608,12 +680,15 @@ export class HeistManager {
       // flip the row out of 'in_progress', after which resumePendingHeists no
       // longer selects it and resolveHeist returns early for terminal statuses —
       // the unpaid participant (paid_at still NULL) would never be retried and
-      // silently loses their share. Leave the heist in_progress so the next
-      // resume re-runs the payout loop; heist_credit_participant is idempotent
-      // (paid_at guard), so already-paid crew are not double-credited and only
-      // the still-unpaid members are settled on retry.
+      // silently loses their share. Leave the heist in_progress and schedule an
+      // in-process retry (bounded backoff); heist_credit_participant is
+      // idempotent (paid_at guard), so already-paid crew are not double-credited
+      // and only the still-unpaid members are settled on retry. If the in-process
+      // retries are exhausted, resumePendingHeists still recovers it on the next
+      // restart — the frozen decision persists on the row, so a payout is never lost.
       if (failedPayouts.length > 0) {
-        log.warn(`Heist ${heistId} left in_progress: ${failedPayouts.length} payout(s) failed — will retry on next resume`);
+        log.warn(`Heist ${heistId} left in_progress: ${failedPayouts.length} payout(s) failed — scheduling in-process retry`);
+        this.scheduleResolveRetry(guildId, heistId, channelId);
         return;
       }
 
@@ -627,9 +702,16 @@ export class HeistManager {
       });
       if (finErr) {
         log.error(`heist_finalize_resolution failed for ${heistId}:`, finErr.message);
-        return;  // leave in_progress; a later resume finalises + notifies
+        // Every credit succeeded but the terminal flip errored — retry in-process
+        // so we finalise + notify without waiting for the next restart.
+        this.scheduleResolveRetry(guildId, heistId, channelId);
+        return;  // leave in_progress; a retry/resume finalises + notifies
       }
-      if (finalized !== true) return;  // another resolver already finalised — no re-notify
+      if (finalized !== true) {
+        this.clearRetryState(heistId); // another resolver finalised — stop retrying
+        return;  // no re-notify
+      }
+      this.clearRetryState(heistId); // terminal success — drop any retry bookkeeping
 
       // We only reach here once every credit succeeded (the failedPayouts guard
       // above returns early otherwise), so every crew member is paid.
@@ -662,9 +744,15 @@ export class HeistManager {
     });
     if (finErr) {
       log.error(`heist_finalize_resolution failed for ${heistId}:`, finErr.message);
+      // Retryable: the row is still in_progress with resolution='failed' frozen.
+      this.scheduleResolveRetry(guildId, heistId, channelId);
       return;
     }
-    if (finalized !== true) return;  // another resolver already finalised — no re-notify
+    if (finalized !== true) {
+      this.clearRetryState(heistId);
+      return;  // another resolver already finalised — no re-notify
+    }
+    this.clearRetryState(heistId); // terminal failure — drop any retry bookkeeping
 
     const story = randomPick(FAIL_STORIES);
     const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;

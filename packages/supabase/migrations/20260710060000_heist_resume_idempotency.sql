@@ -284,3 +284,86 @@ $$;
 
 REVOKE ALL ON FUNCTION heist_finalize_resolution(UUID) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION heist_finalize_resolution(UUID) TO service_role;
+
+-- ─── 6. Reconcile a join that raced past the claim ───────────
+-- Closes the OTHER side of the freeze TOCTOU. Freezing the crew at claim time
+-- (§3) means a /heist join that read the heist as 'recruiting' but whose
+-- participant insert commits AFTER heist_claim_for_resolution stamped the crew
+-- lands with claimed_at IS NULL. Settlement (which reads only claimed_at IS NOT
+-- NULL rows) then excludes that row from BOTH the success payout and the cancel
+-- refund — the joiner was charged the entry fee, saw "Joined", yet is never
+-- settled and silently loses the fee.
+--
+-- After its insert, the join path calls this under the heist-row lock. Three
+-- outcomes:
+--   * heist still 'recruiting' — the claim has not run; the joiner is in the
+--     crew and will be frozen by the claim. Nothing to do (refunded=false).
+--   * heist claimed AND this participant is stamped (claimed_at set) — the join
+--     made it into the frozen crew and will be settled normally (refunded=false).
+--   * heist claimed AND this participant is UNSTAMPED and unsettled (paid_at
+--     NULL) — it raced past the claim and can never be settled. Delete the
+--     stranded row and its slot in economy_heists.participants, and return
+--     refunded=true so the caller returns the entry fee. Deleting is safe: an
+--     unstamped, unpaid row was never part of any payout/refund decision.
+-- Locking the heist row makes this race-free: by the time the claim's stamp is
+-- committed and visible here, we either observe our row stamped (in the crew)
+-- or observe the heist claimed with our row unstamped (refund) — never both.
+CREATE OR REPLACE FUNCTION heist_settle_missed_join(
+  p_heist_id UUID,
+  p_user_id  TEXT
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status     TEXT;
+  v_claimed_at TIMESTAMPTZ;
+  v_paid_at    TIMESTAMPTZ;
+BEGIN
+  -- Lock the heist row: serialises against heist_claim_for_resolution, so the
+  -- status/claimed_at we read below reflect a settled claim decision.
+  SELECT h.status INTO v_status
+    FROM public.economy_heists h
+   WHERE h.id = p_heist_id
+     FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RETURN false;  -- heist gone; nothing to reconcile
+  END IF;
+
+  -- Still recruiting → the claim has not frozen the crew yet; this joiner is in.
+  IF v_status = 'recruiting' THEN
+    RETURN false;
+  END IF;
+
+  SELECT p.claimed_at, p.paid_at INTO v_claimed_at, v_paid_at
+    FROM public.economy_heist_participants p
+   WHERE p.heist_id = p_heist_id
+     AND p.user_id  = p_user_id
+     FOR UPDATE;
+
+  -- No row, already frozen into the crew, or already settled → leave it to the
+  -- normal settle path; do not refund (would double-pay a settled member).
+  IF NOT FOUND OR v_claimed_at IS NOT NULL OR v_paid_at IS NOT NULL THEN
+    RETURN false;
+  END IF;
+
+  -- Raced past the claim: unstamped + unsettled. Remove the stranded row and
+  -- its participants[] slot so it is neither counted nor displayed, then tell
+  -- the caller to refund the entry fee.
+  DELETE FROM public.economy_heist_participants p
+   WHERE p.heist_id = p_heist_id
+     AND p.user_id  = p_user_id;
+
+  UPDATE public.economy_heists h
+     SET participants = array_remove(h.participants, p_user_id)
+   WHERE h.id = p_heist_id;
+
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION heist_settle_missed_join(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION heist_settle_missed_join(UUID, TEXT) TO service_role;

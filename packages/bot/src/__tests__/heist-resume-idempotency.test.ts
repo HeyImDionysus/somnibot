@@ -445,6 +445,76 @@ describe('heist resume idempotency', () => {
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
   });
 
+  // ── Finding (round 2): errored payout is retried IN-PROCESS, not only on restart ──
+  it('a transient payout error schedules an in-process retry that pays + finalises', async () => {
+    vi.useFakeTimers();
+    try {
+      const failSet = new Set(['u2']);
+      const db = makeStatefulDb({
+        status: 'recruiting', participants: ['u1', 'u2'], successChance: 100, targetPayout: 250,
+        failCreditFor: failSet,
+      });
+      const { client, send } = makeClient();
+      const mgr = new HeistManager(db.supabase as any, client as any);
+
+      await resolve(mgr); // u1 paid, u2 errors → left in_progress + in-process retry scheduled
+
+      expect(db.heist.status).toBe('in_progress');
+      expect(db.credits).toEqual([{ user_id: 'u1', amount: 125 }]);
+      // No announcement yet.
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(0);
+
+      // The transient failure heals; advancing past the backoff fires the
+      // in-process retry (no restart / resumePendingHeists needed).
+      failSet.clear();
+      await vi.advanceTimersByTimeAsync(1_500); // first backoff is 1s
+
+      expect(db.heist.status).toBe('success');
+      expect(db.credits).toHaveLength(2);
+      expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
+      // u1 not double-credited.
+      expect(db.credits.filter((c) => c.user_id === 'u1')).toHaveLength(1);
+      // Announced exactly once, only after every member is paid.
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('in-process retries are bounded and give up after MAX_RETRY_ATTEMPTS', async () => {
+    vi.useFakeTimers();
+    try {
+      // u2's credit never heals — the retry must not loop forever.
+      const failSet = new Set(['u2']);
+      const db = makeStatefulDb({
+        status: 'recruiting', participants: ['u1', 'u2'], successChance: 100, targetPayout: 250,
+        failCreditFor: failSet,
+      });
+      const { client } = makeClient();
+      const mgr = new HeistManager(db.supabase as any, client as any);
+
+      await resolve(mgr); // initial attempt fails on u2
+
+      // Drain all scheduled backoffs (1+2+4+8+16s, capped 30s each). Advancing a
+      // generous window fires every retry; each re-fails and reschedules until
+      // the attempt cap, after which no further timer is armed.
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      // Never finalised — left in_progress for a future restart's resume.
+      expect(db.heist.status).toBe('in_progress');
+      // u1 paid exactly once across all attempts (idempotent); u2 never paid.
+      expect(db.credits).toEqual([{ user_id: 'u1', amount: 125 }]);
+      // No pending timers remain (bounded) — a further advance changes nothing.
+      const before = db.credits.length;
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(db.credits.length).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── Finding 3: legacy in_progress heist (NULL resolution) is not failed ──
   it('a legacy in_progress heist with NULL resolution is left untouched, not failed', async () => {
     // Old-resolver row: status in_progress but no frozen resolution.
