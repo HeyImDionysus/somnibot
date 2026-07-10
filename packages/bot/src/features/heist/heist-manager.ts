@@ -443,16 +443,44 @@ export class HeistManager {
     // freeze, our row is unstamped and would be excluded from BOTH payout and
     // refund — we would have charged the entry fee for a seat that is never
     // settled. heist_settle_missed_join detects that (heist no longer
-    // recruiting AND our row unstamped/unsettled) under the same lock; when it
-    // returns true it has removed the stranded row, so we refund the fee and
-    // tell the user recruiting already closed instead of a false "Joined".
-    const { data: missedJoin } = await this.supabase.rpc('heist_settle_missed_join', {
-      p_heist_id: heist.id, p_user_id: userId,
-    });
+    // recruiting AND our row unstamped/unsettled) under the same lock; the
+    // refund now happens INSIDE that RPC, in the same transaction as the delete,
+    // so a `true` return means the entry fee is actually back in the wallet.
+    // We therefore only confirm "refunded" to the user AFTER the credit commits.
+    //
+    // If the RPC errors the transaction rolled back — the row is NOT deleted and
+    // no partial credit landed — but we must NOT confirm a refund that did not
+    // happen (the previous bug), and no resume/resolve path settles a stranded
+    // unstamped row, so we cannot leave it for "later". The RPC is atomic and
+    // idempotent (a repeat after a committed refund returns false because the
+    // row is gone), so we retry it inline a few times to actually land the
+    // refund before responding. Only if every attempt fails do we surface an
+    // error WITHOUT falsely claiming the fee was returned.
+    let missedJoin: boolean | null = null;
+    let missedErr: { message: string } | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await this.supabase.rpc('heist_settle_missed_join', {
+        p_heist_id: heist.id, p_user_id: userId, p_refund_amount: entryFee,
+      });
+      missedErr = res.error;
+      missedJoin = res.data as boolean | null;
+      if (!res.error) break;
+      log.warn(`heist_settle_missed_join attempt ${attempt + 1} failed:`, res.error.message);
+    }
+    if (missedErr) {
+      // Every attempt to atomically delete+refund the stranded row failed. The
+      // row is still present and the fee is still charged; log at error level so
+      // an operator can reconcile, and tell the user honestly — do NOT claim it
+      // was refunded.
+      log.error(`heist_settle_missed_join failed after retries for heist ${heist.id}, user ${userId}:`, missedErr.message);
+      await interaction.reply({
+        content: '❌ The heist already got underway before you could join, and we could not process your entry-fee refund right now. Please contact a server admin — your fee has not been lost.',
+        ephemeral: true,
+      });
+      return;
+    }
     if (missedJoin === true) {
-      await Promise.resolve(this.supabase.rpc('economy_add_balance', {
-        p_guild_id: guildId, p_user_id: userId, p_amount: entryFee,
-      })).catch((e: unknown) => { log.warn('missed-join refund failed:', (e as Error)?.message ?? e); });
+      // Refund already committed atomically inside the RPC — safe to confirm.
       await interaction.reply({
         content: '❌ The heist already got underway before you could join. Your entry fee was refunded.',
         ephemeral: true,
@@ -632,12 +660,59 @@ export class HeistManager {
       // Refund entry fees idempotently — heist_credit_participant pays each
       // crew member at most once (guarded by paid_at), so a re-resolve after
       // a crash does not double-refund.
+      const failedRefunds: string[] = [];
       for (const uid of participants) {
         const { error: refundErr } = await this.supabase.rpc('heist_credit_participant', {
           p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
         });
-        if (refundErr) log.error(`Failed to refund ${uid}:`, refundErr.message);
+        if (refundErr) {
+          log.error(`Failed to refund ${uid}:`, refundErr.message);
+          failedRefunds.push(uid);
+          // Mark for reconciliation (leaves paid_at NULL so a later retry refunds).
+          await this.supabase.from('economy_heist_participants')
+            .update({ payout_failed: true })
+            .eq('heist_id', heistId)
+            .eq('user_id', uid);
+        }
       }
+
+      // Do NOT finalise (or tell the channel "fees have been refunded") while any
+      // refund is still outstanding. The claim left this row 'in_progress' with
+      // resolution='cancelled' precisely so an unfinished cancel stays retryable:
+      // finalising now would flip it to terminal 'cancelled', after which
+      // resumePendingHeists no longer selects it and resolveHeist returns early
+      // for terminal statuses — the un-refunded member (paid_at still NULL) would
+      // silently lose their entry fee. Leave it in_progress and schedule an
+      // in-process retry; heist_credit_participant is idempotent (paid_at guard),
+      // so already-refunded crew are not double-paid and only the still-unpaid
+      // members are settled on retry. resumePendingHeists recovers it on restart
+      // if the in-process retries are exhausted — the frozen 'cancelled' decision
+      // persists on the row, so no refund is ever lost.
+      if (failedRefunds.length > 0) {
+        log.warn(`Heist ${heistId} (cancelled) left in_progress: ${failedRefunds.length} refund(s) failed — scheduling in-process retry`);
+        this.scheduleResolveRetry(guildId, heistId, channelId);
+        return;
+      }
+
+      // Every refund committed — finalise to terminal 'cancelled' once, and
+      // announce iff THIS call performed the terminal flip (single-shot). A
+      // concurrent resolver or a post-crash resume gets finalized=false and must
+      // not re-notify.
+      const { data: finalized, error: finErr } = await this.supabase.rpc('heist_finalize_resolution', {
+        p_heist_id: heistId,
+      });
+      if (finErr) {
+        log.error(`heist_finalize_resolution failed for cancelled ${heistId}:`, finErr.message);
+        // Every refund succeeded but the terminal flip errored — retry in-process
+        // so we finalise + notify without waiting for the next restart.
+        this.scheduleResolveRetry(guildId, heistId, channelId);
+        return;  // leave in_progress; a retry/resume finalises + notifies
+      }
+      if (finalized !== true) {
+        this.clearRetryState(heistId); // another resolver finalised — stop retrying
+        return;  // no re-notify
+      }
+      this.clearRetryState(heistId); // terminal cancel — drop any retry bookkeeping
 
       const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
       if (channel) {

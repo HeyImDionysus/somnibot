@@ -451,8 +451,9 @@ describe('HeistManager', () => {
     it('refunds a join that raced past the atomic claim (missed join)', async () => {
       // The join reads the heist as recruiting, charges the fee and inserts the
       // participant — but resolution froze the crew before the insert committed.
-      // heist_settle_missed_join returns true (row stranded + removed); the join
-      // path must refund the entry fee and tell the user recruiting closed
+      // heist_settle_missed_join deletes the stranded row AND refunds the entry
+      // fee atomically, returning true only once the credit has committed; the
+      // join path must confirm the refund and tell the user recruiting closed
       // instead of announcing a false "Joined".
       supabase.from.mockImplementation((table: string) => {
         if (table === 'guild_config') {
@@ -469,23 +470,108 @@ describe('HeistManager', () => {
         }
         return chainBuilder();
       });
-      supabase.rpc.mockImplementation((fn: string) => {
+      const rpcCalls: Array<{ fn: string; args: any }> = [];
+      supabase.rpc.mockImplementation((fn: string, args: any) => {
+        rpcCalls.push({ fn, args });
         if (fn === 'heist_settle_missed_join') return Promise.resolve({ data: true, error: null });
         return Promise.resolve({ data: null, error: null });
       });
       const interaction = makeInteraction();
       await mgr.joinHeist(interaction as any);
 
-      // Entry fee refunded via economy_add_balance.
-      expect(supabase.rpc).toHaveBeenCalledWith(
-        'economy_add_balance',
-        expect.objectContaining({ p_guild_id: 'g1', p_user_id: 'u1', p_amount: 100 }),
+      // Refund happens INSIDE the RPC (atomic with the delete) — the bot must
+      // pass the fee to settle, and must NOT issue a separate economy_add_balance
+      // that could land without the delete (or vice versa).
+      expect(rpcCalls).toContainEqual({
+        fn: 'heist_settle_missed_join',
+        args: expect.objectContaining({ p_heist_id: 'h1', p_user_id: 'u1', p_refund_amount: 100 }),
+      });
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_add_balance', expect.anything(),
       );
       // User told recruiting already closed; no "Joined" embed.
       expect(interaction.reply).toHaveBeenCalledWith(
         expect.objectContaining({ content: expect.stringContaining('already got underway') }),
       );
       const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.embeds).toBeUndefined();
+      expect(replyArg.content).toContain('refunded');
+    });
+
+    it('retries the missed-join refund and confirms once it commits', async () => {
+      // The atomic delete+refund RPC errors transiently, then succeeds. The bot
+      // must retry inline (the RPC is idempotent) and only confirm the refund
+      // after it actually commits.
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      let attempts = 0;
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_settle_missed_join') {
+          attempts++;
+          if (attempts === 1) return Promise.resolve({ data: null, error: { message: 'transient' } });
+          return Promise.resolve({ data: true, error: null });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      expect(attempts).toBe(2); // one failure, one success
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(replyArg.content).toContain('was refunded');
+      expect(replyArg.embeds).toBeUndefined();
+    });
+
+    it('does not confirm a refund when the missed-join RPC keeps erroring', async () => {
+      // If heist_settle_missed_join errors on every attempt, its transaction
+      // rolled back — the stranded row is NOT deleted and no credit landed. The
+      // bot must NOT tell the user their fee was refunded (the earlier bug did),
+      // because that would be a false confirmation.
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'guild_config') {
+          return chainBuilder({ data: { ...defaultConfig }, error: null });
+        }
+        if (table === 'economy_heists') {
+          return chainBuilder({
+            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            error: null,
+          });
+        }
+        if (table === 'economy_wallets') {
+          return chainBuilder({ data: { wallet: 500 }, error: null });
+        }
+        return chainBuilder();
+      });
+      let attempts = 0;
+      supabase.rpc.mockImplementation((fn: string) => {
+        if (fn === 'heist_settle_missed_join') {
+          attempts++;
+          return Promise.resolve({ data: null, error: { message: 'refund tx failed' } });
+        }
+        return Promise.resolve({ data: null, error: null });
+      });
+      const interaction = makeInteraction();
+      await mgr.joinHeist(interaction as any);
+
+      expect(attempts).toBeGreaterThan(1); // retried, not a single shot
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // Must NOT falsely claim the fee was refunded.
+      expect(replyArg.content).not.toContain('was refunded');
+      // Must not confirm a refund at all, and must not send a "Joined" embed.
+      expect(replyArg.content).not.toContain('Your entry fee was refunded');
       expect(replyArg.embeds).toBeUndefined();
     });
 

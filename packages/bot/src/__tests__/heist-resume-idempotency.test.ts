@@ -174,7 +174,11 @@ function makeStatefulDb(opts: {
         for (const p of parts) { if (p.claimed_at == null && !(p as any).__late) p.claimed_at = new Date().toISOString(); }
         const count = parts.filter((p) => p.claimed_at != null).length;
         if (count < args.p_min_participants) {
-          heist.status = 'cancelled'; heist.resolution = 'cancelled'; heist.resolved_at = new Date().toISOString();
+          // Under-crewed now flips to the INTERMEDIATE in_progress with
+          // resolution='cancelled' (not terminal), so a failed refund stays
+          // retryable; heist_finalize_resolution moves it to terminal 'cancelled'
+          // only after every refund committed. Mirrors 20260710120000 §B.
+          heist.status = 'in_progress'; heist.resolution = 'cancelled';
           return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null }], error: null });
         }
         const isSuccess = (heist.success_chance ?? 0) > 0; // deterministic for tests
@@ -409,6 +413,69 @@ describe('heist resume idempotency', () => {
     // Announced once, and the crew size in the message reflects the frozen 1.
     expect(cancelSends).toHaveLength(1);
     expect(String(cancelSends[0][0]?.embeds?.[0]?.data?.description ?? '')).toContain('got 1');
+  });
+
+  // ── Round-3 finding: a failed cancel refund stays retryable, not terminal ──
+  it('a failed cancel refund leaves the heist in_progress and does not announce', async () => {
+    // Under-crewed heist whose single crew member's refund RPC errors. The row
+    // must NOT be finalised to terminal 'cancelled' (that would strand the
+    // refund — resumePendingHeists skips terminal rows) and the channel must NOT
+    // be told fees were refunded while a refund is still outstanding.
+    const failSet = new Set(['u1']);
+    const db = makeStatefulDb({
+      status: 'recruiting', participants: ['u1'], successChance: 100,
+      failCreditFor: failSet,
+    });
+    const { client, send } = makeClient();
+    const mgr = new HeistManager(db.supabase as any, client as any);
+
+    await resolve(mgr); // claims (cancelled), refund of u1 errors → stay in_progress
+
+    expect(db.heist.status).toBe('in_progress');
+    expect(db.heist.resolution).toBe('cancelled');
+    expect(db.credits).toHaveLength(0);
+    // No "Heist Cancelled" announcement while the refund is unpaid.
+    expect(send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(0);
+
+    // The transient failure heals; the next resume refunds u1 and finalises.
+    failSet.clear();
+    await mgr.resumePendingHeists('g1');
+
+    expect(db.heist.status).toBe('cancelled');
+    expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]);
+    // Announced exactly once, only after the refund committed.
+    const cancelSends = send.mock.calls.filter(
+      (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'));
+    expect(cancelSends).toHaveLength(1);
+  });
+
+  it('a failed cancel refund retries in-process and is not double-refunded', async () => {
+    vi.useFakeTimers();
+    try {
+      const failSet = new Set(['u1']);
+      const db = makeStatefulDb({
+        status: 'recruiting', participants: ['u1'], successChance: 100,
+        failCreditFor: failSet,
+      });
+      const { client, send } = makeClient();
+      const mgr = new HeistManager(db.supabase as any, client as any);
+
+      await resolve(mgr); // refund errors → in_progress + in-process retry scheduled
+      expect(db.heist.status).toBe('in_progress');
+      expect(db.credits).toHaveLength(0);
+
+      failSet.clear();
+      await vi.advanceTimersByTimeAsync(1_500); // first backoff is 1s
+
+      expect(db.heist.status).toBe('cancelled');
+      // Refunded exactly once (paid_at guard survives the retry).
+      expect(db.credits).toEqual([{ user_id: 'u1', amount: 100 }]);
+      expect(send.mock.calls.filter(
+        (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Cancelled'))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── Finding 2: an errored payout stays retryable (not finalised) ────────
