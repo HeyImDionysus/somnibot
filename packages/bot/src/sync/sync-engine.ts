@@ -364,11 +364,233 @@ async function repairDriftItem(
       return { success: false, action: 'manual_required', reason: `Extra ${item.entityType} not in desired config — manual cleanup recommended` };
     }
 
-    case 'EXTERNAL_CHANGE':
-    case 'HIERARCHY_DRIFT':
+    case 'EXTERNAL_CHANGE': {
+      // A tracked entity was modified outside the dashboard — re-apply desired state.
+      if (item.entityType === 'role') {
+        return await reapplyRoleDesiredState(guild, supabase, item, idMap);
+      }
+      if (item.entityType === 'channel' || item.entityType === 'category') {
+        return await reapplyChannelDesiredState(guild, supabase, item, idMap);
+      }
+      return { success: false, action: 'manual_required', reason: `External change repair not supported for ${item.entityType}` };
+    }
+
+    case 'HIERARCHY_DRIFT': {
+      // Role positions drifted from desired ordering — reorder to desired.
+      if (item.entityType !== 'role') {
+        return { success: false, action: 'manual_required', reason: `Hierarchy repair not supported for ${item.entityType}` };
+      }
+      return await reorderRolesToDesired(guild, supabase, item, idMap);
+    }
+
     default:
       return { success: false, action: 'manual_required', reason: `Repair not implemented for ${item.type}` };
   }
+}
+
+interface DesiredRoleDef {
+  key: string;
+  name?: string;
+  color?: number;
+  permissions?: string;
+  hoist?: boolean;
+  mentionable?: boolean;
+  position?: number;
+}
+
+interface DesiredChannelDef {
+  key: string;
+  name?: string;
+  type?: number;
+  topic?: string | null;
+  slowmode?: number;
+  nsfw?: boolean;
+}
+
+/**
+ * Re-apply a role's desired state after an external (non-permission) change:
+ * name / color / hoist / mentionable. Permissions are handled by PERMISSION_DRIFT.
+ * Idempotent — Discord's edit is a no-op when values already match.
+ */
+async function reapplyRoleDesiredState(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+
+  const role = guild.roles.cache.get(item.entityDiscordId);
+  if (!role) return { success: false, action: 'manual_required', reason: 'Role not in cache' };
+  if (role.managed) return { success: false, action: 'manual_required', reason: 'Role is managed by an integration' };
+
+  // Discord constraint: the bot can only edit roles strictly below its own highest role.
+  const botHighest = guild.members.me?.roles.highest.position;
+  if (typeof botHighest === 'number' && role.position >= botHighest) {
+    return { success: false, action: 'manual_required', reason: `Role "${role.name}" is at or above the bot's highest role — cannot edit` };
+  }
+
+  const roleKey = item.templateKey ?? findKeyForEntity(idMap, item.entityDiscordId, 'role');
+  if (!roleKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredRoles = (desired?.roles ?? []) as DesiredRoleDef[];
+  const roleDef = desiredRoles.find(r => stripPrefix(r.key) === stripPrefix(roleKey));
+  if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
+
+  await role.edit({
+    name: roleDef.name ?? role.name,
+    color: roleDef.color ?? role.color,
+    hoist: roleDef.hoist ?? role.hoist,
+    mentionable: roleDef.mentionable ?? role.mentionable,
+    reason: 'SomniBot sync auto-repair — re-applied desired state after external change',
+  });
+
+  return { success: true, action: `Re-applied desired state to role "${roleDef.name ?? role.name}"` };
+}
+
+/**
+ * Re-apply a channel's desired state after an external change:
+ * name / topic / slowmode / nsfw. Idempotent.
+ */
+async function reapplyChannelDesiredState(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+
+  const channel = guild.channels.cache.get(item.entityDiscordId) as
+    | ({ name: string; edit: (opts: Record<string, unknown>) => Promise<unknown>; topic?: unknown; nsfw?: unknown; rateLimitPerUser?: unknown })
+    | undefined;
+  if (!channel) return { success: false, action: 'manual_required', reason: 'Channel not in cache' };
+
+  const chanKey = item.templateKey ?? findKeyForEntity(idMap, item.entityDiscordId, item.entityType);
+  if (!chanKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('channels')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredChannels = (desired?.channels ?? []) as DesiredChannelDef[];
+  const chanDef = desiredChannels.find(c => stripPrefix(c.key) === stripPrefix(chanKey));
+  if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
+
+  const editOptions: Record<string, unknown> = {};
+  if (chanDef.name !== undefined) editOptions.name = chanDef.name;
+  if ('topic' in channel && chanDef.topic !== undefined) editOptions.topic = chanDef.topic;
+  if ('nsfw' in channel && chanDef.nsfw !== undefined) editOptions.nsfw = chanDef.nsfw;
+  if ('rateLimitPerUser' in channel && chanDef.slowmode !== undefined) editOptions.rateLimitPerUser = chanDef.slowmode;
+
+  await channel.edit({
+    ...editOptions,
+    reason: 'SomniBot sync auto-repair — re-applied desired state after external change',
+  });
+
+  return { success: true, action: `Re-applied desired state to ${item.entityType} "${chanDef.name ?? channel.name}"` };
+}
+
+/**
+ * Reorder roles to their desired relative positions.
+ *
+ * Desired state stores each role with a relative `position` (higher = higher in
+ * the hierarchy). We assign absolute positions immediately below the bot's own
+ * highest role, mirroring the deploy flow. Discord only lets the bot move roles
+ * strictly below its highest role, so:
+ *   - roles at/above the bot are excluded from the reorder set, and
+ *   - if the drifted target itself is at/above the bot, that's genuinely
+ *     impossible → manual_required.
+ * Idempotent — when the current ordering already matches desired, no API call
+ * is made.
+ */
+async function reorderRolesToDesired(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  const botHighest = guild.members.me?.roles.highest.position;
+  if (typeof botHighest !== 'number') {
+    return { success: false, action: 'manual_required', reason: "Bot's highest role position is unknown" };
+  }
+
+  // The drifted target must be below the bot to be movable at all.
+  if (item.entityDiscordId) {
+    const targetRole = guild.roles.cache.get(item.entityDiscordId);
+    if (targetRole && targetRole.position >= botHighest) {
+      return {
+        success: false,
+        action: 'manual_required',
+        reason: `Role "${targetRole.name}" is at or above the bot's highest role — the bot cannot move it`,
+      };
+    }
+  }
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredRoles = (desired?.roles ?? []) as DesiredRoleDef[];
+  if (desiredRoles.length === 0) {
+    return { success: false, action: 'manual_required', reason: 'No desired roles configured' };
+  }
+
+  // Resolve each desired role to a live, movable Discord role (below the bot).
+  const sorted = [...desiredRoles].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const movable: Array<{ id: string; currentPosition: number }> = [];
+  for (const def of sorted) {
+    const discordId = idMap.get(`role:${stripPrefix(def.key)}`);
+    if (!discordId) continue;
+    const role = guild.roles.cache.get(discordId);
+    if (!role) continue;
+    if (role.managed) continue;
+    if (role.position >= botHighest) continue; // cannot move roles at/above the bot
+    movable.push({ id: discordId, currentPosition: role.position });
+  }
+
+  if (movable.length === 0) {
+    return { success: false, action: 'manual_required', reason: 'No movable roles resolved from desired state' };
+  }
+
+  // Target absolute positions: contiguous band immediately below the bot,
+  // preserving desired relative order (lowest desired position → lowest slot).
+  const positionUpdates = movable.map((entry, index) => ({
+    role: entry.id,
+    position: Math.max(1, botHighest - movable.length + index),
+  }));
+
+  // Idempotent: skip the API call when the current relative ordering already
+  // matches the desired ordering. Compare the sequence of current positions —
+  // if it is already strictly increasing in desired order, nothing to do.
+  const alreadyOrdered = movable.every((entry, index) => {
+    if (index === 0) return true;
+    return entry.currentPosition > movable[index - 1].currentPosition;
+  });
+  if (alreadyOrdered) {
+    return { success: true, action: 'Role hierarchy already matches desired order' };
+  }
+
+  await guild.roles.setPositions(positionUpdates);
+  return { success: true, action: `Reordered ${positionUpdates.length} role(s) to desired hierarchy` };
+}
+
+/**
+ * Strip a leading "prefix:" (e.g. "role:mod" → "mod"). Desired-state keys and
+ * ID-map keys are stored inconsistently with/without the entity-type prefix.
+ */
+function stripPrefix(key: string): string {
+  const idx = key.indexOf(':');
+  return idx >= 0 ? key.slice(idx + 1) : key;
 }
 
 /**
