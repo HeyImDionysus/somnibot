@@ -3,9 +3,15 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, type ComponentType } from 'react';
 import { cn } from '@/lib/utils/cn';
 import { GuildSelector } from '@/components/guild-selector';
+import {
+  OpenTicketsBadge,
+  PendingOrdersBadge,
+  ActiveGiveawaysBadge,
+  DlqBadge,
+} from '@/components/layout/sidebar-badges';
 import { createClient } from '@/lib/supabase/client';
 import {
   LayoutDashboard,
@@ -58,6 +64,8 @@ interface NavItem {
   href: string;
   icon: LucideIcon;
   requires?: 'discord' | 'paypal' | 'lavalink';
+  /** Optional count badge rendered at the right edge of the item */
+  badge?: ComponentType;
 }
 
 interface NavGroup {
@@ -95,7 +103,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Auto-Mod Rules', href: '/moderation/rules', icon: Shield, requires: 'discord' },
       { label: 'Infractions', href: '/moderation/infractions', icon: FileCode2, requires: 'discord' },
-      { label: 'Ticket Panels', href: '/tickets', icon: Ticket, requires: 'discord' },
+      { label: 'Ticket Panels', href: '/tickets', icon: Ticket, requires: 'discord', badge: OpenTicketsBadge },
     ],
   },
   {
@@ -104,7 +112,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Levels & XP', href: '/levels', icon: Trophy, requires: 'discord' },
       { label: 'Reaction Roles', href: '/reaction-roles', icon: Palette, requires: 'discord' },
-      { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord' },
+      { label: 'Giveaways', href: '/giveaways', icon: Gift, requires: 'discord', badge: ActiveGiveawaysBadge },
       { label: 'Scheduled Messages', href: '/scheduled-messages', icon: Clock, requires: 'discord' },
       { label: 'Economy', href: '/economy', icon: Coins, requires: 'discord' },
       { label: 'Econ Analytics', href: '/economy/analytics', icon: TrendingUp, requires: 'discord' },
@@ -141,7 +149,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Automations', href: '/automations', icon: Zap, requires: 'discord' },
       { label: 'Custom Commands', href: '/commands', icon: Terminal, requires: 'discord' },
-      { label: 'Failed Actions', href: '/action-queue', icon: AlertTriangle, requires: 'discord' },
+      { label: 'Failed Actions', href: '/action-queue', icon: AlertTriangle, requires: 'discord', badge: DlqBadge },
     ],
   },
   {
@@ -150,7 +158,7 @@ const navigation: NavGroup[] = [
     items: [
       { label: 'Analytics', href: '/analytics', icon: TrendingUp },
       { label: 'Store', href: '/store', icon: ShoppingCart, requires: 'paypal' },
-      { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal' },
+      { label: 'Orders', href: '/store/orders', icon: Receipt, requires: 'paypal', badge: PendingOrdersBadge },
       { label: 'Customers', href: '/customers', icon: Users, requires: 'paypal' },
       { label: 'License Keys', href: '/licenses', icon: Key, requires: 'paypal' },
       { label: 'Promotions', href: '/store/promotions', icon: Tag, requires: 'paypal' },
@@ -296,6 +304,7 @@ export function Sidebar() {
                 {group.items.map((item) => {
                   const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
                   const Icon = item.icon;
+                  const Badge = item.badge;
                   const isLocked = false;
 
                   return (
@@ -321,6 +330,7 @@ export function Sidebar() {
                         )}
                       />
                       <span className="flex-1 truncate">{item.label}</span>
+                      {Badge ? <Badge /> : null}
                     </Link>
                   );
                 })}

@@ -16,6 +16,7 @@ const ALLOWED_TABLES = [
   'giveaways',
   'infractions',
   'incidents',
+  'action_queue_dlq',
 ] as const;
 
 /** V7 Audit §7.P3a — Zod-validated query params for /api/counts */
@@ -49,6 +50,10 @@ export async function GET(req: NextRequest) {
       query = query.eq('status', 'active');
     } else if (table === 'incidents') {
       query = query.in('status', ['open', 'investigating', 'identified', 'monitoring']);
+    } else if (table === 'action_queue_dlq') {
+      // Pending = not yet acknowledged and not yet retried. Uses the admin
+      // (service role) client — the table is intentionally service_role-only.
+      query = query.eq('acknowledged', false).eq('retried', false);
     }
 
     const { count, error } = await query;
