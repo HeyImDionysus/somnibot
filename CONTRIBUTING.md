@@ -209,8 +209,10 @@ Example: `20260601000004_v53_dead_table_cleanup.sql`
    are implicit and need no prefix. This class of bug caused a full lottery outage and a
    broken GDPR purge function. CI's `db-security-audit` checks that these functions set a
    `search_path`, and the `migration-lint` job runs `scripts/check-secdef-search-path.py`,
-   which **flags unqualified references in `SECURITY DEFINER` bodies** and fails the build
-   on any hit — so this class of bug is now caught automatically in CI.
+   which **automatically fails the build on unqualified extension-function references**
+   (the lottery-outage class). Unqualified **table** references are NOT yet gated — the
+   script's `--include-tables` mode is advisory only — so reviewers must still verify
+   `public.<table>` qualification by hand.
 7. **RLS policies must be role-scoped.** Never `CREATE POLICY ... FOR ALL USING (true)`
    without a `TO` clause on a table holding sensitive data — combined with the legacy
    anon default-grant window, that lets anyone with the publishable key read (and often
