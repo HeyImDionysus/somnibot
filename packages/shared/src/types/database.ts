@@ -371,6 +371,12 @@ export interface DbGuildConfig {
   economy_prestige_multiplier_pct: number;
   economy_prestige_min_level: number;
   economy_prestige_min_net_worth: number;
+
+  // V53 Phase 2 Observability / retention / ticketing additions
+  alert_channel_id: string | null;
+  anti_raid_ban_delete_seconds: number;
+  data_retention_days: number;
+  ticket_satisfaction_survey: boolean;
 }
 
 export interface DbInstanceSettings {
@@ -1116,11 +1122,18 @@ export interface DbBotActionQueue {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
-  // Note: V19 incorrectly added 6 fields from missing_tables.sql (action_type,
-  // attempts, error, max_attempts, next_retry_at, processed_at). Those columns
-  // don't exist — bot_action_queue was created by guild_live_state.sql and
-  // missing_tables.sql was a no-op (IF NOT EXISTS). V10 missed this table.
-  // Stale fields removed in V20.
+  // Retry / backoff bookkeeping. 20260518000001_missing_tables.sql adds these
+  // to the pre-existing table via unconditional `ALTER ... ADD COLUMN IF NOT
+  // EXISTS`, so they DO exist; retry_count was added in 20260524000000 (V48).
+  // next_retry_at is the receipt-retry backoff schedule (PR #265) and the
+  // lane sweep (PR #275) filters on it — actively used, never dropped.
+  action_type: string | null;
+  attempts: number;
+  max_attempts: number;
+  retry_count: number;
+  error: string | null;
+  processed_at: string | null;
+  next_retry_at: string | null;
 }
 
 // — Reconciliation —
@@ -1389,6 +1402,10 @@ export interface DbEconomyWallet {
   total_spent: number;
   created_at: string;
   updated_at: string;
+  // V53 ban/leave cleanup — suspended blocks economy commands & targeting
+  suspended: boolean;
+  suspended_at: string | null;
+  suspended_reason: string | null;
 }
 
 export type EconomyTransactionType =
@@ -1672,6 +1689,8 @@ export interface DbAdventureSession {
   channel_id: string | null;
   started_at: string;
   ended_at: string | null;
+  // Codex cross-ref fix P5 — bot writes .update({ loot_failed: true })
+  loot_failed: boolean;
 }
 
 // ── Market ────────────────────────────────────────────────
@@ -1708,24 +1727,17 @@ export interface DbTriviaQuestion {
   updated_at: string;
 }
 
-export type TriviaSessionStatus = 'active' | 'finished' | 'cancelled';
-
-export interface DbTriviaSession {
-  id: string;
-  guild_id: string;
-  channel_id: string;
-  host_user_id: string;
-  category: string | null;
-  difficulty: TriviaDifficulty;
-  status: TriviaSessionStatus;
-  rounds_completed: number;
-  started_at: string;
-  ended_at: string | null;
-}
+// DbTriviaSession / TriviaSessionStatus removed — economy_trivia_sessions was
+// created in v31 but DROPped in 20260601000004_v53_dead_table_cleanup.sql and
+// never recreated (trivia session state now lives in Valkey). Nothing imported
+// the type; no dead usages to fix.
 
 // ── Lottery ───────────────────────────────────────────────
 
-export type LotteryDrawingStatus = 'active' | 'drawn' | 'cancelled';
+// 'drawing' = claimed, payout pending (intermediate state). The v31 CHECK
+// only allowed active/drawn/cancelled; 20260709130000_lottery_stable_winner
+// widened it to include 'drawing'.
+export type LotteryDrawingStatus = 'active' | 'drawing' | 'drawn' | 'cancelled';
 
 export interface DbLotteryDrawing {
   id: string;
@@ -1736,6 +1748,8 @@ export interface DbLotteryDrawing {
   winning_number: number | null;
   drawn_at: string | null;
   created_at: string;
+  // 20260709130000 — NULL while payout pending; set with status='drawn'
+  winner_paid_at: string | null;
 }
 
 export interface DbLotteryTicket {
@@ -1880,6 +1894,8 @@ export interface DbQuestProgress {
   claimed: boolean;
   assigned_at: string;
   completed_at: string | null;
+  // V49 — date portion of assigned_at; unique (guild,user,template,date)
+  assigned_date: string;
 }
 
 export interface DbAchievementDef {
@@ -1927,4 +1943,217 @@ export interface DbProfile {
   profile_views: number;
   created_at: string;
   updated_at: string;
+}
+
+// ── Heists (economy_heists / economy_heist_participants) ───
+// V36 — accessed via the typed client in features/heist/heist-manager.ts.
+
+export type HeistStatus = 'recruiting' | 'in_progress' | 'success' | 'failed' | 'cancelled';
+
+export interface DbHeist {
+  id: string;
+  guild_id: string;
+  initiator_id: string;
+  status: HeistStatus;
+  target_name: string;
+  target_payout: number;
+  participants: string[];
+  success_chance: number;
+  resolved_at: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface DbHeistParticipant {
+  id: string;
+  heist_id: string;
+  guild_id: string;
+  user_id: string;
+  role: string;
+  payout: number;
+  joined_at: string;
+}
+
+// ── Action Queue DLQ (action_queue_dlq) ───────────────────
+// V53 Phase 2 — distinct from dead_letter_queue (DbDeadLetterItem). The
+// dashboard action-queue route and the bot's DLQ insert path use the typed
+// client. Nullable defaulted columns follow the existing style (non-null).
+
+export interface DbActionQueueDlq {
+  id: string;
+  guild_id: string;
+  action: string;
+  // 20260710020000: dead-lettered rows preserve their processing lane
+  // (stamped by a BEFORE INSERT trigger) so DLQ listings are self-describing.
+  lane: 'commerce' | 'game';
+  payload: Record<string, unknown>;
+  error_message: string | null;
+  retry_count: number;
+  max_retries: number;
+  original_id: string | null;
+  failed_at: string;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  retried: boolean;
+  retried_at: string | null;
+  created_at: string;
+}
+
+// ── Health Metrics (health_metrics) ───────────────────────
+// V53 Phase 2 — written by diagnostics-service, read by dashboard diagnostics.
+
+export interface DbHealthMetric {
+  id: string;
+  guild_id: string;
+  metric_type: string;
+  value_ms: number;
+  recorded_at: string;
+}
+
+// ── Starboard (starboard_entries) ─────────────────────────
+// V17 — accessed via the typed client in features/starboard.
+
+export interface DbStarboardEntry {
+  id: string;
+  guild_id: string | null;
+  source_channel_id: string;
+  source_message_id: string;
+  starboard_message_id: string | null;
+  star_count: number;
+  author_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Button Roles (button_roles) ───────────────────────────
+// V17 — accessed via the typed client in features/reaction-roles/button-roles.
+
+export type ButtonRoleStyle = 'primary' | 'secondary' | 'success' | 'danger';
+
+export interface DbButtonRole {
+  id: string;
+  guild_id: string | null;
+  panel_id: string;
+  channel_id: string;
+  message_id: string | null;
+  label: string;
+  emoji: string | null;
+  style: ButtonRoleStyle;
+  role_id: string;
+  sort_order: number;
+  exclusive_group: string | null;
+  require_role: string | null;
+  require_level: number | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── Sync Reports (sync_reports) ───────────────────────────
+// V53 Phase 4 — written by sync/sync-engine via the typed client.
+
+export interface DbSyncReport {
+  id: string;
+  guild_id: string;
+  repaired_count: number;
+  attention_count: number;
+  total_drift: number;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+// ── Level Unlock Configs (level_unlock_configs) ───────────
+// V53 Phase 4 — read by services/cross-feature-bridge via the typed client.
+
+export interface DbLevelUnlockConfig {
+  guild_id: string;
+  feature_key: string;
+  required_level: number;
+  unlock_message: string | null;
+}
+
+// ── Member Feature Unlocks (member_feature_unlocks) ───────
+// V53 Phase 4 — upserted by services/cross-feature-bridge via the typed client.
+
+export interface DbMemberFeatureUnlock {
+  guild_id: string;
+  user_id: string;
+  feature_key: string;
+  unlocked_at: string;
+}
+
+// ── Tutorial (tutorial_configs / tutorial_steps / tutorial_progress) ──
+// V53 Phase 3 — accessed via the typed client in features/tutorial and the
+// dashboard tutorial route.
+
+export type TutorialTriggerMode = 'first_command' | 'join' | 'disabled';
+
+export interface DbTutorialConfig {
+  guild_id: string;
+  enabled: boolean;
+  auto_trigger: boolean;
+  trigger_mode: TutorialTriggerMode;
+  updated_at: string;
+}
+
+export interface DbTutorialStep {
+  id: string;
+  guild_id: string;
+  step_order: number;
+  title: string;
+  description: string;
+  image_url: string | null;
+  built_in_key: string | null;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface DbTutorialProgress {
+  guild_id: string;
+  user_id: string;
+  current_step: number;
+  completed: boolean;
+  started_at: string;
+  completed_at: string | null;
+}
+
+// ── Feature Embed Overrides (feature_embed_overrides) ─────
+// V53 Phase 3 — read by services/embed-theme via the typed client.
+
+export type FeatureEmbedKey =
+  | 'welcome'
+  | 'goodbye'
+  | 'level_up'
+  | 'moderation'
+  | 'economy'
+  | 'music'
+  | 'tickets'
+  | 'giveaways'
+  | 'achievements';
+
+export interface DbFeatureEmbedOverride {
+  guild_id: string;
+  feature_key: FeatureEmbedKey;
+  color: string | null;
+  footer_text: string | null;
+  footer_icon_url: string | null;
+  thumbnail_url: string | null;
+  author_name: string | null;
+  updated_at: string;
+}
+
+// ── Payment Refunds (payment_refunds) ─────────────────────
+// 20260710040000_refund_semantics — one row per PayPal refund/reversal.
+// Inserted/selected via the typed client in the dashboard PayPal webhook.
+
+export interface DbPaymentRefund {
+  id: string;
+  payment_id: string;
+  order_id: string | null;
+  guild_id: string | null;
+  paypal_refund_id: string;
+  event_type: string;
+  amount_cents: number | null;
+  currency: string | null;
+  created_at: string;
 }
