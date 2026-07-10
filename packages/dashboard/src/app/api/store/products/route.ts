@@ -14,11 +14,15 @@ import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError, apiError } from '@/lib/api/response';
+import { dbError, apiError, apiServerError } from '@/lib/api/response';
 import {
   assertProductRolesNotIncomeEarning,
+  findSubscriptionsWithChargeablePlan,
   isBuyableProduct,
   metadataGrantRoleIds,
+  metadataGrantVectorApplies,
+  preserveSoldMetadataGrantHistory,
+  type WallCheckResult,
 } from '@/lib/api/commerce-income-wall';
 
 // ── PayPal Helpers ─────────────────────────────────────
@@ -260,33 +264,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Compliance wall: a BUYABLE product's granted roles must not earn
-  // role-income (real money → wagerable currency). Checked before any PayPal
-  // call or DB write so a rejected product creates nothing. Cover BOTH grant
-  // vectors: the `granted_role_ids` array and the single `metadata.grant_role_id`
-  // role that the bot's purchase.completed → grantPurchaseRole path acts on.
-  //
-  // CALIBRATION: gate on the same buyability predicate as the PUT wall below,
-  // not on `type !== 'free'` alone — creating a STAGED product (active=false)
-  // or a zero-price one-time product is not a real-money purchase path and
-  // must not be blocked. This is safe because the PUT wall re-checks whenever
-  // `active`/`price_cents`/`type` change (flipping the staged product live
-  // re-runs the wall with effective values), and the plans route re-checks
-  // before a paid active plan lands.
-  const rolesToGrant = [
-    ...(granted_role_ids ?? []),
-    ...metadataGrantRoleIds(metadata),
-  ];
-  const wall = await assertProductRolesNotIncomeEarning(
-    supabase,
-    guildId,
-    rolesToGrant,
-    isBuyableProduct({ type, active: active ?? true, price_cents }),
-  );
-  if (!wall.ok) {
-    return apiError(wall.message, 409);
-  }
-
   interface PlanDefinition {
     name?: string;
     interval_unit?: string;
@@ -300,6 +277,46 @@ export async function POST(req: NextRequest) {
   const hasPaidSubscriptionPlan = type === 'subscription'
     && normalizedPlanDefs.some((planDef) => (planDef.price_cents ?? price_cents) > 0);
   const requiresPayPal = type !== 'free' && (price_cents > 0 || hasPaidSubscriptionPlan);
+
+  // Compliance wall: a BUYABLE product's granted roles must not earn
+  // role-income (real money → wagerable currency). Checked before any PayPal
+  // call or DB write so a rejected product creates nothing. See the DECISION
+  // MATRIX in commerce-income-wall.ts. Roles under test: the
+  // `granted_role_ids` array (V1) plus, only when the metadata vector fires
+  // for this type (one-time products — subscriptions never consume it), the
+  // single `metadata.grant_role_id` role (V2).
+  //
+  // BUYABILITY at create time: a STAGED product (active=false), a zero-price
+  // one-time product, and a subscription without a chargeable plan are not
+  // real-money purchase paths and must not be blocked. Subscriptions are
+  // judged by the plan definitions in THIS request (when no plan defs are
+  // given, a priced product auto-creates one default plan at `price_cents`);
+  // adding a chargeable plan later re-runs the wall in /api/store/plans, and
+  // every buyability-flipping PUT re-runs it below.
+  const rolesToGrant = [
+    ...(granted_role_ids ?? []),
+    ...(metadataGrantVectorApplies(type) ? metadataGrantRoleIds(metadata) : []),
+  ];
+  const createHasChargeablePlan = type === 'subscription'
+    && (normalizedPlanDefs.length > 0 ? hasPaidSubscriptionPlan : price_cents > 0);
+  let wall: WallCheckResult;
+  try {
+    wall = await assertProductRolesNotIncomeEarning(
+      supabase,
+      guildId,
+      rolesToGrant,
+      isBuyableProduct(
+        { type, active: active ?? true, price_cents },
+        { hasChargeablePlan: createHasChargeablePlan },
+      ),
+    );
+  } catch (err) {
+    // Fail CLOSED: an unreadable wall must abort the write, never wave it on.
+    return apiServerError(err, 'store/products');
+  }
+  if (!wall.ok) {
+    return apiError(wall.message, 409);
+  }
 
   if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
     normalizedPlanDefs = [{
@@ -435,17 +452,15 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
-  // Compliance wall: an update must never leave a PAID, buyable product
-  // granting a role that earns role-income. Re-check whenever the update
-  // touches ANY field that can (a) change what roles are granted, or (b) make
-  // the product a real-money purchase path — because flipping only `active`
-  // false→true or `price_cents` 0→paid on a product with an overlapping income
-  // role opens the laundering path without touching roles or `type`.
-  //
-  // `type` alone no longer decides paid-ness: a `one_time` product with
-  // price_cents 0 or active=false is not a real-money purchase path. We treat a
-  // product as buyable only when it is non-free AND active AND priced > 0, using
-  // the stored row for any field the update omits.
+  // Compliance wall: an update must never leave a BUYABLE product granting a
+  // role that earns role-income. Re-check whenever the update touches ANY
+  // field that can (a) change what roles are granted, or (b) make the product
+  // a real-money purchase path — flipping only `active` false→true or
+  // `price_cents` 0→paid on a product with an overlapping income role opens
+  // the laundering path without touching roles or `type`. See the DECISION
+  // MATRIX in commerce-income-wall.ts; buyability is evaluated on EFFECTIVE
+  // (stored + updated) values, with subscriptions judged by their stored
+  // plans (isChargeablePlan).
   const WALL_TRIGGER_FIELDS = [
     'granted_role_ids',
     'metadata',
@@ -454,39 +469,79 @@ export async function PUT(req: NextRequest) {
     'price_cents',
   ] as const;
   if (WALL_TRIGGER_FIELDS.some((f) => f in updates)) {
-    const { data: existing } = await supabase
+    // Fail CLOSED: the stored row is half of the effective values — if it
+    // cannot be read, the wall cannot be evaluated and the update must abort
+    // (an `active: true` write must never skip the stored granted roles).
+    const { data: existing, error: existingErr } = await supabase
       .from('products')
       .select('type, granted_role_ids, metadata, active, price_cents')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
+    if (existingErr) {
+      return dbError(existingErr, 'store/products');
+    }
+    if (!existing) {
+      return apiError('Product not found for this guild', 404);
+    }
 
     const pick = <K extends string>(key: K, fallback: unknown) =>
       (key in updates ? (updates as Record<string, unknown>)[key] : fallback);
 
-    const effectiveType = pick('type', existing?.type) as string | undefined;
-    const effectiveActive = pick('active', existing?.active) as boolean | undefined;
-    const effectivePrice = pick('price_cents', existing?.price_cents) as number | undefined;
-    const effectiveMetadata = pick('metadata', existing?.metadata);
+    const effectiveType = pick('type', existing.type) as string | undefined;
+    const effectiveActive = pick('active', existing.active) as boolean | undefined;
+    const effectivePrice = pick('price_cents', existing.price_cents) as number | undefined;
+    const effectiveMetadata = pick('metadata', existing.metadata);
     const effectiveRoles = [
-      ...(((pick('granted_role_ids', existing?.granted_role_ids)) as string[] | null) ?? []),
-      ...metadataGrantRoleIds(effectiveMetadata),
+      ...(((pick('granted_role_ids', existing.granted_role_ids)) as string[] | null) ?? []),
+      // V2 only fires for one-time products — a subscription never consumes
+      // the metadata role, so it must not block there (V3/V4 history is
+      // enforced on the role-income side, not by this product write).
+      ...(metadataGrantVectorApplies(effectiveType)
+        ? metadataGrantRoleIds(effectiveMetadata)
+        : []),
     ];
 
-    // Buyable = a real-money purchase path — see isBuyableProduct() for the
-    // shared calibration (non-free type, active, chargeable).
-    const wall = await assertProductRolesNotIncomeEarning(
-      supabase,
-      guildId,
-      effectiveRoles,
-      isBuyableProduct({
-        type: effectiveType,
-        active: effectiveActive,
-        price_cents: effectivePrice,
-      }),
-    );
-    if (!wall.ok) {
-      return apiError(wall.message, 409);
+    try {
+      // Subscription buyability depends on the product's stored plans — a
+      // chargeable plan may already exist when `active` flips true.
+      const hasChargeablePlan = effectiveType === 'subscription'
+        ? (await findSubscriptionsWithChargeablePlan(supabase, guildId, [id])).has(id)
+        : false;
+
+      const wall = await assertProductRolesNotIncomeEarning(
+        supabase,
+        guildId,
+        effectiveRoles,
+        isBuyableProduct(
+          { type: effectiveType, active: effectiveActive, price_cents: effectivePrice },
+          { hasChargeablePlan },
+        ),
+      );
+      if (!wall.ok) {
+        return apiError(wall.message, 409);
+      }
+
+      // V4 MAINTENANCE: when the edit replaces `metadata`, preserve recorded
+      // history and record a stripped SOLD permanent grant role — buyers of a
+      // permanent metadata role have no per-user record, so the product's
+      // metadata is the only place the evidence can live. Append-only: a
+      // client-supplied metadata object can never erase it.
+      if ('metadata' in updates) {
+        const mergedMetadata = await preserveSoldMetadataGrantHistory(
+          supabase,
+          guildId,
+          id,
+          existing.metadata,
+          (updates as Record<string, unknown>).metadata,
+        );
+        if (mergedMetadata) {
+          (updates as Record<string, unknown>).metadata = mergedMetadata;
+        }
+      }
+    } catch (err) {
+      // Fail CLOSED: an unreadable wall or history lookup aborts the update.
+      return apiServerError(err, 'store/products');
     }
   }
 

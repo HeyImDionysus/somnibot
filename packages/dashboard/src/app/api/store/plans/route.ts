@@ -6,12 +6,13 @@
  * PUT: Update a plan
  * DELETE: Delete a plan by ID
  *
- * COMPLIANCE WALL: a paid ACTIVE plan is the one config change that can make a
- * subscription product chargeable WITHOUT touching the product row (the
+ * COMPLIANCE WALL: a chargeable plan is the one config change that can make a
+ * subscription product buyable WITHOUT touching the product row (the
  * product-side wall in /api/store/products only re-checks on product-field
- * changes). So before a paid active plan is written — created, re-priced,
- * re-activated, or moved to another product — this route re-runs the wall
- * against the parent product's granted roles. See commerce-income-wall.ts.
+ * changes). So before a CHARGEABLE plan is written — created, re-priced,
+ * re-activated, given a paypal_plan_id, or moved to another product — this
+ * route re-runs the wall against the parent product's granted roles. See the
+ * DECISION MATRIX in commerce-income-wall.ts.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -23,23 +24,32 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError } from '@/lib/api/response';
 import {
   assertProductRolesNotIncomeEarning,
-  metadataGrantRoleIds,
+  isChargeablePlan,
   type WallCheckResult,
 } from '@/lib/api/commerce-income-wall';
 
 /**
  * Compliance-wall check for a plan write. Call only when the EFFECTIVE plan
- * state (stored + updated values) is active with price_cents > 0 — a paid
- * active plan opens a real-money purchase path through its parent product.
+ * state (stored + updated values) is CHARGEABLE — active with price_cents > 0
+ * or with a paypal_plan_id (checkout starts a subscription from the PayPal id
+ * alone and charges PayPal's price, not our DB row) — because only a
+ * chargeable plan opens a real-money purchase path through its parent.
  *
- * Resolves the parent product GUILD-SCOPED and blocks when the parent is a
- * currently-buyable-with-this-plan product (non-free, active) granting any
- * role that earns role-income. An INACTIVE parent does not block (it cannot
- * be bought); reactivating it re-runs the product-side wall, which treats a
- * non-free subscription as chargeable and catches the collision then — the
- * same reactivation dance as findPaidProductRoles.
+ * Resolves the parent product GUILD-SCOPED and blocks when the parent is an
+ * ACTIVE SUBSCRIPTION granting any role that earns role-income. Other parents
+ * never become buyable through a plan (verified against the checkout,
+ * payment-handler.ts): a one-time purchase ignores `plans` entirely and
+ * charges `products.price_cents`, and free products are refused at checkout —
+ * so a plan write under those parents is inert and must not 409. An INACTIVE
+ * subscription parent does not block either (it cannot be bought); flipping
+ * it active re-runs the product-side wall, which now checks the stored plans
+ * for chargeability and catches the collision then.
  *
- * Returns null when the write may proceed, or an error response.
+ * Roles under test: `granted_role_ids` only (V1) — subscription activation
+ * never consumes `metadata.grant_role_id` (V2 is a one-time-purchase vector).
+ *
+ * Returns null when the write may proceed, or an error response (fail CLOSED
+ * on lookup errors).
  */
 async function checkPlanWall(
   supabase: SupabaseClient,
@@ -48,7 +58,7 @@ async function checkPlanWall(
 ): Promise<NextResponse | null> {
   const { data: product, error } = await supabase
     .from('products')
-    .select('type, active, granted_role_ids, metadata')
+    .select('type, active, granted_role_ids')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -56,22 +66,17 @@ async function checkPlanWall(
     return dbError(error, 'store/plans');
   }
   if (!product) {
-    // Unknown or cross-guild product — never attach a paid plan to a product
-    // this guild does not own (the wall could not be evaluated).
+    // Unknown or cross-guild product — never attach a plan to a product this
+    // guild does not own (the wall could not be evaluated).
     return apiError('Product not found for this guild', 404);
   }
 
-  if (product.type === 'free' || product.active === false) {
-    // Not buyable even with a paid plan: free products move no real money,
-    // and an inactive product cannot be bought. Reactivation re-runs the
-    // product-side wall (subscriptions are treated as chargeable there).
+  if (product.type !== 'subscription' || product.active === false) {
+    // A plan cannot make this parent buyable (see the doc comment above).
     return null;
   }
 
-  const rolesGranted = [
-    ...((product.granted_role_ids as string[] | null) ?? []),
-    ...metadataGrantRoleIds(product.metadata),
-  ];
+  const rolesGranted = (product.granted_role_ids as string[] | null) ?? [];
   const wall: WallCheckResult = await assertProductRolesNotIncomeEarning(
     supabase,
     guildId,
@@ -145,11 +150,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Compliance wall: a paid ACTIVE plan makes the parent product chargeable —
-  // re-check the role-income overlap before writing it. Zero-price or inactive
-  // plans open no purchase path and are not blocked (calibration: never block
-  // config that moves no real money).
-  if ((active ?? true) && price_cents > 0) {
+  // Compliance wall: a CHARGEABLE plan (active, and priced > 0 or carrying a
+  // paypal_plan_id) makes the parent subscription buyable — re-check the
+  // role-income overlap before writing it. Inactive plans, and zero-price
+  // plans with no PayPal id, open no purchase path and are not blocked
+  // (calibration: never block config that moves no real money).
+  if (isChargeablePlan({ active: active ?? true, price_cents, paypal_plan_id })) {
     const blocked = await checkPlanWall(supabase, guildId, product_id);
     if (blocked) return blocked;
   }
@@ -199,14 +205,15 @@ export async function PUT(req: NextRequest) {
   }
 
   // Compliance wall: re-check whenever the update can turn this plan into (or
-  // move) a paid ACTIVE plan — `price_cents` 0→paid, `active` false→true, or
-  // `product_id` pointing the plan at a different parent. Effective values
-  // (stored row + updates) decide, mirroring the product PUT wall.
-  const PLAN_WALL_TRIGGER_FIELDS = ['price_cents', 'active', 'product_id'] as const;
+  // move) a CHARGEABLE plan — `price_cents` 0→paid, `active` false→true,
+  // `paypal_plan_id` set on a previously chargeless plan, or `product_id`
+  // pointing the plan at a different parent. Effective values (stored row +
+  // updates) decide, mirroring the product PUT wall.
+  const PLAN_WALL_TRIGGER_FIELDS = ['price_cents', 'active', 'product_id', 'paypal_plan_id'] as const;
   if (PLAN_WALL_TRIGGER_FIELDS.some((f) => f in updates)) {
     const { data: existingPlan, error: planErr } = await supabase
       .from('plans')
-      .select('product_id, price_cents, active')
+      .select('product_id, price_cents, active, paypal_plan_id')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
@@ -220,10 +227,20 @@ export async function PUT(req: NextRequest) {
     const effectiveProductId = pick('product_id', existingPlan?.product_id) as string | undefined;
     const effectivePrice = pick('price_cents', existingPlan?.price_cents) as number | undefined;
     const effectiveActive = pick('active', existingPlan?.active) as boolean | undefined;
+    const effectivePayPalPlanId = pick('paypal_plan_id', existingPlan?.paypal_plan_id) as
+      | string
+      | undefined;
 
-    // Only a paid ACTIVE plan opens a purchase path. (A missing plan row makes
+    // Only a CHARGEABLE plan opens a purchase path. (A missing plan row makes
     // effectiveProductId undefined — the update below then 404s naturally.)
-    if (effectiveProductId && effectiveActive !== false && (effectivePrice ?? 0) > 0) {
+    if (
+      effectiveProductId &&
+      isChargeablePlan({
+        active: effectiveActive,
+        price_cents: effectivePrice,
+        paypal_plan_id: effectivePayPalPlanId,
+      })
+    ) {
       const blocked = await checkPlanWall(supabase, guildId, effectiveProductId);
       if (blocked) return blocked;
     }

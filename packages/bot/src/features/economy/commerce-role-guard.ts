@@ -1,36 +1,55 @@
 /**
  * Commerce role-income compliance guard (collection-time, defense-in-depth).
  *
- * COMPLIANCE WALL: real money must never buy wagerable game currency. A paid
- * product can grant a Discord role (products.granted_role_ids); role-income
- * (economy_role_income) pays wagerable game currency for holding a role. If a
- * commerce-granted role also has role-income configured, a buyer would collect
- * wagerable currency funded by a real-money purchase — exactly the laundering
- * path the wall forbids.
- *
- * The dashboard rejects that CONFIG (a role can never be both commerce-granted
- * and income-earning). This module is the second layer: even if a role slips
- * through config, `/collect-income` must never pay for a role the collecting
- * user holds via a commerce grant.
+ * COMPLIANCE WALL: real money must never buy wagerable game currency. This
+ * module implements the COLLECTION GUARD column of the DECISION MATRIX
+ * documented in packages/dashboard/src/lib/api/commerce-income-wall.ts (the
+ * dashboard enforces the CONFIG WALL columns; the bot cannot import that
+ * module, so the shared predicates are mirrored here and kept in sync with
+ * that header). Even if a role slips through config, `/collect-income` must
+ * never pay for a role the collecting user holds via a real-money grant.
  *
  * A user holds a role via commerce when ANY of:
- *   1. An active/grace entitlement of theirs WITH A REAL-MONEY SOURCE lists
- *      the role in `entitlements.granted_role_ids` — linked to the user
- *      through `customers.discord_id`. (EntitlementService.grant path.)
- *      Entitlements whose `source` is a known non-purchase grant (giveaway /
- *      manual / automation — comped, no money moved) do NOT make the role
- *      commerce-held: a giveaway winner or admin-comped user legitimately
- *      collects income on the role.
- *   2. An unexpired `temp_role_grants` row with a commerce source grants them
- *      the role directly by Discord `user_id`. (CrossFeatureBridge.grantPurchaseRole
- *      TEMPORARY path — only written when metadata.role_duration_hours is set.)
- *   3. The role is the `metadata.grant_role_id` of any PAID product in the
- *      guild. (CrossFeatureBridge.grantPurchaseRole PERMANENT path — a permanent
- *      metadata grant adds the Discord role but writes NO temp_role_grants row
- *      and NO entitlement, so layers 1–2 never see it. The config wall forbids a
- *      paid product's granted role from also earning income, so any role a paid
- *      product grants is commerce-held for wall purposes regardless of which
- *      specific product the collecting user bought.)
+ *
+ *   L1  An active/grace entitlement of theirs WITH A REAL-MONEY SOURCE lists
+ *       the role in `entitlements.granted_role_ids` — linked to the user
+ *       through `customers.discord_id`. (EntitlementService.grant path, used
+ *       by BOTH one-time and subscription fulfillment.) Entitlements whose
+ *       `source` is a known non-purchase grant (giveaway / manual /
+ *       automation — comped, no money moved) do NOT make the role
+ *       commerce-held: a giveaway winner or admin-comped user legitimately
+ *       collects income. NULL/unknown sources fail CLOSED as purchases.
+ *
+ *   L2  An unexpired `temp_role_grants` row with a commerce source grants
+ *       them the role directly by Discord `user_id`.
+ *       (CrossFeatureBridge.grantPurchaseRole TEMPORARY path — written only
+ *       when `metadata.role_duration_hours` is set. Temporary metadata grants
+ *       are COMPLETELY covered by this layer: they have per-user rows and an
+ *       expiry, so L3 must not match them — doing so would keep excluding a
+ *       user whose temp grant already expired, or who never bought at all.)
+ *
+ *   L3  Product-level evidence for PERMANENT metadata grants, which leave NO
+ *       per-user record (grantPurchaseRole just adds the Discord role):
+ *         V3 — the role is the PERMANENT `metadata.grant_role_id` of a
+ *              product with at least one REAL-MONEY ONE-TIME sale (an
+ *              `orders` row: amount_cents > 0, source purchase/NULL,
+ *              paypal_subscription_id NULL, status other than
+ *              pending/cancelled). The evidence is judged on ORDERS, not on
+ *              the product's current type/active/price: historical buyers
+ *              keep the role after the owner deactivates, re-prices, or
+ *              re-types the product, and only the sale record proves they
+ *              exist. Conversely a product that NEVER sold has no commerce
+ *              holders — everyone holding its metadata role got it some
+ *              other way and may collect. (A buyer cannot outrun the check:
+ *              the webhook writes the completed order BEFORE fulfillment
+ *              grants the role.) The one-time-order scoping is verified
+ *              behaviour: only one-time fulfillment emits
+ *              `purchase.completed`, the sole consumer of
+ *              `metadata.grant_role_id` — subscriptions grant exclusively
+ *              via `granted_role_ids` (covered by L1).
+ *         V4 — the role is in `metadata.historical_grant_role_ids`, the
+ *              append-only record the dashboard writes when an edit strips a
+ *              sold permanent metadata role (evidence outliving the edit).
  *
  * Returns the set of role IDs the user holds via commerce, so callers can
  * exclude them from any wagerable-currency payout.
@@ -57,12 +76,74 @@ const NON_PURCHASE_SOURCE_SET: ReadonlySet<string> = new Set(NON_PURCHASE_ENTITL
 export const COMMERCE_TEMP_ROLE_SOURCES = ['commerce_purchase', 'purchase'] as const;
 
 /**
+ * `orders.status` values that prove NO fulfillment ever ran (checkout was
+ * abandoned or cancelled before capture). Everything else — completed,
+ * refunded, disputed, pending_review — had money captured; refunds revoke
+ * ENTITLEMENT roles but never remove a permanent metadata role, so those
+ * orders remain evidence. Deny-list: unknown future statuses fail CLOSED.
+ */
+export const NEVER_FULFILLED_ORDER_STATUSES = ['pending', 'cancelled'] as const;
+
+/**
+ * Mirror of the dashboard matrix's isTemporaryMetadataGrant(): a metadata
+ * grant with `role_duration_hours > 0` writes a per-user temp_role_grants row
+ * (L2's territory) instead of a record-less permanent grant.
+ */
+function isTemporaryMetadataGrant(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== 'object') return false;
+  const hours = (metadata as Record<string, unknown>).role_duration_hours;
+  return typeof hours === 'number' && hours > 0;
+}
+
+/** Mirror of the dashboard matrix's metadataGrantRoleId(). */
+function metadataGrantRoleId(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const roleId = (metadata as Record<string, unknown>).grant_role_id;
+  return typeof roleId === 'string' && roleId.length > 0 ? roleId : null;
+}
+
+/** Mirror of the dashboard matrix's historicalGrantRoleIds(). */
+function historicalGrantRoleIds(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== 'object') return [];
+  const raw = (metadata as Record<string, unknown>).historical_grant_role_ids;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((r): r is string => typeof r === 'string' && r.length > 0);
+}
+
+/**
+ * Of `productIds`, the subset with at least one real-money one-time sale —
+ * the V3 evidence query (see the module header for the filter rationale).
+ * One existence probe per product; the candidate set is tiny.
+ */
+async function findProductsWithRealMoneyOneTimeSales(
+  supabase: SupabaseClient,
+  guildId: string,
+  productIds: string[],
+): Promise<Set<string>> {
+  const sold = new Set<string>();
+  for (const productId of productIds) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id')
+      .eq('guild_id', guildId)
+      .eq('product_id', productId)
+      .gt('amount_cents', 0)
+      .is('paypal_subscription_id', null)
+      .not('status', 'in', '("pending","cancelled")')
+      .or('source.eq.purchase,source.is.null')
+      .limit(1);
+    if (error) throw new Error(`orders lookup failed: ${error.message}`);
+    if ((data ?? []).length > 0) sold.add(productId);
+  }
+  return sold;
+}
+
+/**
  * Return the subset of `candidateRoleIds` that `userId` holds via a commerce
- * grant in `guildId`. Failures are treated as fail-CLOSED for the queried
- * layer is not appropriate here (we cannot invent roles), but a query error
- * must never silently pay out a commerce role — so on error we conservatively
- * return ALL candidate roles as "commerce-held" so nothing is paid, and let
- * the caller surface the situation. The wall favours not paying over paying.
+ * grant in `guildId`. A query error must never silently pay out a commerce
+ * role — on error we conservatively return ALL candidate roles as
+ * "commerce-held" so nothing is paid, and let the caller surface the
+ * situation. The wall favours not paying over paying.
  */
 export async function getCommerceHeldRoleIds(
   supabase: SupabaseClient,
@@ -76,7 +157,7 @@ export async function getCommerceHeldRoleIds(
   try {
     const commerceHeld = new Set<string>();
 
-    // ── Layer 1: entitlements.granted_role_ids (via customers.discord_id) ──
+    // ── L1: entitlements.granted_role_ids (via customers.discord_id) ──
     // Resolve the caller's customer rows in this guild, then their active
     // entitlements' granted roles.
     const { data: customers, error: custErr } = await supabase
@@ -114,7 +195,7 @@ export async function getCommerceHeldRoleIds(
       }
     }
 
-    // ── Layer 2: unexpired commerce temp_role_grants (by discord user_id) ──
+    // ── L2: unexpired commerce temp_role_grants (by discord user_id) ──
     const nowIso = new Date().toISOString();
     const { data: tempGrants, error: tempErr } = await supabase
       .from('temp_role_grants')
@@ -131,39 +212,54 @@ export async function getCommerceHeldRoleIds(
       if (candidates.has(roleId)) commerceHeld.add(roleId);
     }
 
-    // ── Layer 3: permanent metadata.grant_role_id on any PAID product ──
-    // A permanent commerce role grant (no role_duration_hours) writes neither
-    // an entitlement nor a temp_role_grants row — grantPurchaseRole just adds
-    // the Discord role. So layers 1–2 can't see it. The config wall forbids a
-    // paid product from granting a role that also earns income, so ANY role a
-    // paid product grants via metadata is treated as commerce-held here. We only
-    // query for the candidate roles (roles the user both holds and has income
-    // configured for), so this stays cheap.
-    //
-    // DELIBERATELY BROADER than the dashboard's config-time wall: the config
-    // wall (commerce-income-wall.ts) exempts inactive/zero-price products
-    // because they cannot CURRENTLY be bought and every reactivation path
-    // re-checks. This layer must NOT mirror that calibration — a permanent
-    // metadata grant leaves no per-user record, so a role bought while the
-    // product was active and paid is indistinguishable from a manually-added
-    // one AFTER the owner deactivates or re-prices the product. Filtering on
-    // active/price here would let those historical real-money holders collect
-    // income (laundering path). The cost of staying broad: a staged (inactive,
-    // never-sold) product's metadata role also never pays income via this
-    // layer — the wall favours not paying over paying.
+    // ── L3/V3: permanent metadata.grant_role_id on a product that SOLD ──
+    // No type/active/price filters: the sale record — not the product's
+    // current config — is what proves record-less permanent buyers exist
+    // (deactivating, re-pricing, or re-typing a product does not take the
+    // role away from them). Only candidate roles are queried, so this stays
+    // cheap. TEMPORARY metadata grants are skipped: L2 owns them (per-user
+    // rows with expiry), and matching them here would exclude holders whose
+    // grant expired or who never bought at all.
     const { data: metaProducts, error: metaErr } = await supabase
       .from('products')
-      .select('metadata')
+      .select('id, metadata')
       .eq('guild_id', guildId)
-      .neq('type', 'free')
       .in('metadata->>grant_role_id', [...candidates])
       .limit(1000);
     if (metaErr) throw new Error(`products metadata lookup failed: ${metaErr.message}`);
 
+    const soldCheck: { id: string; roleId: string }[] = [];
     for (const product of metaProducts ?? []) {
-      const metadata = (product.metadata as Record<string, unknown> | null) ?? {};
-      const roleId = metadata.grant_role_id;
-      if (typeof roleId === 'string' && candidates.has(roleId)) commerceHeld.add(roleId);
+      const roleId = metadataGrantRoleId(product.metadata);
+      if (!roleId || !candidates.has(roleId)) continue;
+      if (isTemporaryMetadataGrant(product.metadata)) continue;
+      soldCheck.push({ id: product.id as string, roleId });
+    }
+    if (soldCheck.length > 0) {
+      const sold = await findProductsWithRealMoneyOneTimeSales(
+        supabase,
+        guildId,
+        soldCheck.map((p) => p.id),
+      );
+      for (const { id, roleId } of soldCheck) {
+        if (sold.has(id)) commerceHeld.add(roleId);
+      }
+    }
+
+    // ── L3/V4: recorded historical grants (append-only dashboard record of
+    // sold permanent metadata roles stripped by later edits) ──
+    const { data: histProducts, error: histErr } = await supabase
+      .from('products')
+      .select('id, metadata')
+      .eq('guild_id', guildId)
+      .not('metadata->historical_grant_role_ids', 'is', null)
+      .limit(1000);
+    if (histErr) throw new Error(`products history lookup failed: ${histErr.message}`);
+
+    for (const product of histProducts ?? []) {
+      for (const roleId of historicalGrantRoleIds(product.metadata)) {
+        if (candidates.has(roleId)) commerceHeld.add(roleId);
+      }
     }
 
     return commerceHeld;

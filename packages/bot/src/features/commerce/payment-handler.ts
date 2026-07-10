@@ -87,6 +87,23 @@ export async function handleBuyButton(
     return;
   }
 
+  // BUYABILITY guard — enforce the checkout column of the compliance
+  // decision matrix (packages/dashboard/src/lib/api/commerce-income-wall.ts):
+  // only priced one-time products and subscription products may start a
+  // real-money checkout. Without this, a `free`-typed product would fall into
+  // the subscription branch below and could charge real money through an
+  // attached PayPal plan, and a zero-price one-time product would attempt a
+  // $0.00 PayPal order — both outside what the dashboard's compliance walls
+  // model as "buyable", so both are refused at the point of sale.
+  if (product.type !== 'one_time' && product.type !== 'subscription') {
+    await interaction.editReply({ content: '❌ This product cannot be purchased.' });
+    return;
+  }
+  if (product.type === 'one_time' && (product.price_cents ?? 0) <= 0) {
+    await interaction.editReply({ content: '❌ This product cannot be purchased.' });
+    return;
+  }
+
   // Check if user already has an active entitlement for this product
   const { data: existingCustomer } = await supabase
     .from('customers')

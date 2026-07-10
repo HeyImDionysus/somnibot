@@ -1,10 +1,16 @@
 /**
- * Compliance wall — commerce-granted roles earn NO game currency (collection-time).
+ * Compliance wall — COLLECTION GUARD matrix (defense-in-depth layer).
  *
- * Covers the defense-in-depth layer in economy/commands.ts handleCollectIncome
- * and its helper economy/commerce-role-guard.ts. Even if a role slips past the
- * dashboard config-time reject, a role the user holds via a commerce grant must
- * never pay wagerable currency, while a normally-earned role still pays.
+ * Covers economy/commerce-role-guard.ts (the collection column of the
+ * DECISION MATRIX documented in
+ * packages/dashboard/src/lib/api/commerce-income-wall.ts) and its consumer,
+ * economy/commands.ts handleCollectIncome. Fixtures run through a small
+ * interpreting PostgREST fake so every matrix row asserts real filter
+ * behaviour (sources, expiry, permanence, sale evidence), not query shapes.
+ *
+ * Even if a role slips past the dashboard config-time walls, a role held via
+ * a real-money grant must never pay wagerable currency — while giveaway/comp
+ * holders, expired temp grants, and roles on never-sold products still pay.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -12,189 +18,292 @@ vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
 }));
 
-import { getCommerceHeldRoleIds, COMMERCE_TEMP_ROLE_SOURCES } from '../features/economy/commerce-role-guard.js';
+import { getCommerceHeldRoleIds } from '../features/economy/commerce-role-guard.js';
 import { handleEconomyCommand } from '../features/economy/commands.js';
 
-// ── Supabase mock: a chainable per-table query builder that resolves to a
-//    caller-provided result, so we can assert exact table access. ───────────
+// ── Interpreting PostgREST fake (mirrors the dashboard test harness) ────────
 
-interface TableResult {
-  data?: unknown;
-  error?: { message: string } | null;
+type Row = Record<string, unknown>;
+
+interface TableConfig {
+  rows?: Row[];
+  readError?: { message: string };
 }
 
-function makeSupabase(results: Record<string, TableResult | ((state: QueryState) => TableResult)>) {
-  const calls: Record<string, QueryState[]> = {};
+function getCol(row: Row, col: string): unknown {
+  if (col.includes('->>')) {
+    const [base, key] = col.split('->>');
+    const obj = row[base] as Record<string, unknown> | null | undefined;
+    const v = obj?.[key];
+    return v == null ? null : String(v);
+  }
+  if (col.includes('->')) {
+    const [base, key] = col.split('->');
+    const obj = row[base] as Record<string, unknown> | null | undefined;
+    return obj?.[key] ?? null;
+  }
+  return row[col];
+}
 
-  function tableBuilder(table: string) {
-    const state: QueryState = { table, filters: {}, inFilters: {}, gt: {} };
+function matchesOp(row: Row, col: string, op: string, val: unknown): boolean {
+  const cell = getCol(row, col);
+  switch (op) {
+    case 'eq':
+      return cell === val || String(cell) === String(val);
+    case 'neq':
+      return !(cell === val || String(cell) === String(val));
+    case 'gt':
+      return typeof cell === 'number' ? cell > Number(val) : String(cell ?? '') > String(val);
+    case 'is':
+      return val === null ? cell == null : cell === val;
+    case 'in': {
+      const list = Array.isArray(val)
+        ? val.map(String)
+        : String(val).replace(/^\(|\)$/g, '').split(',').map((s) => s.replace(/^"|"$/g, ''));
+      return cell != null && list.includes(String(cell));
+    }
+    default:
+      throw new Error(`fake postgrest: unsupported op ${op}`);
+  }
+}
+
+function matchesOrDisjunct(row: Row, disjunct: string): boolean {
+  const parts = disjunct.split('.');
+  const col = parts[0];
+  if (parts[1] === 'not') {
+    const val = parts[3] === 'null' ? null : parts.slice(3).join('.');
+    return !matchesOp(row, col, parts[2], val);
+  }
+  const val = parts[2] === 'null' ? null : parts.slice(2).join('.');
+  return matchesOp(row, col, parts[1], val);
+}
+
+function makeSupabase(tables: Record<string, TableConfig>) {
+  function from(table: string) {
+    const cfg = tables[table] ?? {};
+    const conds: ((row: Row) => boolean)[] = [];
+    let limitN: number | undefined;
+
+    const result = () => {
+      if (cfg.readError) return { data: null, error: cfg.readError };
+      let rows = (cfg.rows ?? []).filter((r) => conds.every((c) => c(r)));
+      if (limitN != null) rows = rows.slice(0, limitN);
+      return { data: rows, error: null };
+    };
+
     const chain: Record<string, unknown> = {
-      select: vi.fn(() => chain),
-      eq: vi.fn((col: string, val: unknown) => { state.filters[col] = val; return chain; }),
-      in: vi.fn((col: string, vals: unknown) => { state.inFilters[col] = vals; return chain; }),
-      gt: vi.fn((col: string, val: unknown) => { state.gt[col] = val; return chain; }),
-      neq: vi.fn(() => chain),
-      order: vi.fn(() => chain),
-      limit: vi.fn(() => {
-        (calls[table] ??= []).push(state);
-        const r = results[table];
-        const resolved = typeof r === 'function' ? r(state) : (r ?? { data: [] });
-        return Promise.resolve(resolved);
-      }),
+      select: () => chain,
+      order: () => chain,
+      limit: (n: number) => { limitN = n; return chain; },
+      eq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'eq', val)); return chain; },
+      neq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'neq', val)); return chain; },
+      gt: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'gt', val)); return chain; },
+      in: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'in', val)); return chain; },
+      is: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'is', val)); return chain; },
+      not: (col: string, op: string, val: unknown) => {
+        conds.push((r) => !matchesOp(r, col, op, val === 'null' ? null : val));
+        return chain;
+      },
+      or: (expr: string) => {
+        conds.push((r) => expr.split(',').some((d) => matchesOrDisjunct(r, d)));
+        return chain;
+      },
+      then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+        Promise.resolve(result()).then(resolve, reject),
     };
     return chain;
   }
-
-  return {
-    from: vi.fn((table: string) => tableBuilder(table)),
-    _calls: calls,
-  };
+  return { from: vi.fn(from) };
 }
 
-interface QueryState {
-  table: string;
-  filters: Record<string, unknown>;
-  inFilters: Record<string, unknown>;
-  gt: Record<string, unknown>;
-}
+// ── Fixture builders ────────────────────────────────────────────────────────
 
 const GUILD = 'g1';
 const USER = 'u1';
+const PRODUCT = 'prod-1';
 
-describe('getCommerceHeldRoleIds', () => {
-  it('flags a role held via an active entitlement (customers → entitlements)', async () => {
-    const supabase = makeSupabase({
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [{ granted_role_ids: ['role-paid'] }] },
-      temp_role_grants: { data: [] },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-paid', 'role-free']);
-    expect([...held]).toEqual(['role-paid']);
-  });
+const FUTURE = new Date(Date.now() + 3600_000).toISOString();
+const PAST = new Date(Date.now() - 3600_000).toISOString();
 
-  it('does NOT flag roles held only via comped entitlements (giveaway/manual/automation)', async () => {
-    // Calibration: these sources moved no real money — a giveaway winner or an
-    // admin-comped user legitimately collects income on the role.
-    const supabase = makeSupabase({
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [
-        { granted_role_ids: ['role-giveaway'], source: 'giveaway' },
-        { granted_role_ids: ['role-manual'], source: 'manual' },
-        { granted_role_ids: ['role-auto'], source: 'automation' },
-      ] },
-      temp_role_grants: { data: [] },
-      products: { data: [] },
-    });
-    const held = await getCommerceHeldRoleIds(
-      supabase as any, GUILD, USER, ['role-giveaway', 'role-manual', 'role-auto'],
-    );
-    expect(held.size).toBe(0);
-  });
+function entitlement(roles: string[], source: string | null = 'purchase', status = 'active'): Row {
+  return { guild_id: GUILD, customer_id: 'cust-1', granted_role_ids: roles, source, status };
+}
 
-  it('flags source=purchase and fails CLOSED on NULL/unknown entitlement sources', async () => {
-    // Only positively-known non-purchase sources are exempt: a purchase, a
-    // NULL (DB default is purchase) or an unrecognised future source value
-    // must all stay commerce-held.
-    const supabase = makeSupabase({
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [
-        { granted_role_ids: ['role-bought'], source: 'purchase' },
-        { granted_role_ids: ['role-null-src'], source: null },
-        { granted_role_ids: ['role-unknown-src'], source: 'mystery_source' },
-      ] },
-      temp_role_grants: { data: [] },
-      products: { data: [] },
-    });
-    const held = await getCommerceHeldRoleIds(
-      supabase as any, GUILD, USER, ['role-bought', 'role-null-src', 'role-unknown-src'],
-    );
-    expect([...held].sort()).toEqual(['role-bought', 'role-null-src', 'role-unknown-src']);
-  });
+function tempGrant(roleId: string, opts: { source?: string; expires_at?: string } = {}): Row {
+  return {
+    guild_id: GUILD, user_id: USER, role_id: roleId,
+    source: opts.source ?? 'commerce_purchase',
+    expires_at: opts.expires_at ?? FUTURE,
+  };
+}
 
-  it('flags a role held via an unexpired commerce temp_role_grant', async () => {
-    const supabase = makeSupabase({
-      customers: { data: [] }, // no entitlements path
-      temp_role_grants: { data: [{ role_id: 'role-temp' }] },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-temp', 'role-free']);
-    expect([...held]).toEqual(['role-temp']);
-  });
+function metaProduct(metadata: Record<string, unknown>, id = PRODUCT): Row {
+  return { id, guild_id: GUILD, metadata };
+}
 
-  it('filters temp grants by commerce sources and unexpired only', async () => {
-    const supabase = makeSupabase({
-      customers: { data: [] },
-      temp_role_grants: (state) => {
-        // Assert the query constrains source to commerce sources and expiry > now.
-        expect(state.inFilters.source).toEqual(COMMERCE_TEMP_ROLE_SOURCES);
-        expect(typeof state.gt.expires_at).toBe('string');
-        expect(state.filters.user_id).toBe(USER);
-        return { data: [{ role_id: 'role-temp' }] };
+function order(o: { amount_cents?: number; status?: string; source?: string | null; paypal_subscription_id?: string | null; product_id?: string } = {}): Row {
+  return {
+    id: `order-${Math.random().toString(36).slice(2, 8)}`,
+    guild_id: GUILD,
+    product_id: o.product_id ?? PRODUCT,
+    amount_cents: o.amount_cents ?? 1500,
+    status: o.status ?? 'completed',
+    source: o.source === undefined ? 'purchase' : o.source,
+    paypal_subscription_id: o.paypal_subscription_id ?? null,
+  };
+}
+
+const CUSTOMER = { rows: [{ id: 'cust-1', guild_id: GUILD, discord_id: USER }] };
+
+// ═════════════════════════════════════════════════════════════════════════
+// COLLECTION GUARD MATRIX — getCommerceHeldRoleIds
+// ═════════════════════════════════════════════════════════════════════════
+
+describe('COLLECTION GUARD MATRIX — getCommerceHeldRoleIds', () => {
+  const CASES: {
+    name: string;
+    tables: Record<string, TableConfig>;
+    candidates: string[];
+    held: string[];
+  }[] = [
+    // ── L1: entitlements ──
+    { name: 'L1: purchase-source active entitlement excludes the role',
+      tables: { customers: CUSTOMER, entitlements: { rows: [entitlement(['role-paid'])] } },
+      candidates: ['role-paid', 'role-free'], held: ['role-paid'] },
+    { name: 'L1: grace_period entitlement still excludes',
+      tables: { customers: CUSTOMER, entitlements: { rows: [entitlement(['role-paid'], 'purchase', 'grace_period')] } },
+      candidates: ['role-paid'], held: ['role-paid'] },
+    { name: 'L1: revoked/expired entitlements do not exclude',
+      tables: { customers: CUSTOMER, entitlements: { rows: [
+        entitlement(['role-a'], 'purchase', 'revoked'),
+        entitlement(['role-b'], 'purchase', 'expired'),
+      ] } },
+      candidates: ['role-a', 'role-b'], held: [] },
+    { name: 'L1: comped sources (giveaway/manual/automation) do not exclude',
+      tables: { customers: CUSTOMER, entitlements: { rows: [
+        entitlement(['role-giveaway'], 'giveaway'),
+        entitlement(['role-manual'], 'manual'),
+        entitlement(['role-auto'], 'automation'),
+      ] } },
+      candidates: ['role-giveaway', 'role-manual', 'role-auto'], held: [] },
+    { name: 'L1: NULL and unknown sources fail CLOSED as purchases',
+      tables: { customers: CUSTOMER, entitlements: { rows: [
+        entitlement(['role-null'], null),
+        entitlement(['role-mystery'], 'mystery_source'),
+      ] } },
+      candidates: ['role-null', 'role-mystery'], held: ['role-null', 'role-mystery'] },
+
+    // ── L2: temp grants ──
+    { name: 'L2: unexpired commerce temp grant excludes',
+      tables: { temp_role_grants: { rows: [tempGrant('role-temp')] } },
+      candidates: ['role-temp', 'role-free'], held: ['role-temp'] },
+    { name: 'L2: EXPIRED commerce temp grant does not exclude',
+      tables: { temp_role_grants: { rows: [tempGrant('role-temp', { expires_at: PAST })] } },
+      candidates: ['role-temp'], held: [] },
+    { name: 'L2: non-commerce temp grant sources do not exclude',
+      tables: { temp_role_grants: { rows: [tempGrant('role-temp', { source: 'level_reward' })] } },
+      candidates: ['role-temp'], held: [] },
+
+    // ── L3/V3: permanent metadata grants, judged on sale evidence ──
+    { name: 'V3: permanent metadata role on a product that SOLD excludes',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({})] },
       },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-temp']);
-    expect(held.has('role-temp')).toBe(true);
-  });
-
-  it('returns empty when the user holds none of the candidate roles via commerce', async () => {
-    const supabase = makeSupabase({
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [{ granted_role_ids: ['some-other-role'] }] },
-      temp_role_grants: { data: [] },
-      products: { data: [] },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-earned']);
-    expect(held.size).toBe(0);
-  });
-
-  it('flags a PERMANENT metadata.grant_role_id role on a paid product (no temp grant, no entitlement)', async () => {
-    // The permanent-grant path writes neither a temp_role_grants row nor an
-    // entitlement — only a paid product carrying metadata.grant_role_id exists.
-    const supabase = makeSupabase({
-      customers: { data: [] },
-      temp_role_grants: { data: [] },
-      products: (state) => {
-        // Layer 3 must query paid products (type != free) filtered to the
-        // candidate roles via the metadata->>grant_role_id JSON path. The
-        // filter carries ALL candidate roles; the DB (real, not this mock)
-        // returns only rows whose metadata role matches.
-        expect(state.filters.guild_id).toBe(GUILD);
-        expect(state.inFilters['metadata->>grant_role_id']).toEqual(['role-perma', 'role-free']);
-        return { data: [{ metadata: { grant_role_id: 'role-perma' } }] };
+      candidates: ['role-perma', 'role-free'], held: ['role-perma'] },
+    { name: 'V3: permanent metadata role on a NEVER-SOLD product pays (no commerce holder can exist)',
+      tables: { products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] }, orders: { rows: [] } },
+      candidates: ['role-perma'], held: [] },
+    { name: 'V3: TEMPORARY metadata role is not matched here even if sold (L2 owns it, and it expires)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-temp', role_duration_hours: 24 })] },
+        orders: { rows: [order({})] },
       },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-perma', 'role-free']);
-    expect([...held]).toEqual(['role-perma']);
+      candidates: ['role-temp'], held: [] },
+    { name: 'V3: only zero-amount orders — pays (no money moved)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ amount_cents: 0 })] },
+      },
+      candidates: ['role-perma'], held: [] },
+    { name: 'V3: only pending/cancelled orders — pays (never fulfilled)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ status: 'pending' }), order({ status: 'cancelled' })] },
+      },
+      candidates: ['role-perma'], held: [] },
+    { name: 'V3: a REFUNDED paid order still excludes (refunds never remove a permanent metadata role)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ status: 'refunded' })] },
+      },
+      candidates: ['role-perma'], held: ['role-perma'] },
+    { name: 'V3: only comped (giveaway/manual) orders — pays',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ source: 'giveaway' }), order({ source: 'manual' })] },
+      },
+      candidates: ['role-perma'], held: [] },
+    { name: 'V3: only SUBSCRIPTION orders — pays (subscriptions never consume the metadata vector)',
+      tables: {
+        products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+        orders: { rows: [order({ paypal_subscription_id: 'I-SUB1' })] },
+      },
+      candidates: ['role-perma'], held: [] },
+    { name: 'V3: evidence survives product deactivation/re-typing (no product-state filters)',
+      tables: {
+        // Row deliberately carries free/inactive state — the guard must not care.
+        products: { rows: [{ ...metaProduct({ grant_role_id: 'role-perma' }), type: 'free', active: false }] },
+        orders: { rows: [order({})] },
+      },
+      candidates: ['role-perma'], held: ['role-perma'] },
+
+    // ── L3/V4: recorded historical grants ──
+    { name: 'V4: role in historical_grant_role_ids excludes, whatever the live metadata says',
+      tables: { products: { rows: [metaProduct({ historical_grant_role_ids: ['role-hist'] })] } },
+      candidates: ['role-hist', 'role-free'], held: ['role-hist'] },
+    { name: 'V4: history for other roles does not exclude the candidate',
+      tables: { products: { rows: [metaProduct({ historical_grant_role_ids: ['role-other'] })] } },
+      candidates: ['role-hist'], held: [] },
+
+    // ── nothing commerce-ish ──
+    { name: 'no commerce records at all — nothing excluded',
+      tables: {},
+      candidates: ['role-earned'], held: [] },
+  ];
+
+  it.each(CASES)('$name', async ({ tables, candidates, held }) => {
+    const supabase = makeSupabase(tables);
+    const result = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, candidates);
+    expect([...result].sort()).toEqual([...held].sort());
   });
 
-  it('does NOT flag a metadata grant role that belongs only to a FREE product', async () => {
-    // The Layer-3 query excludes free products (neq type free), so a free
-    // product granting the role returns no rows and the role stays payable.
-    const supabase = makeSupabase({
-      customers: { data: [] },
-      temp_role_grants: { data: [] },
-      products: { data: [] }, // free product filtered out by the query
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-earned']);
-    expect(held.size).toBe(0);
-  });
-
-  it('fails CLOSED: on a query error, treats every candidate as commerce-held', async () => {
-    const supabase = makeSupabase({
-      customers: { error: { message: 'db down' }, data: null },
-    });
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['a', 'b']);
+  it('fails CLOSED: any query error excludes every candidate', async () => {
+    const supabase = makeSupabase({ customers: { readError: { message: 'db down' } } });
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, ['a', 'b']);
     expect([...held].sort()).toEqual(['a', 'b']);
+  });
+
+  it('fails CLOSED on an orders (V3 evidence) error too', async () => {
+    const supabase = makeSupabase({
+      products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+      orders: { readError: { message: 'db down' } },
+    });
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, ['role-perma', 'role-free']);
+    expect([...held].sort()).toEqual(['role-free', 'role-perma']);
   });
 
   it('short-circuits with no query when there are no candidate roles', async () => {
     const supabase = makeSupabase({});
-    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, []);
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, []);
     expect(held.size).toBe(0);
     expect(supabase.from).not.toHaveBeenCalled();
   });
 });
 
-// ── End-to-end: handleCollectIncome pays earned roles, skips commerce roles ──
+// ═════════════════════════════════════════════════════════════════════════
+// End-to-end: handleCollectIncome pays earned roles, skips commerce roles
+// ═════════════════════════════════════════════════════════════════════════
 
 function makeManager() {
   const store = new Map<string, string>();
@@ -221,27 +330,24 @@ function makeInteraction(supabase: unknown, heldRoleIds: string[]) {
   };
 }
 
+function incomeRule(roleId: string, amount: number): Row {
+  return { guild_id: GUILD, role_id: roleId, amount, interval_minutes: 60 };
+}
+
 describe('handleCollectIncome — compliance wall at collection', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('pays an earned role but NOT a commerce-held role with the same income config', async () => {
-    // Both roles are configured for income and both are held. role-paid is held
-    // via a commerce entitlement; role-earned is a normal role.
+  it('pays an earned role but NOT a commerce-entitled role with the same income config', async () => {
     const supabase = makeSupabase({
-      economy_role_income: { data: [
-        { role_id: 'role-paid', amount: 500, interval_minutes: 60 },
-        { role_id: 'role-earned', amount: 100, interval_minutes: 60 },
-      ] },
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [{ granted_role_ids: ['role-paid'] }] },
-      temp_role_grants: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-paid', 500), incomeRule('role-earned', 100)] },
+      customers: CUSTOMER,
+      entitlements: { rows: [entitlement(['role-paid'])] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-paid', 'role-earned']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
-    // Only the earned role (100) is credited — the commerce role (500) is excluded.
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 100);
     const reply = int.reply.mock.calls[0][0].content as string;
     expect(reply).toContain('from 1 role');
@@ -249,15 +355,14 @@ describe('handleCollectIncome — compliance wall at collection', () => {
 
   it('pays NOTHING and explains when the only income role is commerce-held', async () => {
     const supabase = makeSupabase({
-      economy_role_income: { data: [{ role_id: 'role-paid', amount: 500, interval_minutes: 60 }] },
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [{ granted_role_ids: ['role-paid'] }] },
-      temp_role_grants: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-paid', 500)] },
+      customers: CUSTOMER,
+      entitlements: { rows: [entitlement(['role-paid'])] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-paid']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).not.toHaveBeenCalled();
     const reply = int.reply.mock.calls[0][0].content as string;
@@ -266,49 +371,68 @@ describe('handleCollectIncome — compliance wall at collection', () => {
 
   it('pays a GIVEAWAY-granted role in full — comped entitlements are not commerce holds', async () => {
     const supabase = makeSupabase({
-      economy_role_income: { data: [{ role_id: 'role-comped', amount: 150, interval_minutes: 60 }] },
-      customers: { data: [{ id: 'cust-1' }] },
-      entitlements: { data: [{ granted_role_ids: ['role-comped'], source: 'giveaway' }] },
-      temp_role_grants: { data: [] },
-      products: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-comped', 150)] },
+      customers: CUSTOMER,
+      entitlements: { rows: [entitlement(['role-comped'], 'giveaway')] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-comped']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 150);
   });
 
+  it('skips a SOLD permanent-metadata role but pays the same role config to nobody else affected', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { rows: [incomeRule('role-perma', 500), incomeRule('role-earned', 250)] },
+      products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+      orders: { rows: [order({})] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-perma', 'role-earned']);
+
+    await handleEconomyCommand(int as never, mgr as never);
+
+    expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 250);
+  });
+
+  it('pays a metadata role whose product NEVER sold (staged products do not starve holders)', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { rows: [incomeRule('role-perma', 300)] },
+      products: { rows: [metaProduct({ grant_role_id: 'role-perma' })] },
+      orders: { rows: [] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-perma']);
+
+    await handleEconomyCommand(int as never, mgr as never);
+
+    expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 300);
+  });
+
   it('pays a normally-earned role in full when no commerce grant is present', async () => {
     const supabase = makeSupabase({
-      economy_role_income: { data: [{ role_id: 'role-earned', amount: 250, interval_minutes: 60 }] },
-      customers: { data: [] },
-      temp_role_grants: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-earned', 250)] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-earned']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 250);
   });
 
   it('skips a zero-amount rule WITHOUT burning its cooldown or crediting', async () => {
-    // A stray zero-amount rule must not set the cooldown (which would lock the
-    // user out) nor reach creditWallet (which rejects non-positive amounts).
     const supabase = makeSupabase({
-      economy_role_income: { data: [{ role_id: 'role-zero', amount: 0, interval_minutes: 60 }] },
-      customers: { data: [] },
-      temp_role_grants: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-zero', 0)] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-zero']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).not.toHaveBeenCalled();
-    // Cooldown was never set — the collection window is preserved.
     expect(mgr.valkey.set).not.toHaveBeenCalled();
     const reply = int.reply.mock.calls[0][0].content as string;
     expect(reply.toLowerCase()).toContain('no role income available');
@@ -316,20 +440,14 @@ describe('handleCollectIncome — compliance wall at collection', () => {
 
   it('pays only the positive rule when a zero-amount rule is also configured', async () => {
     const supabase = makeSupabase({
-      economy_role_income: { data: [
-        { role_id: 'role-zero', amount: 0, interval_minutes: 60 },
-        { role_id: 'role-earned', amount: 300, interval_minutes: 60 },
-      ] },
-      customers: { data: [] },
-      temp_role_grants: { data: [] },
+      economy_role_income: { rows: [incomeRule('role-zero', 0), incomeRule('role-earned', 300)] },
     });
     const mgr = makeManager();
     const int = makeInteraction(supabase, ['role-zero', 'role-earned']);
 
-    await handleEconomyCommand(int as any, mgr as any);
+    await handleEconomyCommand(int as never, mgr as never);
 
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 300);
-    // Cooldown set exactly once — only for the paying role.
     expect(mgr.valkey.set).toHaveBeenCalledTimes(1);
   });
 });
