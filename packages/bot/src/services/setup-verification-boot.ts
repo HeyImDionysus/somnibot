@@ -129,6 +129,56 @@ async function persistDetectedGuildId(
 }
 
 /**
+ * Read the FINALIZED `discord_guild_id` straight from `instance_settings`
+ * (codex round-4 finding #1).
+ *
+ * The verification→full-boot transition cannot rely on loadConfigFromDatabase()
+ * to surface a guild the owner picked during finalize: that loader only fills
+ * env vars that are MISSING (see config-loader.ts `if (!process.env[envVar])`).
+ * When the launcher started the bot with `DISCORD_GUILD_ID` already in env and
+ * the dashboard finalize submits a DIFFERENT guild, the loader leaves the stale
+ * env value in place, so the transition would heartbeat/initialize the wrong
+ * primary guild (or fail primary init if the bot is not in the old guild) until
+ * a manual restart.
+ *
+ * Reading the row directly lets the transition honor the finalized value
+ * regardless of what is cached in env. Returns the trimmed non-blank guild id,
+ * or null when the row is absent/blank or the read fails (the caller then keeps
+ * whatever guild it already resolved rather than clobbering it on a blip).
+ *
+ * Multi-guild note: mirrors getPrimaryDiscordGuildId — the stored value may be a
+ * comma-separated list, so we take the first non-blank entry as the primary.
+ */
+export async function resolveFinalizedGuildId(
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  try {
+    const { data, error } = (await supabase
+      .from('instance_settings')
+      .select('value')
+      .eq('key', 'discord_guild_id')
+      .maybeSingle()) as { data: { value: string | null } | null; error: unknown };
+    if (error) {
+      log.warn('Failed reading finalized discord_guild_id (keeping current)', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+    const raw = typeof data?.value === 'string' ? data.value : '';
+    const primary = raw
+      .split(',')
+      .map((part) => part.trim())
+      .find(Boolean);
+    return primary && primary.length > 0 ? primary : null;
+  } catch (err) {
+    log.warn('Error reading finalized discord_guild_id (keeping current)', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Write a minimal `type: 'health'` diagnostic row so the setup route's
  * Supabase readiness fallback (which checks for a fresh `health` snapshot
  * before trying Valkey) can prove the bot is online without Valkey. The full

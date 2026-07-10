@@ -100,3 +100,71 @@ export function startSetupCompletionWatcher(
 
   return { stop };
 }
+
+/**
+ * Watch for Discord CREDENTIALS to arrive while the bot idles in the
+ * 'not_started' awaiting-setup state (codex round-4 finding #2).
+ *
+ * A standalone / process-manager boot started with ONLY Supabase credentials
+ * classifies as 'not_started': there is no Discord token to log in with, so the
+ * process idles reporting HTTP 200 `awaiting_setup`. The dashboard's
+ * verify-discord step later writes `discord_bot_token` to instance_settings —
+ * but nothing in-process reloads it, and because health is 200 a supervisor
+ * won't restart the bot either, so first-time setup is stuck forever.
+ *
+ * This watcher polls the gate; the moment it leaves 'not_started' (a token
+ * arrived, so the state becomes 'in_progress' or 'complete') it fires
+ * `onCredentials` exactly once so the boot sequence can continue in-process —
+ * loading config and proceeding into verification/full boot without a manual
+ * restart. It shares the completion-watcher's lifecycle guarantees: once
+ * stopped it stays stopped, `onCredentials` fires at most once, and an in-flight
+ * poll cannot fire after stop().
+ */
+export function startAwaitingSetupWatcher(
+  supabase: SupabaseClient,
+  onCredentials: () => void | Promise<void>,
+  opts: { pollMs?: number } = {},
+): SetupCompletionWatcher {
+  const pollMs = opts.pollMs ?? SETUP_COMPLETION_POLL_MS;
+  let fired = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  const stop = (): void => {
+    stopped = true;
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  timer = setInterval(async () => {
+    if (fired || stopped) return;
+    let gate;
+    try {
+      gate = await evaluateSetupGate(supabase);
+    } catch (err) {
+      log.warn('Awaiting-setup credential check failed (will retry)', { error: String(err) });
+      return;
+    }
+    if (fired || stopped) return;
+    // Still no token to log in with — keep waiting. Any non-'not_started' state
+    // means a Discord token has appeared (in_progress once the wizard stored it,
+    // or complete for an env/finalized deploy), so the process can proceed.
+    if (gate.state === 'not_started') return;
+
+    fired = true;
+    stop();
+    log.info('Discord credentials detected — leaving awaiting-setup idle to continue boot', {
+      state: gate.state,
+    });
+    try {
+      await onCredentials();
+    } catch (err) {
+      log.error('Boot continuation after credentials arrived failed', { error: String(err) });
+    }
+  }, pollMs);
+  timer.unref?.();
+
+  return { stop };
+}

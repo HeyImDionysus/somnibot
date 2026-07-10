@@ -29,11 +29,14 @@ import {
   runSetupVerificationBoot,
   writeGuildRecord,
   writeVerificationHealthSnapshot,
+  resolveFinalizedGuildId,
 } from './services/setup-verification-boot.js';
 import {
   startSetupCompletionWatcher as startWatcher,
+  startAwaitingSetupWatcher,
   type SetupCompletionWatcher,
 } from './services/setup-completion-watcher.js';
+import { decideBoot } from './services/boot-decision.js';
 import { startLauncherIpcHeartbeat, stopLauncherIpcHeartbeat } from './services/launcher-ipc.js';
 import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
@@ -103,7 +106,13 @@ async function main(): Promise<void> {
     log.warn('Setup gate evaluation failed (non-fatal, continuing)', { error: String(err) });
   }
 
-  if (setupGate && setupGate.state === 'not_started') {
+  // ── Boot decision matrix ──
+  // Reduce the setup-gate state to a single boot action + its transition-out
+  // (see services/boot-decision.ts). Every non-terminal action wires exactly
+  // one watcher so there is no terminal idle that never re-checks.
+  const decision = setupGate ? decideBoot(setupGate) : null;
+
+  if (decision && decision.action === 'idle_awaiting_setup') {
     // No Discord token yet — the bot has nothing to log in with. Log one clear
     // line and idle in an "awaiting setup" health state so a health watcher
     // sees a clean waiting status (rather than a crash loop from loadConfig
@@ -115,18 +124,75 @@ async function main(): Promise<void> {
     // defensive path for a standalone `node dist/index.js` started with only
     // Supabase creds; we intentionally do NOT send the launcher IPC ready
     // signal here (there is no Discord client and the bot is not truly online).
-    log.warn(setupGate.message ?? 'Setup not complete — finish setup before the bot can run.');
+    log.warn(setupGate!.message ?? 'Setup not complete — finish setup before the bot can run.');
     setAwaitingSetup({
       reason: 'Setup not complete — no Discord bot token configured yet.',
-      dashboardUrl: setupGate.dashboardUrl,
+      dashboardUrl: setupGate!.dashboardUrl,
     });
     // The listening health server keeps the event loop alive so the process
-    // idles (reporting awaiting_setup) until the owner finishes setup and
-    // restarts the bot.
+    // idles (reporting awaiting_setup) until credentials arrive.
     startHealthServer(null);
+
+    // ── Transition-out: await_credentials (codex round-4 finding #2) ──
+    // Do NOT idle forever. The dashboard's verify-discord step writes
+    // `discord_bot_token` to instance_settings while this process is running;
+    // because health is 200, a supervisor won't restart it, so without this
+    // watcher first-time setup is stuck. Poll the gate; the moment a token
+    // appears (state leaves 'not_started') reload it from the DB into env and
+    // continue the boot in-process — no manual restart.
+    startAwaitingSetupTransition();
     return;
   }
 
+  // Credentials are present (in_progress or complete) — proceed into the
+  // configured boot. Clear any stale awaiting-setup health flag first (this
+  // path is also re-entered by the await_credentials watcher above once a token
+  // arrives, so a prior idle state must not linger).
+  setAwaitingSetup(null);
+  await runConfiguredBoot();
+
+  // ── Await-credentials transition wiring ──
+  // Poll for a Discord token while idling in 'not_started'. When one appears,
+  // reload config (DB→env) so loadConfig() below can see it, then continue into
+  // the configured boot exactly once. Reuses the completion-watcher's
+  // once-fire/stopped-guard lifecycle.
+  function startAwaitingSetupTransition(): void {
+    const bootstrapSupabase = createBootstrapSupabase();
+    if (!bootstrapSupabase) {
+      log.warn('Cannot watch for credentials — no bootstrap Supabase; a manual restart will be needed after setup.');
+      return;
+    }
+    awaitingSetupWatcher = startAwaitingSetupWatcher(bootstrapSupabase, async () => {
+      // A token arrived in instance_settings. Pull it (and any co-written
+      // config) into process.env so loadConfig() sees a valid token instead of
+      // exiting, then run the same configured-boot path a normally-credentialed
+      // start would.
+      try {
+        await loadConfigFromDatabase();
+      } catch (err) {
+        log.warn('Config reload after credentials arrived failed (non-fatal)', { error: String(err) });
+      }
+      // Re-evaluate the gate now that the token is loaded so the configured boot
+      // picks the right action (verification vs full) for the freshly-arrived
+      // credentials.
+      try {
+        const refreshed = createBootstrapSupabase();
+        if (refreshed) setupGate = await evaluateSetupGate(refreshed);
+      } catch (err) {
+        log.warn('Setup gate re-evaluation after credentials arrived failed (non-fatal)', { error: String(err) });
+      }
+      setAwaitingSetup(null);
+      await runConfiguredBoot();
+    });
+  }
+
+  /**
+   * The credential-dependent boot: validate env, verify Supabase, connect
+   * Valkey, create the client, log in, and wire post-ready init. Runs once
+   * credentials are present — either directly on a normally-configured start or
+   * from the await_credentials watcher after a token arrives mid-idle.
+   */
+  async function runConfiguredBoot(): Promise<void> {
   // 1. Validate environment
   const config = loadConfig();
   log.info('Environment loaded', { env: config.NODE_ENV, guild: config.DISCORD_GUILD_ID || '(auto-detect)' });
@@ -195,8 +261,13 @@ async function main(): Promise<void> {
     // while config is incomplete. Once the owner finalizes setup, a poller
     // (started here) detects it and transitions this SAME process into the
     // full boot below — no manual restart required.
-    if (setupGate && setupGate.state === 'in_progress') {
-      log.warn(setupGate.message ?? 'Setup not complete — running in setup-verification mode.');
+    //
+    // Recompute the boot action from the current gate (the await_credentials
+    // watcher may have refreshed setupGate after a token arrived), so this
+    // branch is driven by the same decision function as the rest of the matrix.
+    const readyDecision = setupGate ? decideBoot(setupGate) : null;
+    if (readyDecision && readyDecision.action === 'verification_boot') {
+      log.warn(setupGate!.message ?? 'Setup not complete — running in setup-verification mode.');
 
       // Flag verification mode so the normal Discord event handlers registered
       // in registerEvents() bail out. They are wired up (login must succeed for
@@ -316,13 +387,15 @@ async function main(): Promise<void> {
   // ── Graceful shutdown ──
   const shutdown = async (signal: string) => {
     stopSetupCompletionWatcher();
+    stopAwaitingSetupWatcher();
     stopLauncherIpcHeartbeat();
     await shutdownBot({ signal, client, botLevelServices, dependencies: { log } });
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
-}
+  } // end runConfiguredBoot
+} // end main
 
 /**
  * Construct a GuildRouter wired to the client's shared services, with the
@@ -349,6 +422,18 @@ let fullBootStarted = false;
 
 /** Active setup-completion watcher (verification mode only), stopped on shutdown. */
 let setupCompletionWatcher: SetupCompletionWatcher | null = null;
+
+/**
+ * Active awaiting-setup credential watcher (not_started idle only), stopped on
+ * shutdown and once it fires the boot continuation. Ensures the 'not_started'
+ * idle is never terminal — see startAwaitingSetupTransition in main().
+ */
+let awaitingSetupWatcher: SetupCompletionWatcher | null = null;
+
+function stopAwaitingSetupWatcher(): void {
+  awaitingSetupWatcher?.stop();
+  awaitingSetupWatcher = null;
+}
 
 /**
  * Start watching for setup finalization while in verification mode. Once the
@@ -400,21 +485,33 @@ function startSetupCompletionWatcher(
     }
 
     // Re-resolve the primary guild from the FINALIZED config (codex round-3
-    // finding #2). Verification mode may have provisionally auto-detected the
-    // first cached guild, but the finalize step can specify a DIFFERENT
-    // discord_guild_id (reloaded into env just above). runFullBoot skips its
-    // own auto-detection when client.guildId is already set, so without this
-    // override the bot-level services (heartbeat, presence, deploy fallback,
-    // first-boot DM) would stay anchored to the provisional guild until a
-    // manual restart. The provisional assignment is deliberately writable —
-    // see runSetupVerificationBoot.
-    const configuredGuildId = getPrimaryDiscordGuildId(process.env.DISCORD_GUILD_ID ?? '');
-    if (configuredGuildId && configuredGuildId !== client.guildId) {
+    // finding #2 + round-4 finding #1). Verification mode may have provisionally
+    // auto-detected the first cached guild, but the finalize step can specify a
+    // DIFFERENT discord_guild_id. runFullBoot skips its own auto-detection when
+    // client.guildId is already set, so without this override the bot-level
+    // services (heartbeat, presence, deploy fallback, first-boot DM) would stay
+    // anchored to the provisional/stale guild until a manual restart.
+    //
+    // Round-4 finding #1: we must NOT read the guild from process.env here.
+    // loadConfigFromDatabase() only fills env vars that are MISSING, so when the
+    // launcher started with DISCORD_GUILD_ID already in env and finalize submits
+    // a DIFFERENT guild, the reload above leaves the STALE env value in place.
+    // Read the finalized discord_guild_id straight from instance_settings so the
+    // transition honors the value the owner actually finalized. Also mirror it
+    // into process.env so downstream env readers see the finalized guild. Fall
+    // back to whatever env holds only when the row is absent/unreadable.
+    const finalizedGuildId =
+      (await resolveFinalizedGuildId(client.supabase)) ??
+      getPrimaryDiscordGuildId(process.env.DISCORD_GUILD_ID ?? '');
+    if (finalizedGuildId) {
+      process.env.DISCORD_GUILD_ID = finalizedGuildId;
+    }
+    if (finalizedGuildId && finalizedGuildId !== client.guildId) {
       log.info('Finalized config names a different primary guild — overriding provisional detection', {
         provisional: client.guildId || '(none)',
-        configured: configuredGuildId,
+        configured: finalizedGuildId,
       });
-      client.guildId = configuredGuildId;
+      client.guildId = finalizedGuildId;
     }
 
     // Leave verification mode: the normal event handlers gate on this flag, so
