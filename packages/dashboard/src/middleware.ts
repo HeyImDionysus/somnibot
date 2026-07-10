@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { checkCsrf, shouldRotateCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, generateCsrfToken } from '@/lib/api/csrf';
+import { checkCsrf, shouldRotateCsrf, csrfCookieIssuedAt, stripCsrfTimestamp, deriveRotatedCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /* ------------------------------------------------------------------ */
@@ -279,26 +279,45 @@ export async function middleware(request: NextRequest) {
   // V5 Audit §1.P3b: Periodically rotate CSRF cookie to limit token lifetime
   // V10 Audit §5: Preserve the old nonce in a separate cookie so in-flight
   // requests using the previous token are accepted during the grace period.
-  if (user && shouldRotateCsrf(request)) {
+  // WAVE 2B [security]: Rotate DETERMINISTICALLY. Under concurrency (many
+  // dashboard tabs), several requests observe the same stale cookie and each
+  // rotate. A random per-request nonce makes every response set a different
+  // cookie and embed a different token — the browser keeps the last Set-Cookie,
+  // so a form built from a losing response holds a token that matches neither
+  // the surviving cookie nor the single `prev` cookie (spurious 403 "cookie
+  // soup"). Deriving the new nonce from the stale cookie's issuance timestamp
+  // means every concurrent request converges on the same rotated token.
+  const currentCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
+  if (user && currentCookie && shouldRotateCsrf(request)) {
     const sessionId = user.id?.slice(-16) ?? 'unknown';
+    const rotatedAt = Date.now();
 
-    // Save current cookie as previous before overwriting
-    const currentCookie = request.cookies.get(CSRF_COOKIE_NAME)?.value;
-    if (currentCookie) {
-      supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${currentCookie}`, {
-        httpOnly: true,
-        sameSite: 'strict',
-        secure: process.env.NODE_ENV === 'production',
-        path: '/',
-        // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
-        // buffer. Previously 120s which stored the cookie well past the 60s
-        // acceptance window, wasting cookie bandwidth and leaking timing info.
-        maxAge: 90,
-      });
-    }
+    // Save the old nonce as `prev` so in-flight requests still holding the old
+    // token are accepted during the grace period. Stamp it with the ROTATION
+    // time (not the stale cookie's original issuance) — the grace window is
+    // measured from when rotation happened. Previously this stored the stale
+    // cookie verbatim, whose timestamp is >30min old by definition (that is
+    // what triggered rotation), so the grace-window check always rejected it
+    // and every in-flight old token 403'd until the client re-fetched.
+    const oldPrefix = stripCsrfTimestamp(currentCookie);
+    supabaseResponse.cookies.set(CSRF_PREV_COOKIE_NAME, `${oldPrefix}!${rotatedAt}`, {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production',
+      path: '/',
+      // V11 Audit M-3: Align cookie TTL with CSRF_GRACE_PERIOD_MS (60s) + 30s
+      // buffer. Previously 120s which stored the cookie well past the 60s
+      // acceptance window, wasting cookie bandwidth and leaking timing info.
+      maxAge: 90,
+    });
 
-    const csrf = await generateCsrfToken(sessionId);
-    supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${Date.now()}`, {
+    // Derive the rotated token from the STALE cookie's issuance timestamp so
+    // every concurrent request lands on the same nonce. Legacy cookies without
+    // a timestamp fall back to the wall clock (they are not part of the race —
+    // the derivation is still deterministic per request).
+    const priorIssuedAt = csrfCookieIssuedAt(currentCookie) ?? rotatedAt;
+    const csrf = await deriveRotatedCsrf(sessionId, priorIssuedAt);
+    supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${rotatedAt}`, {
       httpOnly: true,
       sameSite: 'strict',
       secure: process.env.NODE_ENV === 'production',

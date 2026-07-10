@@ -127,6 +127,76 @@ export async function generateCsrfToken(sessionId: string): Promise<{ token: str
 }
 
 /**
+ * WAVE 2B [security] — Deterministic CSRF rotation to eliminate the rotation race.
+ *
+ * Background: the middleware reissues the CSRF cookie once it is older than
+ * CSRF_ROTATION_MAX_AGE_MS. Under concurrency (many dashboard tabs), several
+ * requests observe the *same* stale cookie and each rotate independently. If
+ * every rotation picks a fresh random nonce (as `generateCsrfToken` does), the
+ * responses race: each sets a different cookie and each rendered page embeds a
+ * different token. The browser keeps whichever Set-Cookie landed last, so a
+ * form built from a losing response carries a token that matches neither the
+ * surviving cookie nor the single `prev` cookie — a spurious 403 ("cookie
+ * soup").
+ *
+ * Fix: derive the rotated nonce deterministically from the *prior* cookie's
+ * issuance timestamp (`priorIssuedAt`) plus the session ID, via HMAC. Every
+ * concurrent request reads the same stale cookie, so every request sees the
+ * same `priorIssuedAt` and derives the *same* new nonce — regardless of tiny
+ * wall-clock skew between them. All responses therefore agree on the cookie and
+ * on the embedded token, so no in-flight form is spuriously rejected.
+ *
+ * Security is unchanged from the random-nonce design: the derived nonce is an
+ * HMAC under the same server secret, so an attacker cannot predict or forge it
+ * without the secret. The token itself is still `HMAC(nonce, sessionId)`, which
+ * the double-submit check validates exactly as before.
+ */
+export async function deriveRotatedCsrf(
+  sessionId: string,
+  priorIssuedAt: number,
+): Promise<{ token: string; nonce: string }> {
+  const signature = await getWebCrypto().subtle.sign(
+    'HMAC',
+    await getCsrfKey(),
+    // Domain-separated from the token HMAC (`nonce:sessionId`) so the derived
+    // nonce can never coincide with a token value. `priorIssuedAt` makes each
+    // rotation window derive a distinct nonce.
+    encoder.encode(`csrf-rotation:v1:${sessionId}:${priorIssuedAt}`),
+  );
+  // Use the first 16 bytes (32 hex) so the nonce matches the random-nonce
+  // format produced by generateRandomHex(16).
+  const nonce = toHex(signature).slice(0, 32);
+  const token = await signCsrfValue(nonce, sessionId);
+  return { token, nonce };
+}
+
+/**
+ * Extract the issuance timestamp from a CSRF cookie value
+ * (`nonce:sessionId!timestamp`). Returns null when the cookie has no parseable
+ * `!timestamp` suffix (legacy cookies) so callers can fall back safely.
+ */
+export function csrfCookieIssuedAt(cookieValue: string): number | null {
+  const bangIdx = cookieValue.lastIndexOf('!');
+  if (bangIdx === -1) return null;
+  const issuedAt = parseInt(cookieValue.slice(bangIdx + 1), 10);
+  return Number.isNaN(issuedAt) ? null : issuedAt;
+}
+
+/**
+ * Strip a trailing `!timestamp` suffix from a CSRF cookie value, returning just
+ * the `nonce:sessionId` prefix. Only removes the suffix when it is numeric, so
+ * a legacy cookie (no `!timestamp`) is returned unchanged. Used when re-stamping
+ * the `prev` cookie with the rotation time.
+ */
+export function stripCsrfTimestamp(cookieValue: string): string {
+  const bangIdx = cookieValue.lastIndexOf('!');
+  if (bangIdx === -1) return cookieValue;
+  const suffix = cookieValue.slice(bangIdx + 1);
+  if (suffix.length === 0 || Number.isNaN(parseInt(suffix, 10))) return cookieValue;
+  return cookieValue.slice(0, bangIdx);
+}
+
+/**
  * Verify a CSRF token against the stored nonce and session.
  */
 export function verifyCsrfToken(
