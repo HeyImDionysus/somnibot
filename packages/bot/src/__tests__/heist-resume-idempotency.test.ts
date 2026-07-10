@@ -61,7 +61,13 @@ function makeStatefulDb(opts: {
   status: string;
   resolution?: string | null;
   payoutEach?: number | null;
+  // Initial crew as user_ids. Seeds the participant ROWS (the single source of
+  // truth); there is no participants[] array on the heist row anymore.
   participants: string[];
+  // The old success_chance seed. It now maps to base_success_chance (the
+  // immutable single-member anchor) — the claim DERIVES the roll chance from
+  // base + the frozen crew count, and the success/fail decision below keys off
+  // this seed (>0 ⇒ success, 0 ⇒ fail) for deterministic tests.
   successChance?: number;
   targetPayout?: number;
   // Per-user frozen entry_fee_paid stamped on each seeded participant row. Lets a
@@ -109,8 +115,10 @@ function makeStatefulDb(opts: {
     payout_each: opts.payoutEach ?? null,
     target_name: 'Corner Store',
     target_payout: opts.targetPayout ?? 250,
-    success_chance: opts.successChance ?? 40,
-    participants: [...opts.participants],
+    // Immutable derivation anchor (was the mutable success_chance counter). The
+    // roll chance and every display chance derive from this + a participant-row
+    // COUNT; nothing else is stored. There is NO participants[] array.
+    base_success_chance: opts.successChance ?? 40,
     expires_at: new Date(Date.now() - 1000).toISOString(),
   };
   // A heist that starts already claimed (in_progress) had its crew frozen by
@@ -250,7 +258,13 @@ function makeStatefulDb(opts: {
           heist.status = 'in_progress'; heist.resolution = 'cancelled';
           return Promise.resolve({ data: [{ claimed: true, outcome: 'cancelled', participant_count: count, payout_each: null }], error: null });
         }
-        const isSuccess = (heist.success_chance ?? 0) > 0; // deterministic for tests
+        // The roll chance is DERIVED from base_success_chance + the FROZEN crew
+        // count, clamped [0,95] — never a stored counter (20260710180000). The
+        // success/fail decision is deterministic for tests: a base > 0 always
+        // succeeds, a base of 0 always fails (the seeded 100/0 sentinels).
+        const _derivedChance = Math.min(95, Math.max(0, (heist.base_success_chance ?? 0) + (count - 1) * 7));
+        void _derivedChance;
+        const isSuccess = (heist.base_success_chance ?? 0) > 0; // deterministic for tests
         if (isSuccess) {
           const each = Math.floor(heist.target_payout / count);
           heist.status = 'in_progress'; heist.resolution = 'success'; heist.payout_each = each;
@@ -273,36 +287,32 @@ function makeStatefulDb(opts: {
         }
         const stranded = parts.filter((p) => p.claimed_at == null && p.paid_at == null);
         for (const p of stranded) {
+          // Deleting the ROW is the entire removal — no participants[] array to
+          // maintain (20260710180000).
           const idx = parts.indexOf(p);
           if (idx >= 0) parts.splice(idx, 1);
-          heist.participants = heist.participants.filter((u: string) => u !== p.user_id);
           const refund = p.entry_fee_paid ?? args.p_refund_amount;
           if (refund > 0) credits.push({ user_id: p.user_id, amount: refund });
         }
         return Promise.resolve({ data: stranded.length, error: null });
       }
       if (fn === 'heist_settle_missed_join') {
-        // Models the migration's TEXT-status contract, including the finding-#3
-        // fix: every 'reconciled' branch array_removes the user from
-        // participants[] before returning, so a joinHeist that appended before
-        // calling this RPC cannot leave a ghost participant in the array.
+        // Models the migration's TEXT-status contract. With the participants[]
+        // array gone (20260710180000), deleting the ROW is the whole removal —
+        // there is no ghost array slot to strip on any branch.
         if (heist.status === 'recruiting') return Promise.resolve({ data: 'recruiting', error: null });
         const p = parts.find((x) => x.user_id === args.p_user_id);
         if (!p) {
-          // Row gone (a concurrent bulk reconcile deleted it). Strip any ghost
-          // array slot and report reconciled.
-          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
+          // Row gone (a concurrent bulk reconcile deleted it) → reconciled.
           return Promise.resolve({ data: 'reconciled', error: null });
         }
         if (p.claimed_at != null) return Promise.resolve({ data: 'in_crew', error: null });
         if (p.paid_at != null) {
-          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
           return Promise.resolve({ data: 'reconciled', error: null });
         }
-        // Unstamped + unsettled: delete, strip array slot, refund frozen fee.
+        // Unstamped + unsettled: delete the row, refund frozen fee.
         const idx = parts.indexOf(p);
         if (idx >= 0) parts.splice(idx, 1);
-        heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
         const refund = p.entry_fee_paid ?? args.p_refund_amount;
         if (refund > 0) credits.push({ user_id: args.p_user_id, amount: refund });
         return Promise.resolve({ data: 'refunded', error: null });
@@ -331,68 +341,62 @@ function makeStatefulDb(opts: {
         // Atomic serialized join under the heist-row lock. Re-check status: if the
         // heist already left 'recruiting' (the claim won the lock), reject WITHOUT
         // debiting — a post-recruiting insert is structurally impossible, so no fee
-        // is ever stranded. Otherwise debit, insert the row (frozen fee), append to
-        // participants[], and DERIVE success_chance from the new count (clamped).
+        // is ever stranded. Otherwise debit and insert the ROW (frozen fee). Crew
+        // count + success_chance are DERIVED from the participant rows (no
+        // participants[] array, no stored counter — 20260710180000).
+        const rowCount = () => parts.length;
+        const deriveChance = (n: number) => Math.min(95, Math.max(0, args.p_base_chance + (n - 1) * 7));
         if (heist.status !== 'recruiting') {
           return Promise.resolve({
-            data: [{ status: 'not_recruiting', member_count: heist.participants.length, success_chance: 0, role: null }],
+            data: [{ status: 'not_recruiting', member_count: rowCount(), success_chance: 0, role: null }],
             error: null,
           });
         }
-        if (heist.participants.includes(args.p_user_id)) {
+        if (parts.some((p) => p.user_id === args.p_user_id)) {
           return Promise.resolve({
-            data: [{ status: 'already_joined', member_count: heist.participants.length, success_chance: heist.success_chance, role: null }],
+            data: [{ status: 'already_joined', member_count: rowCount(), success_chance: deriveChance(rowCount()), role: null }],
             error: null,
           });
         }
-        if (heist.participants.length >= args.p_max) {
+        if (rowCount() >= args.p_max) {
           return Promise.resolve({
-            data: [{ status: 'crew_full', member_count: heist.participants.length, success_chance: heist.success_chance, role: null }],
+            data: [{ status: 'crew_full', member_count: rowCount(), success_chance: deriveChance(rowCount()), role: null }],
             error: null,
           });
         }
-        // Debit (models economy_subtract_balance inside the tx), insert row, append.
+        // Debit (models economy_subtract_balance inside the tx) + insert the row.
         credits.push({ user_id: args.p_user_id, amount: -args.p_entry_fee });
         parts.push({
           heist_id: 'h1', user_id: args.p_user_id, role: args.p_role, payout: 0,
           paid_at: null, payout_failed: false, claimed_at: null,
           entry_fee_paid: args.p_entry_fee,
         });
-        heist.participants.push(args.p_user_id);
-        const newCount = heist.participants.length;
-        // Derived, clamped — never a mutable +7 counter.
-        heist.success_chance = Math.min(95, Math.max(0, args.p_base_chance + (newCount - 1) * 7));
+        const newCount = rowCount();
+        // Derived, clamped — display-only; nothing stored back on the heist row.
         return Promise.resolve({
-          data: [{ status: 'joined', member_count: newCount, success_chance: heist.success_chance, role: args.p_role }],
+          data: [{ status: 'joined', member_count: newCount, success_chance: deriveChance(newCount), role: args.p_role }],
           error: null,
         });
       }
       if (fn === 'heist_undo_join') {
-        // Corrected undo: recompute success_chance from the post-removal count
-        // (clamped), NOT a naive -7 that would drift a capped value. Only a still-
-        // recruiting, unstamped, unsettled row is undone.
+        // Simplified undo (20260710180000): with success_chance DERIVED and the
+        // participants[] array gone, an undo has nothing to recompute and no slot
+        // to strip — it just refunds the frozen fee and DELETES the row. The next
+        // derivation reads one fewer row, so the chance drops automatically,
+        // capped or not. Only a still-recruiting, unstamped, unsettled row.
         if (heist.status !== 'recruiting') return Promise.resolve({ data: 'not_recruiting', error: null });
         const p = parts.find((x) => x.user_id === args.p_user_id);
         if (!p) {
-          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
           return Promise.resolve({ data: 'gone', error: null });
         }
         if (p.claimed_at != null) return Promise.resolve({ data: 'in_crew', error: null });
         if (p.paid_at != null) {
-          heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
           return Promise.resolve({ data: 'gone', error: null });
         }
         const idx = parts.indexOf(p);
         if (idx >= 0) parts.splice(idx, 1);
-        heist.participants = heist.participants.filter((u: string) => u !== args.p_user_id);
         const refund = p.entry_fee_paid ?? args.p_refund_amount;
         if (refund > 0) credits.push({ user_id: args.p_user_id, amount: refund });
-        const newCount = heist.participants.length;
-        if (args.p_base_chance != null) {
-          heist.success_chance = Math.min(95, Math.max(0, args.p_base_chance + (newCount - 1) * 7));
-        } else {
-          heist.success_chance = Math.max(0, heist.success_chance - 7);
-        }
         return Promise.resolve({ data: 'undone', error: null });
       }
       if (fn === 'economy_add_balance') {
@@ -574,8 +578,9 @@ describe('heist resume idempotency', () => {
     // But the stranded late-join row is reconciled (not left unsettled): its entry
     // fee is refunded exactly once and the row removed from the crew.
     expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
+    // The row is deleted — and since crew membership derives ONLY from the rows
+    // now, deleting the row IS its full removal from the crew (no array to check).
     expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
-    expect(db.heist.participants).not.toContain('late');
   });
 
   it('an under-crewed cancellation refunds/announces only the frozen crew', async () => {
@@ -973,9 +978,7 @@ describe('heist resume idempotency', () => {
     });
     // u1,u2 are the frozen crew (in_progress preseeds claimed_at). Add the
     // stranded 'late' row: unstamped + unpaid, and present in participants[].
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
-    db.heist.participants.push('late');
-    const { client, send } = makeClient();
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });    const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
     await mgr.resumePendingHeists('g1');
@@ -986,9 +989,9 @@ describe('heist resume idempotency', () => {
     expect(db.credits.filter((c) => c.user_id === 'u2')).toEqual([{ user_id: 'u2', amount: 125 }]);
     // …and the stranded joiner's fee is refunded exactly once (entry fee 100).
     expect(db.credits.filter((c) => c.user_id === 'late')).toEqual([{ user_id: 'late', amount: 100 }]);
-    // The stranded row is removed from the crew and the participants[] array.
+    // The stranded row is deleted — its removal from the row set IS its removal
+    // from the crew (crew derives from rows; there is no participants[] array).
     expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
-    expect(db.heist.participants).not.toContain('late');
     const successSends = send.mock.calls.filter(
       (c: any[]) => String(c[0]?.embeds?.[0]?.data?.title ?? '').includes('Heist Success'));
     expect(successSends).toHaveLength(1);
@@ -999,9 +1002,7 @@ describe('heist resume idempotency', () => {
       status: 'in_progress', resolution: 'success', payoutEach: 125,
       participants: ['u1', 'u2'], targetPayout: 250,
     });
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
-    db.heist.participants.push('late');
-    const { client } = makeClient();
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });    const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
     await resolve(mgr);  // reconciles + refunds 'late', pays crew, finalises
@@ -1058,9 +1059,7 @@ describe('heist resume idempotency', () => {
       heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0,
       paid_at: null, payout_failed: false, claimed_at: null,
       entry_fee_paid: 150, // charged 150 at join time — before an admin lowered the fee
-    } as any);
-    db.heist.participants.push('late');
-    const { client } = makeClient();
+    } as any);    const { client } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
     await mgr.resumePendingHeists('g1');
@@ -1087,9 +1086,7 @@ describe('heist resume idempotency', () => {
       heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0,
       paid_at: null, payout_failed: false, claimed_at: null,
       entry_fee_paid: 100,
-    } as any);
-    db.heist.participants.push('late');
-    const { client, send } = makeClient();
+    } as any);    const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
     await mgr.resumePendingHeists('g1');
@@ -1116,9 +1113,7 @@ describe('heist resume idempotency', () => {
       status: 'in_progress', resolution: 'success', payoutEach: 125,
       participants: ['u1', 'u2'], targetPayout: 250, failReconcile,
     });
-    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });
-    db.heist.participants.push('late');
-    const { client, send } = makeClient();
+    db.parts.push({ heist_id: 'h1', user_id: 'late', role: 'Hacker', payout: 0, paid_at: null, payout_failed: false, claimed_at: null, entry_fee_paid: 100 });    const { client, send } = makeClient();
     const mgr = new HeistManager(db.supabase as any, client as any);
 
     await resolve(mgr); // reconcile errors → must NOT finalise, must NOT credit
@@ -1230,34 +1225,31 @@ describe('heist resume idempotency', () => {
     }
   });
 
-  // ── Finding #3 (codex migration:114): settle removes an already-reconciled
-  //    joiner from participants[] so the array and rows stay consistent. ──
-  it('heist_settle_missed_join removes an already-reconciled joiner from participants[] (no ghost)', async () => {
-    // Model the exact race: the resolver's bulk reconcile already deleted +
-    // refunded the late joiner's participant ROW (so no row exists), but joinHeist
-    // had appended the user to participants[] via array_append_heist_participant
-    // BEFORE it reached heist_settle_missed_join. Without the array_remove on the
-    // 'reconciled' NOT-FOUND branch, the array keeps a ghost: a refunded, non-crew
-    // user still shown in /heist view and still bumping success_chance. The RPC
-    // must strip the array slot and return 'reconciled'.
+  // ── Derive-from-rows: settle of an already-reconciled joiner is a clean
+  //    'reconciled' no-op — no ghost is possible because there is no array. ──
+  it('heist_settle_missed_join returns reconciled (and does not double-refund) when the row is already gone', async () => {
+    // Model the race: the resolver's bulk reconcile already deleted + refunded the
+    // late joiner's participant ROW (so no row exists). Pre-refactor this test
+    // guarded against a GHOST left in participants[] by array_append; that array no
+    // longer exists (20260710180000), so crew membership is derived purely from the
+    // rows — a deleted row is fully gone from the crew with nothing else to fix.
+    // settle must simply observe the missing row, return 'reconciled', and NOT
+    // refund again.
     const db = makeStatefulDb({
       status: 'in_progress', resolution: 'success', payoutEach: 125,
       participants: ['u1', 'u2'], targetPayout: 250,
     });
-    // The bulk reconcile already deleted the 'late' ROW, but the ghost array entry
-    // survives (joinHeist appended it after the delete).
-    db.heist.participants.push('late');
     const { supabase } = db;
 
     const res = await supabase.rpc('heist_settle_missed_join', {
       p_heist_id: 'h1', p_user_id: 'late', p_refund_amount: 100,
     });
 
-    // Reconciled (no row to settle), and — the finding-#3 fix — the ghost array
-    // slot is stripped so participants[] matches the rows.
+    // Reconciled (no row to settle), and no ghost is possible — the crew is the
+    // row set, and 'late' has no row.
     expect(res.data).toBe('reconciled');
-    expect(db.heist.participants).not.toContain('late');
-    // No second refund: the bulk reconcile already paid it; settle only fixes the array.
+    expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
+    // No second refund: the bulk reconcile already paid it.
     expect(db.credits.filter((c) => c.user_id === 'late')).toHaveLength(0);
   });
 
@@ -1279,11 +1271,11 @@ describe('heist resume idempotency', () => {
     });
     const row = (res.data as any[])[0];
 
-    // Rejected, nothing charged, no participant row created, no ghost array slot.
+    // Rejected, nothing charged, no participant row created (the row IS the
+    // membership now — no separate array slot to check).
     expect(row.status).toBe('not_recruiting');
     expect(db.credits).toHaveLength(0); // no debit, no refund — the fee was never taken
     expect(db.parts.some((p) => p.user_id === 'late')).toBe(false);
-    expect(db.heist.participants).not.toContain('late');
   });
 
   it('a join that commits before the claim is admitted, then frozen into the crew (serialized both ways)', async () => {
@@ -1310,49 +1302,139 @@ describe('heist resume idempotency', () => {
     expect(db.parts.some((p) => p.user_id === 'u2' && p.claimed_at != null)).toBe(true);
   });
 
-  // ── Capped success_chance undo (codex migration 20260710160000:385) ─────────
-  it('heist_undo_join restores the EXACT capped success_chance (no -7 drift)', async () => {
-    // A large crew has driven success_chance to the 95 cap. base_chance is 40, so
-    // at 9 members the derived chance is min(95, 40 + 8*7) = min(95, 96) = 95 —
-    // CAPPED. The last join's +7 was absorbed by the cap (88 → 95, only +7 would
-    // be 95; but from 89..95 the bump is partially/fully capped). Undoing that join
-    // must recompute for the reduced crew: min(95, 40 + 7*7) = min(95, 89) = 89 —
-    // NOT the naive 95 - 7 = 88 the old code produced. Deriving from count is
-    // drift-free whether or not the value was capped.
+  // ── Derived chance after undo (drift-free by construction) ──────────────────
+  // The mutable success_chance counter is GONE — chance is derived from the row
+  // COUNT at the point of use (LEAST(95, GREATEST(0, base + (n-1)*7))). So an undo
+  // has nothing to recompute: it just deletes the row, and the very next
+  // derivation reads one fewer row. This is drift-free whether or not the value
+  // was capped — the class of bug the old naive -7 counter caused (codex
+  // 20260710160000:385) is now structurally impossible.
+  const deriveChance = (base: number, n: number) => Math.min(95, Math.max(0, base + (n - 1) * 7));
+
+  it('after undoing a join from a capped crew, the DERIVED chance is exact (no -7 drift)', async () => {
+    // 9 members at base 40 → derived min(95, 40 + 8*7) = min(95, 96) = 95, CAPPED.
+    // Undo one → 8 members remain → derived min(95, 40 + 7*7) = 89, NOT the naive
+    // capped 95 - 7 = 88 the old counter produced. The value is never stored; it is
+    // computed from the surviving row count.
     const db = makeStatefulDb({
       status: 'recruiting',
       participants: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8', 'u9'],
-      successChance: 95, // capped: 40 + 8*7 = 96 → 95
+      successChance: 40, // base_success_chance anchor
     });
     const { supabase } = db;
+    // Pre-condition: 9 rows → derived chance is capped at 95.
+    expect(deriveChance(40, db.parts.length)).toBe(95);
 
     const res = await supabase.rpc('heist_undo_join', {
       p_heist_id: 'h1', p_user_id: 'u9', p_refund_amount: 100, p_base_chance: 40,
     });
 
     expect(res.data).toBe('undone');
-    // 8 members remain → derived chance = min(95, 40 + 7*7) = 89. The naive
-    // (capped) -7 would have wrongly produced 88.
-    expect(db.heist.success_chance).toBe(89);
-    expect(db.heist.participants).not.toContain('u9');
+    // The row is deleted — the crew is now the 8 surviving rows.
+    expect(db.parts.some((p) => p.user_id === 'u9')).toBe(false);
+    expect(db.parts.length).toBe(8);
+    // Derived from the surviving count: min(95, 40 + 7*7) = 89 (never 88).
+    expect(deriveChance(40, db.parts.length)).toBe(89);
     // The undone member is refunded their frozen fee exactly once.
     expect(db.credits.filter((c) => c.user_id === 'u9')).toEqual([{ user_id: 'u9', amount: 100 }]);
   });
 
-  it('heist_undo_join below the cap also recomputes exactly (small crew)', async () => {
-    // Not capped: 3 members → 40 + 2*7 = 54. Undo one → 40 + 1*7 = 47. Here the
-    // naive -7 (54 - 7 = 47) happens to agree, proving the derived path matches the
-    // uncapped case too (it only DIVERGES, correctly, once the cap is in play).
+  it('after undoing a join below the cap, the DERIVED chance is exact (small crew)', async () => {
+    // 3 members → derived 40 + 2*7 = 54. Undo one → 2 rows → 40 + 1*7 = 47.
     const db = makeStatefulDb({
-      status: 'recruiting', participants: ['u1', 'u2', 'u3'], successChance: 54,
+      status: 'recruiting', participants: ['u1', 'u2', 'u3'], successChance: 40,
     });
     const { supabase } = db;
+    expect(deriveChance(40, db.parts.length)).toBe(54);
 
     const res = await supabase.rpc('heist_undo_join', {
       p_heist_id: 'h1', p_user_id: 'u3', p_refund_amount: 100, p_base_chance: 40,
     });
 
     expect(res.data).toBe('undone');
-    expect(db.heist.success_chance).toBe(47);
+    expect(db.parts.length).toBe(2);
+    expect(deriveChance(40, db.parts.length)).toBe(47);
+  });
+
+  // ── ONE SOURCE OF TRUTH: crew + count + membership + chance derive from the
+  //    participant ROWS; no participants[] array and no stored counter remain. ──
+  describe('derive-from-rows model (20260710180000)', () => {
+    it('heist_join derives member_count + success_chance from the rows, storing neither on the heist', async () => {
+      // Start with a single-member recruiting heist (base 40). Two more join.
+      const db = makeStatefulDb({ status: 'recruiting', participants: ['u1'], successChance: 40 });
+      const { supabase } = db;
+
+      const j2 = (await supabase.rpc('heist_join', {
+        p_heist_id: 'h1', p_user_id: 'u2', p_role: 'Muscle',
+        p_entry_fee: 100, p_max: 8, p_base_chance: 40,
+      })).data[0];
+      // 2 rows → count 2, derived chance min(95, 40 + 1*7) = 47.
+      expect(j2.status).toBe('joined');
+      expect(j2.member_count).toBe(2);
+      expect(j2.success_chance).toBe(47);
+
+      const j3 = (await supabase.rpc('heist_join', {
+        p_heist_id: 'h1', p_user_id: 'u3', p_role: 'Lookout',
+        p_entry_fee: 100, p_max: 8, p_base_chance: 40,
+      })).data[0];
+      // 3 rows → count 3, derived chance 40 + 2*7 = 54.
+      expect(j3.member_count).toBe(3);
+      expect(j3.success_chance).toBe(54);
+
+      // Count is the ROW count; nothing was written back to the heist row.
+      expect(db.parts.length).toBe(3);
+      expect('participants' in db.heist).toBe(false);   // no denormalized array
+      expect('success_chance' in db.heist).toBe(false); // no stored counter
+      // The immutable anchor is the ONLY chance field on the row.
+      expect(db.heist.base_success_chance).toBe(40);
+    });
+
+    it('heist_join derives the success_chance CAP from the row count (no counter to overshoot)', async () => {
+      // A crew already large enough that the next join is capped at 95. base 40:
+      // 8 rows → 40 + 7*7 = 89; 9 rows → 40 + 8*7 = 96 → clamped 95.
+      const db = makeStatefulDb({
+        status: 'recruiting',
+        participants: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8'],
+        successChance: 40,
+      });
+      const { supabase } = db;
+
+      const j9 = (await supabase.rpc('heist_join', {
+        p_heist_id: 'h1', p_user_id: 'u9', p_role: 'Driver',
+        p_entry_fee: 100, p_max: 12, p_base_chance: 40,
+      })).data[0];
+
+      expect(j9.member_count).toBe(9);
+      expect(j9.success_chance).toBe(95); // clamped, derived from the 9-row count
+    });
+
+    it('membership is derived from a row: already_joined keys off the rows, not an array', async () => {
+      const db = makeStatefulDb({ status: 'recruiting', participants: ['u1', 'u2'], successChance: 40 });
+      const { supabase } = db;
+
+      // u2 already has a row → already_joined, no debit.
+      const dup = (await supabase.rpc('heist_join', {
+        p_heist_id: 'h1', p_user_id: 'u2', p_role: 'Muscle',
+        p_entry_fee: 100, p_max: 8, p_base_chance: 40,
+      })).data[0];
+      expect(dup.status).toBe('already_joined');
+      expect(db.credits).toHaveLength(0);        // nothing charged
+      expect(db.parts.length).toBe(2);           // no duplicate row
+      // Derived current chance for the 2-row crew.
+      expect(dup.success_chance).toBe(47);
+    });
+
+    it('crew_full keys off the ROW count, not an array length', async () => {
+      const db = makeStatefulDb({ status: 'recruiting', participants: ['u1', 'u2'], successChance: 40 });
+      const { supabase } = db;
+
+      const full = (await supabase.rpc('heist_join', {
+        p_heist_id: 'h1', p_user_id: 'u3', p_role: 'Muscle',
+        p_entry_fee: 100, p_max: 2, p_base_chance: 40, // max already reached by the 2 rows
+      })).data[0];
+      expect(full.status).toBe('crew_full');
+      expect(db.credits).toHaveLength(0);
+      expect(db.parts.length).toBe(2); // rejected without inserting
+    });
   });
 });

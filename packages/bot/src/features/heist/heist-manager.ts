@@ -250,6 +250,14 @@ export class HeistManager {
     const joinWindowSecs = config.economy_heist_join_window_secs ?? 60;
     const expiresAt = new Date(Date.now() + joinWindowSecs * 1000).toISOString();
 
+    // The immutable single-member (base) chance: base success pct + this target's
+    // difficulty modifier. This is the ONLY chance value stored on the heist row
+    // (as base_success_chance) — success_chance is no longer stored; it is DERIVED
+    // everywhere from base_success_chance + the participant-row count, so there is
+    // no mutable counter to drift. For a 1-member crew the derived chance equals
+    // this base (LEAST(95, GREATEST(0, base + 0)) with base in 25..40).
+    const baseChance = (config.economy_heist_success_base_pct ?? 40) + target.difficultyMod;
+
     // V48-M2: create heist with a unique-violation refund path.
     // The "no active heist" check above is racy — two concurrent
     // /heist start invocations could both pass it before either
@@ -264,8 +272,10 @@ export class HeistManager {
         initiator_id: userId,
         target_name: target.name,
         target_payout: basePayout,
-        participants: [userId],
-        success_chance: (config.economy_heist_success_base_pct ?? 40) + target.difficultyMod,
+        // Single source of truth for the chance: the immutable base anchor. Crew
+        // membership lives ONLY in economy_heist_participants rows (the initiator
+        // row is inserted below) — there is no denormalized participants[] array.
+        base_success_chance: baseChance,
         expires_at: expiresAt,
       })
       .select()
@@ -337,7 +347,7 @@ export class HeistManager {
         .setDescription(
           `<@${userId}> is assembling a crew to rob **${target.name}**!\n\n` +
           `💰 Potential payout: **${basePayout.toLocaleString()}** coins (split among crew)\n` +
-          `🎯 Base success chance: **${heist.success_chance}%** (+7% per extra member)\n` +
+          `🎯 Base success chance: **${baseChance}%** (+7% per extra member)\n` +
           `💵 Entry fee: **${entryFee.toLocaleString()}** coins\n` +
           `👥 Crew: 1/${maxParticipants}\n\n` +
           `Use \`/heist join\` within **${joinWindowSecs}s** to join the crew!`
@@ -383,17 +393,21 @@ export class HeistManager {
     const entryFee = config.economy_heist_entry_fee ?? 100;
     const role = randomPick(HEIST_ROLES);
     // The single-member (base) chance: base success pct + this target's difficulty
-    // modifier, clamped like the display. heist_join DERIVES success_chance from
-    // the post-join member count anchored on this value, so the counter never
-    // drifts (and an undo recomputes it exactly), fixing codex's capped-undo bug.
+    // modifier. heist_join DERIVES the returned success_chance from the post-join
+    // participant-ROW count anchored on this value; nothing is stored, so there is
+    // no counter to drift (and an undo simply reads one fewer row). This is the
+    // same value persisted as base_success_chance at start — recomputed here from
+    // config+target because the join-read heist row no longer carries a chance
+    // counter (only base_success_chance, which equals this).
     const baseChance = (config.economy_heist_success_base_pct ?? 40)
       + (HEIST_TARGETS.find(t => t.name === heist.target_name)?.difficultyMod ?? 0);
 
     // ── Atomic, serialized join ───────────────────────────────
     // heist_join does the ENTIRE join — re-check status='recruiting', debit the
-    // fee, insert the participant row (with the frozen entry_fee_paid), append to
-    // participants[], and derive success_chance — in ONE transaction under the
-    // SAME heist-row lock heist_claim_for_resolution takes. This SERIALIZES the
+    // fee, insert the participant row (with the frozen entry_fee_paid), and derive
+    // success_chance from the participant-row count — in ONE transaction under the
+    // SAME heist-row lock heist_claim_for_resolution takes. No participants[] array
+    // is written; the row IS the membership. This SERIALIZES the
     // join against resolution: if the claim wins the lock first, this call sees
     // status <> 'recruiting' and returns 'not_recruiting' having debited NOTHING,
     // so no fee can ever be stranded past the recruiting → resolution edge (codex
@@ -450,10 +464,13 @@ export class HeistManager {
     }
 
     // joinStatus === 'joined' — the member is atomically in the frozen-or-recruiting
-    // crew with the fee debited and the row inserted, all in one commit.
-    const actualCount = result?.member_count ?? (heist.participants as string[]).length + 1;
+    // crew with the fee debited and the row inserted, all in one commit. Crew size
+    // and chance come straight from the RPC result (both DERIVED from the
+    // participant rows under the heist-row lock); there is no participants[] array
+    // to fall back on. The ?? guards only cover a malformed result shape.
+    const actualCount = result?.member_count ?? 1;
     const displayChance = result?.success_chance
-      ?? Math.min(95, baseChance + (actualCount - 1) * 7);
+      ?? Math.max(0, Math.min(95, baseChance + (actualCount - 1) * 7));
     const joinedRole = result?.role ?? role;
 
     getQuestsManager(guildId)?.trackProgress(guildId, userId, 'heist').catch((e: unknown) => { log.warn('trackProgress failed:', (e as Error)?.message ?? e); });
@@ -468,6 +485,23 @@ export class HeistManager {
         )
         .setColor(0xFFA500)],
     });
+  }
+
+  /**
+   * Crew of a heist, derived from the participant ROWS (the single source of
+   * truth), as Discord mentions in stable join order. Used for display only.
+   * A failed read yields an empty list — /heist view is a read-only status
+   * command, so a transient blip degrades to an empty crew line rather than
+   * throwing; it never drives money.
+   */
+  private async crewMentions(heistId: string): Promise<string[]> {
+    const { data } = await this.supabase
+      .from('economy_heist_participants')
+      .select('user_id')
+      .eq('heist_id', heistId)
+      .order('joined_at', { ascending: true })
+      .limit(1000);
+    return ((data ?? []) as Array<{ user_id: string }>).map((r) => `<@${r.user_id}>`);
   }
 
   async viewHeist(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -503,13 +537,16 @@ export class HeistManager {
         return;
       }
 
+      // Crew is derived from the participant rows — the single source of truth
+      // (there is no participants[] array on the heist row anymore).
+      const lastCrew = await this.crewMentions(last.id);
       const resultEmoji = last.status === 'success' ? '✅' : '❌';
       await interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle(`🏴‍☠️ Last Heist: ${last.target_name}`)
           .setDescription(
             `${resultEmoji} **${last.status === 'success' ? 'SUCCESS' : 'FAILED'}**\n\n` +
-            `👥 Crew: ${(last.participants as string[]).map((id: string) => `<@${id}>`).join(', ')}\n` +
+            `👥 Crew: ${lastCrew.join(', ')}\n` +
             `💰 Payout: **${last.target_payout.toLocaleString()}** coins\n` +
             `📅 ${new Date(last.resolved_at).toLocaleString()}`
           )
@@ -518,7 +555,14 @@ export class HeistManager {
       return;
     }
 
-    const participants = (heist.participants as string[]).map((id: string) => `<@${id}>`).join(', ');
+    // Derive the active crew from the participant rows, then derive the current
+    // success chance from base_success_chance + the crew size (never a stored
+    // counter): LEAST(95, GREATEST(0, base + (count - 1) * 7)).
+    const crewMentions = await this.crewMentions(heist.id);
+    const crewSize = crewMentions.length;
+    const participants = crewMentions.join(', ');
+    const displayChance = Math.max(
+      0, Math.min(95, (heist.base_success_chance ?? 0) + (crewSize - 1) * 7));
     const remainingSecs = Math.max(0, Math.floor((new Date(heist.expires_at).getTime() - Date.now()) / 1000));
 
     await interaction.reply({
@@ -527,7 +571,7 @@ export class HeistManager {
         .setDescription(
           `Status: **${heist.status}**\n\n` +
           `👥 Crew: ${participants}\n` +
-          `🎯 Success chance: **${heist.success_chance}%**\n` +
+          `🎯 Success chance: **${displayChance}%**\n` +
           `💰 Potential payout: **${heist.target_payout.toLocaleString()}** coins\n` +
           `⏱️ ${remainingSecs > 0 ? `Resolves in **${remainingSecs}s**` : 'Resolving...'}`
         )

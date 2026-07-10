@@ -297,9 +297,11 @@ describe('HeistManager', () => {
         if (table === 'economy_heists') {
           heistCallCount++;
           if (heistCallCount <= 2) return chainBuilder({ data: null, error: null }); // no recent/active
-          // Insert success
+          // Insert success. The row now carries the immutable base_success_chance
+          // anchor instead of a mutable success_chance counter; crew membership
+          // lives only in economy_heist_participants rows (no participants[]).
           return chainBuilder({
-            data: { id: 'h1', success_chance: 40, target_name: 'Corner Store', target_payout: 250 },
+            data: { id: 'h1', base_success_chance: 40, target_name: 'Corner Store', target_payout: 250 },
             error: null,
           });
         }
@@ -329,8 +331,11 @@ describe('HeistManager', () => {
           return chainBuilder({ data: { ...defaultConfig, ...opts.configOverrides }, error: null });
         }
         if (table === 'economy_heists') {
+          // The recruiting-heist read used only for target_name + a fast "no heist"
+          // UX check. It no longer carries participants[] or a success_chance
+          // counter — the join RPC derives count + chance from the rows.
           return chainBuilder({
-            data: { id: 'h1', participants: ['u2'], success_chance: 40, target_name: 'Corner Store' },
+            data: { id: 'h1', base_success_chance: 40, target_name: 'Corner Store' },
             error: null,
           });
         }
@@ -483,7 +488,7 @@ describe('HeistManager', () => {
       );
     });
 
-    it('shows last completed heist when no active', async () => {
+    it('shows last completed heist with crew derived from participant rows', async () => {
       let callCount = 0;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
@@ -492,42 +497,55 @@ describe('HeistManager', () => {
           return chainBuilder({
             data: {
               id: 'h1', target_name: 'Bank', status: 'success',
-              participants: ['u1', 'u2'], target_payout: 500,
-              resolved_at: new Date().toISOString(),
+              target_payout: 500, resolved_at: new Date().toISOString(),
             },
             error: null,
           });
+        }
+        if (table === 'economy_heist_participants') {
+          // Crew is derived from the rows (single source of truth) — no
+          // participants[] array on the heist row anymore.
+          return chainBuilder({ data: [{ user_id: 'u1' }, { user_id: 'u2' }], error: null });
         }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalled();
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // Crew mentions come from the participant rows.
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u2>');
     });
 
-    it('shows active heist', async () => {
+    it('shows active heist with crew + chance derived from rows and base_success_chance', async () => {
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
           return chainBuilder({
             data: {
               id: 'h1', target_name: 'Museum', status: 'recruiting',
-              participants: ['u1', 'u2'], success_chance: 47,
+              // The immutable base anchor; success_chance is derived, not stored.
+              base_success_chance: 40,
               target_payout: 750,
               expires_at: new Date(Date.now() + 30000).toISOString(),
             },
             error: null,
           });
         }
+        if (table === 'economy_heist_participants') {
+          return chainBuilder({ data: [{ user_id: 'u1' }, { user_id: 'u2' }], error: null });
+        }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalledWith(
-        expect.objectContaining({ embeds: expect.any(Array) }),
-      );
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      // 2-member crew → derived chance = min(95, 40 + (2-1)*7) = 47.
+      expect(String(replyArg.embeds[0].data.description)).toContain('47%');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u2>');
     });
 
-    it('shows last failed heist', async () => {
+    it('shows last failed heist with crew derived from participant rows', async () => {
       let callCount = 0;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_heists') {
@@ -536,17 +554,20 @@ describe('HeistManager', () => {
           return chainBuilder({
             data: {
               id: 'h2', target_name: 'Vault', status: 'failed',
-              participants: ['u1'], target_payout: 1000,
-              resolved_at: new Date().toISOString(),
+              target_payout: 1000, resolved_at: new Date().toISOString(),
             },
             error: null,
           });
+        }
+        if (table === 'economy_heist_participants') {
+          return chainBuilder({ data: [{ user_id: 'u1' }], error: null });
         }
         return chainBuilder();
       });
       const interaction = makeInteraction();
       await mgr.viewHeist(interaction as any);
-      expect(interaction.reply).toHaveBeenCalled();
+      const replyArg = (interaction.reply as any).mock.calls.at(-1)[0];
+      expect(String(replyArg.embeds[0].data.description)).toContain('<@u1>');
     });
   });
 
