@@ -9,7 +9,16 @@ import os
 from collections import OrderedDict
 from pathlib import Path
 
-MIGRATIONS_DIR = Path("/work/repos/somnibot-typegen/packages/supabase/migrations")
+# Migrations live at <repo>/packages/supabase/migrations. Resolve relative to this
+# script (scripts/generate-db-types.py) so the generator runs from a fresh checkout
+# on any OS with no path patching. Override with SOMNIBOT_MIGRATIONS_DIR if needed.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+MIGRATIONS_DIR = Path(
+    os.environ.get(
+        "SOMNIBOT_MIGRATIONS_DIR",
+        _REPO_ROOT / "packages" / "supabase" / "migrations",
+    )
+)
 
 
 # Maps SQL types to TypeScript types
@@ -145,12 +154,12 @@ def parse_default(constraints_str: str) -> str | None:
 def parse_create_table(sql: str):
     """Parse a CREATE TABLE statement."""
     m = re.match(
-        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"?(\w+)\"?)\s*\(",
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s*\(",
         sql, re.IGNORECASE
     )
     if not m:
         return
-    
+
     table_name = m.group(1)
     if table_name in tables:
         return
@@ -266,27 +275,55 @@ def parse_alter_add_column(sql: str):
     Handles multi-column ALTER TABLE statements like:
       ALTER TABLE t ADD COLUMN IF NOT EXISTS a TEXT, ADD COLUMN IF NOT EXISTS b INT;
     """
-    # Extract table name
-    m = re.match(r"ALTER\s+TABLE\s+(?:\"?(\w+)\"?)\s+", sql, re.IGNORECASE)
+    # Extract table name (tolerating an optional schema qualifier, e.g. public.foo)
+    m = re.match(r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
+                 sql, re.IGNORECASE)
     if not m:
         return
-    
+
     table_name = m.group(1)
     if table_name not in tables:
         return
-    
+
     table = tables[table_name]
-    
-    # Find all ADD COLUMN clauses
-    # Split by ADD COLUMN (case insensitive)
-    pattern = r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+([^,]+?)(?=,\s*ADD\s+COLUMN|$)"
-    for col_match in re.finditer(pattern, sql, re.IGNORECASE | re.DOTALL):
+
+    # Strip the leading "ALTER TABLE [schema.]<name>" so only the clause list remains.
+    body = re.sub(r"^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?\w+\"?)\s+",
+                  "", sql, count=1, flags=re.IGNORECASE).rstrip().rstrip(';')
+
+    # Split into top-level clauses on commas that are NOT inside parentheses.
+    # This keeps commas inside CHECK (col IN ('a','b')) and type precision like
+    # NUMERIC(3,1) attached to their owning column instead of splitting a clause.
+    clauses = []
+    current = ""
+    depth = 0
+    for ch in body:
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            clauses.append(current.strip())
+            current = ""
+            continue
+        current += ch
+    if current.strip():
+        clauses.append(current.strip())
+
+    # Only ADD COLUMN clauses are relevant here; ignore ADD CONSTRAINT / ALTER
+    # COLUMN / DROP etc. which are handled elsewhere (or intentionally not).
+    add_col_re = re.compile(r"^ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+(.+)$",
+                            re.IGNORECASE | re.DOTALL)
+    for clause in clauses:
+        col_match = add_col_re.match(clause)
+        if not col_match:
+            continue
         col_name = col_match.group(1).strip('"')
         rest = col_match.group(2).strip().rstrip(';').rstrip(',')
-        
+
         if table.has_column(col_name):
             continue
-        
+
         tokens = rest.split()
         if not tokens:
             continue
@@ -329,7 +366,7 @@ def parse_alter_add_column(sql: str):
 def parse_alter_add_pk(sql: str):
     """Parse ALTER TABLE ... ADD PRIMARY KEY (col1, col2)."""
     m = re.match(
-        r"ALTER\s+TABLE\s+(?:\"?(\w+)\"?)\s+ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)",
+        r"ALTER\s+TABLE\s+(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+ADD\s+PRIMARY\s+KEY\s*\(([^)]+)\)",
         sql, re.IGNORECASE
     )
     if not m:
@@ -345,9 +382,64 @@ def parse_alter_add_pk(sql: str):
                 tables[table_name].columns[col_name].nullable = False
 
 
+def parse_alter_drop_column(sql: str):
+    """Parse ALTER TABLE [schema.]t DROP COLUMN [IF EXISTS] col [, DROP COLUMN ...].
+
+    Without this, a column added by an early CREATE TABLE / ADD COLUMN and later
+    removed would linger as a phantom in the generated types (drift vs reality).
+    """
+    m = re.match(
+        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?(?:\"?(\w+)\"?)\s+",
+        sql, re.IGNORECASE,
+    )
+    if not m:
+        return
+    table_name = m.group(1)
+    table = tables.get(table_name)
+    if table is None:
+        return
+    for dc in re.finditer(
+        r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?(\w+)\"?", sql, re.IGNORECASE
+    ):
+        col_name = dc.group(1)
+        if col_name in table.columns:
+            del table.columns[col_name]
+
+
+def parse_drop_table(sql: str):
+    """Parse DROP TABLE [IF EXISTS] [schema.]t so dropped tables disappear."""
+    for m in re.finditer(
+        r"DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?\"?(\w+)\"?",
+        sql, re.IGNORECASE,
+    ):
+        tables.pop(m.group(1), None)
+
+
+def process_do_block(stmt: str):
+    """Extract ALTER TABLE ... ADD/DROP COLUMN statements nested inside DO $$ ... $$.
+
+    Idempotent migrations frequently wrap column changes in a
+    `DO $$ BEGIN IF NOT EXISTS (...) THEN ALTER TABLE t ADD COLUMN c ...; END IF; END $$;`
+    guard. The outer statement starts with `DO`, so it is otherwise ignored — but
+    the columns are real. Pull the inner ALTER ... ADD/DROP COLUMN statements out
+    (each terminated by `;`), in source order, and feed them to the normal parsers.
+    """
+    inner_re = re.compile(
+        r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:\"?\w+\"?\.)?\"?\w+\"?\s+"
+        r"(?:ADD|DROP)\s+COLUMN\b.*?;",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for inner in inner_re.finditer(stmt):
+        text = inner.group(0)
+        if re.search(r"\bDROP\s+COLUMN\b", text, re.IGNORECASE):
+            parse_alter_drop_column(text)
+        else:
+            parse_alter_add_column(text)
+
+
 def process_migration(filepath: Path):
     """Process a single migration file."""
-    content = filepath.read_text()
+    content = filepath.read_text(encoding="utf-8")
     
     # Remove comments
     content = re.sub(r'--[^\n]*', '', content)
@@ -379,10 +471,19 @@ def process_migration(filepath: Path):
         upper = stmt.upper().lstrip()
         if upper.startswith("CREATE TABLE"):
             parse_create_table(stmt)
-        elif "ADD COLUMN" in upper and upper.startswith("ALTER TABLE"):
-            parse_alter_add_column(stmt)
-        elif "ADD PRIMARY KEY" in upper and upper.startswith("ALTER TABLE"):
-            parse_alter_add_pk(stmt)
+        elif upper.startswith("DROP TABLE"):
+            parse_drop_table(stmt)
+        elif upper.startswith("ALTER TABLE"):
+            # A single ALTER may add, drop, and/or set a PK; apply each in order.
+            if "ADD COLUMN" in upper:
+                parse_alter_add_column(stmt)
+            if "DROP COLUMN" in upper:
+                parse_alter_drop_column(stmt)
+            if "ADD PRIMARY KEY" in upper:
+                parse_alter_add_pk(stmt)
+        elif upper.startswith("DO") and ("ADD COLUMN" in upper or "DROP COLUMN" in upper):
+            # Idempotency-guarded column changes wrapped in DO $$ ... $$.
+            process_do_block(stmt)
 
 
 # ============================================================
@@ -747,27 +848,33 @@ export type BlastRadius = 'low' | 'medium' | 'high' | 'critical';
 '''
 
 
-def main():
+def build_types() -> str:
+    """Parse all migrations and return the generated TypeScript source as a string."""
     migration_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     print(f"Processing {len(migration_files)} migration files...")
-    
+
     for mf in migration_files:
         process_migration(mf)
-    
-    print(f"\nFound {len(tables)} tables")
-    
+
+    print(f"Found {len(tables)} tables")
+
     # Build output
     lines = []
     lines.append("/**")
-    lines.append(" * AUTO-GENERATED from SQL migrations — DO NOT EDIT BY HAND")
+    lines.append(" * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.")
+    lines.append(" * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.")
     lines.append(f" * Source: {len(migration_files)} migration files in packages/supabase/migrations/")
-    lines.append(" * Run `scripts/generate-db-types.ts` to regenerate.")
     lines.append(" *")
-    lines.append(" * This file is the SINGLE SOURCE OF TRUTH for database column types.")
-    lines.append(" * If a column name doesn't exist here, it doesn't exist in the database.")
+    lines.append(" * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.")
+    lines.append(" * Application code imports the hand-maintained packages/shared/src/types/")
+    lines.append(" * database.ts. CI regenerates this file and fails if it differs from the")
+    lines.append(" * committed copy, forcing a review whenever a migration changes the schema.")
+    lines.append(" * The generator is a best-effort SQL parser; see the RUNBOOK for its known")
+    lines.append(" * limitations (no ALTER COLUMN type/nullability tracking, no constraint")
+    lines.append(" * re-derivation), which is why it is a tripwire rather than the source type.")
     lines.append(" */")
     lines.append("")
-    
+
     # Helper types first (Json, etc.) since row types reference them
     lines.append(HELPER_TYPES)
     lines.append("")
@@ -775,59 +882,93 @@ def main():
     lines.append("// Row Types — auto-generated from SQL migrations")
     lines.append("// ============================================================")
     lines.append("")
-    
+
     categorized = set()
     for tbl_list in CATEGORIES.values():
         categorized.update(tbl_list)
-    
-    uncategorized = [t for t in tables if t not in categorized and t not in SKIP_TABLES]
+
+    uncategorized = sorted(t for t in tables if t not in categorized and t not in SKIP_TABLES)
     if uncategorized:
         CATEGORIES["Other"] = uncategorized
-    
+
     for cat_name, tbl_names in CATEGORIES.items():
         cat_tables = [(n, tables[n]) for n in tbl_names if n in tables and n not in SKIP_TABLES]
         if not cat_tables:
             continue
-        
+
         lines.append(f"// — {cat_name} —")
         lines.append("")
-        
+
         for tbl_name, tbl in cat_tables:
             db_name = TABLE_TO_DB_NAME.get(tbl_name, "Db" + "".join(p.capitalize() for p in tbl_name.split("_")))
             lines.append(generate_row_interface(tbl, db_name))
             lines.append("")
-    
-    result = "\n".join(lines)
-    
-    out_path = MIGRATIONS_DIR.parent.parent / "shared" / "src" / "types" / "database.ts"
-    out_path.write_text(result)
-    print(f"Generated types written to {out_path}")
+
+    # Normalise trailing whitespace and guarantee a single trailing newline so the
+    # output is stable across platforms and safe to byte-compare in CI.
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+# Default snapshot location: a dedicated generated file, NEVER the hand-maintained
+# database.ts (which application code imports and which the generator cannot fully
+# reproduce). Overridable with --out for local experimentation.
+DEFAULT_OUT_PATH = (
+    MIGRATIONS_DIR.parent.parent / "shared" / "src" / "types" / "database.generated.ts"
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Generate the DB-schema drift snapshot from SQL migrations."
+    )
+    parser.add_argument(
+        "--out", type=Path, default=DEFAULT_OUT_PATH,
+        help="Path to write the generated snapshot (default: database.generated.ts).",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="Do not write; exit non-zero if the committed snapshot differs from a "
+             "fresh generation (used by CI to fail on drift).",
+    )
+    args = parser.parse_args(argv)
+
+    result = build_types()
+
+    if args.check:
+        # Compare newline-agnostically: the committed snapshot is stored with LF
+        # (.gitattributes enforces this), but read it robustly so a stray CRLF
+        # checkout on Windows does not produce a false drift.
+        existing = ""
+        if args.out.exists():
+            existing = args.out.read_text(encoding="utf-8").replace("\r\n", "\n")
+        if existing == result:
+            print(f"OK: {args.out} is up to date with migrations (no drift).")
+            return 0
+        import difflib
+        diff = "".join(
+            difflib.unified_diff(
+                existing.splitlines(keepends=True),
+                result.splitlines(keepends=True),
+                fromfile=f"{args.out} (committed)",
+                tofile=f"{args.out} (regenerated)",
+            )
+        )
+        print("DRIFT DETECTED: committed DB-type snapshot is stale.")
+        print("Run `python scripts/generate-db-types.py` and commit the result.")
+        print()
+        print(diff[:8000])
+        return 1
+
+    # Always write LF so the committed snapshot is identical on every OS and byte-
+    # compares cleanly against a Linux-CI regeneration.
+    with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(result)
+    print(f"Generated snapshot written to {args.out}")
     print(f"Total lines: {len(result.splitlines())}")
-    
-    # Also print a diff summary of what changed vs old types
-    print("\n=== KEY DIFFERENCES FROM OLD database.ts ===")
-    print("\nTables that are NEW (not in old hand-written types):")
-    old_types = {"users", "guild", "guild_config", "members", "role_templates", "channel_templates",
-                 "guild_desired_state", "discord_id_map", "reaction_roles", "automod_rules",
-                 "infractions", "ticket_panels", "tickets", "ticket_transcripts", "automations",
-                 "custom_commands", "embed_configs", "member_levels", "level_rewards", "xp_multipliers",
-                 "member_rank_settings", "temp_channel_hubs", "stats_channels", "scheduled_messages",
-                 "giveaways", "products", "product_files", "plans", "customers", "promotions",
-                 "orders", "license_keys", "entitlements", "product_license_config", "license_sessions",
-                 "license_validations", "payments", "audit_logs", "webhook_events",
-                 "dashboard_roles", "dashboard_user_roles", "portal_sessions", "fraud_signals",
-                 "fraud_rules", "incidents", "incident_events", "dead_letter_queue",
-                 "workflow_events", "admin_changes"}
-    
-    for tname in sorted(tables.keys()):
-        if tname not in old_types and tname not in SKIP_TABLES:
-            print(f"  + {tname} ({len(tables[tname].columns)} columns)")
-    
-    print("\nguild_config columns in schema:")
-    if "guild_config" in tables:
-        for col in tables["guild_config"].columns.values():
-            print(f"  {col.name}: {col.sql_type} {'NOT NULL' if not col.nullable else 'NULL'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

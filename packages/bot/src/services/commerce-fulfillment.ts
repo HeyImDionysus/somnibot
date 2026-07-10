@@ -18,7 +18,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
-import { createLogger } from '@somnibot/shared';
+import { createLogger, getGracePeriodDays } from '@somnibot/shared';
 
 const log = createLogger('Fulfillment');
 import { checkPurchaseVelocity, checkPaymentPattern, checkCriticalThreshold } from './fraud-detection.js';
@@ -418,13 +418,10 @@ export class CommerceFulfillmentService {
       .eq('status', 'active')
       .limit(1000);
 
-    // Read configurable grace period (default 3 days if not set)
-    const { data: guildCfg } = await this.supabase
-      .from('guild_config')
-      .select('grace_period_days')
-      .eq('guild_id', payload.guild_id)
-      .maybeSingle();
-    const graceDays = guildCfg?.grace_period_days ?? 3;
+    // Read configurable grace period (guild_config.grace_period_days, default
+    // DEFAULT_GRACE_PERIOD_DAYS if unset) via the shared helper that the
+    // dashboard's manual grace transition also uses — one source of truth.
+    const graceDays = await getGracePeriodDays(this.supabase, payload.guild_id);
 
     if (entitlements && entitlements.length > 0) {
       for (const ent of entitlements) {

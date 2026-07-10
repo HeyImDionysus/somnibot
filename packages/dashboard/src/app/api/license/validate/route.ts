@@ -35,6 +35,7 @@ interface LookupResult {
   entitlement_id?: string;
   entitlement_status?: string;
   entitlement_expires_at?: string;
+  entitlement_grace_period_ends_at?: string | null;
   config_max_devices?: number;
   config_device_policy?: string;
   config_feature_flags?: string[];
@@ -157,12 +158,52 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // 4.5. Grace-period lifecycle (W2): compute the grace window at validation
+  // time — never trust a stale `grace_period` status. Reconciliation runs
+  // every 6 hours, so a lapsed-but-unreconciled row would otherwise keep
+  // validating (and keep a churned customer's app running) until the next
+  // sweep. The route only REJECTS: the reconciliation job owns the status
+  // transition (audit trail + role revocation), so the row is left in
+  // grace_period for it to find.
+  const inGracePeriod = result.entitlement_status === 'grace_period';
+  const graceEndsAt = result.entitlement_grace_period_ends_at ?? null;
+  if (inGracePeriod && graceEndsAt && new Date(graceEndsAt) < new Date()) {
+    await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
+    return NextResponse.json({
+      valid: false,
+      status: 'expired',
+      error: 'Payment grace period has ended',
+      grace_period_ends_at: graceEndsAt,
+    });
+  }
+
   // 5. Check expiry
   if (result.entitlement_expires_at && new Date(result.entitlement_expires_at) < new Date()) {
+    const expiredAt = new Date().toISOString();
     await supabase
       .from('entitlements')
-      .update({ status: 'expired', updated_at: new Date().toISOString() })
+      .update({ status: 'expired', updated_at: expiredAt })
       .eq('id', result.entitlement_id);
+
+    // W2 codex round 2: an entitlement can natural-expire (expires_at past)
+    // while still in a payment-failure grace window whose deadline has NOT yet
+    // lapsed (so the grace check above did not fire) — this terminal 'expired'
+    // write strands the open 'entitlement_grace_period' operator alert that
+    // revoke()/reconciliation would otherwise resolve. Resolve it with the same
+    // entitlement-scoped filter (a no-op when none is open). Non-fatal: the
+    // expiry write above has already committed.
+    if (result.entitlement_status === 'grace_period' && result.product_guild_id) {
+      const { error: graceAlertError } = await supabase
+        .from('alerts')
+        .update({ resolved: true, resolved_at: expiredAt, updated_at: expiredAt })
+        .eq('guild_id', result.product_guild_id)
+        .eq('alert_type', 'entitlement_grace_period')
+        .eq('metadata->>entitlement_id', result.entitlement_id)
+        .eq('resolved', false);
+      if (graceAlertError) {
+        console.error('[License] Failed to resolve grace-period alert on validation expiry:', graceAlertError.message);
+      }
+    }
 
     await logValidation(supabase, result.key_id!, product_id, device_fingerprint, 'expired', clientIp, app_version);
     return NextResponse.json({ valid: false, status: 'expired', error: 'License has expired' });
@@ -224,13 +265,17 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     valid: true,
-    status: 'active',
+    // W2: surface a decaying entitlement instead of masking it as healthy —
+    // the SDK (and the paying customer's app) can warn that payment failed
+    // and access ends at grace_period_ends_at.
+    status: inGracePeriod ? 'grace_period' : 'active',
     entitlement_id: result.entitlement_id,
     features: result.config_feature_flags ?? [],
     tier: result.config_tier ?? null,
     customer_discord_id: result.customer_discord_id,
     customer_name: result.customer_discord_username,
     expires_at: result.entitlement_expires_at,
+    grace_period_ends_at: inGracePeriod ? graceEndsAt : null,
     session_id: sessionId ?? null,
     heartbeat_interval_seconds: result.config_heartbeat_interval_seconds ?? 0,
   });

@@ -750,6 +750,30 @@ export async function handleSubscriptionExpired(
     'Failed to expire entitlements for subscription expiry',
   );
 
+  // W2 codex round 2: EXPIRABLE_ENTITLEMENT_STATUSES includes 'grace_period',
+  // so this expiry is a terminal transition for a row that suspend() may have
+  // left an 'entitlement_grace_period' operator alert open on. revoke() and
+  // the reconciliation sweep resolve that alert on their terminal writes; this
+  // direct webhook expiry bypassed both. Resolve it with the same
+  // entitlement-scoped, entitlement_grace_period filter (no-op when none open).
+  // Non-fatal: the entitlement expiry above has already committed.
+  const expiryGraceAlertEntitlementIds = (activeEntitlements ?? []).map((ent) => ent.id);
+  if (expiryGraceAlertEntitlementIds.length > 0) {
+    const { error: expireGraceAlertError } = await supabase
+      .from('alerts')
+      .update({ resolved: true, resolved_at: now, updated_at: now })
+      .eq('guild_id', order.guild_id)
+      .eq('alert_type', 'entitlement_grace_period')
+      .in('metadata->>entitlement_id', expiryGraceAlertEntitlementIds)
+      .eq('resolved', false);
+    if (expireGraceAlertError) {
+      console.error(
+        '[Webhook] Failed to resolve grace-period alerts for subscription expiry:',
+        formatSupabaseError(expireGraceAlertError),
+      );
+    }
+  }
+
   const { error: expireLicenseKeysError } = await supabase
     .from('license_keys')
     .update({
@@ -1496,6 +1520,30 @@ async function handleExternalPaymentRefunded(
     .eq('order_id', orderId)
     .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
   requireSupabaseSuccess(expireEntitlementsError, 'Failed to revoke entitlements for refund');
+
+  // W2 codex round 2: EXPIRABLE_ENTITLEMENT_STATUSES includes 'grace_period',
+  // so a full refund is a terminal transition for a row that suspend() may
+  // have left an 'entitlement_grace_period' operator alert open on. revoke()
+  // and the reconciliation sweep resolve that alert on their terminal writes;
+  // this direct refund expiry bypassed both. Resolve it with the same
+  // entitlement-scoped, entitlement_grace_period filter (a no-op when none is
+  // open). Non-fatal: the entitlement revocation above has already committed.
+  const graceAlertEntitlementIds = (activeEntitlements ?? []).map((ent) => ent.id);
+  if (graceAlertEntitlementIds.length > 0) {
+    const { error: refundGraceAlertError } = await supabase
+      .from('alerts')
+      .update({ resolved: true, resolved_at: nowIso, updated_at: nowIso })
+      .eq('guild_id', payment.guild_id)
+      .eq('alert_type', 'entitlement_grace_period')
+      .in('metadata->>entitlement_id', graceAlertEntitlementIds)
+      .eq('resolved', false);
+    if (refundGraceAlertError) {
+      console.error(
+        '[Webhook] Failed to resolve grace-period alerts for refund revocation:',
+        formatSupabaseError(refundGraceAlertError),
+      );
+    }
+  }
 
   const { error: revokeKeysError } = await supabase
     .from('license_keys')

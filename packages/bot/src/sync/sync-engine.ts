@@ -67,12 +67,23 @@ export async function runSyncCycle(
     .limit(1000);
 
   const idMap = new Map<string, string>();
+  // Entity-typed map keyed by `${entity_type}:${bareKey}`. The flat `idMap`
+  // above collapses rows that share a bare template_key across entity types
+  // (a role and a channel both keyed `staff`), so hierarchy resolution needs
+  // this entity-scoped view to avoid resolving a role key to a channel's ID.
+  const entityIdMap = new Map<string, string>();
   for (const m of mappings ?? []) {
     idMap.set(m.template_key, m.discord_id);
+    if (m.entity_type) {
+      const bare = String(m.template_key).includes(':')
+        ? String(m.template_key).slice(String(m.template_key).indexOf(':') + 1)
+        : String(m.template_key);
+      entityIdMap.set(`${m.entity_type}:${bare}`, m.discord_id);
+    }
   }
 
   // 4. Compute diff
-  const diff = computeStateDiff(desiredState, actualState, idMap);
+  const diff = computeStateDiff(desiredState, actualState, idMap, entityIdMap);
 
   // 5. Classify drift
   const rawDriftItems = classifyDrift(diff);
@@ -117,7 +128,7 @@ export async function runSyncCycle(
       if (item.suggestedAction !== 'repair') continue;
 
       try {
-        const repairResult = await repairDriftItem(guild, supabase, item, idMap);
+        const repairResult = await repairDriftItem(guild, supabase, item, idMap, entityIdMap);
         if (repairResult.success) {
           repaired++;
           log.info(`Auto-repaired ${item.entityType} "${item.entityName}": ${repairResult.action}`);
@@ -263,6 +274,7 @@ async function repairDriftItem(
   supabase: SupabaseClient,
   item: DriftItem,
   idMap: Map<string, string>,
+  entityIdMap?: Map<string, string>,
 ): Promise<RepairResult> {
   // Use DriftType + entityType to determine the right repair action
   switch (item.type) {
@@ -278,8 +290,8 @@ async function repairDriftItem(
           .eq('guild_id', guild.id)
           .single();
 
-        const desiredRoles = (desired?.roles ?? []) as Array<{ key: string; name: string; color?: number; permissions?: string; hoist?: boolean; mentionable?: boolean }>;
-        const roleDef = desiredRoles.find(r => r.key === roleKey);
+        const desiredRoles = (desired?.roles ?? []) as Array<DesiredRoleDef & { name: string }>;
+        const roleDef = desiredRoles.find(r => stripPrefix(desiredKeyOf(r)) === stripPrefix(roleKey));
         if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
 
         const created = await guild.roles.create({
@@ -312,16 +324,16 @@ async function repairDriftItem(
           .eq('guild_id', guild.id)
           .single();
 
-        const desiredChannels = (desired?.channels ?? []) as Array<{ key: string; name: string; type?: number; parentKey?: string; topic?: string }>;
-        const chanDef = desiredChannels.find(c => c.key === chanKey);
+        const desiredChannels = (desired?.channels ?? []) as Array<DesiredChannelDef & { name: string; parentKey?: string }>;
+        const chanDef = desiredChannels.find(c => stripPrefix(desiredKeyOf(c)) === stripPrefix(chanKey));
         if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
 
-        const parentId = chanDef.parentKey ? idMap.get(`category:${chanDef.parentKey}`) ?? undefined : undefined;
+        const parentId = chanDef.parentKey ? resolveDiscordId(idMap, 'category', chanDef.parentKey) : undefined;
         const created = await guild.channels.create({
           name: chanDef.name,
           type: chanDef.type ?? 0,
           parent: parentId,
-          topic: chanDef.topic,
+          topic: chanDef.topic ?? undefined,
           reason: 'SomniBot sync auto-repair — recreated missing channel',
         }) as { id: string };
 
@@ -364,11 +376,335 @@ async function repairDriftItem(
       return { success: false, action: 'manual_required', reason: `Extra ${item.entityType} not in desired config — manual cleanup recommended` };
     }
 
-    case 'EXTERNAL_CHANGE':
-    case 'HIERARCHY_DRIFT':
+    case 'EXTERNAL_CHANGE': {
+      // A tracked entity was modified outside the dashboard — re-apply desired state.
+      if (item.entityType === 'role') {
+        return await reapplyRoleDesiredState(guild, supabase, item, idMap);
+      }
+      if (item.entityType === 'channel') {
+        return await reapplyChannelDesiredState(guild, supabase, item, idMap);
+      }
+      if (item.entityType === 'category') {
+        // Categories are not persisted in guild_desired_state (only `roles` and
+        // `channels` JSONB columns exist — category defs are derived from channel
+        // `categoryKey`s at deploy time and never stored). There is therefore no
+        // desired category name to restore to, so routing this through the
+        // channel helper would only ever return a misleading "not in desired
+        // state" error. Surface it honestly for manual attention instead.
+        return {
+          success: false,
+          action: 'manual_required',
+          reason: 'Category external changes have no persisted desired state to restore — manual review required',
+        };
+      }
+      return { success: false, action: 'manual_required', reason: `External change repair not supported for ${item.entityType}` };
+    }
+
+    case 'HIERARCHY_DRIFT': {
+      // Role positions drifted from desired ordering — reorder to desired.
+      if (item.entityType !== 'role') {
+        return { success: false, action: 'manual_required', reason: `Hierarchy repair not supported for ${item.entityType}` };
+      }
+      return await reorderRolesToDesired(guild, supabase, item, idMap, entityIdMap);
+    }
+
     default:
       return { success: false, action: 'manual_required', reason: `Repair not implemented for ${item.type}` };
   }
+}
+
+interface DesiredRoleDef {
+  // Guilds store the key variantly depending on which write path produced the
+  // row: `key` (diff engine), `template_key`/`templateKey` (deploy/accept path).
+  key?: string;
+  template_key?: string;
+  templateKey?: string;
+  name?: string;
+  color?: number;
+  permissions?: string;
+  hoist?: boolean;
+  mentionable?: boolean;
+  position?: number;
+}
+
+interface DesiredChannelDef {
+  key?: string;
+  template_key?: string;
+  templateKey?: string;
+  name?: string;
+  type?: number;
+  topic?: string | null;
+  slowmode?: number;
+  nsfw?: boolean;
+}
+
+/**
+ * Re-apply a role's desired state after an external (non-permission) change:
+ * name / color / hoist / mentionable. Permissions are handled by PERMISSION_DRIFT.
+ * Idempotent — Discord's edit is a no-op when values already match.
+ */
+async function reapplyRoleDesiredState(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+
+  const role = guild.roles.cache.get(item.entityDiscordId);
+  if (!role) return { success: false, action: 'manual_required', reason: 'Role not in cache' };
+  if (role.managed) return { success: false, action: 'manual_required', reason: 'Role is managed by an integration' };
+
+  // Discord constraint: the bot can only edit roles strictly below its own highest role.
+  const botHighest = guild.members.me?.roles.highest.position;
+  if (typeof botHighest === 'number' && role.position >= botHighest) {
+    return { success: false, action: 'manual_required', reason: `Role "${role.name}" is at or above the bot's highest role — cannot edit` };
+  }
+
+  const roleKey = item.templateKey ?? findKeyForEntity(idMap, item.entityDiscordId, 'role');
+  if (!roleKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredRoles = (desired?.roles ?? []) as DesiredRoleDef[];
+  const roleDef = desiredRoles.find(r => stripPrefix(desiredKeyOf(r)) === stripPrefix(roleKey));
+  if (!roleDef) return { success: false, action: 'manual_required', reason: 'Role not in desired state' };
+
+  await role.edit({
+    name: roleDef.name ?? role.name,
+    color: roleDef.color ?? role.color,
+    hoist: roleDef.hoist ?? role.hoist,
+    mentionable: roleDef.mentionable ?? role.mentionable,
+    reason: 'SomniBot sync auto-repair — re-applied desired state after external change',
+  });
+
+  return { success: true, action: `Re-applied desired state to role "${roleDef.name ?? role.name}"` };
+}
+
+/**
+ * Re-apply a channel's desired state after an external change:
+ * name / topic / slowmode / nsfw. Idempotent.
+ */
+async function reapplyChannelDesiredState(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+): Promise<RepairResult> {
+  if (!item.entityDiscordId) return { success: false, action: 'manual_required', reason: 'No Discord ID' };
+
+  const channel = guild.channels.cache.get(item.entityDiscordId) as
+    | ({ name: string; edit: (opts: Record<string, unknown>) => Promise<unknown>; topic?: unknown; nsfw?: unknown; rateLimitPerUser?: unknown })
+    | undefined;
+  if (!channel) return { success: false, action: 'manual_required', reason: 'Channel not in cache' };
+
+  const chanKey = item.templateKey ?? findKeyForEntity(idMap, item.entityDiscordId, item.entityType);
+  if (!chanKey) return { success: false, action: 'manual_required', reason: 'No template key found' };
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('channels')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredChannels = (desired?.channels ?? []) as DesiredChannelDef[];
+  const chanDef = desiredChannels.find(c => stripPrefix(desiredKeyOf(c)) === stripPrefix(chanKey));
+  if (!chanDef) return { success: false, action: 'manual_required', reason: 'Channel not in desired state' };
+
+  const editOptions: Record<string, unknown> = {};
+  if (chanDef.name !== undefined) editOptions.name = chanDef.name;
+  if ('topic' in channel && chanDef.topic !== undefined) editOptions.topic = chanDef.topic;
+  if ('nsfw' in channel && chanDef.nsfw !== undefined) editOptions.nsfw = chanDef.nsfw;
+  if ('rateLimitPerUser' in channel && chanDef.slowmode !== undefined) editOptions.rateLimitPerUser = chanDef.slowmode;
+
+  await channel.edit({
+    ...editOptions,
+    reason: 'SomniBot sync auto-repair — re-applied desired state after external change',
+  });
+
+  return { success: true, action: `Re-applied desired state to ${item.entityType} "${chanDef.name ?? channel.name}"` };
+}
+
+/**
+ * Reorder roles to their desired relative positions.
+ *
+ * Desired state stores each role with a relative `position` (higher = higher in
+ * the hierarchy). We assign absolute positions immediately below the bot's own
+ * highest role, mirroring the deploy flow. Discord only lets the bot move roles
+ * strictly below its highest role, so:
+ *   - roles at/above the bot are excluded from the reorder set, and
+ *   - if the drifted target itself is at/above the bot, that's genuinely
+ *     impossible → manual_required.
+ * Idempotent — when the current ordering already matches desired, no API call
+ * is made.
+ */
+async function reorderRolesToDesired(
+  guild: Guild,
+  supabase: SupabaseClient,
+  item: DriftItem,
+  idMap: Map<string, string>,
+  entityIdMap?: Map<string, string>,
+): Promise<RepairResult> {
+  const botHighest = guild.members.me?.roles.highest.position;
+  if (typeof botHighest !== 'number') {
+    return { success: false, action: 'manual_required', reason: "Bot's highest role position is unknown" };
+  }
+
+  // The drifted target must be below the bot to be movable at all.
+  if (item.entityDiscordId) {
+    const targetRole = guild.roles.cache.get(item.entityDiscordId);
+    if (targetRole && targetRole.position >= botHighest) {
+      return {
+        success: false,
+        action: 'manual_required',
+        reason: `Role "${targetRole.name}" is at or above the bot's highest role — the bot cannot move it`,
+      };
+    }
+  }
+
+  const { data: desired } = await supabase
+    .from('guild_desired_state')
+    .select('roles')
+    .eq('guild_id', guild.id)
+    .single();
+
+  const desiredRoles = (desired?.roles ?? []) as DesiredRoleDef[];
+  if (desiredRoles.length === 0) {
+    return { success: false, action: 'manual_required', reason: 'No desired roles configured' };
+  }
+
+  // Resolve each desired role to a live Discord role. A desired role that
+  // resolves to a live, non-managed role sitting at/above the bot is a *blocker*:
+  // the bot cannot move it, so the full desired ordering is unachievable. We must
+  // NOT silently drop such a role and reorder only the remainder — doing so can
+  // turn an impossible repair into a false success (the excluded role keeps the
+  // hierarchy drifted while the movable subset looks "already ordered").
+  const sorted = [...desiredRoles].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+  const movable: Array<{ id: string; currentPosition: number }> = [];
+  for (const def of sorted) {
+    const defKey = desiredKeyOf(def);
+    if (!defKey) continue;
+    // ID map may store keys prefixed (`role:mod`) or bare (`mod`); try both.
+    // Pass the entity-typed map so a bare-key collision with a channel/category
+    // of the same key cannot resolve this role to the wrong Discord ID.
+    const discordId = resolveDiscordId(idMap, 'role', defKey, entityIdMap);
+    if (!discordId) continue;
+    const role = guild.roles.cache.get(discordId);
+    if (!role) continue;
+    if (role.managed) continue; // managed roles are Discord-controlled, not part of the reorder
+    if (role.position >= botHighest) {
+      // A desired, movable-in-principle role that is currently at/above the bot
+      // blocks a correct reorder — surface it for manual attention.
+      return {
+        success: false,
+        action: 'manual_required',
+        reason: `Role "${role.name}" is at or above the bot's highest role — the bot cannot reorder the hierarchy while it stays there`,
+      };
+    }
+    movable.push({ id: discordId, currentPosition: role.position });
+  }
+
+  if (movable.length === 0) {
+    return { success: false, action: 'manual_required', reason: 'No movable roles resolved from desired state' };
+  }
+
+  // Target absolute positions: contiguous band immediately below the bot,
+  // preserving desired relative order (lowest desired position → lowest slot).
+  const positionUpdates = movable.map((entry, index) => ({
+    role: entry.id,
+    position: Math.max(1, botHighest - movable.length + index),
+  }));
+
+  // Idempotent: skip the API call when the current relative ordering already
+  // matches the desired ordering. The diff engine treats equal actual positions
+  // as ordered (Discord positions are not guaranteed unique), so a tie is not an
+  // inversion here either — only a strict decrease means the hierarchy drifted.
+  const alreadyOrdered = movable.every((entry, index) => {
+    if (index === 0) return true;
+    return entry.currentPosition >= movable[index - 1].currentPosition;
+  });
+  if (alreadyOrdered) {
+    return { success: true, action: 'Role hierarchy already matches desired order' };
+  }
+
+  await guild.roles.setPositions(positionUpdates);
+  return { success: true, action: `Reordered ${positionUpdates.length} role(s) to desired hierarchy` };
+}
+
+/**
+ * Strip a leading "prefix:" (e.g. "role:mod" → "mod"). Desired-state keys and
+ * ID-map keys are stored inconsistently with/without the entity-type prefix.
+ * Tolerates undefined/empty input (some desired-state rows omit `key` entirely).
+ */
+function stripPrefix(key: string | undefined | null): string {
+  if (!key) return '';
+  const idx = key.indexOf(':');
+  return idx >= 0 ? key.slice(idx + 1) : key;
+}
+
+/**
+ * Read a desired-state entry's template key regardless of which shape the guild
+ * stored it as. The deploy/accept paths write `template_key`/`templateKey`,
+ * while the diff engine and older rows use `key`. Any of the three is accepted.
+ */
+function desiredKeyOf(
+  entry: { key?: string; template_key?: string; templateKey?: string },
+): string | undefined {
+  return entry.key ?? entry.template_key ?? entry.templateKey;
+}
+
+/**
+ * Resolve a desired-state entry's template key to a live Discord ID via the ID
+ * map, tolerating both prefixed (`role:mod`) and unprefixed (`mod`) storage on
+ * either side. The deploy listener persists raw keys (`template_key: m.key`),
+ * while the recreate path writes prefixed keys — so we try every combination.
+ */
+function resolveDiscordId(
+  idMap: Map<string, string>,
+  prefix: 'role' | 'channel' | 'category',
+  rawKey: string,
+  entityIdMap?: Map<string, string>,
+): string | undefined {
+  const bare = stripPrefix(rawKey);
+  // Prefer the flat prefixed key first (already entity-scoped), then the
+  // entity-typed map, which is the only source that survives a bare-key
+  // collision across entity types (a role and a channel both keyed `staff`).
+  const prefixed = idMap.get(`${prefix}:${bare}`);
+  if (prefixed) return prefixed;
+  if (entityIdMap) {
+    const typed = entityIdMap.get(`${prefix}:${bare}`) ?? entityIdMap.get(`${prefix}:${rawKey}`);
+    if (typed) return typed;
+  }
+  // Bare/raw fallback — but reject a hit that the entity-typed map shows belongs
+  // to a DIFFERENT entity type, so a channel row keyed `staff` cannot resolve as
+  // the role `staff`.
+  const bareHit = idMap.get(bare) ?? idMap.get(rawKey) ?? idMap.get(`${prefix}:${rawKey}`);
+  if (bareHit && entityIdMap && isForeignEntityId(entityIdMap, prefix, bareHit)) {
+    return undefined;
+  }
+  return bareHit;
+}
+
+/**
+ * True when `discordId` is registered in `entityIdMap` under an entity type
+ * other than `entityType` — used to reject a bare-key collision that actually
+ * belongs to a different entity.
+ */
+function isForeignEntityId(
+  entityIdMap: Map<string, string>,
+  entityType: 'role' | 'channel' | 'category',
+  discordId: string,
+): boolean {
+  for (const [key, id] of entityIdMap) {
+    if (id !== discordId) continue;
+    const type = key.includes(':') ? key.slice(0, key.indexOf(':')) : key;
+    if (type !== entityType) return true;
+  }
+  return false;
 }
 
 /**

@@ -59,6 +59,12 @@ export interface SomniLicenseConfig {
 
 export interface ValidationResponse {
   valid: boolean;
+  /**
+   * 'active' for a healthy license. 'grace_period' means the license is
+   * still valid but the customer's payment failed — access ends at
+   * `grace_period_ends_at` unless payment recovers. Apps should surface
+   * this to the user (e.g. "update your payment method").
+   */
   status: string;
   entitlement_id?: string;
   features?: string[];
@@ -66,6 +72,12 @@ export interface ValidationResponse {
   customer_discord_id?: string;
   customer_name?: string;
   expires_at?: string | null;
+  /**
+   * Set while `status` is 'grace_period' (and on rejections caused by a
+   * lapsed grace window): ISO timestamp at which the payment-failure grace
+   * period ends/ended. Null for healthy licenses.
+   */
+  grace_period_ends_at?: string | null;
   session_id?: string | null;
   heartbeat_interval_seconds?: number;
   error?: string;
@@ -74,6 +86,14 @@ export interface ValidationResponse {
 export interface HeartbeatResponse {
   valid: boolean;
   status: string;
+  /**
+   * Set when a still-valid session's entitlement has entered a payment-failure
+   * grace period (status 'grace_period'): ISO timestamp at which access ends
+   * unless payment recovers. Null/absent for healthy sessions. Lets apps that
+   * monitor license health via heartbeats surface the warning without a
+   * separate validation call.
+   */
+  grace_period_ends_at?: string | null;
   next_heartbeat_seconds: number;
 }
 
@@ -92,6 +112,20 @@ export class SomniLicense {
   private cacheExpiry: number = 0;
   private sessionId: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * W2 review — hard stop for a cached `grace_period` response, on the local
+   * monotonic timeline.
+   *
+   * `grace_period_ends_at` is a server-side hard deadline: once it passes the
+   * server rejects the key. The offline fallbacks (validate/heartbeat catch
+   * paths) must therefore never keep serving a cached grace success past it —
+   * otherwise a lapsed payment stays "valid" simply by going offline for the
+   * remainder of `offlineGraceMs`. Null unless the last successful validation
+   * was a grace response with a placeable deadline; cleared on any healthy
+   * (non-grace) validation.
+   */
+  private cachedGraceDeadlineMono: number | null = null;
 
   /**
    * V7 Audit §3.P3a — Server-time anchor for offline grace.
@@ -133,6 +167,42 @@ export class SomniLicense {
     return this.mono() - this.serverTimeAnchor.localMono;
   }
 
+  /**
+   * True when the cached success was a `grace_period` response whose
+   * server-side deadline has now passed on the local monotonic timeline.
+   * Used by the offline fallbacks to hard-stop a lapsed payment-grace license
+   * regardless of the (longer) offline grace window.
+   */
+  private cachedGraceLapsed(): boolean {
+    return this.cachedGraceDeadlineMono !== null && this.mono() >= this.cachedGraceDeadlineMono;
+  }
+
+  /**
+   * Place a server-side ISO deadline on the local monotonic timeline.
+   *
+   * Uses the server-time anchor when available (immune to local clock
+   * manipulation, V7 §3.P3a). `anchored` reports whether a real server-time
+   * anchor was used: when false, the mapping fell back to the local wall clock
+   * (`Date.now()`), which a behind/ahead client clock can skew — callers that
+   * must not TRUST an unanchored deadline (e.g. deciding a cache window) treat
+   * it conservatively rather than extending access on a possibly-wrong mono
+   * value (W2 P3). Returns null when the deadline is absent or unparseable.
+   */
+  private serverDeadlineToMono(
+    iso: string | null | undefined,
+  ): { mono: number; anchored: boolean } | null {
+    if (!iso) return null;
+    const epoch = new Date(iso).getTime();
+    if (isNaN(epoch)) return null;
+    if (this.serverTimeAnchor) {
+      return {
+        mono: this.serverTimeAnchor.localMono + (epoch - this.serverTimeAnchor.serverEpoch),
+        anchored: true,
+      };
+    }
+    return { mono: this.mono() + (epoch - Date.now()), anchored: false };
+  }
+
   constructor(config: SomniLicenseConfig) {
     this.config = {
       cacheTtlMs: 60_000,
@@ -169,12 +239,44 @@ export class SomniLicense {
 
       if (data.valid) {
         this.cachedResult = data;
-        // V5 Audit §3.1: monotonic clock for cache TTL
-        this.cacheExpiry = this.mono() + (this.config.cacheTtlMs ?? 60_000);
         this.sessionId = data.session_id ?? null;
 
-        // V7 Audit §3.P3a — anchor server time on successful validation
+        // V7 Audit §3.P3a — anchor server time on successful validation.
+        // (Anchored before the cache-expiry math below, which uses the
+        // anchor to place the server-side grace deadline on the local
+        // monotonic timeline.)
         this.anchorServerTime(res);
+
+        // V5 Audit §3.1: monotonic clock for cache TTL.
+        // W2 review: a grace_period response carries a hard server-side
+        // deadline (grace_period_ends_at) after which the server rejects
+        // the key — never cache past it. Otherwise a validation moments
+        // before the deadline would keep a revoked customer "valid" from
+        // cache for the remainder of the full TTL.
+        const ttlExpiry = this.mono() + (this.config.cacheTtlMs ?? 60_000);
+        const graceDeadline = this.serverDeadlineToMono(data.grace_period_ends_at);
+        if (graceDeadline === null) {
+          // Healthy (non-grace) response, or no/unparseable deadline: plain TTL.
+          this.cacheExpiry = ttlExpiry;
+          this.cachedGraceDeadlineMono = null;
+        } else if (graceDeadline.anchored) {
+          // Grace response with a trustworthy deadline: cap the cache at it,
+          // and remember it so the OFFLINE fallbacks (validate/heartbeat catch)
+          // stop serving this cached grace success once it passes.
+          this.cacheExpiry = Math.min(ttlExpiry, graceDeadline.mono);
+          this.cachedGraceDeadlineMono = graceDeadline.mono;
+        } else {
+          // W2 P3: grace deadline present but NOT server-time-anchored (e.g. a
+          // cross-origin fetch that does not expose the Date header). A behind
+          // client clock could push graceDeadline.mono past the payment cutoff,
+          // so we cannot TRUST it as either a cache window or an offline stop.
+          // Make it non-cacheable — force a server revalidation on the very
+          // next call — and treat the offline grace as already lapsed (mono
+          // "now"), so if that revalidation is offline the fallback rejects
+          // instead of riding out offlineGraceMs on an unverifiable deadline.
+          this.cacheExpiry = this.mono();
+          this.cachedGraceDeadlineMono = this.mono();
+        }
 
         // Auto-start heartbeat — prefer config override, then server-provided interval.
         // V5 Audit §3.P3a: heartbeatIntervalSeconds config option.
@@ -193,7 +295,11 @@ export class SomniLicense {
       const graceMs = this.config.offlineGraceMs ?? 86_400_000;
       const elapsed = this.elapsedSinceAnchor();
 
-      if (this.cachedResult?.valid && elapsed < graceMs) {
+      // W2 review: the payment-failure grace deadline is a HARD server-side
+      // stop. If the cached success was a grace_period response and that
+      // deadline has now passed, the offline window must NOT ride it out —
+      // clear the cache and reject exactly as an elapsed offline grace would.
+      if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
         return { ...this.cachedResult, status: 'offline_grace' };
       }
 
@@ -202,6 +308,7 @@ export class SomniLicense {
       // Clear the stale cache and stop heartbeats to prevent zombie sessions.
       if (this.cachedResult) {
         this.cachedResult = null;
+        this.cachedGraceDeadlineMono = null;
         this.stopHeartbeat();
         return { valid: false, status: 'offline_grace_expired' };
       }
@@ -237,8 +344,70 @@ export class SomniLicense {
       // V7 Audit §3.P3a — refresh server time anchor on successful heartbeat
       if (data.valid) {
         this.anchorServerTime(res);
+        // W2: the entitlement may have ENTERED grace after the initial
+        // validation (payment failed mid-session). The heartbeat now reports
+        // status 'grace_period' + a deadline. We must both (a) record the
+        // offline hard-stop so a subsequent offline heartbeat/validate rejects
+        // once it passes, AND (b) cap the ONLINE validation cache at the same
+        // deadline and rewrite the cached response to reflect grace — otherwise
+        // validate()/isValid() keep serving the stale 'active' cache (from the
+        // initial validation) past the deadline until the original, possibly
+        // much longer, cacheTtlMs elapses. Only an anchored deadline is trusted
+        // (same P3 reasoning as validate()); an unanchored one is treated as an
+        // immediate stop (non-cacheable + offline reject). A healthy heartbeat
+        // clears any prior grace stop but leaves the existing cache window alone.
+        if (data.status === 'grace_period') {
+          const graceDeadline = this.serverDeadlineToMono(data.grace_period_ends_at);
+          if (graceDeadline === null) {
+            // No/unparseable deadline: keep any prior stop, leave cache as-is.
+          } else if (graceDeadline.anchored) {
+            this.cachedGraceDeadlineMono = graceDeadline.mono;
+            // Cap the online cache at the deadline (never EXTEND it) and rewrite
+            // the cached success so validate()/isValid() surface grace and stop
+            // exactly at the deadline.
+            this.cacheExpiry = Math.min(this.cacheExpiry, graceDeadline.mono);
+            if (this.cachedResult) {
+              this.cachedResult = {
+                ...this.cachedResult,
+                status: 'grace_period',
+                grace_period_ends_at: data.grace_period_ends_at,
+              };
+            }
+          } else {
+            // Unanchored deadline: cannot be trusted. Force revalidation on the
+            // next validate() and treat the offline stop as already lapsed.
+            this.cachedGraceDeadlineMono = this.mono();
+            this.cacheExpiry = this.mono();
+            if (this.cachedResult) {
+              this.cachedResult = {
+                ...this.cachedResult,
+                status: 'grace_period',
+                grace_period_ends_at: data.grace_period_ends_at,
+              };
+            }
+          }
+        } else {
+          this.cachedGraceDeadlineMono = null;
+          // W2 codex: payment recovered — the heartbeat now reports a
+          // non-grace status (e.g. 'active'). A PRIOR grace heartbeat may have
+          // rewritten cachedResult.status to 'grace_period' (and stamped a
+          // deadline) above; clearing only the deadline mono leaves that stale
+          // grace payload in the cache, so validate()/isValid() keep returning
+          // 'grace_period' until the original cacheTtlMs elapses and apps that
+          // treat status !== 'active' as unhealthy keep restricting a recovered
+          // customer. Reconcile the cached payload back to the heartbeat's
+          // status and drop the stale deadline.
+          if (this.cachedResult) {
+            this.cachedResult = {
+              ...this.cachedResult,
+              status: data.status ?? this.cachedResult.status,
+              grace_period_ends_at: null,
+            };
+          }
+        }
       } else {
         this.cachedResult = null;
+        this.cachedGraceDeadlineMono = null;
         this.stopHeartbeat();
       }
 
@@ -248,10 +417,14 @@ export class SomniLicense {
       // A network error during heartbeat should still respect the offline grace window.
       const graceMs = this.config.offlineGraceMs ?? 86_400_000;
       const elapsed = this.elapsedSinceAnchor();
-      if (this.cachedResult?.valid && elapsed < graceMs) {
+      // W2 review: same hard stop as validate()'s offline path — a lapsed
+      // payment-grace deadline overrides the offline window, so a heartbeat
+      // cannot keep a session alive past the server-side grace cutoff.
+      if (this.cachedResult?.valid && !this.cachedGraceLapsed() && elapsed < graceMs) {
         return { valid: true, status: 'offline', next_heartbeat_seconds: 300 };
       }
       this.cachedResult = null;
+      this.cachedGraceDeadlineMono = null;
       this.stopHeartbeat();
       return { valid: false, status: 'offline_grace_expired', next_heartbeat_seconds: 0 };
     }
@@ -280,6 +453,7 @@ export class SomniLicense {
       const data: DeactivateResponse = await res.json();
       this.sessionId = null;
       this.cachedResult = null;
+      this.cachedGraceDeadlineMono = null;
       return data;
     } catch (err) {
       return {

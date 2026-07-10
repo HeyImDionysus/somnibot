@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
   // Check entitlement
   const { data: entitlement } = await supabase
     .from('entitlements')
-    .select('status')
+    .select('status, grace_period_ends_at')
     .eq('license_key_id', licenseKey.id)
     .single();
 
@@ -67,6 +67,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       valid: false,
       status: entitlement?.status ?? 'revoked',
+      next_heartbeat_seconds: 0,
+    });
+  }
+
+  // W2: compute the grace window at heartbeat time — a lapsed-but-
+  // unreconciled grace_period row must not keep the session alive until the
+  // next reconciliation sweep. Reject only; reconciliation owns the status
+  // transition (audit trail + role revocation).
+  if (
+    entitlement.status === 'grace_period' &&
+    entitlement.grace_period_ends_at &&
+    new Date(entitlement.grace_period_ends_at) < new Date()
+  ) {
+    return NextResponse.json({
+      valid: false,
+      status: 'expired',
       next_heartbeat_seconds: 0,
     });
   }
@@ -99,9 +115,18 @@ export async function POST(req: NextRequest) {
     .eq('product_id', licenseKey.product_id)
     .maybeSingle();
 
+  // W2 codex round 3: an entitlement can enter grace AFTER the initial
+  // validation (payment fails mid-session). The lapsed-deadline branch above
+  // already rejects an EXPIRED grace window; here the window is still open, so
+  // the session stays valid — but surface `grace_period` (and the deadline)
+  // instead of masking it as 'active'. Apps that monitor license health via
+  // heartbeats would otherwise never see the payment-failure warning until a
+  // separate validation happened.
+  const inGracePeriod = entitlement.status === 'grace_period';
   return NextResponse.json({
     valid: true,
-    status: 'active',
+    status: inGracePeriod ? 'grace_period' : 'active',
+    grace_period_ends_at: inGracePeriod ? entitlement.grace_period_ends_at : null,
     next_heartbeat_seconds: config?.heartbeat_interval_seconds ?? 300,
   });
 }

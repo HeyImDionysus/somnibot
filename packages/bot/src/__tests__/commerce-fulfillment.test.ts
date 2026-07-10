@@ -9,6 +9,10 @@ vi.mock('@somnibot/shared', () => ({
   createLogger: () => ({
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   }),
+  // commerce-fulfillment reads the configured grace window via this shared
+  // helper; the mock returns the default so the suspend flow proceeds.
+  getGracePeriodDays: vi.fn(async () => 3),
+  DEFAULT_GRACE_PERIOD_DAYS: 3,
 }));
 
 vi.mock('discord.js', () => ({
@@ -56,6 +60,9 @@ vi.mock('../services/audit.js', () => ({
 }));
 
 import { CommerceFulfillmentService, type FulfillmentPayload } from '../services/commerce-fulfillment.js';
+// Mocked above — imported here so the wiring test can override its return
+// value and assert commerce-fulfillment threads it into suspend().
+import { getGracePeriodDays } from '@somnibot/shared';
 
 function makeChain(result: any = { data: null, error: null }) {
   const chain: any = {};
@@ -188,6 +195,22 @@ describe('CommerceFulfillmentService', () => {
       const payload = { ...basePayload, fulfillment_type: 'subscription_suspended' };
       const result = await service.fulfill(payload);
       expect(result.eventEmitted).toBe(true);
+    });
+
+    it("suspends with the guild's configured grace window from getGracePeriodDays (single source of truth)", async () => {
+      // Codex round-2 finding #1: the bot's suspend path must read the
+      // configured window via the shared helper, not a hardcoded value —
+      // the same source of truth the dashboard's manual PUT uses. Return a
+      // distinctive 9 so a hardcoded default (3) would fail this assertion.
+      (getGracePeriodDays as ReturnType<typeof vi.fn>).mockResolvedValueOnce(9);
+      const supa = makeSupa({ entitlements: [{ id: 'ent-1' }] });
+      service = new CommerceFulfillmentService(makeGuild(), supa as any, eventBus);
+
+      const payload = { ...basePayload, fulfillment_type: 'subscription_suspended' };
+      await service.fulfill(payload);
+
+      expect(getGracePeriodDays).toHaveBeenCalledWith(supa, payload.guild_id);
+      expect(mockSuspend).toHaveBeenCalledWith('ent-1', 9);
     });
   });
 

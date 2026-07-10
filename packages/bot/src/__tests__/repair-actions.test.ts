@@ -95,6 +95,106 @@ describe('repair-actions', () => {
       // May succeed or fail depending on mock chain
       expect(result).toBeDefined();
     });
+
+    it('accepting HIERARCHY_DRIFT rewrites desired positions to the observed order', async () => {
+      // Desired ordering has member(0) below admin(1). Live Discord shows the
+      // inverse — member ABOVE admin. Accepting the drift must persist that
+      // observed ordering as the new desired positions, otherwise the next diff
+      // recomputes the same inversion and re-adds the drift forever.
+      const captured: { roles?: any[] } = {};
+      const desiredRow = {
+        roles: [
+          { template_key: 'admin', position: 1 },
+          { template_key: 'member', position: 0 },
+        ],
+      };
+      const mappingsRows = [
+        { template_key: 'admin', discord_id: 'r-admin' },
+        { template_key: 'member', discord_id: 'r-member' },
+      ];
+
+      // Table-aware supabase stub: desired-state reads/writes, role mappings list.
+      function chainFor(table: string) {
+        const c: any = {};
+        for (const m of ['from', 'select', 'insert', 'delete', 'eq', 'order', 'limit', 'in', 'match', 'upsert', 'neq']) {
+          c[m] = vi.fn(() => c);
+        }
+        c.update = vi.fn((payload: any) => {
+          if (table === 'guild_desired_state' && Array.isArray(payload?.roles)) {
+            captured.roles = payload.roles;
+          }
+          return c;
+        });
+        const single =
+          table === 'guild_desired_state'
+            ? { data: desiredRow, error: null }
+            : { data: null, error: null };
+        c.single = vi.fn(async () => single);
+        c.maybeSingle = vi.fn(async () => single);
+        c.then = (resolve: Function) =>
+          resolve({
+            data:
+              table === 'discord_id_map'
+                ? mappingsRows
+                : table === 'guild_desired_state'
+                  ? [desiredRow]
+                  : [],
+            error: null,
+          });
+        return c;
+      }
+      const supa: any = { from: vi.fn((table: string) => chainFor(table)), rpc: vi.fn(async () => ({ data: null, error: null })) };
+
+      // Guild cache: member sits ABOVE admin (positions inverted vs desired).
+      const guild = makeGuild();
+      guild.roles.cache.set('r-admin', { id: 'r-admin', name: 'Admin', position: 3, managed: false });
+      guild.roles.cache.set('r-member', { id: 'r-member', name: 'Member', position: 9, managed: false });
+
+      const drift = {
+        type: 'HIERARCHY_DRIFT',
+        entityType: 'role',
+        entityName: 'Role hierarchy',
+        entityDiscordId: 'r-admin',
+        templateKey: 'admin',
+        suggestedAction: 'accept',
+      };
+
+      const result = await acceptDriftItem(guild, supa as any, drift as any);
+      expect(result.success).toBe(true);
+
+      // Desired positions now reflect the observed order. Position is "higher =
+      // higher in hierarchy", and on Discord member(9) sits ABOVE admin(3), so
+      // admin gets the lower desired position (0) and member the higher (1).
+      expect(captured.roles).toBeDefined();
+      const byKey = new Map(captured.roles!.map((r) => [r.template_key, r.position]));
+      expect(byKey.get('admin')).toBe(0);
+      expect(byKey.get('member')).toBe(1);
+    });
+
+    it('rejects HIERARCHY_DRIFT accept when fewer than two roles resolve', async () => {
+      // Only one mapped role resolves to a live role → there is no ordering to
+      // accept, so the accept must fail rather than silently clearing the drift.
+      const desiredRow = { roles: [{ template_key: 'admin', position: 0 }] };
+      function chainFor(table: string) {
+        const c: any = {};
+        for (const m of ['from', 'select', 'insert', 'update', 'delete', 'eq', 'order', 'limit', 'in', 'match', 'upsert', 'neq']) {
+          c[m] = vi.fn(() => c);
+        }
+        const single = table === 'guild_desired_state' ? { data: desiredRow, error: null } : { data: null, error: null };
+        c.single = vi.fn(async () => single);
+        c.maybeSingle = vi.fn(async () => single);
+        c.then = (resolve: Function) =>
+          resolve({ data: table === 'discord_id_map' ? [{ template_key: 'admin', discord_id: 'r-admin' }] : [], error: null });
+        return c;
+      }
+      const supa: any = { from: vi.fn((table: string) => chainFor(table)), rpc: vi.fn(async () => ({ data: null, error: null })) };
+      const guild = makeGuild();
+      guild.roles.cache.set('r-admin', { id: 'r-admin', name: 'Admin', position: 3, managed: false });
+
+      const drift = { type: 'HIERARCHY_DRIFT', entityType: 'role', entityName: 'Role hierarchy', entityDiscordId: 'r-admin', templateKey: 'admin' };
+      const result = await acceptDriftItem(guild, supa as any, drift as any);
+      expect(result.success).toBe(false);
+    });
   });
 
   describe('ignoreDriftItem', () => {

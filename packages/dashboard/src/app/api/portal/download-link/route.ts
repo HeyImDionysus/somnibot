@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { generateSignedDownloadUrl } from '@/lib/api/signed-url';
 import { rateLimits } from '@/lib/api/rate-limit';
+import { isEntitlementAccessLive } from '@somnibot/shared';
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -57,18 +58,27 @@ export async function POST(request: NextRequest) {
 
     const { productId, fileId } = parsed.data;
 
-    // Verify entitlement exists
-    const { data: entitlement } = await admin
+    // Verify entitlement exists AND is currently live. W2 codex: a
+    // `grace_period` row whose deadline has lapsed but which reconciliation
+    // (runs every ~6h) has not yet expired must NOT mint a download link —
+    // otherwise the portal keeps serving a customer whose license the SDK
+    // already rejects. Recompute the grace window here with the same predicate
+    // license/validate + heartbeat use.
+    //
+    // A customer may hold more than one candidate row for the same product (a
+    // re-buy, or overlapping subscription + manual grant). Fetch the whole
+    // candidate set — not an arbitrary `.limit(1)` row — and mint the link if
+    // ANY of them is still live, so one lapsed grace row cannot mask another
+    // that is active or in an unexpired grace window.
+    const { data: entitlements } = await admin
       .from('entitlements')
-      .select('id')
+      .select('id, status, grace_period_ends_at')
       .eq('customer_id', session.customer_id)
       .eq('product_id', productId)
       .eq('guild_id', session.guild_id)
-      .in('status', ['active', 'grace_period'])
-      .limit(1)
-      .maybeSingle();
+      .in('status', ['active', 'grace_period']);
 
-    if (!entitlement) {
+    if (!entitlements?.some((e) => isEntitlementAccessLive(e))) {
       return NextResponse.json({ error: 'No active entitlement for this product' }, { status: 403 });
     }
 

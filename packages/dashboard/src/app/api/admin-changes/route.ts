@@ -9,46 +9,12 @@ import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
+import { validateUndoPayload } from '@/lib/api/undo-allowlist';
 
 const undoChangeSchema = z.object({
   action: z.literal('undo'),
   id: z.string().uuid(),
 });
-
-/**
- * Allowlist of tables the undo route may target.
- *
- * The undo_payload.table field is server-written, but a compromised DB row
- * could point it at any table. This set constrains undo to only the tables
- * that the admin-changes system legitimately modifies.
- */
-const UNDOABLE_TABLES = new Set([
-  'guild_config',
-  'products',
-  'product_files',
-  'product_license_config',
-  'level_rewards',
-  'xp_multipliers',
-  'reaction_roles',
-  'automod_rules',
-  'custom_commands',
-  'ticket_panels',
-  'embed_configs',
-  'scheduled_messages',
-  'automations',
-  'economy_items',
-  'stats_channels',
-  'temp_channel_hubs',
-  'channel_templates',
-  'giveaways',
-  'polls',
-  'predictions',
-  'tutorial_configs',
-  'tutorial_steps',
-  'role_templates',
-  'alerts',
-  'fraud_rules',
-]);
 
 export async function GET(request: NextRequest) {
   try {
@@ -110,22 +76,56 @@ export async function POST(request: NextRequest) {
     if (!change.is_undoable) return NextResponse.json({ error: 'Change is not undoable' }, { status: 400 });
     if (change.is_undone) return NextResponse.json({ error: 'Change already undone' }, { status: 400 });
 
-    // Apply the undo payload
-    const undo = change.undo_payload as Record<string, unknown> | null;
-    if (undo?.table && undo?.data && undo?.match) {
-      // Reject undo if the target table is not in the allowlist.
-      const tableName = undo.table as string;
-      if (!UNDOABLE_TABLES.has(tableName)) {
+    // Apply the undo payload.
+    //
+    // undo_payload is read back from a stored row, so a corrupted or tampered
+    // row could steer this write at a non-allowlisted table (e.g. users,
+    // guild_secrets) or at columns undo never legitimately touches. Re-validate
+    // the resolved table AND every column against the allowlist at APPLY time
+    // and never trust the payload's own table/column names. A present-but-off-
+    // list payload is rejected here, before any DB write.
+    const undo = change.undo_payload;
+    if (undo !== null && undo !== undefined) {
+      const validation = validateUndoPayload(undo, { guildId: ctx.guildId });
+      if (!validation.ok) {
         return NextResponse.json(
-          { error: `Undo blocked: table "${tableName}" is not in the allowlist` },
+          { error: `Undo blocked: ${validation.reason}` },
           { status: 400 },
         );
       }
 
+      // For tables with no guild column of their own (e.g.
+      // product_license_config), the allowlist can't confine the write to this
+      // guild synchronously. Resolve the row's owning guild through its parent
+      // table and verify it against ctx.guildId BEFORE applying, so a tampered
+      // undo row can't reach across tenants by naming another guild's key.
+      if (validation.tenancyCheck) {
+        const { foreignTable, foreignKey, keyValue, foreignGuildColumn } =
+          validation.tenancyCheck;
+        const { data: owner, error: ownerError } = await admin
+          .from(foreignTable)
+          .select(foreignGuildColumn)
+          .eq(foreignKey, keyValue as string)
+          .maybeSingle();
+
+        if (ownerError) return dbError(ownerError, 'admin-changes');
+        // foreignTable/foreignGuildColumn are dynamic, so the generated
+        // Supabase types can't narrow the row shape; read the guild value
+        // through an unknown-first cast.
+        const ownerGuild =
+          owner && ((owner as unknown as Record<string, unknown>)[foreignGuildColumn]);
+        if (!owner || ownerGuild !== ctx.guildId) {
+          return NextResponse.json(
+            { error: 'Undo blocked: target does not belong to this guild' },
+            { status: 400 },
+          );
+        }
+      }
+
       const { error: undoError } = await admin
-        .from(tableName)
-        .update(undo.data as Record<string, unknown>)
-        .match(undo.match as Record<string, unknown>);
+        .from(validation.table)
+        .update(validation.data)
+        .match(validation.match);
 
       if (undoError) return dbError(undoError, 'admin-changes');
     }

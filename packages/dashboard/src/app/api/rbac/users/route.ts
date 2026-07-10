@@ -9,7 +9,7 @@ import { requirePermission, authErrorResponse } from '@/lib/rbac';
 import { z } from 'zod';
 import { parseBody } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { CSRF_COOKIE_NAME } from '@/lib/api/csrf';
+import { invalidateCsrfCookies } from '@/lib/api/csrf';
 import { dbError } from '@/lib/api/response';
 
 const rbacUserAssign = z.object({
@@ -129,10 +129,12 @@ export async function POST(request: NextRequest) {
     if (error) return dbError(error, 'rbac/users');
 
     // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
-    // Clearing the cookie forces a re-fetch of /api/csrf, which re-derives
-    // the token from the (now changed) session state.
+    // Clearing the cookies forces a re-fetch of /api/csrf, which re-derives
+    // the token from the (now changed) session state. Both the current and the
+    // rotation `prev` cookie are cleared — otherwise a tab that rotated within
+    // the last grace window could keep passing its pre-change token via `prev`.
     const resp = NextResponse.json({ success: true, data });
-    resp.cookies.delete(CSRF_COOKIE_NAME);
+    invalidateCsrfCookies(resp);
     return resp;
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -160,9 +162,11 @@ export async function DELETE(request: NextRequest) {
 
     if (error) return dbError(error, 'rbac/users');
 
-    // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change.
+    // V9 Audit §1.P2: Invalidate CSRF tokens after privilege change. Clears both
+    // the current and rotation `prev` cookie so a stale tab cannot keep passing
+    // its pre-change token via the grace window.
     const resp = NextResponse.json({ success: true });
-    resp.cookies.delete(CSRF_COOKIE_NAME);
+    invalidateCsrfCookies(resp);
     return resp;
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Unknown error';

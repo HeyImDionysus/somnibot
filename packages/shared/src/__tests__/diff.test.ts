@@ -434,3 +434,302 @@ describe('classifyDrift', () => {
     });
   });
 });
+
+// ── Role hierarchy drift (reachability of HIERARCHY_DRIFT) ────
+// These prove the PRODUCTION classifier emits HIERARCHY_DRIFT for real role
+// position moves — the sync-engine reorder repair is only reachable because of
+// this. Without a real producer, that repair branch would be dead code.
+describe('computeStateDiff — role hierarchy drift', () => {
+  it('detects hierarchy drift when mapped roles are out of desired order', () => {
+    // Desired: member(0) < mod(1) < admin(2). Actual Discord positions scramble
+    // mod above admin, so the desired order is no longer reflected.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 3 }),
+        makeActualRole('r-mod', { position: 10 }), // drifted above admin
+        makeActualRole('r-member', { position: 1 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+    expect(diff.roleHierarchyDriftId).toBeDefined();
+    expect(diff.roleHierarchyDriftKey).toBeDefined();
+  });
+
+  it('reports no hierarchy drift when mapped roles are in desired order', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 12 }),
+        makeActualRole('r-mod', { position: 11 }),
+        makeActualRole('r-member', { position: 10 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
+  it('resolves roles from unprefixed ID-map keys (deploy-listener shape)', () => {
+    // deploy-listener persists template_key = raw key (no "role:" prefix).
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 2 }),
+        makeActualRole('r-member', { position: 5 }), // member above admin → drift
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['admin', 'r-admin'],
+      ['member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+  });
+
+  it('does NOT flag drift when adjacent roles share the same actual position (tie)', () => {
+    // Discord role positions are not guaranteed unique. Two desired roles that
+    // legitimately resolve to the same numeric position are NOT an inversion —
+    // reporting drift here would fire forever and the repair could never clear it.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 7 }),
+        makeActualRole('r-member', { position: 7 }), // tie with admin
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
+  it('flags drift on a strict inversion even when another pair ties', () => {
+    // member(0) < mod(1) < admin(2) desired. Actual: member ties mod (both 5),
+    // but admin sits strictly below mod → a real inversion at admin.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2 }),
+        makeDesiredRole('mod', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 3 }), // below mod → inversion
+        makeActualRole('r-mod', { position: 5 }),
+        makeActualRole('r-member', { position: 5 }), // ties mod, benign
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+  });
+
+  it('disambiguates bare role keys by entity type so a channel mapping cannot mask a role', () => {
+    // Both a role and a channel are keyed with the bare template_key "staff".
+    // deploy-listener persists bare keys, and the flat idMap can only hold one
+    // "staff" entry — here the CHANNEL row won (last writer), so a naive bare
+    // lookup for role "staff" would resolve to the channel's Discord ID, the
+    // role would be dropped from the hierarchy comparison, and a real inversion
+    // would go undetected. The entity-typed map must rescue the role lookup.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('staff', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-staff', { position: 2 }),
+        makeActualRole('r-member', { position: 7 }), // member above staff → inversion
+      ],
+    });
+    // Flat map: the channel "staff" clobbered the role "staff" (bare-key collision).
+    const idMap = new Map<string, string>([
+      ['staff', 'c-staff-channel'], // channel id, NOT the role
+      ['member', 'r-member'],
+    ]);
+    // Entity-typed map preserves entity_type from the real table primary key.
+    const entityIdMap = new Map<string, string>([
+      ['role:staff', 'r-staff'],
+      ['channel:staff', 'c-staff-channel'],
+      ['role:member', 'r-member'],
+    ]);
+
+    // Without the entity map the collision would hide the drift…
+    const naive = computeStateDiff(desired, actual, idMap);
+    expect(naive.roleHierarchyDrift).toBe(false); // role "staff" dropped → no pair
+
+    // …but with it, the role resolves correctly and the inversion is detected.
+    // The representative is the higher-desired role sitting too low: "staff".
+    const diff = computeStateDiff(desired, actual, idMap, entityIdMap);
+    expect(diff.roleHierarchyDrift).toBe(true);
+    expect(diff.roleHierarchyDriftKey).toBe('staff');
+    expect(diff.roleHierarchyDriftId).toBe('r-staff');
+  });
+
+  it('rejects a bare-key flat-map hit that belongs to another entity type', () => {
+    // No prefixed and no entity-typed role entry for "staff" — only a bare
+    // flat-map entry that actually points at a channel. The isForeignEntityId
+    // guard must refuse it rather than resolving the role to a channel ID.
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('staff', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-member', { position: 7 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['staff', 'c-staff-channel'], // bare hit, but it's a channel
+      ['member', 'r-member'],
+    ]);
+    const entityIdMap = new Map<string, string>([
+      ['channel:staff', 'c-staff-channel'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap, entityIdMap);
+    // Only "member" resolves to a live role → fewer than two → no false drift,
+    // and crucially "staff" did NOT resolve to the channel id.
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+
+  it('ignores managed roles when evaluating hierarchy order', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('bot', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-bot', { position: 5, managed: true }), // integration role
+        makeActualRole('r-member', { position: 10 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:bot', 'r-bot'],
+      ['role:member', 'r-member'],
+    ]);
+
+    // Only one non-managed mapped role remains → cannot be "out of order".
+    const diff = computeStateDiff(desired, actual, idMap);
+    expect(diff.roleHierarchyDrift).toBe(false);
+  });
+});
+
+describe('classifyDrift — HIERARCHY_DRIFT emission', () => {
+  it('emits a repairable HIERARCHY_DRIFT item from a real drifted diff', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 2, name: 'Admin' }),
+        makeDesiredRole('mod', { position: 1, name: 'Mod' }),
+        makeDesiredRole('member', { position: 0, name: 'Member' }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { name: 'Admin', position: 3 }),
+        makeActualRole('r-mod', { name: 'Mod', position: 10 }),
+        makeActualRole('r-member', { name: 'Member', position: 1 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:mod', 'r-mod'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const diff = computeStateDiff(desired, actual, idMap);
+    const items = classifyDrift(diff);
+    const hierarchy = items.find(i => i.type === 'HIERARCHY_DRIFT');
+    expect(hierarchy).toBeDefined();
+    expect(hierarchy).toMatchObject({
+      type: 'HIERARCHY_DRIFT',
+      entityType: 'role',
+      suggestedAction: 'repair',
+    });
+    expect(hierarchy!.entityDiscordId).toBeDefined();
+    expect(hierarchy!.templateKey).toBeDefined();
+  });
+
+  it('does not emit HIERARCHY_DRIFT when ordering matches', () => {
+    const desired = baseDesiredState({
+      roles: [
+        makeDesiredRole('admin', { position: 1 }),
+        makeDesiredRole('member', { position: 0 }),
+      ],
+    });
+    const actual = baseActualState({
+      roles: [
+        makeActualRole('guild-id', { name: '@everyone' }),
+        makeActualRole('r-admin', { position: 5 }),
+        makeActualRole('r-member', { position: 2 }),
+      ],
+    });
+    const idMap = new Map<string, string>([
+      ['role:admin', 'r-admin'],
+      ['role:member', 'r-member'],
+    ]);
+
+    const items = classifyDrift(computeStateDiff(desired, actual, idMap));
+    expect(items.find(i => i.type === 'HIERARCHY_DRIFT')).toBeUndefined();
+  });
+});
