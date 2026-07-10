@@ -14,7 +14,8 @@ import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError } from '@/lib/api/response';
+import { dbError, apiError } from '@/lib/api/response';
+import { assertProductRolesNotIncomeEarning } from '@/lib/api/commerce-income-wall';
 // ── PayPal Helpers ─────────────────────────────────────
 
 type PayPalSyncResult =
@@ -254,6 +255,20 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Compliance wall: a PAID product's granted roles must not earn role-income
+  // (real money → wagerable currency). Checked before any PayPal call or DB
+  // write so a rejected product creates nothing.
+  const rolesToGrant = granted_role_ids ?? [];
+  const wall = await assertProductRolesNotIncomeEarning(
+    supabase,
+    guildId,
+    rolesToGrant,
+    type !== 'free',
+  );
+  if (!wall.ok) {
+    return apiError(wall.message, 409);
+  }
+
   interface PlanDefinition {
     name?: string;
     interval_unit?: string;
@@ -400,6 +415,33 @@ export async function PUT(req: NextRequest) {
 
   if (!id) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
+  }
+
+  // Compliance wall: if this update sets granted roles (or flips the product
+  // to paid), reject roles that already earn role-income. `type` is optional
+  // on update, so fall back to the stored type to decide paid-ness.
+  if ('granted_role_ids' in updates || 'type' in updates) {
+    const { data: existing } = await supabase
+      .from('products')
+      .select('type, granted_role_ids')
+      .eq('id', id)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+
+    const effectiveType = (updates.type ?? existing?.type) as string | undefined;
+    const effectiveRoles = ('granted_role_ids' in updates
+      ? updates.granted_role_ids
+      : existing?.granted_role_ids) ?? [];
+
+    const wall = await assertProductRolesNotIncomeEarning(
+      supabase,
+      guildId,
+      effectiveRoles,
+      effectiveType !== 'free',
+    );
+    if (!wall.ok) {
+      return apiError(wall.message, 409);
+    }
   }
 
   // `updates` contains ONLY the writable product columns: schemas.product.update

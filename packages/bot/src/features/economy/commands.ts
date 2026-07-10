@@ -16,6 +16,7 @@ import {
 } from 'discord.js';
 import type { SomniClient } from '../../client.js';
 import type { EconomyManager } from './economy-manager.js';
+import { getCommerceHeldRoleIds } from './commerce-role-guard.js';
 
 // ── Command builders ──────────────────────────────────────
 
@@ -571,11 +572,35 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
 
   const memberRoles = member.roles;
   const roleCache = 'cache' in memberRoles ? (memberRoles as { cache: Map<string, unknown> }).cache : new Map();
+
+  // COMPLIANCE WALL (defense-in-depth): a role the user holds via a commerce
+  // (real-money) grant must never earn wagerable game currency, even if it was
+  // misconfigured with role-income. Compute the excluded set once, over only
+  // the roles that are both configured for income AND actually held, so the
+  // commerce query stays cheap. See commerce-role-guard.ts for the rationale.
+  const heldConfiguredRoleIds = roleIncomes
+    .filter((ri) => roleCache.has(ri.role_id))
+    .map((ri) => ri.role_id);
+  const commerceHeldRoleIds = await getCommerceHeldRoleIds(
+    client.supabase,
+    interaction.guildId!,
+    interaction.user.id,
+    heldConfiguredRoleIds,
+  );
+
   let totalIncome = 0;
   let collected = 0;
+  let excludedCommerce = 0;
 
   for (const ri of roleIncomes) {
     if (!roleCache.has(ri.role_id)) continue;
+
+    // Skip commerce-granted roles — paying them would credit wagerable
+    // currency funded by a real-money purchase (compliance-wall breach).
+    if (commerceHeldRoleIds.has(ri.role_id)) {
+      excludedCommerce++;
+      continue;
+    }
 
     // Check cooldown per role
     const cooldownKey = `economy:${interaction.guildId}:${interaction.user.id}:role_income:${ri.role_id}`;
@@ -591,7 +616,10 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
   }
 
   if (collected === 0) {
-    await interaction.reply({ content: '⏰ No role income available to collect right now.', ephemeral: true });
+    const suffix = excludedCommerce > 0
+      ? ' (roles granted through a store purchase do not earn income.)'
+      : '';
+    await interaction.reply({ content: `⏰ No role income available to collect right now.${suffix}`, ephemeral: true });
     return;
   }
 

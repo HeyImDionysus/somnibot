@@ -557,6 +557,21 @@ const syncConfig = z.object({
   sync_auto_repair_everyone: z.boolean().optional(),
 }).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
 
+// ── Economy role-income schemas ─────────────────────
+// Passive game currency paid for holding a Discord role. COMPLIANCE WALL:
+// the route rejects any role granted by a paid product (real money must never
+// buy wagerable currency) — see commerce-income-wall.ts.
+
+const economyRoleIncomeUpsert = z.object({
+  role_id: snowflake,
+  amount: z.number().int().min(0).max(1_000_000_000),
+  interval_minutes: z.number().int().min(1).max(525_600), // 1 min … 1 year
+});
+
+const economyRoleIncomeDelete = z.object({
+  role_id: snowflake,
+});
+
 // ── Music schemas ───────────────────────────────────
 
 const musicConfig = z.object({
@@ -724,6 +739,10 @@ export const schemas = {
   },
   music: {
     config: musicConfig,
+  },
+  economyRoleIncome: {
+    upsert: economyRoleIncomeUpsert,
+    delete: economyRoleIncomeDelete,
   },
   productFile: {
     create: productFileCreate,
