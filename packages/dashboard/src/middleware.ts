@@ -1,6 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
-import { checkCsrf, shouldRotateCsrf, csrfCookieIssuedAt, stripCsrfTimestamp, deriveRotatedCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
+import { checkCsrf, shouldRotateCsrf, csrfRotationSeed, stripCsrfTimestamp, deriveRotatedCsrf, CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME } from '@/lib/api/csrf';
 import { requireBrowserSupabaseConfig } from '@/lib/supabase/runtime-config';
 
 /* ------------------------------------------------------------------ */
@@ -311,12 +311,14 @@ export async function middleware(request: NextRequest) {
       maxAge: 90,
     });
 
-    // Derive the rotated token from the STALE cookie's issuance timestamp so
-    // every concurrent request lands on the same nonce. Legacy cookies without
-    // a timestamp fall back to the wall clock (they are not part of the race —
-    // the derivation is still deterministic per request).
-    const priorIssuedAt = csrfCookieIssuedAt(currentCookie) ?? rotatedAt;
-    const csrf = await deriveRotatedCsrf(sessionId, priorIssuedAt);
+    // Derive the rotated token from a stable seed taken from the STALE cookie
+    // itself so every concurrent request lands on the same nonce. For
+    // timestamped cookies the seed is the issuance timestamp; for legacy
+    // timestamp-less cookies it is the cookie's own prefix — never the
+    // per-request clock, which would give concurrent tabs different nonces and
+    // reintroduce the very race this change eliminates.
+    const rotationSeed = csrfRotationSeed(currentCookie);
+    const csrf = await deriveRotatedCsrf(sessionId, rotationSeed);
     supabaseResponse.cookies.set(CSRF_COOKIE_NAME, `${csrf.nonce}:${sessionId}!${rotatedAt}`, {
       httpOnly: true,
       sameSite: 'strict',

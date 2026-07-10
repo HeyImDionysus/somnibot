@@ -23,6 +23,7 @@ import { NextRequest } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import {
   deriveRotatedCsrf,
+  csrfRotationSeed,
   verifyCsrfToken,
   generateCsrfToken,
   checkCsrf,
@@ -82,6 +83,41 @@ describe('deriveRotatedCsrf — deterministic rotation', () => {
     const { token, nonce } = await deriveRotatedCsrf(SESSION_ID, 1_700_000_000_000);
     expect(nonce).toMatch(/^[0-9a-f]{32}$/);
     expect(token).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('a numeric seed and its stringified form derive the same nonce', async () => {
+    // csrfRotationSeed returns a string; the HMAC input must be byte-identical
+    // whether the middleware passes the number or the string form.
+    const a = await deriveRotatedCsrf(SESSION_ID, 1_700_000_000_000);
+    const b = await deriveRotatedCsrf(SESSION_ID, '1700000000000');
+    expect(a.nonce).toBe(b.nonce);
+    expect(a.token).toBe(b.token);
+  });
+});
+
+describe('csrfRotationSeed — stable, clock-free rotation seed', () => {
+  it('uses the issuance timestamp for a timestamped cookie', () => {
+    expect(csrfRotationSeed(`${'a'.repeat(32)}:${SESSION_ID}!1700000000000`)).toBe('1700000000000');
+  });
+
+  it('uses the cookie prefix (not the clock) for a legacy timestamp-less cookie', () => {
+    const legacy = `${'b'.repeat(32)}:${SESSION_ID}`;
+    expect(csrfRotationSeed(legacy)).toBe(`legacy:${legacy}`);
+  });
+
+  it('is identical across repeated reads of the same legacy cookie', () => {
+    // This is the property that makes concurrent legacy rotations converge:
+    // the seed depends only on the cookie, never on Date.now().
+    const legacy = `${'c'.repeat(32)}:${SESSION_ID}`;
+    expect(csrfRotationSeed(legacy)).toBe(csrfRotationSeed(legacy));
+  });
+
+  it('legacy and timestamped seeds never collide', () => {
+    // A legacy cookie whose prefix looks like a number must not derive the same
+    // nonce as a timestamped cookie with that timestamp.
+    const numericLike = '1700000000000';
+    const legacy = `${'d'.repeat(32)}:${SESSION_ID}`;
+    expect(csrfRotationSeed(legacy)).not.toBe(numericLike);
   });
 });
 
@@ -234,6 +270,37 @@ describe('middleware CSRF rotation under concurrency', () => {
     expect(prevCookie).toBeTruthy();
     expect(parseCsrfCookie(prevCookie!).nonce).toBe(pre.nonce);
     expect(Number.isNaN(parseCsrfCookie(prevCookie!).issuedAt)).toBe(false);
+  });
+
+  it('concurrent requests on the SAME legacy (timestamp-less) cookie all rotate to one nonce', async () => {
+    // Regression for the residual gap: legacy cookies used to fall back to
+    // Date.now() as the rotation seed, so concurrent tabs derived different
+    // nonces and the cookie-soup race reappeared for legacy-cookie users. The
+    // seed now comes from the cookie prefix, so all responses must converge.
+    const { middleware } = await import('../middleware');
+    const legacyPrefix = `${STALE_NONCE}:${SESSION_ID}`;
+
+    const legacyRequest = (): NextRequest => {
+      const req = new NextRequest('http://localhost:3000/dashboard', {
+        headers: { host: 'localhost:3000' },
+      });
+      req.cookies.set(CSRF_COOKIE_NAME, legacyPrefix); // no !timestamp
+      return req;
+    };
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => middleware(legacyRequest())),
+    );
+
+    const nonces = new Set(
+      responses.map((res) => parseCsrfCookie(res.cookies.get(CSRF_COOKIE_NAME)!.value).nonce),
+    );
+    expect(nonces.size).toBe(1);
+
+    // And the converged nonce matches the deterministic derivation from the
+    // legacy seed — proving it is clock-independent.
+    const expected = await deriveRotatedCsrf(SESSION_ID, csrfRotationSeed(legacyPrefix));
+    expect([...nonces][0]).toBe(expected.nonce);
   });
 
   it('preserves the pre-rotation token via the prev cookie during the grace window', async () => {

@@ -139,12 +139,20 @@ export async function generateCsrfToken(sessionId: string): Promise<{ token: str
  * surviving cookie nor the single `prev` cookie — a spurious 403 ("cookie
  * soup").
  *
- * Fix: derive the rotated nonce deterministically from the *prior* cookie's
- * issuance timestamp (`priorIssuedAt`) plus the session ID, via HMAC. Every
- * concurrent request reads the same stale cookie, so every request sees the
- * same `priorIssuedAt` and derives the *same* new nonce — regardless of tiny
- * wall-clock skew between them. All responses therefore agree on the cookie and
- * on the embedded token, so no in-flight form is spuriously rejected.
+ * Fix: derive the rotated nonce deterministically from a `rotationSeed` that is
+ * a stable property of the *stale cookie itself* (plus the session ID), via
+ * HMAC. Every concurrent request reads the same stale cookie, so every request
+ * passes the same `rotationSeed` and derives the *same* new nonce — regardless
+ * of tiny wall-clock skew between them. All responses therefore agree on the
+ * cookie and on the embedded token, so no in-flight form is spuriously rejected.
+ *
+ * The seed MUST come from the stale cookie, never from the per-request clock:
+ * for a timestamped cookie the caller passes the issuance timestamp; for a
+ * legacy timestamp-less cookie the caller passes the cookie prefix
+ * (`nonce:sessionId`). Both are identical across all concurrent requests that
+ * read the same cookie, which is what makes the derivation converge. (An earlier
+ * revision fell back to `Date.now()` for legacy cookies, which reintroduced the
+ * race for those users because each concurrent request read a different clock.)
  *
  * Security is unchanged from the random-nonce design: the derived nonce is an
  * HMAC under the same server secret, so an attacker cannot predict or forge it
@@ -153,21 +161,39 @@ export async function generateCsrfToken(sessionId: string): Promise<{ token: str
  */
 export async function deriveRotatedCsrf(
   sessionId: string,
-  priorIssuedAt: number,
+  rotationSeed: string | number,
 ): Promise<{ token: string; nonce: string }> {
   const signature = await getWebCrypto().subtle.sign(
     'HMAC',
     await getCsrfKey(),
     // Domain-separated from the token HMAC (`nonce:sessionId`) so the derived
-    // nonce can never coincide with a token value. `priorIssuedAt` makes each
+    // nonce can never coincide with a token value. `rotationSeed` makes each
     // rotation window derive a distinct nonce.
-    encoder.encode(`csrf-rotation:v1:${sessionId}:${priorIssuedAt}`),
+    encoder.encode(`csrf-rotation:v1:${sessionId}:${rotationSeed}`),
   );
   // Use the first 16 bytes (32 hex) so the nonce matches the random-nonce
   // format produced by generateRandomHex(16).
   const nonce = toHex(signature).slice(0, 32);
   const token = await signCsrfValue(nonce, sessionId);
   return { token, nonce };
+}
+
+/**
+ * Compute the stable rotation seed for a CSRF cookie value.
+ *
+ * WAVE 2B follow-up [security]: the seed must be derived only from the stale
+ * cookie's own content — never the wall clock — so that all concurrent requests
+ * reading the same cookie converge on one rotated nonce (see `deriveRotatedCsrf`).
+ *
+ * - Timestamped cookie (`nonce:sessionId!timestamp`): seed is the numeric
+ *   issuance timestamp. Identical across concurrent readers.
+ * - Legacy cookie (`nonce:sessionId`, no timestamp): seed is the cookie prefix
+ *   (`stripCsrfTimestamp` returns it unchanged), which is likewise identical
+ *   across concurrent readers, so legacy-cookie rotations no longer race.
+ */
+export function csrfRotationSeed(cookieValue: string): string {
+  const issuedAt = csrfCookieIssuedAt(cookieValue);
+  return issuedAt !== null ? String(issuedAt) : `legacy:${stripCsrfTimestamp(cookieValue)}`;
 }
 
 /**
@@ -332,3 +358,20 @@ export function shouldRotateCsrf(request: NextRequest): boolean {
  * Cookie name and header name exports for the /api/csrf route.
  */
 export { CSRF_COOKIE_NAME, CSRF_PREV_COOKIE_NAME, CSRF_HEADER_NAME };
+
+/**
+ * V9 Audit §1.P2 follow-up [security] — Invalidate every CSRF cookie after a
+ * privilege change.
+ *
+ * Deleting only `CSRF_COOKIE_NAME` is insufficient: if the current token was
+ * rotated within the last `CSRF_GRACE_PERIOD_MS`, the browser still holds a
+ * `CSRF_PREV_COOKIE_NAME` cookie that `checkCsrf` accepts during the grace
+ * window. A stale tab could keep passing its pre-change token via `prev` even
+ * after the client re-fetches `/api/csrf`, defeating the documented CSRF
+ * invalidation window on RBAC role assignment/removal. Clearing both cookies
+ * closes that window. Call this anywhere the current CSRF token is invalidated.
+ */
+export function invalidateCsrfCookies(response: NextResponse): void {
+  response.cookies.delete(CSRF_COOKIE_NAME);
+  response.cookies.delete(CSRF_PREV_COOKIE_NAME);
+}
