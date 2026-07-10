@@ -1,0 +1,250 @@
+-- Heist resume idempotency — atomic, single-shot resolution.
+--
+-- Defect (WAVE 2B): heist resolution was a bot-side check-then-act. The
+-- resolve-timer (or resumePendingHeists after a crash) SELECTed the heist,
+-- checked `status = 'recruiting'` in JS, then flipped the status and paid out
+-- in separate statements. Two resolutions of the same heist could interleave:
+--   * the in-memory timer fires while a restart's resumePendingHeists also
+--     resolves the same 'recruiting' heist, or
+--   * the bot crashes mid-payout leaving status='in_progress' with only some
+--     participants credited — a re-resolve re-rolled the outcome and re-paid
+--     participants who were already paid (entry-fee refund / payout double).
+-- The JS `status !== 'recruiting'` guard could not prevent this: both callers
+-- read 'recruiting' before either wrote.
+--
+-- Fix (mirrors lottery_claim_drawing / lottery_award_jackpot, 20260709130000):
+--   1. heist_claim_for_resolution — under FOR UPDATE on the heist row, decide
+--      the ENTIRE outcome exactly once: too-few-crew ⇒ flip recruiting→cancelled;
+--      otherwise roll success server-side (CSPRNG), store the decision and the
+--      per-person payout on the row, and flip recruiting→in_progress. Only the
+--      caller that observes 'recruiting' wins; every other concurrent or
+--      post-crash caller gets claimed=false and must NOT re-decide or re-pay.
+--   2. Per-participant credit idempotency via economy_heist_participants.paid_at:
+--      heist_credit_participant pays a participant iff paid_at IS NULL and stamps
+--      it in the SAME transaction, so a retry after a crash pays each crew member
+--      exactly once (success payout AND cancel refund share this guard).
+--   3. heist_finalize_resolution — flips in_progress→success/failed (or leaves a
+--      cancelled heist as-is) exactly once, guarded on the current status so a
+--      second finalize is a no-op.
+-- Participant JOINs are already deduped by the UNIQUE (heist_id, user_id) on
+-- economy_heist_participants (v36), so no participant can be double-counted.
+
+-- ─── 1. Outcome + payout state carried on the heist row ───────
+-- payout_each: the per-person success payout, computed and frozen at claim
+-- time so a resumed finalize pays the SAME amount the claim decided (never a
+-- fresh split over a changed crew). NULL until a success is claimed.
+ALTER TABLE economy_heists
+  ADD COLUMN IF NOT EXISTS payout_each INTEGER;
+
+-- resolution: the decision frozen at claim time. NULL while recruiting;
+-- 'success' | 'failed' | 'cancelled' once claimed. Distinct from `status`
+-- so the intermediate 'in_progress' row still carries the eventual verdict
+-- across a crash/resume.
+ALTER TABLE economy_heists
+  ADD COLUMN IF NOT EXISTS resolution TEXT
+    CHECK (resolution IN ('success', 'failed', 'cancelled'));
+
+-- ─── 2. Per-participant payout idempotency marker ─────────────
+-- Set (with the wallet credit) the first time a participant is paid or
+-- refunded. A NULL means "not yet credited"; a retry sees it non-NULL and
+-- skips, so no crew member is ever paid twice.
+ALTER TABLE economy_heist_participants
+  ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
+
+-- payout_failed: preserved for reconciliation (the bot marks a participant
+-- whose credit RPC errored). Additive; independent of paid_at.
+ALTER TABLE economy_heist_participants
+  ADD COLUMN IF NOT EXISTS payout_failed BOOLEAN NOT NULL DEFAULT false;
+
+-- ─── 3. Atomic single-shot claim ─────────────────────────────
+-- Decides the whole outcome under the heist row lock. Returns exactly one
+-- row; `claimed` is true only for the caller that observed status='recruiting'
+-- and performed the transition. Every other caller (concurrent timer, a
+-- resume after crash, a duplicate resume) gets claimed=false and must treat
+-- the heist as already owned.
+--
+-- outcome values:
+--   'cancelled' — fewer than p_min_participants joined; row flipped to
+--                 'cancelled'. The caller refunds entry fees idempotently.
+--   'success'   — roll succeeded; row flipped to 'in_progress' with
+--                 payout_each stored. The caller credits payouts idempotently
+--                 then finalises to 'success'.
+--   'failed'    — roll failed; row flipped to 'in_progress', payout_each=0.
+--                 The caller finalises to 'failed' (entry fees are forfeit).
+CREATE OR REPLACE FUNCTION heist_claim_for_resolution(
+  p_heist_id          UUID,
+  p_min_participants  INTEGER
+)
+RETURNS TABLE (
+  claimed           BOOLEAN,
+  outcome           TEXT,
+  participant_count INTEGER,
+  payout_each       INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status        TEXT;
+  v_target_payout INTEGER;
+  v_success_chance INTEGER;
+  v_count         INTEGER;
+  v_roll          INTEGER;
+  v_is_success    BOOLEAN;
+  v_payout_each   INTEGER;
+BEGIN
+  -- Lock the heist row: every resolution path locks this same row, so the
+  -- read-decide-write below cannot interleave with another resolver.
+  SELECT h.status, h.target_payout, h.success_chance
+    INTO v_status, v_target_payout, v_success_chance
+    FROM public.economy_heists h
+   WHERE h.id = p_heist_id
+     FOR UPDATE;
+
+  -- Already claimed / resolved / cancelled by another caller, or gone.
+  IF NOT FOUND OR v_status <> 'recruiting' THEN
+    RETURN QUERY SELECT false, NULL::TEXT, 0, NULL::INTEGER;
+    RETURN;
+  END IF;
+
+  -- Crew size from the deduped join table (authoritative; the participants
+  -- array is display-only and TOCTOU-prone).
+  SELECT COUNT(*)::INTEGER INTO v_count
+    FROM public.economy_heist_participants p
+   WHERE p.heist_id = p_heist_id;
+
+  -- Too few crew — cancel and let the caller refund entry fees.
+  IF v_count < p_min_participants THEN
+    UPDATE public.economy_heists h
+       SET status      = 'cancelled',
+           resolution  = 'cancelled',
+           resolved_at = now()
+     WHERE h.id = p_heist_id;
+
+    RETURN QUERY SELECT true, 'cancelled'::TEXT, v_count, NULL::INTEGER;
+    RETURN;
+  END IF;
+
+  -- Roll success server-side with CSPRNG-backed randomness. pgcrypto's
+  -- gen_random_bytes is schema-qualified (extensions.) so it resolves under
+  -- SET search_path = '' — the same crypto-random idiom lottery_buy_tickets
+  -- uses (V7 Audit §4). Two bytes give [0, 65536); bucketed to [0,100) to
+  -- compare against the integer success_chance percentage.
+  v_roll := (get_byte(extensions.gen_random_bytes(2), 0) * 256
+             + get_byte(extensions.gen_random_bytes(2), 1)) % 100;
+  v_is_success := v_roll < v_success_chance;
+
+  IF v_is_success THEN
+    v_payout_each := (v_target_payout / v_count)::INTEGER;  -- floor split
+    UPDATE public.economy_heists h
+       SET status      = 'in_progress',
+           resolution  = 'success',
+           payout_each = v_payout_each
+     WHERE h.id = p_heist_id;
+
+    RETURN QUERY SELECT true, 'success'::TEXT, v_count, v_payout_each;
+  ELSE
+    UPDATE public.economy_heists h
+       SET status      = 'in_progress',
+           resolution  = 'failed',
+           payout_each = 0
+     WHERE h.id = p_heist_id;
+
+    RETURN QUERY SELECT true, 'failed'::TEXT, v_count, 0;
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION heist_claim_for_resolution(UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION heist_claim_for_resolution(UUID, INTEGER) TO service_role;
+
+-- ─── 4. Idempotent per-participant credit ────────────────────
+-- Credits p_amount to a single crew member iff they have not been credited
+-- yet (paid_at IS NULL), stamping paid_at in the SAME transaction as the
+-- wallet write so "credited" and "paid" can never diverge. Used for BOTH the
+-- success payout and the cancel refund. Returns true iff this call performed
+-- the credit; false means it was already credited (a retry) — never pay twice.
+-- p_amount = 0 is allowed (a stamped no-op), so a failed heist can mark its
+-- crew settled without a wallet write.
+CREATE OR REPLACE FUNCTION heist_credit_participant(
+  p_heist_id UUID,
+  p_guild_id TEXT,
+  p_user_id  TEXT,
+  p_amount   INTEGER
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_paid_at TIMESTAMPTZ;
+BEGIN
+  -- Lock the participant row so concurrent credit attempts serialise.
+  SELECT p.paid_at INTO v_paid_at
+    FROM public.economy_heist_participants p
+   WHERE p.heist_id = p_heist_id
+     AND p.user_id  = p_user_id
+     FOR UPDATE;
+
+  IF NOT FOUND OR v_paid_at IS NOT NULL THEN
+    RETURN false;  -- unknown participant or already credited — no double pay
+  END IF;
+
+  IF p_amount > 0 THEN
+    PERFORM public.economy_add_balance(p_guild_id, p_user_id, p_amount);
+  END IF;
+
+  UPDATE public.economy_heist_participants p
+     SET paid_at       = now(),
+         payout        = p_amount,
+         payout_failed = false
+   WHERE p.heist_id = p_heist_id
+     AND p.user_id  = p_user_id;
+
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION heist_credit_participant(UUID, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION heist_credit_participant(UUID, TEXT, TEXT, INTEGER) TO service_role;
+
+-- ─── 5. Single-shot finalisation ─────────────────────────────
+-- Flips a claimed, in-progress heist to its stored resolution ('success' or
+-- 'failed') exactly once. Guarded on status='in_progress' so a second
+-- finalise (concurrent or post-crash) is a no-op. Returns true iff this call
+-- performed the transition. A 'cancelled' heist is already terminal and is
+-- reported as not-finalised-here (false).
+CREATE OR REPLACE FUNCTION heist_finalize_resolution(
+  p_heist_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status     TEXT;
+  v_resolution TEXT;
+BEGIN
+  SELECT h.status, h.resolution INTO v_status, v_resolution
+    FROM public.economy_heists h
+   WHERE h.id = p_heist_id
+     FOR UPDATE;
+
+  IF NOT FOUND OR v_status <> 'in_progress' THEN
+    RETURN false;  -- not claimed-in-progress (already finalised or cancelled)
+  END IF;
+
+  UPDATE public.economy_heists h
+     SET status      = COALESCE(v_resolution, 'failed'),
+         resolved_at = now()
+   WHERE h.id = p_heist_id;
+
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION heist_finalize_resolution(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION heist_finalize_resolution(UUID) TO service_role;

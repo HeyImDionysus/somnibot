@@ -5,7 +5,7 @@
  * Participants join with /heist join. Each additional member increases success chance.
  * Roles are randomly assigned: Hacker, Muscle, Lookout, Driver, Demolitions.
  */
-import { randomPick, randomFloat } from '../../utils/random.js';
+import { randomPick } from '../../utils/random.js';
 import { hasErrorCode } from '../../utils/db-helpers.js';
 import {
   EmbedBuilder,
@@ -479,36 +479,74 @@ export class HeistManager {
   private async resolveHeist(guildId: string, heistId: string, channelId: string): Promise<void> {
     this.resolveTimers.delete(heistId);
 
+    const config = await this.getConfig(guildId);
+    const minParticipants = config?.economy_heist_min_participants ?? 2;
+    const entryFee = config?.economy_heist_entry_fee ?? 100;
+
+    // Read the row for the display fields (target, chance). Not a guard —
+    // the atomic claim below is the sole authority on whether we resolve.
     const { data: heist } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('id', heistId)
       .single();
+    if (!heist) return;
 
-    if (!heist || heist.status !== 'recruiting') return;
+    // ── Atomic, single-shot claim ─────────────────────────────
+    // Flips recruiting→in_progress (with the outcome + payout frozen on the
+    // row) or recruiting→cancelled, under FOR UPDATE. Only ONE caller — the
+    // one that observes 'recruiting' — gets claimed=true. A concurrent timer,
+    // a resume after crash, or a duplicate resume all get claimed=false and
+    // must not re-decide or re-pay. If the heist was already claimed
+    // (status='in_progress') by a crash before finalisation, we skip the
+    // claim and fall through to the idempotent settle/finalise below.
+    let outcome: 'success' | 'failed' | 'cancelled' | null = null;
+    if (heist.status === 'recruiting') {
+      const { data: claimData, error: claimErr } = await this.supabase.rpc('heist_claim_for_resolution', {
+        p_heist_id: heistId,
+        p_min_participants: minParticipants,
+      });
+      if (claimErr) {
+        log.error(`heist_claim_for_resolution failed for ${heistId}:`, claimErr.message);
+        return;  // transient — leave the heist for a later resume; never guess
+      }
+      const claim = Array.isArray(claimData) ? claimData[0] : claimData;
+      if (!claim?.claimed) {
+        // Another resolver owns this heist. If it is mid-resolution
+        // (in_progress), re-read so the settle/finalise pass below can finish
+        // a crashed payout idempotently; otherwise it is already terminal.
+        const { data: fresh } = await this.supabase
+          .from('economy_heists').select('*').eq('id', heistId).single();
+        if (!fresh || fresh.status !== 'in_progress') return;
+        Object.assign(heist, fresh);
+        outcome = (fresh.resolution as typeof outcome) ?? null;
+      } else {
+        outcome = claim.outcome as typeof outcome;
+        heist.payout_each = claim.payout_each;
+      }
+    } else if (heist.status === 'in_progress') {
+      // Crashed after claim, before finalisation — resume the stored decision.
+      outcome = (heist.resolution as typeof outcome) ?? null;
+    } else {
+      return;  // success / failed / cancelled — already terminal
+    }
 
-    const config = await this.getConfig(guildId);
-    const minParticipants = config?.economy_heist_min_participants ?? 2;
-
-    // Use the join table as source of truth (immune to array TOCTOU race)
+    // Authoritative crew from the deduped join table.
     const { data: partRows } = await this.supabase
       .from('economy_heist_participants')
-      .select('user_id')
+      .select('user_id, role')
       .eq('heist_id', heistId)
       .limit(1000);
-    const participants = (partRows ?? []).map((r: any) => r.user_id as string);
+    const partList = (partRows ?? []) as Array<{ user_id: string; role: string }>;
+    const participants = partList.map((r) => r.user_id);
 
-    // Not enough participants — cancel
-    if (participants.length < minParticipants) {
-      await this.supabase.from('economy_heists')
-        .update({ status: 'cancelled', resolved_at: new Date().toISOString() })
-        .eq('id', heistId);
-
-      // Refund entry fees
-      const entryFee = config?.economy_heist_entry_fee ?? 100;
+    if (outcome === 'cancelled') {
+      // Refund entry fees idempotently — heist_credit_participant pays each
+      // crew member at most once (guarded by paid_at), so a re-resolve after
+      // a crash does not double-refund.
       for (const uid of participants) {
-        const { error: refundErr } = await this.supabase.rpc('economy_add_balance', {
-          p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
+        const { error: refundErr } = await this.supabase.rpc('heist_credit_participant', {
+          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: entryFee,
         });
         if (refundErr) log.error(`Failed to refund ${uid}:`, refundErr.message);
       }
@@ -528,54 +566,44 @@ export class HeistManager {
       return;
     }
 
-    // Mark as in_progress
-    await this.supabase.from('economy_heists')
-      .update({ status: 'in_progress' })
-      .eq('id', heistId);
+    if (outcome === 'success') {
+      const perPerson = heist.payout_each ?? 0;
 
-    // Roll success
-    const roll = randomFloat(100);
-    const isSuccess = roll < heist.success_chance;
-
-    if (isSuccess) {
-      // Split payout among participants
-      const totalPayout = heist.target_payout;
-      const perPerson = Math.floor(totalPayout / participants.length);
-
-      // V53-C11: Track payout failures individually so they can be reconciled
+      // Credit each participant idempotently. heist_credit_participant returns
+      // false (and skips the wallet write) for anyone already paid, so a
+      // crash-then-resume mid-payout finishes without double-crediting.
       const failedPayouts: string[] = [];
       for (const uid of participants) {
-        const { error: payErr } = await this.supabase.rpc('economy_add_balance', {
-          p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
+        const { error: payErr } = await this.supabase.rpc('heist_credit_participant', {
+          p_heist_id: heistId, p_guild_id: guildId, p_user_id: uid, p_amount: perPerson,
         });
         if (payErr) {
           log.error(`Failed to pay ${uid}:`, payErr.message);
           failedPayouts.push(uid);
-          // Mark participant with payout_failed for reconciliation
+          // Mark for reconciliation (leaves paid_at NULL so a later retry pays).
           await this.supabase.from('economy_heist_participants')
-            .update({ payout: 0, payout_failed: true })
-            .eq('heist_id', heistId)
-            .eq('user_id', uid);
-        } else {
-          await this.supabase.from('economy_heist_participants')
-            .update({ payout: perPerson })
+            .update({ payout_failed: true })
             .eq('heist_id', heistId)
             .eq('user_id', uid);
         }
       }
 
-      await this.supabase.from('economy_heists')
-        .update({ status: 'success', resolved_at: new Date().toISOString() })
-        .eq('id', heistId);
+      // Finalise once, and announce iff THIS call performed the terminal flip.
+      // heist_finalize_resolution returns true only for the caller that moved
+      // the row out of 'in_progress'; a concurrent resolver or a post-crash
+      // resume gets false and must not re-notify (mirrors lottery gating its
+      // announcement on a non-null award result).
+      const { data: finalized, error: finErr } = await this.supabase.rpc('heist_finalize_resolution', {
+        p_heist_id: heistId,
+      });
+      if (finErr) {
+        log.error(`heist_finalize_resolution failed for ${heistId}:`, finErr.message);
+        return;  // leave in_progress; a later resume finalises + notifies
+      }
+      if (finalized !== true) return;  // another resolver already finalised — no re-notify
 
-      const { data: partData } = await this.supabase
-        .from('economy_heist_participants')
-        .select('user_id, role')
-        .eq('heist_id', heistId)
-        .limit(1000);
-
-      const crewList = (partData ?? [])
-        .map((p: any) => {
+      const crewList = partList
+        .map((p) => {
           const isFailed = failedPayouts.includes(p.user_id);
           return isFailed
             ? `• <@${p.user_id}> — **${p.role}** (⚠️ payout failed — contact admin)`
@@ -592,48 +620,63 @@ export class HeistManager {
             .setTitle(`✅ Heist Success: ${heist.target_name}`)
             .setDescription(
               `${story}\n\n` +
-              `💰 Total haul: **${totalPayout.toLocaleString()}** coins\n\n` +
+              `💰 Total haul: **${heist.target_payout.toLocaleString()}** coins\n\n` +
               `**Crew Payouts:**\n${crewList}`
             )
             .setColor(0x57F287)],
         });
       }
-    } else {
-      // Failed — entry fees are lost
-      await this.supabase.from('economy_heists')
-        .update({ status: 'failed', resolved_at: new Date().toISOString() })
-        .eq('id', heistId);
+      return;
+    }
 
-      const story = randomPick(FAIL_STORIES);
-      const entryFee = config?.economy_heist_entry_fee ?? 100;
+    // outcome === 'failed' — entry fees are forfeit; nothing to credit.
+    // Announce iff THIS call performed the terminal flip (single-shot).
+    const { data: finalized, error: finErr } = await this.supabase.rpc('heist_finalize_resolution', {
+      p_heist_id: heistId,
+    });
+    if (finErr) {
+      log.error(`heist_finalize_resolution failed for ${heistId}:`, finErr.message);
+      return;
+    }
+    if (finalized !== true) return;  // another resolver already finalised — no re-notify
 
-      const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
-      if (channel) {
-        await channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle(`❌ Heist Failed: ${heist.target_name}`)
-            .setDescription(
-              `${story}\n\n` +
-              `👥 ${participants.map((id: string) => `<@${id}>`).join(', ')}\n\n` +
-              `Each crew member lost their **${entryFee.toLocaleString()}** coin entry fee.`
-            )
-            .setColor(0xED4245)],
-        });
-      }
+    const story = randomPick(FAIL_STORIES);
+    const channel = this.client.channels.cache.get(channelId) as TextChannel | undefined;
+    if (channel) {
+      await channel.send({
+        embeds: [new EmbedBuilder()
+          .setTitle(`❌ Heist Failed: ${heist.target_name}`)
+          .setDescription(
+            `${story}\n\n` +
+            `👥 ${participants.map((id) => `<@${id}>`).join(', ')}\n\n` +
+            `Each crew member lost their **${entryFee.toLocaleString()}** coin entry fee.`
+          )
+          .setColor(0xED4245)],
+      });
     }
   }
 
   /** Re-schedule pending heists on bot restart */
   async resumePendingHeists(guildId: string): Promise<void> {
+    // Include 'in_progress' heists: a crash after the atomic claim but before
+    // finalisation leaves the row 'in_progress' with its outcome frozen. Those
+    // must be resumed too, or they strand forever (never paid, never notified).
+    // resolveHeist is idempotent — heist_credit_participant and
+    // heist_finalize_resolution ensure a resumed in_progress heist pays each
+    // crew member exactly once and finalises exactly once.
     const { data: pending } = await this.supabase
       .from('economy_heists')
       .select('*')
       .eq('guild_id', guildId)
-      .eq('status', 'recruiting')
+      .in('status', ['recruiting', 'in_progress'])
       .limit(1000);
 
     for (const heist of pending ?? []) {
-      const remaining = new Date(heist.expires_at).getTime() - Date.now();
+      // in_progress heists were already claimed — resolve immediately to
+      // finish their frozen outcome; don't wait out the (elapsed) join window.
+      const remaining = heist.status === 'in_progress'
+        ? 0
+        : new Date(heist.expires_at).getTime() - Date.now();
       if (remaining <= 0) {
         // Expired while offline — resolve immediately
         // Find the channel from the initiator's last message context — use log channel as fallback
