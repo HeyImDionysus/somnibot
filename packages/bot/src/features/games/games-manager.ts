@@ -11,7 +11,9 @@ import {
   type ChatInputCommandInteraction,
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type Valkey from 'iovalkey';
 import type { DbGuildConfig } from '@somnibot/shared';
+import { randomUUID } from 'node:crypto';
 import { getQuestsManager } from '../quests/quests-manager.js';
 import { createLogger } from '@somnibot/shared';
 import { randomIntRange, randomChance, cryptoShuffle, randomPick } from '../../utils/random.js';
@@ -95,10 +97,12 @@ function formatHand(cards: Card[]): string {
 
 export class GamesManager {
   private supabase: SupabaseClient;
+  private valkey: Valkey | null;
   private configCache = new Map<string, DbGuildConfig>();
 
-  constructor(supabase: SupabaseClient) {
+  constructor(supabase: SupabaseClient, valkey?: Valkey) {
     this.supabase = supabase;
+    this.valkey = valkey ?? null;
   }
 
   /**
@@ -149,13 +153,88 @@ export class GamesManager {
     return true;
   }
 
-  // V49-M4: Per-user game lock — prevents two concurrent game commands
-  // from the same user.  Eliminates the TOCTOU between checkDailyLimit's
-  // read and addDailyLoss's increment: the second command gets a "game in
-  // progress" rejection before reaching the daily-loss check.
-  // Node.js is single-threaded, so a simple Set is safe (has/add/delete
-  // are synchronous; no await between check and acquire).
+  // ── Per-user game lock ──────────────────────────────────
+  //
+  // W2B [game-economy]: Prevents two concurrent game commands from the same
+  // user.  This eliminates the TOCTOU between checkDailyLimit's read and
+  // addDailyLoss's increment: the second command gets a "game in progress"
+  // rejection before it can reach (and thereby bypass) the daily-loss check.
+  //
+  // The lock is Valkey-backed (SET NX PX + owner-token compare-and-delete
+  // release) so it holds across process restarts and multiple bot instances —
+  // an in-memory Set is bypassed by both.  A bounded PX TTL means a crashed
+  // holder cannot deadlock the user; safe release deletes the key only when we
+  // still own the token, so a late release after TTL expiry can never free a
+  // different owner's lock.
+  //
+  // When Valkey is unavailable (not configured, or a command throws) we fall
+  // back to the in-memory Set: degraded, single-instance-safe, and still
+  // correct within one process (has/add/delete are synchronous — Node is
+  // single-threaded, so there is no await between check and acquire).
   private activeGames = new Set<string>();
+
+  // Lua: delete KEYS[1] only if its value still equals our token (ARGV[1]).
+  // Guards against releasing a lock that TTL-expired and was re-acquired.
+  private static readonly RELEASE_LUA =
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+
+  // Bounded TTL so a crash/hang between acquire and release cannot deadlock the
+  // user.  Interactive blackjack runs a 60s collector; 10 minutes leaves ample
+  // headroom while still self-healing.
+  private static readonly LOCK_TTL_MS = 10 * 60 * 1000;
+
+  private static readonly IN_MEMORY_TOKEN = '__in_memory__';
+
+  private lockKey(guildId: string, userId: string): string {
+    return `games:lock:${guildId}:${userId}`;
+  }
+
+  /**
+   * Try to acquire the per-user game lock.  Returns an opaque token to pass to
+   * {@link releaseGameLock} on success, or null if the user already holds it.
+   *
+   * Uses SET NX PX on Valkey; on any Valkey error (connection down, etc.) it
+   * degrades to the in-memory Set so single-instance play still works.
+   */
+  private async acquireGameLock(guildId: string, userId: string): Promise<string | null> {
+    const key = this.lockKey(guildId, userId);
+    if (this.valkey) {
+      try {
+        const token = randomUUID();
+        const claimed = await this.valkey.set(
+          key, token, 'PX', GamesManager.LOCK_TTL_MS, 'NX',
+        );
+        return claimed ? token : null;
+      } catch (err) {
+        // Valkey unreachable — fall through to the in-memory Set (degraded).
+        log.warn('game lock: Valkey acquire failed, using in-memory fallback:', (err as Error)?.message ?? err);
+      }
+    }
+    // In-memory fallback (also the path when no Valkey is configured).
+    if (this.activeGames.has(key)) return null;
+    this.activeGames.add(key);
+    return GamesManager.IN_MEMORY_TOKEN;
+  }
+
+  /**
+   * Release the per-user game lock.  On Valkey, deletes the key only if we
+   * still own the token (owner-safe).  Best-effort: a failed release just
+   * leaves the key to expire via its TTL, so errors are logged, not thrown.
+   */
+  private async releaseGameLock(guildId: string, userId: string, token: string | null): Promise<void> {
+    if (!token) return;
+    const key = this.lockKey(guildId, userId);
+    // The in-memory fallback always releases from the Set — even when Valkey is
+    // configured, because a degraded acquire may have used it.
+    this.activeGames.delete(key);
+    if (this.valkey && token !== GamesManager.IN_MEMORY_TOKEN) {
+      try {
+        await this.valkey.eval(GamesManager.RELEASE_LUA, 1, key, token);
+      } catch (err) {
+        log.warn('game lock: Valkey release failed (will expire via TTL):', (err as Error)?.message ?? err);
+      }
+    }
+  }
 
   // V47-M4: DB-backed daily loss tracking (survives bot restarts).
   private async checkDailyLimit(
@@ -194,45 +273,45 @@ export class GamesManager {
     interaction: ChatInputCommandInteraction,
     amount: number,
     maxBetKey: keyof DbGuildConfig,
-  ): Promise<{ config: DbGuildConfig; balance: number; unlock: () => void } | null> {
+  ): Promise<{ config: DbGuildConfig; balance: number; unlock: () => Promise<void> } | null> {
     const guildId = interaction.guildId!;
     const userId = interaction.user.id;
 
-    // V49-M4: Acquire per-user game lock BEFORE any async checks.
-    const lockKey = `${guildId}:${userId}`;
-    if (this.activeGames.has(lockKey)) {
+    // Acquire the per-user game lock BEFORE any async checks so a concurrent
+    // second command is rejected before it can bypass the daily-loss counter.
+    const token = await this.acquireGameLock(guildId, userId);
+    if (token === null) {
       await interaction.reply({ content: '⏳ You already have a game in progress! Finish it first.', ephemeral: true });
       return null;
     }
-    this.activeGames.add(lockKey);
-    const unlock = (): void => { this.activeGames.delete(lockKey); };
+    const unlock = (): Promise<void> => this.releaseGameLock(guildId, userId, token);
 
     const config = await this.getConfig(guildId);
 
     if (!config?.economy_games_enabled) {
-      unlock();
+      await unlock();
       await interaction.reply({ content: '❌ Mini-games are not enabled.', ephemeral: true });
       return null;
     }
     if (amount <= 0) {
-      unlock();
+      await unlock();
       await interaction.reply({ content: '❌ Bet must be positive.', ephemeral: true });
       return null;
     }
     const maxBet = (config[maxBetKey] as number) ?? 10000;
     if (amount > maxBet) {
-      unlock();
+      await unlock();
       await interaction.reply({ content: `❌ Max bet is **${maxBet.toLocaleString()}** coins.`, ephemeral: true });
       return null;
     }
     const balance = await this.getBalance(guildId, userId);
     if (balance < amount) {
-      unlock();
+      await unlock();
       await interaction.reply({ content: `❌ You only have **${balance.toLocaleString()}** coins.`, ephemeral: true });
       return null;
     }
     if (!(await this.checkDailyLimit(guildId, userId, config, amount))) {
-      unlock();
+      await unlock();
       await interaction.reply({ content: '❌ You\'ve hit your daily loss limit. Try again tomorrow!', ephemeral: true });
       return null;
     }
@@ -274,7 +353,7 @@ export class GamesManager {
         });
       }
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -332,7 +411,7 @@ export class GamesManager {
         });
       }
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -378,7 +457,7 @@ export class GamesManager {
         });
       }
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -415,7 +494,7 @@ export class GamesManager {
         });
       }
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -551,7 +630,7 @@ export class GamesManager {
         }
       });
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -732,7 +811,7 @@ export class GamesManager {
         });
       }
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 
@@ -779,7 +858,7 @@ export class GamesManager {
           .setColor(net > 0 ? 0x57F287 : net < 0 ? 0xED4245 : 0xFEE75C)],
       });
     } finally {
-      v.unlock();
+      await v.unlock();
     }
   }
 }

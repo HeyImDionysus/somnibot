@@ -370,7 +370,7 @@ export async function initGuildFeatures(
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
       }
       if (guildCfg.economy_games_enabled) {
-        const mgr = new GamesManager(supabase);
+        const mgr = new GamesManager(supabase, valkey);
         registerGamesManager(mgr, guildId); ctx.setManager('games', mgr);
         const cmds = buildGameCommands();
         for (const cmd of Object.values(cmds)) allCommands.push(cmd.toJSON());
