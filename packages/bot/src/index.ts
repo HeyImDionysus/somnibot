@@ -22,8 +22,10 @@ import { startDeployListener } from './deploy/deploy-listener.js';
 import { GuildRouter } from './guild-router.js';
 import { runMigrations } from './services/migration-runner.js';
 import { initGuildFeatures, registerGuildCommands, destroyGuildServices } from './guild-init.js';
-import { startHealthServer } from './services/health-server.js';
+import { startHealthServer, setAwaitingSetup } from './services/health-server.js';
 import { HeartbeatService } from './services/heartbeat.js';
+import { evaluateSetupGate, createBootstrapSupabase } from './services/setup-gate.js';
+import { runSetupVerificationBoot, writeGuildRecord } from './services/setup-verification-boot.js';
 import { startLauncherIpcHeartbeat, stopLauncherIpcHeartbeat } from './services/launcher-ipc.js';
 import { startAntiRaidPruner, stopAntiRaidPruner } from './features/anti-raid/index.js';
 import { BotPresenceManager } from './features/discord-ux/index.js';
@@ -75,6 +77,46 @@ async function main(): Promise<void> {
     await syncConfigToDatabase();
   } catch (err) {
     log.warn('Config sync-to-DB failed (non-fatal)', { error: String(err) });
+  }
+
+  // 0.9. Startup setup gate — do not spam errors before owner setup is done.
+  // Classify setup state (complete / in_progress / not_started) from
+  // instance_settings so we can decide how far to boot. This runs BEFORE
+  // loadConfig(): the 'not_started' case has no Discord token, and loadConfig()
+  // would process.exit(1) on it — we want a clear, single, actionable message
+  // and a clean "awaiting setup" idle instead.
+  let setupGate = null as Awaited<ReturnType<typeof evaluateSetupGate>> | null;
+  try {
+    const bootstrapSupabase = createBootstrapSupabase();
+    if (bootstrapSupabase) {
+      setupGate = await evaluateSetupGate(bootstrapSupabase);
+    }
+  } catch (err) {
+    log.warn('Setup gate evaluation failed (non-fatal, continuing)', { error: String(err) });
+  }
+
+  if (setupGate && setupGate.state === 'not_started') {
+    // No Discord token yet — the bot has nothing to log in with. Log one clear
+    // line and idle in an "awaiting setup" health state so a health watcher
+    // sees a clean waiting status (rather than a crash loop from loadConfig
+    // exiting on the missing token).
+    //
+    // Composition note: the desktop launcher forks the bot only AFTER Discord
+    // credentials are collected, so a launcher-driven boot is never
+    // 'not_started' — it's 'in_progress' or 'complete'. This branch is the
+    // defensive path for a standalone `node dist/index.js` started with only
+    // Supabase creds; we intentionally do NOT send the launcher IPC ready
+    // signal here (there is no Discord client and the bot is not truly online).
+    log.warn(setupGate.message ?? 'Setup not complete — finish setup before the bot can run.');
+    setAwaitingSetup({
+      reason: 'Setup not complete — no Discord bot token configured yet.',
+      dashboardUrl: setupGate.dashboardUrl,
+    });
+    // The listening health server keeps the event loop alive so the process
+    // idles (reporting awaiting_setup) until the owner finishes setup and
+    // restarts the bot.
+    startHealthServer(null);
+    return;
   }
 
   // 1. Validate environment
@@ -136,6 +178,24 @@ async function main(): Promise<void> {
   client.once(Events.ClientReady, async () => {
     log.info('Discord ready — initializing systems...');
     startLauncherIpcHeartbeat(client);
+
+    // ── Setup gate: verification-only boot ──
+    // Setup exists in the DB but is not finalized. The wizard needs the bot
+    // reachable to verify "bot online" + "guild detected" before it can
+    // finalize — so we DO come online, write the guild record, and heartbeat,
+    // but we SKIP the heavy per-guild feature init that would spam errors
+    // while config is incomplete. Once the owner finalizes setup and the bot
+    // restarts, the gate reports 'complete' and the normal boot below runs.
+    if (setupGate && setupGate.state === 'in_progress') {
+      log.warn(setupGate.message ?? 'Setup not complete — running in setup-verification mode.');
+      try {
+        const verifyHeartbeat = await runSetupVerificationBoot(client);
+        if (verifyHeartbeat) botLevelServices.heartbeat = verifyHeartbeat;
+      } catch (err) {
+        log.error('Setup-verification boot failed', { error: String(err) });
+      }
+      return;
+    }
 
     // ── Auto-detect guild ID if not set ──
     if (!client.guildId) {
@@ -280,6 +340,27 @@ async function main(): Promise<void> {
   // ── New guild joined: auto-initialize via GuildRouter ──
   client.on('guildCreate', async (guild) => {
     log.info('Bot joined new guild', { name: guild.name, id: guild.id });
+
+    // Setup-verification mode: the router does not exist yet (full init is
+    // gated off). The owner commonly invites the bot mid-setup, so we still
+    // write the guild record here — otherwise the wizard's "guild detected"
+    // check would never see the just-invited guild and setup could not finish.
+    if (setupGate && setupGate.state === 'in_progress') {
+      try {
+        await writeGuildRecord(guild, client.supabase);
+        // If the bot booted with no guilds, no verification heartbeat was
+        // started. Now that a guild exists, start one so the wizard's
+        // "bot online" check (which reads the bot-level heartbeat) can pass.
+        if (!botLevelServices.heartbeat) {
+          const verifyHeartbeat = await runSetupVerificationBoot(client);
+          if (verifyHeartbeat) botLevelServices.heartbeat = verifyHeartbeat;
+        }
+      } catch (err) {
+        log.error('Failed to record guild during setup verification', { id: guild.id, error: String(err) });
+      }
+      return;
+    }
+
     try {
       await client.router.getContext(guild.id);
       log.info('New guild initialized', { name: guild.name, id: guild.id });
@@ -291,6 +372,8 @@ async function main(): Promise<void> {
   // ── Guild removed: destroy context ──
   client.on('guildDelete', (guild) => {
     log.info('Bot removed from guild', { name: guild.name, id: guild.id });
+    // In setup-verification mode no router/contexts exist to tear down.
+    if (!client.router) return;
     const ctx = client.router.getContextSync(guild.id);
     if (ctx) {
       destroyGuildServices(ctx);

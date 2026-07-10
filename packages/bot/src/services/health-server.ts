@@ -8,6 +8,12 @@
  *
  * Port priority: HEALTH_PORT → PORT (hosted platform) → 3001 (default).
  * GET /health → 200 if healthy, 503 if unhealthy.
+ *
+ * Wave 3 setup gate: when the bot is idling because owner setup has not been
+ * completed, it reports `status: 'awaiting_setup'` with HTTP 200 instead of
+ * `unhealthy`/503. The process is intentionally alive and waiting — not
+ * broken — so the launcher/process-manager can surface a clean waiting state
+ * (and its health watcher will not treat the bot as failed and restart it).
  */
 import { createServer, type Server } from 'node:http';
 import { createLogger } from '@somnibot/shared';
@@ -18,13 +24,30 @@ const log = createLogger('HealthServer');
 let server: Server | null = null;
 
 /**
+ * When non-null, the bot is idling awaiting setup completion. The health
+ * endpoint reports this state (HTTP 200) instead of running the Discord/Valkey
+ * checks, so a bot that has not logged in (no token yet) is not reported as
+ * unhealthy. `reason` is a short human-readable line for diagnostics.
+ */
+let awaitingSetup: { reason: string; dashboardUrl: string } | null = null;
+
+/**
+ * Mark the bot as idling in an "awaiting setup" health state. The next
+ * /health request returns `{ status: 'awaiting_setup', ... }` with HTTP 200.
+ * Pass null to clear (used once setup completes / normal boot resumes).
+ */
+export function setAwaitingSetup(state: { reason: string; dashboardUrl: string } | null): void {
+  awaitingSetup = state;
+}
+
+/**
  * Start the health check HTTP server.
  *
  * Checks:
  * 1. Discord WebSocket is open (client.ws.status === 0)
  * 2. Valkey is reachable (PING → PONG)
  */
-export function startHealthServer(client: SomniClient): void {
+export function startHealthServer(client: SomniClient | null): void {
   // HEALTH_PORT takes priority (explicit override), then PORT (some hosted
   // platforms inject this), then 3001 as a safe local default.
   const port = parseInt(process.env.HEALTH_PORT ?? process.env.PORT ?? '3001', 10);
@@ -36,6 +59,22 @@ export function startHealthServer(client: SomniClient): void {
       return;
     }
 
+    // ── Awaiting setup: intentionally idle, not unhealthy ──
+    // Reported first so a bot that never logged in (no token) is not judged
+    // unhealthy for its Discord WS being closed. HTTP 200 keeps the launcher's
+    // health watcher from treating the process as failed.
+    if (awaitingSetup) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          status: 'awaiting_setup',
+          reason: awaitingSetup.reason,
+          dashboardUrl: awaitingSetup.dashboardUrl,
+        }),
+      );
+      return;
+    }
+
     const checks: Record<string, boolean> = {
       discord: false,
       valkey: false,
@@ -43,14 +82,14 @@ export function startHealthServer(client: SomniClient): void {
 
     try {
       // Check Discord WebSocket status (0 = READY)
-      checks.discord = client.ws.status === 0;
+      checks.discord = client?.ws.status === 0;
     } catch {
       checks.discord = false;
     }
 
     try {
       // Check Valkey connectivity
-      const pong = await client.valkey.ping();
+      const pong = await client?.valkey.ping();
       checks.valkey = pong === 'PONG';
     } catch {
       checks.valkey = false;
