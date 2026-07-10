@@ -197,9 +197,33 @@ const productCreate = z.object({
   plans: z.array(z.record(z.unknown())).optional(),
 });
 
-const productUpdate = z.object({
-  id: uuid,
-}).merge(productCreate.partial()).passthrough();
+// STRICT update schema — mass-assignment guard.
+//
+// The store/products PUT route spreads every parsed key straight into the DB
+// `.update()` payload. A permissive schema therefore lets a client write ANY
+// column it names. `paypal_product_id` is the dangerous one: it is a PayPal
+// Catalog identifier assigned once by the create route and TRUSTED by
+// checkout/webhook routing to map a product to its PayPal entry, so a
+// client-supplied value could repoint a product at an attacker-chosen catalog
+// id.
+//
+// Build the update shape from the create schema's writable columns only:
+//   - `.omit({ plans: true })` — `plans` is a create-only input (plan
+//     definitions consumed by the POST route); it is NOT a `products` column,
+//     so forwarding it to `.update()` would target a non-existent column.
+//   - `.partial()` — every column is optional on update (and Zod strips the
+//     create-time `.default()`s, so an omitted key is left untouched instead of
+//     being reset to its default).
+//   - `.strict()` — reject unknown keys (paypal_product_id, guild_id,
+//     created_at, and anything else not in the writable set) rather than
+//     passing them through. This is the ROOT fix: only the intended writable
+//     columns can ever reach the DB, so the undo `products.data` allowlist is
+//     correct by construction (paypal_product_id excluded from both).
+const productUpdate = productCreate
+  .omit({ plans: true })
+  .partial()
+  .extend({ id: uuid })
+  .strict();
 
 // ── Plan schemas ────────────────────────────────────
 
