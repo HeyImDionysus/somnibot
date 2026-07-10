@@ -269,7 +269,14 @@ const entitlementGrant = z.object({
   // CHECK violation surfaced as a generic 500. Nothing grants a 'free'
   // entitlement (no UI/bot/docs/tests reference it), so it is removed here.
   type: z.enum(['one_time', 'subscription']).default('one_time'),
-  source: z.enum(['manual', 'purchase', 'gift', 'promotion']).default('manual'),
+  // Must mirror the entitlements.source (and orders.source) CHECK constraint
+  // in the initial schema — ('purchase', 'giveaway', 'manual', 'automation'),
+  // the same union as EntitlementService.grant. The previous enum accepted
+  // 'gift'/'promotion', which passed validation but died at insert with a
+  // raw DB CHECK violation. COMPLIANCE: do NOT add new values here — the
+  // bot's commerce-role-guard deny-lists non-purchase sources; any new
+  // source needs a real-money-or-not decision there first.
+  source: z.enum(['purchase', 'giveaway', 'manual', 'automation']).default('manual'),
   expires_at: z.string().datetime().optional().nullable(),
   granted_role_ids: snowflakeArray,
   granted_channel_ids: snowflakeArray,
