@@ -263,7 +263,12 @@ const promotionCreate = z.object({
 
 const entitlementGrant = z.object({
   product_id: uuid,
-  type: z.enum(['one_time', 'subscription', 'free']).default('one_time'),
+  // Must mirror the entitlements table CHECK (type IN ('one_time','subscription'))
+  // and EntitlementService.grant's 'one_time' | 'subscription' union. 'free' was
+  // ungrantable — it passed zod, manufactured an order, then died on a raw DB
+  // CHECK violation surfaced as a generic 500. Nothing grants a 'free'
+  // entitlement (no UI/bot/docs/tests reference it), so it is removed here.
+  type: z.enum(['one_time', 'subscription']).default('one_time'),
   // Must mirror the entitlements.source (and orders.source) CHECK constraint
   // in the initial schema — ('purchase', 'giveaway', 'manual', 'automation'),
   // the same union as EntitlementService.grant. The previous enum accepted
