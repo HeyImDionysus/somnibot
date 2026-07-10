@@ -48,6 +48,11 @@ SomniBot has games of chance (lottery, casino, heist). Therefore:
   item → market → coins laundering path.
 - No `fulfillment_type` may credit a game wallet; commerce-granted items must be
   rejected from market listing.
+- **A commerce-granted Discord role must not be eligible for game `economy_role_income`.**
+  Otherwise a paid product grants a role, and the buyer later collects wagerable game
+  currency from it — a real-money → game-currency path that bypasses the direct-credit
+  ban above. Enforce this where role income is collected (exclude commerce-granted roles)
+  or where a role is configured for income (reject roles used by paid products).
 
 ### Money paths — one source of truth
 
@@ -55,9 +60,14 @@ For any value that moves (real or game):
 
 - **Freeze amounts** when they are committed; never re-derive a payout/refund from
   mutable config on a retry.
-- **Do not store the same state twice** (e.g. a denormalized array *and* the rows it
-  duplicates). Derive, don't duplicate. The heist feature took nine rounds of bugs to
-  learn this — it now derives crew size and odds from the participant rows.
+- **Do not duplicate *live, mutable* state** (e.g. a denormalized crew array *and* the
+  participant rows it mirrors). Derive it instead. The heist feature took nine rounds of
+  bugs to learn this — it now derives crew size and odds from the participant rows.
+  **This does not apply to immutable snapshots frozen for money/entitlement rollback** —
+  those are required: e.g. `entitlements.granted_role_ids` captures what was sold at
+  purchase time so a later product edit can't retroactively revoke/re-grant the wrong
+  roles. Freezing a snapshot is the *same* principle as "freeze amounts" above; deriving
+  entitlement state from the mutable `products` record would be the bug.
 - **Idempotent + retryable:** guard on a committed marker (e.g. `paid_at`), retry on
   failure, and finalize/announce only after the money commits.
 
@@ -197,7 +207,9 @@ Example: `20260601000004_v53_dead_table_cleanup.sql`
    at **runtime** (not at apply time). Write `public.<table>` and `extensions.<fn>`
    (e.g. `extensions.gen_random_bytes`); `pg_catalog` functions such as `gen_random_uuid`
    are implicit and need no prefix. This class of bug caused a full lottery outage and a
-   broken GDPR purge function. CI runs `scripts/check-secdef-search-path.py` to catch it.
+   broken GDPR purge function. CI's `db-security-audit` checks that these functions set a
+   `search_path`; **it does not (yet) inspect function bodies for unqualified names**, so
+   reviewers must verify every reference is schema-qualified by hand.
 7. **RLS policies must be role-scoped.** Never `CREATE POLICY ... FOR ALL USING (true)`
    without a `TO` clause on a table holding sensitive data — combined with the legacy
    anon default-grant window, that lets anyone with the publishable key read (and often
