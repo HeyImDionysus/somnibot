@@ -615,6 +615,66 @@ describe('SomniLicense', () => {
       expect(hb.status).toBe('offline_grace_expired');
       client.destroy();
     });
+
+    it('caps the ONLINE validate() cache at a grace deadline learned via heartbeat', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())         // validate: healthy 'active'
+        .mockResolvedValueOnce(heartbeatGrace(10_000)) // heartbeat: grace, 10s deadline
+        .mockResolvedValueOnce(                          // forced revalidation past deadline
+          jsonResponse({ valid: false, status: 'expired', error: 'Payment grace period has ended' }),
+        );
+      // Long cache TTL: without the cap, the stale 'active' cache would ride out
+      // the full hour past the 10s grace deadline.
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+      await client.heartbeat(); // learns grace + 10s deadline
+
+      vi.advanceTimersByTime(12_000); // past the 10s deadline, far inside the 1h TTL
+      const revalidated = await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(3); // validate + heartbeat + forced revalidation
+      expect(revalidated.valid).toBe(false);
+      expect(revalidated.status).toBe('expired');
+      client.destroy();
+    });
+
+    it('surfaces grace_period from cache after a grace heartbeat, before the deadline', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())          // validate: healthy 'active'
+        .mockResolvedValueOnce(heartbeatGrace(60_000)); // heartbeat: grace, 60s deadline
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+      await client.heartbeat();
+
+      vi.advanceTimersByTime(20_000); // well before the 60s deadline
+      const cached = await client.validate();
+
+      expect(fetch).toHaveBeenCalledTimes(2); // still cached — no third fetch
+      expect(cached.valid).toBe(true);
+      expect(cached.status).toBe('grace_period'); // cache rewritten to reflect grace
+      expect(cached.grace_period_ends_at).toBeTruthy();
+      client.destroy();
+    });
+
+    it('isValid() flips false at a grace deadline learned via heartbeat (no refetch)', async () => {
+      const T0 = new Date('2026-07-09T12:00:00.000Z');
+      vi.setSystemTime(T0);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(validationOk())
+        .mockResolvedValueOnce(heartbeatGrace(5_000)); // 5s deadline
+      const client = sdk({ cacheTtlMs: 3_600_000 });
+      await client.validate();
+      await client.heartbeat();
+      expect(client.isValid()).toBe(true);
+
+      vi.advanceTimersByTime(6_000); // past the 5s deadline
+      expect(client.isValid()).toBe(false); // capped, even though TTL is 1h
+      client.destroy();
+    });
   });
 
   // ────────── heartbeat auto-scheduling ──────────

@@ -346,20 +346,46 @@ export class SomniLicense {
         this.anchorServerTime(res);
         // W2: the entitlement may have ENTERED grace after the initial
         // validation (payment failed mid-session). The heartbeat now reports
-        // status 'grace_period' + a deadline — record it as the offline
-        // hard-stop so a subsequent offline heartbeat/validate rejects once it
-        // passes, even though validate() never saw a grace response. Only an
-        // anchored deadline is trusted (same P3 reasoning as validate()); an
-        // unanchored one is treated as an immediate stop. A healthy heartbeat
-        // clears any prior grace stop.
+        // status 'grace_period' + a deadline. We must both (a) record the
+        // offline hard-stop so a subsequent offline heartbeat/validate rejects
+        // once it passes, AND (b) cap the ONLINE validation cache at the same
+        // deadline and rewrite the cached response to reflect grace — otherwise
+        // validate()/isValid() keep serving the stale 'active' cache (from the
+        // initial validation) past the deadline until the original, possibly
+        // much longer, cacheTtlMs elapses. Only an anchored deadline is trusted
+        // (same P3 reasoning as validate()); an unanchored one is treated as an
+        // immediate stop (non-cacheable + offline reject). A healthy heartbeat
+        // clears any prior grace stop but leaves the existing cache window alone.
         if (data.status === 'grace_period') {
           const graceDeadline = this.serverDeadlineToMono(data.grace_period_ends_at);
-          this.cachedGraceDeadlineMono =
-            graceDeadline === null
-              ? this.cachedGraceDeadlineMono
-              : graceDeadline.anchored
-                ? graceDeadline.mono
-                : this.mono();
+          if (graceDeadline === null) {
+            // No/unparseable deadline: keep any prior stop, leave cache as-is.
+          } else if (graceDeadline.anchored) {
+            this.cachedGraceDeadlineMono = graceDeadline.mono;
+            // Cap the online cache at the deadline (never EXTEND it) and rewrite
+            // the cached success so validate()/isValid() surface grace and stop
+            // exactly at the deadline.
+            this.cacheExpiry = Math.min(this.cacheExpiry, graceDeadline.mono);
+            if (this.cachedResult) {
+              this.cachedResult = {
+                ...this.cachedResult,
+                status: 'grace_period',
+                grace_period_ends_at: data.grace_period_ends_at,
+              };
+            }
+          } else {
+            // Unanchored deadline: cannot be trusted. Force revalidation on the
+            // next validate() and treat the offline stop as already lapsed.
+            this.cachedGraceDeadlineMono = this.mono();
+            this.cacheExpiry = this.mono();
+            if (this.cachedResult) {
+              this.cachedResult = {
+                ...this.cachedResult,
+                status: 'grace_period',
+                grace_period_ends_at: data.grace_period_ends_at,
+              };
+            }
+          }
         } else {
           this.cachedGraceDeadlineMono = null;
         }
