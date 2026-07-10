@@ -155,12 +155,21 @@ async function evaluateCondition(
         // timeout enforcement — the evaluated expression is a hardcoded
         // string, never user input. microtaskMode prevents timeout bypass
         // via microtask scheduling.
+        // TIMEOUT: 250ms. The original 50ms (V5 audit) was an uncalibrated
+        // bound: under heavy CPU contention (parallel test workers, busy
+        // host) vm context setup + scheduling alone can exceed 50ms, so even
+        // trivial patterns misclassified as timeouts (observed as flaky test
+        // failures under full-suite load). Patterns are guild-owner
+        // configured (dashboard writes are requireGuildOwner-gated) and
+        // length-capped, and input is sliced, so 250ms still firmly bounds
+        // catastrophic backtracking while tolerating scheduling jitter.
+        // Keep in sync with moderation/automod-engine.ts.
         const input = ctx.messageContent.slice(0, 2000);
         const { runInNewContext } = await import('node:vm');
         const result = runInNewContext(
           'pattern.test(input)',
           { pattern, input },
-          { timeout: 50, microtaskMode: 'afterEvaluate' },
+          { timeout: 250, microtaskMode: 'afterEvaluate' },
         );
         return Boolean(result);
       } catch {
