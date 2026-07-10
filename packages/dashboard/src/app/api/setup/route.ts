@@ -1114,7 +1114,13 @@ export async function POST(request: NextRequest) {
       || process.env['PAYPAL_WEBHOOK_URL']?.trim()
       || savedSetupSettings.get('paypal_webhook_url'),
     );
-    const webhookReachability = await getSetupWebhookReachability(effectivePayPalWebhookUrl);
+    // forceFresh: finalize records a durable verdict in instance_settings, so
+    // it must not consume a result cached up to 30s ago by page polling — an
+    // operator who just fixed DNS/TLS and immediately finalized would get the
+    // stale pre-fix verdict recorded. Polling keeps using the cache.
+    const webhookReachability = await getSetupWebhookReachability(effectivePayPalWebhookUrl, {
+      forceFresh: true,
+    });
     if (webhookReachability.status !== 'reachable') {
       console.warn(
         '[Setup] ⚠ PayPal webhook URL was not proven reachable during finalize:',

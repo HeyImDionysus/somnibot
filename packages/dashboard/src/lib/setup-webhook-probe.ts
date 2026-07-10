@@ -38,6 +38,8 @@
  * probe generates a fresh challenge and accepts only its own echo.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { BlockList, isIP } from 'net';
+import { lookup as dnsLookup } from 'dns/promises';
 
 /** Header carrying the signed probe challenge to the webhook route. */
 export const SETUP_WEBHOOK_PROBE_HEADER = 'x-somnibot-webhook-probe';
@@ -51,6 +53,10 @@ const PROBE_TIMEOUT_MS = 8_000;
 // self-inflicted request storm against the webhook endpoint.
 const PROBE_CACHE_TTL_MS = 30_000;
 const PROBE_CHALLENGE_MAX_LENGTH = 256;
+// The legitimate echo body is ~100 bytes of JSON. Anything meaningfully
+// larger is by definition not this deployment's webhook route, so the prober
+// never buffers more than this from a wrong (or hostile) target.
+const PROBE_MAX_RESPONSE_BYTES = 4_096;
 
 export type SetupWebhookProbeFailureReason =
   | 'dns'
@@ -59,6 +65,8 @@ export type SetupWebhookProbeFailureReason =
   | 'connection'
   | 'http-status'
   | 'echo-mismatch'
+  | 'oversized-response'
+  | 'private-address'
   | 'request-failed'
   | 'no-public-url'
   | 'probe-secret-missing';
@@ -79,11 +87,26 @@ export interface SetupWebhookReachability {
 }
 
 type ProbeFetch = (input: string, init?: RequestInit) => Promise<Response>;
+type ProbeLookup = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 
 interface ProbeOptions {
   fetchImpl?: ProbeFetch;
+  lookupImpl?: ProbeLookup;
   timeoutMs?: number;
 }
+
+interface ReachabilityOptions extends ProbeOptions {
+  /**
+   * Skip the result cache and any shared in-flight probe and run a fresh
+   * probe now (the fresh outcome still refreshes the cache). Used by setup
+   * finalize, which records a durable verdict and must not consume a result
+   * that predates a DNS/TLS fix the operator just made. Status polling keeps
+   * using the cache.
+   */
+  forceFresh?: boolean;
+}
+
+const defaultProbeLookup: ProbeLookup = (hostname) => dnsLookup(hostname, { all: true });
 
 /**
  * Same secret sources as webhook replay auth (app/api/paypal/webhook/verify.ts),
@@ -250,14 +273,187 @@ function classifyProbeError(err: unknown, timeoutMs: number): {
 }
 
 /**
+ * Addresses the probe must never request (SSRF guard), which are also
+ * addresses PayPal could never deliver a webhook to: loopback, RFC1918,
+ * link-local (includes 169.254.169.254-style cloud metadata services),
+ * CGNAT, ULA, multicast, and reserved space. net.BlockList canonicalizes
+ * IPv4-mapped IPv6 forms (`::ffff:10.0.0.5`, `::ffff:a00:5`) against the
+ * IPv4 rules, so mapped-address smuggling is covered.
+ */
+const PRIVATE_ADDRESS_BLOCKLIST = new BlockList();
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('0.0.0.0', 8, 'ipv4'); // "this network" / unspecified
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('10.0.0.0', 8, 'ipv4'); // RFC1918
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('100.64.0.0', 10, 'ipv4'); // CGNAT (Tailscale exception below)
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('127.0.0.0', 8, 'ipv4'); // loopback
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('169.254.0.0', 16, 'ipv4'); // link-local + cloud metadata
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('172.16.0.0', 12, 'ipv4'); // RFC1918
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('192.0.0.0', 24, 'ipv4'); // IETF protocol assignments
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('192.168.0.0', 16, 'ipv4'); // RFC1918
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('198.18.0.0', 15, 'ipv4'); // benchmarking
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('224.0.0.0', 4, 'ipv4'); // multicast
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('240.0.0.0', 4, 'ipv4'); // reserved + broadcast
+PRIVATE_ADDRESS_BLOCKLIST.addAddress('::', 'ipv6'); // unspecified
+PRIVATE_ADDRESS_BLOCKLIST.addAddress('::1', 'ipv6'); // loopback
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('fe80::', 10, 'ipv6'); // link-local
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('fc00::', 7, 'ipv6'); // ULA (Tailscale exception below)
+PRIVATE_ADDRESS_BLOCKLIST.addSubnet('ff00::', 8, 'ipv6'); // multicast
+
+/**
+ * Tailscale tailnet ranges, exempted ONLY for `*.ts.net` hostnames.
+ *
+ * `tailscale funnel` is a supported deployment path (the launcher derives the
+ * public callback URL from a *.ts.net hostname). Publicly those hostnames
+ * resolve to Tailscale's funnel ingress (public IPs), but on the funnel
+ * machine itself — exactly where this probe runs — MagicDNS resolves them to
+ * the node's own tailnet address: 100.64.0.0/10 (CGNAT v4) and
+ * fd7a:115c:a1e0::/48 (v6, inside ULA). Without this exception the guard
+ * would break every funnel deployment. IP literals and non-ts.net hostnames
+ * resolving into these ranges stay blocked (e.g. 100.100.100.200-style CGNAT
+ * metadata services), and *.ts.net names cannot be pointed at arbitrary
+ * internal addresses: Tailscale controls that zone, and MagicDNS only maps
+ * them to nodes of the operator's own tailnet.
+ */
+const TAILSCALE_ADDRESS_ALLOWLIST = new BlockList();
+TAILSCALE_ADDRESS_ALLOWLIST.addSubnet('100.64.0.0', 10, 'ipv4');
+TAILSCALE_ADDRESS_ALLOWLIST.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6');
+
+const TAILSCALE_HOSTNAME_SUFFIX = '.ts.net';
+
+function isBlockedProbeAddress(address: string, hostname: string): boolean {
+  const family = isIP(address);
+  if (family === 0) return true; // not a parseable IP — refuse rather than guess
+  const type = family === 6 ? 'ipv6' : 'ipv4';
+  if (
+    hostname.toLowerCase().endsWith(TAILSCALE_HOSTNAME_SUFFIX)
+    && TAILSCALE_ADDRESS_ALLOWLIST.check(address, type)
+  ) {
+    return false;
+  }
+  return PRIVATE_ADDRESS_BLOCKLIST.check(address, type);
+}
+
+/**
+ * Vet the probe target before any outbound request: reject private/internal
+ * IP literals outright, and resolve hostnames rejecting the target when ANY
+ * resolved address is private (a mixed answer means a rebinding-style DNS
+ * name could steer the probe internally).
+ *
+ * Returns null when the target is acceptable, or the terminal
+ * SetupWebhookReachability to report otherwise.
+ *
+ * TOCTOU honesty: this is resolve-then-fetch — the fetch below re-resolves
+ * the hostname itself, so a DNS name that flips to a private address between
+ * this check and the request (deliberate rebinding) is not fully excluded.
+ * That residual window is accepted deliberately: the platform-patched Next.js
+ * fetch offers no supported way to pin a request to pre-resolved addresses,
+ * and what an attacker gains through it is a single empty-bodied POST whose
+ * response is never reflected beyond a coarse failure classification.
+ */
+async function vetProbeTarget(
+  url: string,
+  lookupImpl: ProbeLookup,
+  timeoutMs: number,
+  checkedAt: string,
+): Promise<SetupWebhookReachability | null> {
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return {
+      status: 'unreachable',
+      failureReason: 'request-failed',
+      detail: 'The webhook URL could not be parsed, so the probe did not run.',
+      checkedUrl: url,
+      checkedAt,
+    };
+  }
+
+  // WHATWG URL keeps brackets on IPv6 hosts ("[fd00::1]"); strip them so
+  // net.isIP and BlockList see the bare address.
+  const bareHost = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+
+  let addresses: string[];
+  if (isIP(bareHost) !== 0) {
+    addresses = [bareHost];
+  } else {
+    try {
+      addresses = (await lookupImpl(bareHost)).map((entry) => entry.address);
+    } catch (err) {
+      // Resolving here (instead of first inside fetch) classifies DNS
+      // failures at the same step that vets the answer.
+      const { failureReason, detail } = classifyProbeError(err, timeoutMs);
+      return { status: 'unreachable', failureReason, detail, checkedUrl: url, checkedAt };
+    }
+    if (addresses.length === 0) {
+      return {
+        status: 'unreachable',
+        failureReason: 'dns',
+        detail: 'DNS lookup for the webhook hostname returned no addresses.',
+        checkedUrl: url,
+        checkedAt,
+      };
+    }
+  }
+
+  if (addresses.some((address) => isBlockedProbeAddress(address, bareHost))) {
+    return {
+      status: 'unreachable',
+      failureReason: 'private-address',
+      detail: 'The webhook URL points at a private or internal network address. PayPal delivers webhooks over the public internet and can never reach private addresses, so the probe refuses to call internal targets. (Tailscale *.ts.net hostnames are exempt from this check — funnel deployments resolve to tailnet addresses locally.)',
+      checkedUrl: url,
+      checkedAt,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Read at most `maxBytes` of the response body. `response.json()` would
+ * buffer an unbounded body from a wrong or malicious target; the real echo
+ * is ~100 bytes, so anything over the cap is treated as its own failure.
+ */
+async function readProbeResponseBody(
+  response: Response,
+  maxBytes: number,
+): Promise<{ kind: 'ok'; text: string } | { kind: 'oversize' } | { kind: 'unreadable' }> {
+  const body = response.body;
+  if (!body) return { kind: 'ok', text: '' };
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return { kind: 'oversize' };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  return { kind: 'ok', text: Buffer.concat(chunks).toString('utf8') };
+}
+
+/**
  * Run one reachability probe against `url` (no caching — see
  * getSetupWebhookReachability for the cached entry point).
  *
  * SSRF posture: callers only pass URLs that already passed
  * getSetupPayPalWebhookUrlError (HTTPS, non-localhost, exact
- * /api/paypal/webhook path), redirects are never followed, the request
- * body is empty, and nothing from the response is reflected to clients
- * beyond a coarse status classification.
+ * /api/paypal/webhook path); on top of that, vetProbeTarget rejects
+ * private/internal targets before any request (see its TOCTOU note),
+ * redirects are never followed, the request body is empty, response bodies
+ * are read capped at PROBE_MAX_RESPONSE_BYTES, and nothing from the response
+ * is reflected to clients beyond a coarse status classification.
  */
 export async function probeSetupWebhookUrl(
   url: string,
@@ -265,6 +461,7 @@ export async function probeSetupWebhookUrl(
 ): Promise<SetupWebhookReachability> {
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
   const fetchImpl: ProbeFetch = options.fetchImpl ?? fetch;
+  const lookupImpl: ProbeLookup = options.lookupImpl ?? defaultProbeLookup;
   const checkedAt = new Date().toISOString();
 
   const challenge = createSetupWebhookProbeChallenge();
@@ -277,6 +474,9 @@ export async function probeSetupWebhookUrl(
       checkedAt,
     };
   }
+
+  const targetRejection = await vetProbeTarget(url, lookupImpl, timeoutMs, checkedAt);
+  if (targetRejection) return targetRejection;
 
   let response: Response;
   try {
@@ -310,12 +510,25 @@ export async function probeSetupWebhookUrl(
     };
   }
 
+  const bodyRead = await readProbeResponseBody(response, PROBE_MAX_RESPONSE_BYTES);
+  if (bodyRead.kind === 'oversize') {
+    return {
+      status: 'unreachable',
+      failureReason: 'oversized-response',
+      detail: 'The webhook URL answered HTTP 200 with an oversized response instead of the compact probe echo — another service appears to be behind this URL.',
+      checkedUrl: url,
+      checkedAt,
+    };
+  }
+
   let echo: unknown = null;
-  try {
-    const body = await response.json() as { echo?: unknown } | null;
-    echo = body?.echo ?? null;
-  } catch {
-    echo = null;
+  if (bodyRead.kind === 'ok') {
+    try {
+      const parsed = JSON.parse(bodyRead.text) as { echo?: unknown } | null;
+      echo = parsed?.echo ?? null;
+    } catch {
+      echo = null;
+    }
   }
 
   const expectedEcho = buildSetupWebhookProbeEcho(challenge);
@@ -354,10 +567,12 @@ let inflightProbe: { url: string; promise: Promise<SetupWebhookReachability> } |
  * - Outcomes (including failures) are cached for PROBE_CACHE_TTL_MS.
  * - Concurrent readiness reads share a single in-flight probe instead of
  *   racing multiple outbound requests.
+ * - `forceFresh` (finalize) bypasses both the cache and any shared in-flight
+ *   probe, then refreshes the cache with the new outcome.
  */
 export async function getSetupWebhookReachability(
   url: string | null,
-  options: ProbeOptions = {},
+  options: ReachabilityOptions = {},
 ): Promise<SetupWebhookReachability> {
   if (!url) {
     return {
@@ -369,12 +584,14 @@ export async function getSetupWebhookReachability(
     };
   }
 
-  if (cachedProbe && cachedProbe.result.checkedUrl === url && Date.now() < cachedProbe.expiresAt) {
-    return cachedProbe.result;
-  }
+  if (!options.forceFresh) {
+    if (cachedProbe && cachedProbe.result.checkedUrl === url && Date.now() < cachedProbe.expiresAt) {
+      return cachedProbe.result;
+    }
 
-  if (inflightProbe?.url === url) {
-    return inflightProbe.promise;
+    if (inflightProbe?.url === url) {
+      return inflightProbe.promise;
+    }
   }
 
   const promise = probeSetupWebhookUrl(url, options)

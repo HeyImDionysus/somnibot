@@ -20,6 +20,11 @@ import {
 
 const WEBHOOK_URL = 'https://dashboard.example.com/api/paypal/webhook';
 
+// Tests never hit real DNS: the probe now vets resolved addresses before
+// fetching (SSRF guard), so every network-path test injects a lookup. This
+// one resolves to a plainly public address.
+const publicLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
 function fetchFailure(code: string, message = `request failed (${code})`) {
   const cause = Object.assign(new Error(message), { code });
   return Object.assign(new TypeError('fetch failed'), { cause });
@@ -143,7 +148,7 @@ describe('probeSetupWebhookUrl', () => {
       return echoResponse(challenge);
     });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('reachable');
     expect(result.failureReason).toBeNull();
@@ -158,7 +163,7 @@ describe('probeSetupWebhookUrl', () => {
       { status: 200 },
     ));
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('echo-mismatch');
@@ -167,7 +172,7 @@ describe('probeSetupWebhookUrl', () => {
   it('reports echo-mismatch when a 200 response is not JSON', async () => {
     const fetchImpl = vi.fn(async () => new Response('<html>captive portal</html>', { status: 200 }));
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('echo-mismatch');
@@ -176,7 +181,7 @@ describe('probeSetupWebhookUrl', () => {
   it('reports http-status failures with the status code', async () => {
     const fetchImpl = vi.fn(async () => new Response('not found', { status: 404 }));
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('http-status');
@@ -189,7 +194,7 @@ describe('probeSetupWebhookUrl', () => {
       headers: { Location: 'https://elsewhere.example.com/' },
     }));
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('http-status');
@@ -199,7 +204,7 @@ describe('probeSetupWebhookUrl', () => {
   it('classifies DNS failures', async () => {
     const fetchImpl = vi.fn(async () => { throw fetchFailure('ENOTFOUND'); });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('dns');
@@ -209,7 +214,7 @@ describe('probeSetupWebhookUrl', () => {
   it('classifies TLS failures', async () => {
     const fetchImpl = vi.fn(async () => { throw fetchFailure('CERT_HAS_EXPIRED'); });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('tls');
@@ -222,7 +227,7 @@ describe('probeSetupWebhookUrl', () => {
     });
     const fetchImpl = vi.fn(async () => { throw timeoutError; });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('timeout');
@@ -231,7 +236,7 @@ describe('probeSetupWebhookUrl', () => {
   it('classifies refused connections', async () => {
     const fetchImpl = vi.fn(async () => { throw fetchFailure('ECONNREFUSED'); });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('connection');
@@ -240,7 +245,7 @@ describe('probeSetupWebhookUrl', () => {
   it('classifies unknown fetch failures as request-failed', async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError('fetch failed'); });
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('unreachable');
     expect(result.failureReason).toBe('request-failed');
@@ -251,11 +256,202 @@ describe('probeSetupWebhookUrl', () => {
     delete process.env.NEXTAUTH_SECRET;
     const fetchImpl = vi.fn();
 
-    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl });
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('skipped');
     expect(result.failureReason).toBe('probe-secret-missing');
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized 200 response instead of buffering it', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      `{"echo":"${'a'.repeat(64 * 1024)}"}`,
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('oversized-response');
+    expect(result.detail).toContain('oversized');
+  });
+
+  it('still verifies echoes that arrive split across multiple stream chunks', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const payload = new TextEncoder().encode(
+        JSON.stringify({ status: 'probe', echo: buildSetupWebhookProbeEcho(probeHeaderOf(init)) }),
+      );
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(payload.slice(0, 10));
+          controller.enqueue(payload.slice(10));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+
+    expect(result.status).toBe('reachable');
+  });
+});
+
+describe('probe target vetting (SSRF guard)', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.env.WEBHOOK_REPLAY_SECRET = 'probe-test-secret';
+    resetSetupWebhookReachabilityCacheForTests();
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['RFC1918 10/8', 'https://10.0.0.5:8443/api/paypal/webhook'],
+    ['RFC1918 172.16/12', 'https://172.20.1.9/api/paypal/webhook'],
+    ['RFC1918 192.168/16', 'https://192.168.1.10/api/paypal/webhook'],
+    ['loopback 127/8 (non-127.0.0.1)', 'https://127.1.2.3/api/paypal/webhook'],
+    ['link-local metadata', 'https://169.254.169.254/api/paypal/webhook'],
+    ['CGNAT metadata-style', 'https://100.100.100.200/api/paypal/webhook'],
+    ['IPv6 ULA', 'https://[fd00::1]/api/paypal/webhook'],
+    ['IPv6 link-local', 'https://[fe80::1]/api/paypal/webhook'],
+    ['IPv4-mapped IPv6', 'https://[::ffff:10.0.0.5]/api/paypal/webhook'],
+  ])('rejects a %s IP literal without any DNS lookup or request', async (_label, url) => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn();
+
+    const result = await probeSetupWebhookUrl(url, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(lookupImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects a hostname that resolves to a private address without requesting it', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn(async () => [{ address: '10.13.37.1', family: 4 }]);
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(lookupImpl).toHaveBeenCalledWith('dashboard.example.com');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // The resolved address itself is never surfaced to setup-status readers.
+    expect(result.detail).not.toContain('10.13.37.1');
+  });
+
+  it('rejects a hostname when ANY resolved address is private (mixed answers)', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn(async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '192.168.0.10', family: 4 },
+    ]);
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-Tailscale hostname resolving into CGNAT space', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn(async () => [{ address: '100.100.100.200', family: 4 }]);
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('allows a *.ts.net funnel hostname that MagicDNS resolves to its tailnet IPv4 address', async () => {
+    // On the funnel machine itself (where this probe runs), MagicDNS resolves
+    // the node's own *.ts.net name to its 100.64.0.0/10 tailnet address, not
+    // the public funnel ingress. This supported deployment path must probe.
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const lookupImpl = vi.fn(async () => [{ address: '100.101.102.103', family: 4 }]);
+
+    const result = await probeSetupWebhookUrl(
+      'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      { fetchImpl, lookupImpl },
+    );
+
+    expect(result.status).toBe('reachable');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a *.ts.net funnel hostname that resolves to the Tailscale IPv6 range', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const lookupImpl = vi.fn(async () => [
+      { address: '100.101.102.103', family: 4 },
+      { address: 'fd7a:115c:a1e0:ab12::1', family: 6 },
+    ]);
+
+    const result = await probeSetupWebhookUrl(
+      'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      { fetchImpl, lookupImpl },
+    );
+
+    expect(result.status).toBe('reachable');
+  });
+
+  it('still blocks non-tailnet private addresses for *.ts.net hostnames', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn(async () => [{ address: '10.0.0.5', family: 4 }]);
+
+    const result = await probeSetupWebhookUrl(
+      'https://somnibot.tailnet.ts.net/api/paypal/webhook',
+      { fetchImpl, lookupImpl },
+    );
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not extend the Tailscale exception to CGNAT IP literals', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn();
+
+    const result = await probeSetupWebhookUrl('https://100.101.102.103/api/paypal/webhook', { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('private-address');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('classifies a failing DNS lookup as a dns failure without fetching', async () => {
+    const fetchImpl = vi.fn();
+    const lookupImpl = vi.fn(async () => {
+      throw Object.assign(new Error('getaddrinfo ENOTFOUND dashboard.example.com'), { code: 'ENOTFOUND' });
+    });
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('unreachable');
+    expect(result.failureReason).toBe('dns');
+    expect(result.detail).toContain('ENOTFOUND');
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('probes public addresses normally', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const lookupImpl = vi.fn(async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:21f:cb07:6820:80da:af6b:8b2c', family: 6 },
+    ]);
+
+    const result = await probeSetupWebhookUrl(WEBHOOK_URL, { fetchImpl, lookupImpl });
+
+    expect(result.status).toBe('reachable');
   });
 });
 
@@ -277,7 +473,7 @@ describe('getSetupWebhookReachability caching', () => {
   it('skips without probing when no URL is ready yet', async () => {
     const fetchImpl = vi.fn();
 
-    const result = await getSetupWebhookReachability(null, { fetchImpl });
+    const result = await getSetupWebhookReachability(null, { fetchImpl, lookupImpl: publicLookup });
 
     expect(result.status).toBe('skipped');
     expect(result.failureReason).toBe('no-public-url');
@@ -287,8 +483,8 @@ describe('getSetupWebhookReachability caching', () => {
   it('caches probe results so status polling cannot become a request storm', async () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
 
-    const first = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
-    const second = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
+    const first = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+    const second = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(first.status).toBe('reachable');
     expect(second).toBe(first);
@@ -298,8 +494,8 @@ describe('getSetupWebhookReachability caching', () => {
   it('caches unreachable outcomes too', async () => {
     const fetchImpl = vi.fn(async () => { throw fetchFailure('ECONNREFUSED'); });
 
-    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
-    const second = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
+    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+    const second = await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(second.status).toBe('unreachable');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
@@ -314,9 +510,11 @@ describe('getSetupWebhookReachability caching', () => {
     });
 
     const [firstPromise, secondPromise] = [
-      getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl }),
-      getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl }),
+      getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup }),
+      getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup }),
     ];
+    // The probe awaits the (async) target vetting before fetching.
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
     resolveFetch!(echoResponse(capturedChallenge));
     const [first, second] = await Promise.all([firstPromise, secondPromise]);
 
@@ -329,9 +527,9 @@ describe('getSetupWebhookReachability caching', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
 
-    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
+    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
     vi.setSystemTime(Date.now() + 31_000);
-    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
+    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
@@ -339,10 +537,82 @@ describe('getSetupWebhookReachability caching', () => {
   it('re-probes immediately when the webhook URL changes', async () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
 
-    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl });
-    const other = await getSetupWebhookReachability('https://other.example.com/api/paypal/webhook', { fetchImpl });
+    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl, lookupImpl: publicLookup });
+    const other = await getSetupWebhookReachability('https://other.example.com/api/paypal/webhook', { fetchImpl, lookupImpl: publicLookup });
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(other.checkedUrl).toBe('https://other.example.com/api/paypal/webhook');
+  });
+
+  it('forceFresh bypasses a cached verdict so finalize never records a stale result', async () => {
+    // Probe 1: URL is broken (DNS failure) — the failure is cached.
+    const failingFetch = vi.fn(async () => { throw fetchFailure('ENOTFOUND'); });
+    const stale = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: failingFetch,
+      lookupImpl: publicLookup,
+    });
+    expect(stale.status).toBe('unreachable');
+
+    // Operator fixes DNS and finalizes immediately: within the cache TTL a
+    // plain read still serves the stale verdict, but forceFresh re-probes.
+    const workingFetch = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const cached = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: workingFetch,
+      lookupImpl: publicLookup,
+    });
+    expect(cached).toBe(stale);
+    expect(workingFetch).not.toHaveBeenCalled();
+
+    const fresh = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: workingFetch,
+      lookupImpl: publicLookup,
+      forceFresh: true,
+    });
+
+    expect(fresh.status).toBe('reachable');
+    expect(workingFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('forceFresh refreshes the cache with the new outcome for subsequent polls', async () => {
+    const failingFetch = vi.fn(async () => { throw fetchFailure('ENOTFOUND'); });
+    await getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl: failingFetch, lookupImpl: publicLookup });
+
+    const workingFetch = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const fresh = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: workingFetch,
+      lookupImpl: publicLookup,
+      forceFresh: true,
+    });
+
+    // A later plain (cached) poll sees the forced result, not the stale one.
+    const polled = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: workingFetch,
+      lookupImpl: publicLookup,
+    });
+    expect(polled).toBe(fresh);
+    expect(workingFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('forceFresh does not join an already in-flight cached probe', async () => {
+    let resolveFirst: ((res: Response) => void) | undefined;
+    let firstChallenge = '';
+    const slowFetch = vi.fn((_url: string, init?: RequestInit) => {
+      firstChallenge = probeHeaderOf(init);
+      return new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    });
+    const pollPromise = getSetupWebhookReachability(WEBHOOK_URL, { fetchImpl: slowFetch, lookupImpl: publicLookup });
+    await vi.waitFor(() => expect(slowFetch).toHaveBeenCalledTimes(1));
+
+    const freshFetch = vi.fn(async (_url: string, init?: RequestInit) => echoResponse(probeHeaderOf(init)));
+    const fresh = await getSetupWebhookReachability(WEBHOOK_URL, {
+      fetchImpl: freshFetch,
+      lookupImpl: publicLookup,
+      forceFresh: true,
+    });
+    expect(freshFetch).toHaveBeenCalledTimes(1);
+    expect(fresh.status).toBe('reachable');
+
+    resolveFirst!(echoResponse(firstChallenge));
+    await expect(pollPromise).resolves.toMatchObject({ status: 'reachable' });
   });
 });

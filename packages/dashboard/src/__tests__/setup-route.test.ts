@@ -440,7 +440,12 @@ describe('POST /api/setup finalize', () => {
     // but does not brick finalize (hairpin-NAT setups legitimately cannot
     // reach their own public URL even though PayPal can).
     expect(body.ok).toBe(true);
-    expect(getSetupWebhookReachability).toHaveBeenCalledWith('https://dashboard.example.com/api/paypal/webhook');
+    // Finalize must bypass the poll cache: the recorded verdict has to
+    // reflect the URL's state at finalize time, not up to 30s earlier.
+    expect(getSetupWebhookReachability).toHaveBeenCalledWith(
+      'https://dashboard.example.com/api/paypal/webhook',
+      { forceFresh: true },
+    );
     expect(instanceSettingsTable.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         key: 'paypal_webhook_reachability',
