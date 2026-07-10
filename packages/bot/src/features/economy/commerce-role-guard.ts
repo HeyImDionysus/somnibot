@@ -13,12 +13,20 @@
  * through config, `/collect-income` must never pay for a role the collecting
  * user holds via a commerce grant.
  *
- * A user holds a role via commerce when EITHER:
+ * A user holds a role via commerce when ANY of:
  *   1. An active/grace entitlement of theirs lists the role in
  *      `entitlements.granted_role_ids` — linked to the user through
  *      `customers.discord_id`. (EntitlementService.grant path.)
  *   2. An unexpired `temp_role_grants` row with a commerce source grants them
- *      the role directly by Discord `user_id`. (CrossFeatureBridge.grantPurchaseRole path.)
+ *      the role directly by Discord `user_id`. (CrossFeatureBridge.grantPurchaseRole
+ *      TEMPORARY path — only written when metadata.role_duration_hours is set.)
+ *   3. The role is the `metadata.grant_role_id` of any PAID product in the
+ *      guild. (CrossFeatureBridge.grantPurchaseRole PERMANENT path — a permanent
+ *      metadata grant adds the Discord role but writes NO temp_role_grants row
+ *      and NO entitlement, so layers 1–2 never see it. The config wall forbids a
+ *      paid product's granted role from also earning income, so any role a paid
+ *      product grants is commerce-held for wall purposes regardless of which
+ *      specific product the collecting user bought.)
  *
  * Returns the set of role IDs the user holds via commerce, so callers can
  * exclude them from any wagerable-currency payout.
@@ -96,6 +104,29 @@ export async function getCommerceHeldRoleIds(
     for (const grant of tempGrants ?? []) {
       const roleId = grant.role_id as string;
       if (candidates.has(roleId)) commerceHeld.add(roleId);
+    }
+
+    // ── Layer 3: permanent metadata.grant_role_id on any PAID product ──
+    // A permanent commerce role grant (no role_duration_hours) writes neither
+    // an entitlement nor a temp_role_grants row — grantPurchaseRole just adds
+    // the Discord role. So layers 1–2 can't see it. The config wall forbids a
+    // paid product from granting a role that also earns income, so ANY role a
+    // paid product grants via metadata is treated as commerce-held here. We only
+    // query for the candidate roles (roles the user both holds and has income
+    // configured for), so this stays cheap.
+    const { data: metaProducts, error: metaErr } = await supabase
+      .from('products')
+      .select('metadata')
+      .eq('guild_id', guildId)
+      .neq('type', 'free')
+      .in('metadata->>grant_role_id', [...candidates])
+      .limit(1000);
+    if (metaErr) throw new Error(`products metadata lookup failed: ${metaErr.message}`);
+
+    for (const product of metaProducts ?? []) {
+      const metadata = (product.metadata as Record<string, unknown> | null) ?? {};
+      const roleId = metadata.grant_role_id;
+      if (typeof roleId === 'string' && candidates.has(roleId)) commerceHeld.add(roleId);
     }
 
     return commerceHeld;

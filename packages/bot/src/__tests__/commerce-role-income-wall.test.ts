@@ -101,6 +101,39 @@ describe('getCommerceHeldRoleIds', () => {
       customers: { data: [{ id: 'cust-1' }] },
       entitlements: { data: [{ granted_role_ids: ['some-other-role'] }] },
       temp_role_grants: { data: [] },
+      products: { data: [] },
+    });
+    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-earned']);
+    expect(held.size).toBe(0);
+  });
+
+  it('flags a PERMANENT metadata.grant_role_id role on a paid product (no temp grant, no entitlement)', async () => {
+    // The permanent-grant path writes neither a temp_role_grants row nor an
+    // entitlement — only a paid product carrying metadata.grant_role_id exists.
+    const supabase = makeSupabase({
+      customers: { data: [] },
+      temp_role_grants: { data: [] },
+      products: (state) => {
+        // Layer 3 must query paid products (type != free) filtered to the
+        // candidate roles via the metadata->>grant_role_id JSON path. The
+        // filter carries ALL candidate roles; the DB (real, not this mock)
+        // returns only rows whose metadata role matches.
+        expect(state.filters.guild_id).toBe(GUILD);
+        expect(state.inFilters['metadata->>grant_role_id']).toEqual(['role-perma', 'role-free']);
+        return { data: [{ metadata: { grant_role_id: 'role-perma' } }] };
+      },
+    });
+    const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-perma', 'role-free']);
+    expect([...held]).toEqual(['role-perma']);
+  });
+
+  it('does NOT flag a metadata grant role that belongs only to a FREE product', async () => {
+    // The Layer-3 query excludes free products (neq type free), so a free
+    // product granting the role returns no rows and the role stays payable.
+    const supabase = makeSupabase({
+      customers: { data: [] },
+      temp_role_grants: { data: [] },
+      products: { data: [] }, // free product filtered out by the query
     });
     const held = await getCommerceHeldRoleIds(supabase as any, GUILD, USER, ['role-earned']);
     expect(held.size).toBe(0);
@@ -204,5 +237,44 @@ describe('handleCollectIncome — compliance wall at collection', () => {
     await handleEconomyCommand(int as any, mgr as any);
 
     expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 250);
+  });
+
+  it('skips a zero-amount rule WITHOUT burning its cooldown or crediting', async () => {
+    // A stray zero-amount rule must not set the cooldown (which would lock the
+    // user out) nor reach creditWallet (which rejects non-positive amounts).
+    const supabase = makeSupabase({
+      economy_role_income: { data: [{ role_id: 'role-zero', amount: 0, interval_minutes: 60 }] },
+      customers: { data: [] },
+      temp_role_grants: { data: [] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-zero']);
+
+    await handleEconomyCommand(int as any, mgr as any);
+
+    expect(mgr.creditWallet).not.toHaveBeenCalled();
+    // Cooldown was never set — the collection window is preserved.
+    expect(mgr.valkey.set).not.toHaveBeenCalled();
+    const reply = int.reply.mock.calls[0][0].content as string;
+    expect(reply.toLowerCase()).toContain('no role income available');
+  });
+
+  it('pays only the positive rule when a zero-amount rule is also configured', async () => {
+    const supabase = makeSupabase({
+      economy_role_income: { data: [
+        { role_id: 'role-zero', amount: 0, interval_minutes: 60 },
+        { role_id: 'role-earned', amount: 300, interval_minutes: 60 },
+      ] },
+      customers: { data: [] },
+      temp_role_grants: { data: [] },
+    });
+    const mgr = makeManager();
+    const int = makeInteraction(supabase, ['role-zero', 'role-earned']);
+
+    await handleEconomyCommand(int as any, mgr as any);
+
+    expect(mgr.creditWallet).toHaveBeenCalledWith(USER, 300);
+    // Cooldown set exactly once — only for the paying role.
+    expect(mgr.valkey.set).toHaveBeenCalledTimes(1);
   });
 });

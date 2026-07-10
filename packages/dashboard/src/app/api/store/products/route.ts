@@ -16,6 +16,19 @@ import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError } from '@/lib/api/response';
 import { assertProductRolesNotIncomeEarning } from '@/lib/api/commerce-income-wall';
+
+/**
+ * Extract the single role a product grants via `metadata.grant_role_id` (the
+ * bot's purchase.completed → grantPurchaseRole path), as a 0-or-1-element array
+ * so callers can spread it alongside `granted_role_ids`. Non-string / missing
+ * values yield [].
+ */
+function metadataGrantRoleIds(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== 'object') return [];
+  const roleId = (metadata as Record<string, unknown>).grant_role_id;
+  return typeof roleId === 'string' && roleId.length > 0 ? [roleId] : [];
+}
+
 // ── PayPal Helpers ─────────────────────────────────────
 
 type PayPalSyncResult =
@@ -257,8 +270,13 @@ export async function POST(req: NextRequest) {
 
   // Compliance wall: a PAID product's granted roles must not earn role-income
   // (real money → wagerable currency). Checked before any PayPal call or DB
-  // write so a rejected product creates nothing.
-  const rolesToGrant = granted_role_ids ?? [];
+  // write so a rejected product creates nothing. Cover BOTH grant vectors:
+  // the `granted_role_ids` array and the single `metadata.grant_role_id` role
+  // that the bot's purchase.completed → grantPurchaseRole path acts on.
+  const rolesToGrant = [
+    ...(granted_role_ids ?? []),
+    ...metadataGrantRoleIds(metadata),
+  ];
   const wall = await assertProductRolesNotIncomeEarning(
     supabase,
     guildId,
@@ -417,27 +435,61 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
-  // Compliance wall: if this update sets granted roles (or flips the product
-  // to paid), reject roles that already earn role-income. `type` is optional
-  // on update, so fall back to the stored type to decide paid-ness.
-  if ('granted_role_ids' in updates || 'type' in updates) {
+  // Compliance wall: an update must never leave a PAID, buyable product
+  // granting a role that earns role-income. Re-check whenever the update
+  // touches ANY field that can (a) change what roles are granted, or (b) make
+  // the product a real-money purchase path — because flipping only `active`
+  // false→true or `price_cents` 0→paid on a product with an overlapping income
+  // role opens the laundering path without touching roles or `type`.
+  //
+  // `type` alone no longer decides paid-ness: a `one_time` product with
+  // price_cents 0 or active=false is not a real-money purchase path. We treat a
+  // product as buyable only when it is non-free AND active AND priced > 0, using
+  // the stored row for any field the update omits.
+  const WALL_TRIGGER_FIELDS = [
+    'granted_role_ids',
+    'metadata',
+    'type',
+    'active',
+    'price_cents',
+  ] as const;
+  if (WALL_TRIGGER_FIELDS.some((f) => f in updates)) {
     const { data: existing } = await supabase
       .from('products')
-      .select('type, granted_role_ids')
+      .select('type, granted_role_ids, metadata, active, price_cents')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
 
-    const effectiveType = (updates.type ?? existing?.type) as string | undefined;
-    const effectiveRoles = ('granted_role_ids' in updates
-      ? updates.granted_role_ids
-      : existing?.granted_role_ids) ?? [];
+    const pick = <K extends string>(key: K, fallback: unknown) =>
+      (key in updates ? (updates as Record<string, unknown>)[key] : fallback);
+
+    const effectiveType = pick('type', existing?.type) as string | undefined;
+    const effectiveActive = pick('active', existing?.active) as boolean | undefined;
+    const effectivePrice = pick('price_cents', existing?.price_cents) as number | undefined;
+    const effectiveMetadata = pick('metadata', existing?.metadata);
+    const effectiveRoles = [
+      ...(((pick('granted_role_ids', existing?.granted_role_ids)) as string[] | null) ?? []),
+      ...metadataGrantRoleIds(effectiveMetadata),
+    ];
+
+    // Buyable = a real-money purchase path: non-free type, active, and able to
+    // charge. One-time products charge `price_cents`, so they are buyable only
+    // when priced > 0. Subscriptions charge through PayPal plans (product-level
+    // price_cents may be 0), so a non-free active subscription is always treated
+    // as buyable — we cannot rule out a paid plan from this row alone.
+    const chargesRealMoney =
+      effectiveType === 'subscription' || (effectivePrice ?? 0) > 0;
+    const isBuyable =
+      effectiveType !== 'free' &&
+      effectiveActive !== false &&
+      chargesRealMoney;
 
     const wall = await assertProductRolesNotIncomeEarning(
       supabase,
       guildId,
       effectiveRoles,
-      effectiveType !== 'free',
+      isBuyable,
     );
     if (!wall.ok) {
       return apiError(wall.message, 409);

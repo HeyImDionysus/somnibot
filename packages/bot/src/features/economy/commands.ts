@@ -595,6 +595,13 @@ async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr
   for (const ri of roleIncomes) {
     if (!roleCache.has(ri.role_id)) continue;
 
+    // Skip non-positive-amount rules BEFORE touching the cooldown. A zero (or
+    // negative) amount is not a real payout: `creditWallet` rejects it, and if
+    // we set the cooldown first the user would lose their collection window for
+    // nothing. The dashboard rejects zero at config; this is the backstop for
+    // any stray legacy row.
+    if (!Number.isFinite(ri.amount) || ri.amount <= 0) continue;
+
     // Skip commerce-granted roles — paying them would credit wagerable
     // currency funded by a real-money purchase (compliance-wall breach).
     if (commerceHeldRoleIds.has(ri.role_id)) {

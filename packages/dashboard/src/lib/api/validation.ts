@@ -564,7 +564,12 @@ const syncConfig = z.object({
 
 const economyRoleIncomeUpsert = z.object({
   role_id: snowflake,
-  amount: z.number().int().min(0).max(1_000_000_000),
+  // Must be POSITIVE: a zero-amount rule is not a real income rule, and at
+  // collection time it would burn the per-role cooldown and then fail
+  // `creditWallet` (which rejects non-positive amounts), so the user loses the
+  // cooldown for no payout. Reject it at config; the bot also skips any
+  // stray zero-amount rule defensively.
+  amount: z.number().int().min(1).max(1_000_000_000),
   interval_minutes: z.number().int().min(1).max(525_600), // 1 min … 1 year
 });
 
