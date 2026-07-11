@@ -88,6 +88,35 @@ function getManager<T>(client: SomniClient, key: string, guildId?: string): T | 
 }
 
 /**
+ * Whether an interaction belongs to the setup wizard.
+ *
+ * During setup-verification mode ONLY these are allowed to route (see the gate
+ * in handleInteraction); every other command/component is short-circuited so it
+ * cannot run against the empty placeholder router and missing guild_config.
+ *
+ * The set mirrors exactly the setup entry points dispatched below:
+ *   - the `/setup` slash command,
+ *   - `setup:` buttons,
+ *   - the `setup:reconfigure` select menu,
+ *   - `setup:modal:` modal submissions.
+ */
+function isSetupInteraction(interaction: Interaction): boolean {
+  if (interaction.isChatInputCommand()) {
+    return interaction.commandName === 'setup';
+  }
+  if (interaction.isButton()) {
+    return interaction.customId.startsWith('setup:');
+  }
+  if (interaction.isStringSelectMenu()) {
+    return interaction.customId === 'setup:reconfigure';
+  }
+  if (interaction.isModalSubmit()) {
+    return interaction.customId.startsWith('setup:modal:');
+  }
+  return false;
+}
+
+/**
  * Handle a single interactionCreate event.
  * Exported for the main event wiring in handler.ts.
  */
@@ -99,6 +128,20 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
   // DM-based interaction ever routes here (Discord API edge cases).
   const guildId = interaction.guildId;
   if (!guildId) return;
+
+  // ── Setup-verification gate (codex round-3 finding #1) ──
+  // While the bot is in setup-verification mode it is logged in ONLY so the
+  // wizard can confirm it is online; the GuildRouter is an empty placeholder
+  // and guild_config rows do not exist yet. Previously registered slash
+  // commands or component interactions (e.g. /warn, store/music buttons) can
+  // still be routed by Discord — running them now would hit an empty router and
+  // missing guild_config, reproducing the pre-setup DB writes/errors this gate
+  // is meant to suppress. Let ONLY the setup wizard's own interactions through
+  // and short-circuit everything else until the full-boot transition clears the
+  // flag.
+  if (client.setupVerificationMode === true && !isSetupInteraction(interaction)) {
+    return;
+  }
 
   try {
     // ── Setup wizard ──

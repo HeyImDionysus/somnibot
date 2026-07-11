@@ -98,6 +98,16 @@ vi.mock('../features/moderation/antiraid.js', () => ({
   processAntiRaid: vi.fn(async () => false),
 }));
 
+// events/handler.ts imports processAntiRaid from ../features/anti-raid/index.js
+// (NOT ../features/moderation/antiraid.js above). Mock the real path so the
+// verification-gate tests can assert whether it ran, and so the "RUNS" test
+// does not invoke the real anti-raid pipeline.
+vi.mock('../features/anti-raid/index.js', () => ({
+  processAntiRaid: vi.fn(async () => false),
+  startAntiRaidPruner: vi.fn(),
+  stopAntiRaidPruner: vi.fn(),
+}));
+
 vi.mock('../features/moderation/automod-actions.js', () => ({
   executeAutoModAction: vi.fn(async () => {}),
 }));
@@ -332,6 +342,98 @@ describe('events/handler', () => {
     const newMember = { id: 'user-1', roles: { cache: new Map() }, guild: { id: 'guild-1' } };
     await client._emit('guildMemberUpdate', oldMember, newMember);
       expect(Object.keys(client._handlers).length).toBeGreaterThan(0);
+  });
+
+  // ── Codex round-2 finding #4: gate normal event handlers during verification ──
+  // In setup-verification mode the bot is logged in only so the wizard can
+  // confirm it is online; the GuildRouter is an empty placeholder and
+  // guild_config rows do not exist yet. Normal guild event handlers must bail
+  // out (client.setupVerificationMode === true), else half-initialized
+  // pipelines run and produce the pre-setup error noise the gate suppresses
+  // (e.g. handleMemberJoin logging a missing guild_config row).
+  it('does NOT run guildMemberAdd feature pipeline while in setup-verification mode', async () => {
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    const { handleMemberJoin } = await import('../features/welcome/index.js');
+    client.setupVerificationMode = true;
+    registerEvents(client);
+
+    const member = { id: 'user-1', guild: { id: 'guild-1' }, user: { bot: false, tag: 'Test#0001' } };
+    await client._emit('guildMemberAdd', member);
+
+    // Gate short-circuits BEFORE any feature work.
+    expect(processAntiRaid).not.toHaveBeenCalled();
+    expect(handleMemberJoin).not.toHaveBeenCalled();
+  });
+
+  it('does NOT run the messageCreate pipeline while in setup-verification mode', async () => {
+    const { processMessage } = await import('../features/moderation/index.js');
+    client.setupVerificationMode = true;
+    registerEvents(client);
+
+    const message = {
+      author: { bot: false, id: 'user-1' },
+      guild: { id: 'guild-1' },
+      guildId: 'guild-1',
+      content: 'hello',
+      channel: { id: 'ch-1' },
+    };
+    await client._emit('messageCreate', message);
+
+    expect(processMessage).not.toHaveBeenCalled();
+  });
+
+  it('RUNS guildMemberAdd once verification mode is cleared (transition lights handlers up)', async () => {
+    const { processAntiRaid } = await import('../features/anti-raid/index.js');
+    const { handleMemberJoin } = await import('../features/welcome/index.js');
+    // Register while gated, then clear the flag exactly as the full-boot
+    // transition does — the SAME registered handler must now run.
+    client.setupVerificationMode = true;
+    registerEvents(client);
+    client.setupVerificationMode = false;
+
+    const member = { id: 'user-1', guild: { id: 'guild-1' }, user: { bot: false, tag: 'Test#0001' } };
+    await client._emit('guildMemberAdd', member);
+
+    expect(processAntiRaid).toHaveBeenCalledTimes(1);
+    expect(handleMemberJoin).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Codex finding #1: the periodic crons unconditionally call
+  // client.router.all(). Setup-verification mode installs an EMPTY GuildRouter
+  // before returning precisely so those sweeps do not throw
+  // "Cannot read properties of undefined". This test proves an empty router
+  // makes the crons harmless no-ops (they iterate zero contexts and do not
+  // throw) rather than crashing the process every interval.
+  it('periodic crons are safe no-ops when the router has no contexts (verification mode)', async () => {
+    const { expireInfractions } = await import('../features/moderation/index.js');
+    vi.useFakeTimers();
+    try {
+      const cronClient = makeClient();
+      // Empty placeholder router, exactly like setup-verification mode installs.
+      cronClient.router = {
+        all: () => [][Symbol.iterator](),
+      };
+      // Supabase stub covering the temp-role-sweep and prune crons that query
+      // Supabase directly (no router iteration): all resolve empty.
+      cronClient.supabase = {
+        from: vi.fn(() => ({
+          select: vi.fn(() => ({
+            lt: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
+          })),
+        })),
+        rpc: vi.fn(async () => ({ data: {}, error: null })),
+      };
+
+      registerEvents(cronClient);
+
+      // Advance well past the 15-min and 30-min cron intervals; must not throw.
+      await expect(vi.advanceTimersByTimeAsync(31 * 60 * 1000)).resolves.not.toThrow();
+
+      // Router had zero contexts → the per-guild cron work never ran.
+      expect(expireInfractions).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
 });
