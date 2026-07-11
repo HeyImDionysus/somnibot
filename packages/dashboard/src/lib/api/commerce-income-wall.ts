@@ -29,16 +29,15 @@
  * free — nor to prove one is chargeable). `free` products are refused at
  * checkout.
  *
- *   type          | active | price/plan state                        | buyable
- *   ------------- | ------ | --------------------------------------- | -------
- *   free          |   *    | *                                       | NO
- *   one_time      | false  | *                                       | NO
- *   one_time      | true   | price_cents <= 0                        | NO
- *   one_time      | true   | price_cents > 0                         | YES
- *   subscription  | false  | *                                       | NO
- *   subscription  | true   | no chargeable plan                      | NO
- *   subscription  | true   | active plan w/ price>0 but NO paypal id | NO
- *   subscription  | true   | >=1 active plan with a paypal_plan_id   | YES
+ *   type          | active | price/plan state                          | buyable
+ *   ------------- | ------ | ----------------------------------------- | -------
+ *   free          |   *    | *                                         | NO
+ *   one_time      | false  | *                                         | NO
+ *   one_time      | true   | price_cents <= 0                          | NO
+ *   one_time      | true   | price_cents > 0                           | YES
+ *   subscription  | false  | *                                         | NO
+ *   subscription  | true   | CHEAPEST active plan has NO paypal id      | NO
+ *   subscription  | true   | CHEAPEST active plan HAS a paypal_plan_id  | YES
  *
  * Chargeable plan = `active` AND `paypal_plan_id` set. A `paypal_plan_id` is
  * REQUIRED, not optional: checkout starts a subscription from
@@ -46,6 +45,15 @@
  * what charges, so a plan WITHOUT a PayPal id cannot move real money however
  * high its `price_cents`, while a zero-`price_cents` plan WITH a real PayPal
  * id can. `price_cents` therefore does not enter the chargeability decision.
+ *
+ * CRUCIAL (finding #3): chargeability is decided on the SINGLE plan checkout
+ * would actually charge, NOT "any active plan with a PayPal id." Checkout
+ * (payment-handler.ts) picks the CHEAPEST active plan for the product
+ * (`order by price_cents asc limit 1`, guild-scoped) and refuses it if it has
+ * no `paypal_plan_id`. So a product whose cheapest active plan lacks a PayPal
+ * id is NOT buyable even if a pricier active plan carries one — checkout picks
+ * the cheapest and stops. The wall mirrors that exact selection
+ * (findSubscriptionsWithChargeablePlan), so wall and checkout never disagree.
  *
  * ── GRANT VECTORS(product, role) — how a purchase grants a role ────────────
  *
@@ -143,6 +151,53 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+// ── Full-scan helper (compliance scans must never truncate) ─────────────────
+
+/** Page size for paginated scans — the PostgREST/Supabase per-request cap. */
+const SCAN_PAGE_SIZE = 1000;
+
+/**
+ * A minimal shape for the query builder after the filters are applied: a
+ * thenable that also supports `.range(from, to)`. `PostgrestFilterBuilder`
+ * satisfies this, but typing it structurally keeps the helper reusable for the
+ * fakes the matrix tests inject.
+ */
+interface RangeableQuery<T> {
+  range(from: number, to: number): PromiseLike<{ data: T[] | null; error: { message: string } | null }>;
+}
+
+/**
+ * Read EVERY row a compliance scan depends on — never just the first page.
+ *
+ * A security scan that stops at PostgREST's default 1,000-row cap can MISS a
+ * role/order/entitlement and let a real-money path slip the wall (finding #1,
+ * same bug class as the past heist truncation). Instead of `.limit(1000)`,
+ * every wall-governing scan pages through the full result set with `.range()`
+ * until a short page proves the set is exhausted. `build()` must apply all
+ * filters and return the query builder; it is re-invoked per page so each call
+ * gets a fresh builder, and `fetchAllRows` appends the `.range()` window. Any
+ * page error propagates (callers fail CLOSED — the write aborts / the payout
+ * excludes every candidate).
+ */
+export async function fetchAllRows<T>(
+  build: () => RangeableQuery<T>,
+  label: string,
+  pageSize: number = SCAN_PAGE_SIZE,
+): Promise<T[]> {
+  const all: T[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const to = from + pageSize - 1;
+    const { data, error } = await build().range(from, to);
+    if (error) throw new Error(`${label}: ${error.message}`);
+    const page = data ?? [];
+    all.push(...page);
+    // A page shorter than the window means we have reached the end. (A page of
+    // exactly pageSize means there may be more; loop for the next window.)
+    if (page.length < pageSize) break;
+  }
+  return all;
+}
+
 // ── Pure predicates (the truth table) ───────────────────────────────────────
 
 /** Product fields the buyability predicate reads. */
@@ -150,6 +205,24 @@ export interface ProductWallFields {
   type?: string | null;
   active?: boolean | null;
   price_cents?: number | null;
+}
+
+/** A products row as read by the paginated V1 scan. */
+interface ProductScanRow {
+  id: string;
+  type: string | null;
+  active: boolean | null;
+  price_cents: number | null;
+  granted_role_ids: string[] | null;
+}
+
+/** A products row as read by the paginated V2/V3/V4 metadata scans. */
+interface ProductMetaScanRow {
+  id: string;
+  type?: string | null;
+  active?: boolean | null;
+  price_cents?: number | null;
+  metadata: unknown;
 }
 
 /** Plan fields the chargeability predicate reads. */
@@ -299,23 +372,40 @@ export async function findIncomeRoles(
   roleIds: string[],
 ): Promise<string[]> {
   if (roleIds.length === 0) return [];
-  const { data, error } = await supabase
-    .from('economy_role_income')
-    .select('role_id')
-    .eq('guild_id', guildId)
-    .in('role_id', roleIds)
-    .gt('amount', 0)
-    .limit(1000);
-  if (error) throw new Error(`economy_role_income lookup failed: ${error.message}`);
-  return (data ?? []).map((r) => r.role_id as string);
+  // Full scan (finding #1): a guild with >1000 income rows must not silently
+  // drop a paying role, or a product/plan write could sell a role that pays.
+  const data = await fetchAllRows<{ role_id: string }>(
+    () =>
+      supabase
+        .from('economy_role_income')
+        .select('role_id')
+        .eq('guild_id', guildId)
+        .in('role_id', roleIds)
+        .gt('amount', 0) as unknown as RangeableQuery<{ role_id: string }>,
+    'economy_role_income lookup failed',
+  );
+  return data.map((r) => r.role_id);
 }
 
 /**
- * Of `productIds` (subscription products), the subset with at least one
- * chargeable plan — see isChargeablePlan(): active AND carrying a
- * `paypal_plan_id` (the only thing checkout can start a subscription from).
- * The SQL filters (active, paypal_plan_id not null) are a prefilter; the
- * shared predicate makes the final call in JS.
+ * Of `productIds` (subscription products), the subset the checkout can
+ * actually charge — mirroring what checkout ACTUALLY selects (finding #3).
+ *
+ * Checkout (payment-handler.ts handleBuyButton, subscription branch) does NOT
+ * accept "any active plan that has a paypal_plan_id": it selects the SINGLE
+ * CHEAPEST active plan for the product (guild-scoped, `order by price_cents
+ * asc`, `limit 1`) and then refuses it if that plan lacks a `paypal_plan_id`
+ * (`if (!plan.paypal_plan_id) return`). So a product whose cheapest active
+ * plan has NO paypal_plan_id is NOT buyable even if a pricier active plan does
+ * — checkout would pick the cheapest, find no PayPal id, and stop.
+ *
+ * The wall must evaluate the SAME plan checkout would charge, or wall and
+ * checkout disagree (wall over-blocks a product checkout can't buy, or the
+ * old "any chargeable plan" rule under-blocks by matching a plan checkout
+ * never reaches). So we per-product select the cheapest active plan and run
+ * isChargeablePlan() on THAT one. One bounded (`limit 1`) query per product;
+ * the candidate set is the subscription products overlapping the roles under
+ * test — small — and being per-product it also cannot truncate (finding #1).
  */
 export async function findSubscriptionsWithChargeablePlan(
   supabase: SupabaseClient,
@@ -323,20 +413,26 @@ export async function findSubscriptionsWithChargeablePlan(
   productIds: string[],
 ): Promise<Set<string>> {
   if (productIds.length === 0) return new Set();
-  const { data, error } = await supabase
-    .from('plans')
-    .select('product_id, active, price_cents, paypal_plan_id')
-    .eq('guild_id', guildId)
-    .in('product_id', productIds)
-    .eq('active', true)
-    .not('paypal_plan_id', 'is', null)
-    .limit(1000);
-  if (error) throw new Error(`plans lookup failed: ${error.message}`);
-  return new Set(
-    (data ?? [])
-      .filter((plan) => isChargeablePlan(plan as PlanWallFields))
-      .map((plan) => plan.product_id as string),
-  );
+  const chargeable = new Set<string>();
+  for (const productId of productIds) {
+    // Mirror checkout EXACTLY: cheapest active plan for this product, then the
+    // paypal_plan_id gate. Guild-scoped so a foreign zero-price plan cannot be
+    // considered (matches checkout's own guild scoping).
+    const { data, error } = await supabase
+      .from('plans')
+      .select('product_id, active, price_cents, paypal_plan_id')
+      .eq('guild_id', guildId)
+      .eq('product_id', productId)
+      .eq('active', true)
+      .order('price_cents', { ascending: true })
+      .limit(1);
+    if (error) throw new Error(`plans lookup failed: ${error.message}`);
+    const cheapestActive = (data ?? [])[0];
+    if (cheapestActive && isChargeablePlan(cheapestActive as PlanWallFields)) {
+      chargeable.add(productId);
+    }
+  }
+  return chargeable;
 }
 
 /**
@@ -398,49 +494,57 @@ export async function findPaidProductRoles(
   // ── V1: granted_role_ids on a BUYABLE product ──
   // SQL prefilters the cheap arms (non-free, active, role overlap); the
   // price/plan arm needs plan rows for subscriptions, so buyability is
-  // decided in JS by the shared predicate.
-  const { data: arrayData, error: arrayErr } = await supabase
-    .from('products')
-    .select('id, type, active, price_cents, granted_role_ids')
-    .eq('guild_id', guildId)
-    .neq('type', 'free')
-    .eq('active', true)
-    .overlaps('granted_role_ids', roleIds)
-    .limit(1000);
-  if (arrayErr) throw new Error(`products lookup failed: ${arrayErr.message}`);
+  // decided in JS by the shared predicate. Full scan (finding #1): a guild
+  // with >1000 active non-free products granting the candidate role must not
+  // truncate — a buyable product beyond page 1 would slip the wall.
+  const arrayData = await fetchAllRows<ProductScanRow>(
+    () =>
+      supabase
+        .from('products')
+        .select('id, type, active, price_cents, granted_role_ids')
+        .eq('guild_id', guildId)
+        .neq('type', 'free')
+        .eq('active', true)
+        .overlaps('granted_role_ids', roleIds) as unknown as RangeableQuery<ProductScanRow>,
+    'products lookup failed',
+  );
 
-  const subscriptionIds = (arrayData ?? [])
+  const subscriptionIds = arrayData
     .filter((p) => p.type === 'subscription')
-    .map((p) => p.id as string);
+    .map((p) => p.id);
   const chargeableSubs = await findSubscriptionsWithChargeablePlan(
     supabase,
     guildId,
     subscriptionIds,
   );
 
-  for (const product of arrayData ?? []) {
-    const buyable = isBuyableProduct(product as ProductWallFields, {
-      hasChargeablePlan: chargeableSubs.has(product.id as string),
+  for (const product of arrayData) {
+    const buyable = isBuyableProduct(product, {
+      hasChargeablePlan: chargeableSubs.has(product.id),
     });
     if (!buyable) continue;
-    for (const roleId of (product.granted_role_ids as string[] | null) ?? []) {
+    for (const roleId of product.granted_role_ids ?? []) {
       if (candidates.has(roleId)) conflicting.add(roleId);
     }
   }
 
-  // ── V2 (live metadata) + V3 (sold metadata): one query, JS decides ──
+  // ── V2 (live metadata) + V3 (sold metadata): one scan, JS decides ──
   // No type/active/price SQL filters: V3 applies regardless of current
-  // product state (historical permanent grants outlive config edits).
-  const { data: metaData, error: metaErr } = await supabase
-    .from('products')
-    .select('id, type, active, price_cents, metadata')
-    .eq('guild_id', guildId)
-    .in('metadata->>grant_role_id', roleIds)
-    .limit(1000);
-  if (metaErr) throw new Error(`products metadata lookup failed: ${metaErr.message}`);
+  // product state (historical permanent grants outlive config edits). Full
+  // scan (finding #1): >1000 products carrying a candidate metadata role must
+  // not truncate.
+  const metaData = await fetchAllRows<ProductMetaScanRow>(
+    () =>
+      supabase
+        .from('products')
+        .select('id, type, active, price_cents, metadata')
+        .eq('guild_id', guildId)
+        .in('metadata->>grant_role_id', roleIds) as unknown as RangeableQuery<ProductMetaScanRow>,
+    'products metadata lookup failed',
+  );
 
   const soldCheck: { id: string; roleId: string }[] = [];
-  for (const product of metaData ?? []) {
+  for (const product of metaData) {
     const roleId = metadataGrantRoleId(product.metadata);
     if (!roleId || !candidates.has(roleId)) continue;
     // V2: the metadata vector only fires for one-time checkout, and only a
@@ -456,7 +560,7 @@ export async function findPaidProductRoles(
     // V3: a PERMANENT metadata grant that has actually sold blocks forever,
     // whatever the product's current type/active/price.
     if (permanentMetadataGrantRoleId(product.metadata) === roleId) {
-      soldCheck.push({ id: product.id as string, roleId });
+      soldCheck.push({ id: product.id, roleId });
     }
   }
   if (soldCheck.length > 0) {
@@ -471,14 +575,21 @@ export async function findPaidProductRoles(
   }
 
   // ── V4: recorded historical grants — any product state ──
-  const { data: histData, error: histErr } = await supabase
-    .from('products')
-    .select('id, metadata')
-    .eq('guild_id', guildId)
-    .not('metadata->historical_grant_role_ids', 'is', null)
-    .limit(1000);
-  if (histErr) throw new Error(`products history lookup failed: ${histErr.message}`);
-  for (const product of histData ?? []) {
+  // Full scan (finding #1): every product carrying server-recorded sold
+  // history must be inspected; a truncated page could hide a blocked role.
+  const histData = await fetchAllRows<{ id: string; metadata: unknown }>(
+    () =>
+      supabase
+        .from('products')
+        .select('id, metadata')
+        .eq('guild_id', guildId)
+        .not('metadata->historical_grant_role_ids', 'is', null) as unknown as RangeableQuery<{
+        id: string;
+        metadata: unknown;
+      }>,
+    'products history lookup failed',
+  );
+  for (const product of histData) {
     for (const roleId of historicalGrantRoleIds(product.metadata)) {
       if (candidates.has(roleId)) conflicting.add(roleId);
     }

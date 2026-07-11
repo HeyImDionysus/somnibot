@@ -90,11 +90,19 @@ function makeSupabase(tables: Record<string, TableConfig>) {
       if (limitN != null) rows = rows.slice(0, limitN);
       return { data: rows, error: null };
     };
+    // Faithful `.range(from, to)`: slices the filtered rows to the inclusive
+    // window so paginated compliance scans past 1000 rows are exercised.
+    const rangeResult = (from: number, to: number) => {
+      if (cfg.readError) return { data: null, error: cfg.readError };
+      const rows = (cfg.rows ?? []).filter((r) => conds.every((c) => c(r)));
+      return { data: rows.slice(from, to + 1), error: null };
+    };
 
     const chain: Record<string, unknown> = {
       select: () => chain,
       order: () => chain,
       limit: (n: number) => { limitN = n; return chain; },
+      range: (from: number, to: number) => Promise.resolve(rangeResult(from, to)),
       eq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'eq', val)); return chain; },
       neq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'neq', val)); return chain; },
       gt: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'gt', val)); return chain; },
@@ -139,6 +147,19 @@ function tempGrant(roleId: string, opts: { source?: string; expires_at?: string 
 
 function metaProduct(metadata: Record<string, unknown>, id = PRODUCT): Row {
   return { id, guild_id: GUILD, metadata };
+}
+
+/** A `bot_action_queue` revoke_roles row for USER (finding #2, L1b). */
+function revokeRow(
+  roleIds: string[],
+  opts: { status?: string; discord_id?: string } = {},
+): Row {
+  return {
+    guild_id: GUILD,
+    action: 'revoke_roles',
+    status: opts.status ?? 'pending',
+    payload: { discord_id: opts.discord_id ?? USER, role_ids: roleIds, reason: 'refund' },
+  };
 }
 
 function order(o: { amount_cents?: number; status?: string; source?: string | null; paypal_subscription_id?: string | null; product_id?: string } = {}): Row {
@@ -192,6 +213,30 @@ describe('COLLECTION GUARD MATRIX — getCommerceHeldRoleIds', () => {
         entitlement(['role-mystery'], 'mystery_source'),
       ] } },
       candidates: ['role-null', 'role-mystery'], held: ['role-null', 'role-mystery'] },
+
+    // ── L1b: pending-revoked purchase roles (finding #2) ──
+    { name: 'finding #2: a PENDING revoke_roles row keeps the role excluded (entitlement already expired, Discord role still on member)',
+      tables: {
+        customers: CUSTOMER,
+        entitlements: { rows: [entitlement(['role-paid'], 'purchase', 'expired')] },
+        bot_action_queue: { rows: [revokeRow(['role-paid'])] },
+      },
+      candidates: ['role-paid', 'role-free'], held: ['role-paid'] },
+    { name: 'finding #2: a FAILED revoke_roles row (retries exhausted, role stuck on member) still excludes',
+      tables: { bot_action_queue: { rows: [revokeRow(['role-paid'], { status: 'failed' })] } },
+      candidates: ['role-paid'], held: ['role-paid'] },
+    { name: 'finding #2: a COMPLETED revoke_roles row does NOT exclude (role actually removed)',
+      tables: { bot_action_queue: { rows: [revokeRow(['role-paid'], { status: 'completed' })] } },
+      candidates: ['role-paid'], held: [] },
+    { name: 'finding #2: a revoke_roles row for ANOTHER discord user does not exclude',
+      tables: { bot_action_queue: { rows: [revokeRow(['role-paid'], { discord_id: 'someone-else' })] } },
+      candidates: ['role-paid'], held: [] },
+    { name: 'finding #2: revoke_roles listing OTHER roles does not exclude the candidate',
+      tables: { bot_action_queue: { rows: [revokeRow(['role-other'])] } },
+      candidates: ['role-paid'], held: [] },
+    { name: 'finding #2: an unknown non-completed status still excludes (fails CLOSED on status != completed)',
+      tables: { bot_action_queue: { rows: [revokeRow(['role-paid'], { status: 'processing' })] } },
+      candidates: ['role-paid'], held: ['role-paid'] },
 
     // ── L2: temp grants ──
     { name: 'L2: unexpired commerce temp grant excludes',
@@ -305,11 +350,46 @@ describe('COLLECTION GUARD MATRIX — getCommerceHeldRoleIds', () => {
     expect([...held].sort()).toEqual(['role-free', 'role-perma']);
   });
 
+  it('finding #2: fails CLOSED when the revoke-queue lookup errors (excludes every candidate)', async () => {
+    const supabase = makeSupabase({ bot_action_queue: { readError: { message: 'db down' } } });
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, ['role-paid', 'role-free']);
+    expect([...held].sort()).toEqual(['role-free', 'role-paid']);
+  });
+
   it('short-circuits with no query when there are no candidate roles', async () => {
     const supabase = makeSupabase({});
     const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, []);
     expect(held.size).toBe(0);
     expect(supabase.from).not.toHaveBeenCalled();
+  });
+
+  // ── FINDING #1 — bot-side compliance scans must not truncate at 1,000 rows ──
+  it('finding #1: a pending revoke_roles row past the 1,000-row page still excludes (queue scan paginated)', async () => {
+    // 1,100 pending revoke rows for THIS user (so they survive the discord_id
+    // filter and pad the page) carry only noise roles; the row naming the
+    // candidate role sits LAST, past the 1,000-row cap.
+    const rows = [
+      ...Array.from({ length: 1100 }, () => revokeRow(['role-noise'])),
+      revokeRow(['role-paid']),
+    ];
+    const supabase = makeSupabase({ bot_action_queue: { rows } });
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, ['role-paid']);
+    expect([...held]).toEqual(['role-paid']);
+  });
+
+  it('finding #1: a sold permanent metadata role on a product past page 1 still excludes (products scan paginated)', async () => {
+    // All 1,101 products carry the SAME candidate metadata role so the `.in()`
+    // prefilter keeps them all; only the LAST one (index 1100, past the cap)
+    // has a real-money order, so pagination is what makes it visible.
+    const fillers = Array.from({ length: 1100 }, (_, i) =>
+      metaProduct({ grant_role_id: 'role-paid' }, `prod-${i}`),
+    );
+    const supabase = makeSupabase({
+      products: { rows: [...fillers, metaProduct({ grant_role_id: 'role-paid' }, 'the-sold-one')] },
+      orders: { rows: [order({ product_id: 'the-sold-one' })] },
+    });
+    const held = await getCommerceHeldRoleIds(supabase as never, GUILD, USER, ['role-paid']);
+    expect([...held]).toEqual(['role-paid']);
   });
 });
 

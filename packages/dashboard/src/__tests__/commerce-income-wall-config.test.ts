@@ -132,11 +132,32 @@ function createFakeSupabase(tables: Record<string, TableConfig>) {
     let mode: 'read' | 'write' = 'read';
     let limitN: number | undefined;
 
+    let orderCol: string | undefined;
+    let orderAsc = true;
+    const applyOrder = (rows: Row[]) => {
+      if (!orderCol) return rows;
+      const col = orderCol;
+      return [...rows].sort((a, b) => {
+        const av = getCol(a, col);
+        const bv = getCol(b, col);
+        const an = typeof av === 'number' ? av : Number(av ?? 0);
+        const bn = typeof bv === 'number' ? bv : Number(bv ?? 0);
+        return orderAsc ? an - bn : bn - an;
+      });
+    };
     const readResult = () => {
       if (cfg.readError) return { data: null, error: cfg.readError };
-      let rows = (cfg.rows ?? []).filter((r) => conds.every((c) => c(r)));
+      let rows = applyOrder((cfg.rows ?? []).filter((r) => conds.every((c) => c(r))));
       if (limitN != null) rows = rows.slice(0, limitN);
       return { data: rows, error: null };
+    };
+    // Faithful `.range(from, to)`: slices the (filtered, ordered) rows to the
+    // inclusive window, so paginated scans that page past 1000 rows are
+    // exercised exactly as PostgREST would serve them.
+    const rangeResult = (from: number, to: number) => {
+      if (cfg.readError) return { data: null, error: cfg.readError };
+      const rows = applyOrder((cfg.rows ?? []).filter((r) => conds.every((c) => c(r))));
+      return { data: rows.slice(from, to + 1), error: null };
     };
     const writeResult = () => cfg.writeResult ?? { data: { id: 'written-row' }, error: null };
     const result = () => (mode === 'write' ? writeResult() : readResult());
@@ -148,8 +169,13 @@ function createFakeSupabase(tables: Record<string, TableConfig>) {
 
     const chain: Record<string, unknown> = {
       select: () => chain,
-      order: () => chain,
+      order: (col: string, opts?: { ascending?: boolean }) => {
+        orderCol = col;
+        orderAsc = opts?.ascending !== false;
+        return chain;
+      },
       limit: (n: number) => { limitN = n; return chain; },
+      range: (from: number, to: number) => Promise.resolve(rangeResult(from, to)),
       eq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'eq', val)); return chain; },
       neq: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'neq', val)); return chain; },
       gt: (col: string, val: unknown) => { conds.push((r) => matchesOp(r, col, 'gt', val)); return chain; },
@@ -981,5 +1007,196 @@ describe('MATRIX C — plans POST/PUT', () => {
     const res = await putPlan({ price_cents: 999 });
     expect(res.status).toBe(500);
     expect(fake._writes.plans ?? []).toHaveLength(0);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// FINDING #1 — compliance scans must NOT truncate at 1,000 rows. The fake's
+// `.range()` slices exactly as PostgREST would, so a truncating `.limit(1000)`
+// would let a role past page 1 slip the wall; full pagination catches it.
+// ═════════════════════════════════════════════════════════════════════════
+
+describe('FINDING #1 — scans do not truncate at 1,000 rows', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
+      guildId: GUILD, userId: 'u', discordId: 'd', permissions: ['dashboard.full_access'],
+    });
+    mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: GUILD });
+    mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    (getPayPalRuntimeConfig as ReturnType<typeof vi.fn>).mockResolvedValue(paypalConfig);
+    (getPayPalToken as ReturnType<typeof vi.fn>).mockResolvedValue('token');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ id: 'PAYPAL-1' }) })));
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  /** N filler products that grant only OTHER_ROLE (never the role under test). */
+  function fillerProducts(n: number): Row[] {
+    return Array.from({ length: n }, (_, i) =>
+      product({ id: `filler-${i}`, type: 'one_time', price_cents: 2500, granted_role_ids: [OTHER_ROLE] }),
+    );
+  }
+
+  it('income POST: a buyable role-granting product on PAGE 2 (index >1000) still blocks (V1 scan not truncated)', async () => {
+    // 1,200 filler products come first; the ONE product granting ROLE sits at
+    // the end, well past the 1,000-row cap a truncating query would stop at.
+    const fake = useFake({
+      products: {
+        rows: [
+          ...fillerProducts(1200),
+          product({ id: 'the-one', type: 'one_time', price_cents: 2500, granted_role_ids: [ROLE] }),
+        ],
+      },
+      plans: { rows: [] },
+      orders: { rows: [] },
+      economy_role_income: {},
+    });
+    const res = await roleIncomePOST(buildRequest('/api/economy/role-income', {
+      method: 'POST',
+      body: { role_id: ROLE, amount: 100, interval_minutes: 60 },
+    }));
+    expect(res.status).toBe(409);
+    expect(fake._writes.economy_role_income ?? []).toHaveLength(0);
+  });
+
+  it('income POST: a sold PERMANENT metadata role on PAGE 2 still blocks (V2/V3 scan not truncated)', async () => {
+    const fillers = Array.from({ length: 1100 }, (_, i) =>
+      product({ id: `m-${i}`, type: 'one_time', price_cents: 2500, metadata: { grant_role_id: OTHER_ROLE } }),
+    );
+    const fake = useFake({
+      products: {
+        rows: [
+          ...fillers,
+          product({ id: 'sold-one', type: 'one_time', active: false, price_cents: 2500, metadata: { grant_role_id: ROLE } }),
+        ],
+      },
+      plans: { rows: [] },
+      orders: { rows: [order({ product_id: 'sold-one' })] },
+      economy_role_income: {},
+    });
+    const res = await roleIncomePOST(buildRequest('/api/economy/role-income', {
+      method: 'POST',
+      body: { role_id: ROLE, amount: 100, interval_minutes: 60 },
+    }));
+    expect(res.status).toBe(409);
+    expect(fake._writes.economy_role_income ?? []).toHaveLength(0);
+  });
+
+  it('income POST: a V4 historical role on PAGE 2 still blocks (history scan not truncated)', async () => {
+    const fillers = Array.from({ length: 1050 }, (_, i) =>
+      product({ id: `h-${i}`, type: 'free', active: false, metadata: { historical_grant_role_ids: [OTHER_ROLE] } }),
+    );
+    const fake = useFake({
+      products: {
+        rows: [
+          ...fillers,
+          product({ id: 'hist-one', type: 'free', active: false, metadata: { historical_grant_role_ids: [ROLE] } }),
+        ],
+      },
+      plans: { rows: [] },
+      orders: { rows: [] },
+      economy_role_income: {},
+    });
+    const res = await roleIncomePOST(buildRequest('/api/economy/role-income', {
+      method: 'POST',
+      body: { role_id: ROLE, amount: 100, interval_minutes: 60 },
+    }));
+    expect(res.status).toBe(409);
+    expect(fake._writes.economy_role_income ?? []).toHaveLength(0);
+  });
+
+  it('product POST: a matching income row on PAGE 2 (index >1000) still blocks the write (income scan not truncated)', async () => {
+    // 1,200 other-role income rows precede the ROLE income row; a truncating
+    // scan would miss ROLE and wrongly allow selling it.
+    const incomeRows = [
+      ...Array.from({ length: 1200 }, (_, i) => incomeRow(`other-${i}`)),
+      incomeRow(ROLE),
+    ];
+    const fake = useFake({
+      products: { rows: [] },
+      plans: { rows: [] },
+      economy_role_income: { rows: incomeRows },
+    });
+    const res = await productsPOST(buildRequest('/api/store/products', {
+      method: 'POST',
+      body: {
+        name: 'Sell', delivery_type: 'access_pass', currency: 'USD', granted_channel_ids: [],
+        type: 'one_time', price_cents: 2500, granted_role_ids: [ROLE],
+      },
+    }));
+    expect(res.status).toBe(409);
+    expect(fake._writes.products ?? []).toHaveLength(0);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// FINDING #3 — chargeability mirrors checkout's CHEAPEST-active-plan pick, not
+// "any active plan with a paypal_plan_id". Checkout (payment-handler.ts) takes
+// the cheapest active plan and refuses it if it lacks a paypal_plan_id.
+// ═════════════════════════════════════════════════════════════════════════
+
+describe('FINDING #3 — wall mirrors checkout cheapest-plan selection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (requirePermission as ReturnType<typeof vi.fn>).mockResolvedValue({
+      guildId: GUILD, userId: 'u', discordId: 'd', permissions: ['dashboard.full_access'],
+    });
+    mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const CASES: { name: string; plans: Row[]; blocked: boolean }[] = [
+    {
+      name: 'cheapest active plan has NO paypal_plan_id, a pricier one DOES — NOT blocked (checkout picks cheapest and refuses it)',
+      plans: [
+        plan({ price_cents: 500, paypal_plan_id: null }),
+        plan({ price_cents: 999, paypal_plan_id: 'P-expensive' }),
+      ],
+      blocked: false,
+    },
+    {
+      name: 'cheapest active plan HAS a paypal_plan_id, a pricier one does not — blocked (checkout charges the cheapest)',
+      plans: [
+        plan({ price_cents: 500, paypal_plan_id: 'P-cheap' }),
+        plan({ price_cents: 999, paypal_plan_id: null }),
+      ],
+      blocked: true,
+    },
+    {
+      name: 'cheapest active plan is a zero-price plan WITH a paypal_plan_id — blocked (PayPal price is authoritative)',
+      plans: [
+        plan({ price_cents: 0, paypal_plan_id: 'P-free-but-real' }),
+        plan({ price_cents: 999, paypal_plan_id: null }),
+      ],
+      blocked: true,
+    },
+    {
+      name: 'the cheapest plan WITHOUT a paypal id is INACTIVE, so the cheapest ACTIVE plan (pricier) has one — blocked',
+      plans: [
+        plan({ price_cents: 100, paypal_plan_id: null, active: false }),
+        plan({ price_cents: 999, paypal_plan_id: 'P-1' }),
+      ],
+      blocked: true,
+    },
+  ];
+
+  it.each(CASES)('income POST vs $name', async ({ plans, blocked }) => {
+    const fake = useFake({
+      products: { rows: [product({ type: 'subscription', granted_role_ids: [ROLE] })] },
+      plans: { rows: plans },
+      orders: { rows: [] },
+      economy_role_income: {},
+    });
+    const res = await roleIncomePOST(buildRequest('/api/economy/role-income', {
+      method: 'POST',
+      body: { role_id: ROLE, amount: 100, interval_minutes: 60 },
+    }));
+    if (blocked) {
+      expect(res.status).toBe(409);
+      expect(fake._writes.economy_role_income ?? []).toHaveLength(0);
+    } else {
+      expect(res.status).toBe(200);
+      expect(fake._writes.economy_role_income?.[0]?.op).toBe('upsert');
+    }
   });
 });

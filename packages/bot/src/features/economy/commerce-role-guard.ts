@@ -20,6 +20,22 @@
  *       commerce-held: a giveaway winner or admin-comped user legitimately
  *       collects income. NULL/unknown sources fail CLOSED as purchases.
  *
+ *   L1b PENDING-REVOKED purchase role (finding #2). A refund / subscription
+ *       cancellation / grace-expiry flips the entitlement to a TERMINAL status
+ *       (`expired`) and only THEN enqueues an async `revoke_roles` action; the
+ *       Discord role stays on the member until that queue action succeeds, and
+ *       revoke_roles RETRIES on removal failure (and is never dead-lettered).
+ *       So an entitlement can be terminal while the paid role is still held —
+ *       L1's `active`/`grace_period` filter would stop excluding it and pay
+ *       income on a real-money role. We therefore also exclude any candidate
+ *       role named by a `bot_action_queue` `revoke_roles` row (for this
+ *       discord user) whose status is NOT yet `completed` — i.e. the
+ *       revocation has not actually completed. Mirrors L2's "row exists ⇒ role
+ *       not yet removed" reasoning: key on the ACTUAL revocation completion,
+ *       not on an entitlement status flag. Since `/collect-income` only passes
+ *       roles the member currently holds, a not-yet-completed revocation of a
+ *       held role = still commerce-held.
+ *
  *   L2  An EXISTING `temp_role_grants` row with a commerce source grants them
  *       the role directly by Discord `user_id`. Keyed on the ROW's existence,
  *       NOT on `expires_at`: the sweeper (events/handler.ts) deletes the row
@@ -63,8 +79,58 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 
+/** Page size for paginated scans — the PostgREST/Supabase per-request cap. */
+const SCAN_PAGE_SIZE = 1000;
+
+/** A filtered query that supports `.range()` and resolves to rows/error. */
+interface RangeableQuery<T> {
+  range(from: number, to: number): PromiseLike<{ data: T[] | null; error: { message: string } | null }>;
+}
+
+/**
+ * Read EVERY row a compliance scan depends on — never just the first page
+ * (finding #1, mirrors the dashboard wall's fetchAllRows). A `.limit(1000)`
+ * scan silently drops rows past the cap, so a guild with >1000 customers /
+ * entitlements / temp grants / products could let a real-money-held role
+ * collect income. Pages through with `.range()` until a short page proves the
+ * set is exhausted. `build()` applies all filters and returns the builder;
+ * it is re-invoked per page for a fresh builder. Errors propagate (the caller
+ * fails CLOSED — every candidate role is excluded).
+ */
+async function fetchAllRows<T>(
+  build: () => RangeableQuery<T>,
+  label: string,
+): Promise<T[]> {
+  const all: T[] = [];
+  for (let from = 0; ; from += SCAN_PAGE_SIZE) {
+    const to = from + SCAN_PAGE_SIZE - 1;
+    const { data, error } = await build().range(from, to);
+    if (error) throw new Error(`${label}: ${error.message}`);
+    const page = data ?? [];
+    all.push(...page);
+    if (page.length < SCAN_PAGE_SIZE) break;
+  }
+  return all;
+}
+
 /** Entitlement statuses under which a commerce-granted role is still held. */
 const ACTIVE_ENTITLEMENT_STATUSES = ['active', 'grace_period'] as const;
+
+/**
+ * `bot_action_queue.status` values for a `revoke_roles` action whose Discord
+ * role removal has NOT yet completed, so the paid role is STILL on the member
+ * (L1b, finding #2). This is a DENY-list keyed on the actual revocation
+ * lifecycle, not on the entitlement status flag:
+ *   - `pending`    — queued / awaiting its next retry (`next_retry_at`), role
+ *                    not yet removed.
+ *   - `failed`     — retries EXHAUSTED; revoke_roles is not dead-lettered, so
+ *                    the role stays granted on the member indefinitely.
+ * A `completed` row means `member.roles.remove` succeeded and the role is off
+ * the member — no longer commerce-held. Any other/unknown status fails CLOSED
+ * (treated as not-yet-removed) below by testing NOT-completed rather than
+ * matching this list, so a future status can never silently pay a stuck role.
+ */
+const REVOKE_ROLES_ACTION = 'revoke_roles' as const;
 
 /**
  * `entitlements.source` values that are NOT real-money purchases. The DB CHECK
@@ -180,39 +246,79 @@ export async function getCommerceHeldRoleIds(
 
     // ── L1: entitlements.granted_role_ids (via customers.discord_id) ──
     // Resolve the caller's customer rows in this guild, then their active
-    // entitlements' granted roles.
-    const { data: customers, error: custErr } = await supabase
-      .from('customers')
-      .select('id')
-      .eq('guild_id', guildId)
-      .eq('discord_id', userId)
-      .limit(1000);
-    if (custErr) throw new Error(`customers lookup failed: ${custErr.message}`);
+    // entitlements' granted roles. Full scans (finding #1).
+    const customers = await fetchAllRows<{ id: string }>(
+      () =>
+        supabase
+          .from('customers')
+          .select('id')
+          .eq('guild_id', guildId)
+          .eq('discord_id', userId) as unknown as RangeableQuery<{ id: string }>,
+      'customers lookup failed',
+    );
 
-    const customerIds = (customers ?? []).map((c) => c.id as string);
+    const customerIds = customers.map((c) => c.id);
     if (customerIds.length > 0) {
-      const { data: entitlements, error: entErr } = await supabase
-        .from('entitlements')
-        .select('granted_role_ids, source')
-        .eq('guild_id', guildId)
-        .in('customer_id', customerIds)
-        .in('status', ACTIVE_ENTITLEMENT_STATUSES as unknown as string[])
-        .limit(1000);
-      if (entErr) throw new Error(`entitlements lookup failed: ${entErr.message}`);
+      const entitlements = await fetchAllRows<{ granted_role_ids: string[] | null; source?: string | null }>(
+        () =>
+          supabase
+            .from('entitlements')
+            .select('granted_role_ids, source')
+            .eq('guild_id', guildId)
+            .in('customer_id', customerIds)
+            .in('status', ACTIVE_ENTITLEMENT_STATUSES as unknown as string[]) as unknown as RangeableQuery<{
+            granted_role_ids: string[] | null;
+            source?: string | null;
+          }>,
+        'entitlements lookup failed',
+      );
 
-      for (const ent of entitlements ?? []) {
+      for (const ent of entitlements) {
         // Only real-money entitlements make a role commerce-held. Comped
         // grants (giveaway/manual/automation) moved no money — the holder may
         // collect income. Filtered in JS (not `.eq('source','purchase')`) so a
         // NULL/unknown source fails CLOSED as a purchase rather than being
         // silently dropped by the SQL filter.
-        const source = (ent as { source?: string | null }).source;
+        const source = ent.source;
         if (source != null && NON_PURCHASE_SOURCE_SET.has(source)) continue;
 
-        const roleIds = (ent.granted_role_ids as string[] | null) ?? [];
+        const roleIds = ent.granted_role_ids ?? [];
         for (const roleId of roleIds) {
           if (candidates.has(roleId)) commerceHeld.add(roleId);
         }
+      }
+    }
+
+    // ── L1b: PENDING-REVOKED purchase roles (finding #2) ──
+    // A refund/cancel/grace-expiry flips the entitlement to a terminal status
+    // (`expired`) BEFORE the async `revoke_roles` action removes the Discord
+    // role, and revoke_roles retries on failure (never dead-lettered). So the
+    // paid role can still be on the member while L1's active/grace filter no
+    // longer matches. Exclude any candidate role named by a NOT-yet-completed
+    // `revoke_roles` queue row for this user — keyed on actual revocation
+    // completion, not on the entitlement flag. `status != 'completed'` (rather
+    // than an in-list of pending/failed) fails CLOSED: any unknown/future
+    // non-completed status still keeps the still-held role excluded.
+    const revokeRows = await fetchAllRows<{ status: string | null; payload: unknown }>(
+      () =>
+        supabase
+          .from('bot_action_queue')
+          .select('status, payload')
+          .eq('guild_id', guildId)
+          .eq('action', REVOKE_ROLES_ACTION)
+          .neq('status', 'completed')
+          .eq('payload->>discord_id', userId) as unknown as RangeableQuery<{
+          status: string | null;
+          payload: unknown;
+        }>,
+      'bot_action_queue revoke lookup failed',
+    );
+
+    for (const row of revokeRows) {
+      const payload = (row.payload ?? {}) as { role_ids?: unknown };
+      const roleIds = Array.isArray(payload.role_ids) ? payload.role_ids : [];
+      for (const roleId of roleIds) {
+        if (typeof roleId === 'string' && candidates.has(roleId)) commerceHeld.add(roleId);
       }
     }
 
@@ -226,17 +332,21 @@ export async function getCommerceHeldRoleIds(
     // from a paid role. Since /collect-income only passes roles the member
     // currently holds, an existing commerce grant row = a real-money role not
     // yet removed = still commerce-held, expired or not.
-    const { data: tempGrants, error: tempErr } = await supabase
-      .from('temp_role_grants')
-      .select('role_id')
-      .eq('guild_id', guildId)
-      .eq('user_id', userId)
-      .in('source', COMMERCE_TEMP_ROLE_SOURCES as unknown as string[])
-      .limit(1000);
-    if (tempErr) throw new Error(`temp_role_grants lookup failed: ${tempErr.message}`);
+    const tempGrants = await fetchAllRows<{ role_id: string }>(
+      () =>
+        supabase
+          .from('temp_role_grants')
+          .select('role_id')
+          .eq('guild_id', guildId)
+          .eq('user_id', userId)
+          .in('source', COMMERCE_TEMP_ROLE_SOURCES as unknown as string[]) as unknown as RangeableQuery<{
+          role_id: string;
+        }>,
+      'temp_role_grants lookup failed',
+    );
 
-    for (const grant of tempGrants ?? []) {
-      const roleId = grant.role_id as string;
+    for (const grant of tempGrants) {
+      const roleId = grant.role_id;
       if (candidates.has(roleId)) commerceHeld.add(roleId);
     }
 
@@ -248,20 +358,25 @@ export async function getCommerceHeldRoleIds(
     // cheap. TEMPORARY metadata grants are skipped: L2 owns them (per-user
     // rows with expiry), and matching them here would exclude holders whose
     // grant expired or who never bought at all.
-    const { data: metaProducts, error: metaErr } = await supabase
-      .from('products')
-      .select('id, metadata')
-      .eq('guild_id', guildId)
-      .in('metadata->>grant_role_id', [...candidates])
-      .limit(1000);
-    if (metaErr) throw new Error(`products metadata lookup failed: ${metaErr.message}`);
+    const metaProducts = await fetchAllRows<{ id: string; metadata: unknown }>(
+      () =>
+        supabase
+          .from('products')
+          .select('id, metadata')
+          .eq('guild_id', guildId)
+          .in('metadata->>grant_role_id', [...candidates]) as unknown as RangeableQuery<{
+          id: string;
+          metadata: unknown;
+        }>,
+      'products metadata lookup failed',
+    );
 
     const soldCheck: { id: string; roleId: string }[] = [];
-    for (const product of metaProducts ?? []) {
+    for (const product of metaProducts) {
       const roleId = metadataGrantRoleId(product.metadata);
       if (!roleId || !candidates.has(roleId)) continue;
       if (isTemporaryMetadataGrant(product.metadata)) continue;
-      soldCheck.push({ id: product.id as string, roleId });
+      soldCheck.push({ id: product.id, roleId });
     }
     if (soldCheck.length > 0) {
       const sold = await findProductsWithRealMoneyOneTimeSales(
@@ -276,15 +391,20 @@ export async function getCommerceHeldRoleIds(
 
     // ── L3/V4: recorded historical grants (append-only dashboard record of
     // sold permanent metadata roles stripped by later edits) ──
-    const { data: histProducts, error: histErr } = await supabase
-      .from('products')
-      .select('id, metadata')
-      .eq('guild_id', guildId)
-      .not('metadata->historical_grant_role_ids', 'is', null)
-      .limit(1000);
-    if (histErr) throw new Error(`products history lookup failed: ${histErr.message}`);
+    const histProducts = await fetchAllRows<{ id: string; metadata: unknown }>(
+      () =>
+        supabase
+          .from('products')
+          .select('id, metadata')
+          .eq('guild_id', guildId)
+          .not('metadata->historical_grant_role_ids', 'is', null) as unknown as RangeableQuery<{
+          id: string;
+          metadata: unknown;
+        }>,
+      'products history lookup failed',
+    );
 
-    for (const product of histProducts ?? []) {
+    for (const product of histProducts) {
       for (const roleId of historicalGrantRoleIds(product.metadata)) {
         if (candidates.has(roleId)) commerceHeld.add(roleId);
       }
