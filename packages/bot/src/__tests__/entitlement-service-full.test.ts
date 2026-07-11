@@ -33,8 +33,12 @@ function makeMember(id: string, roleIds: string[] = []) {
     id,
     roles: {
       cache: roles,
-      add: vi.fn(async () => {}),
-      remove: vi.fn(async () => {}),
+      add: vi.fn(async (roleId: string) => {
+        roles.set(roleId, { id: roleId });
+      }),
+      remove: vi.fn(async (roleId: string) => {
+        roles.delete(roleId);
+      }),
     },
   };
 }
@@ -46,7 +50,8 @@ function makeGuild(members: any[] = []) {
     id: 'g1',
     members: {
       cache: memberMap,
-      fetch: vi.fn(async (id: string) => {
+      fetch: vi.fn(async (input: string | { user: string }) => {
+        const id = typeof input === 'string' ? input : input.user;
         if (memberMap.has(id)) return memberMap.get(id);
         throw new Error('Unknown Member');
       }),
@@ -126,7 +131,7 @@ describe('EntitlementService.grant', () => {
     expect(eventBus.emit).not.toHaveBeenCalled();
   });
 
-  it('handles member not found gracefully during role grant', async () => {
+  it('propagates member lookup failure so the durable entitlement can be retried', async () => {
     const guild = makeGuild([]); // no members
     const supabase = makeSupabase({
       entitlements: { data: { id: 'ent1' }, error: null },
@@ -134,7 +139,7 @@ describe('EntitlementService.grant', () => {
     });
 
     const service = new EntitlementService(guild, supabase, eventBus);
-    const result = await service.grant({
+    await expect(service.grant({
       customerId: 'cust1',
       productId: 'prod1',
       productName: 'Test',
@@ -144,9 +149,31 @@ describe('EntitlementService.grant', () => {
       source: 'purchase',
       grantedRoleIds: ['r1'],
       grantedChannelIds: [],
-    });
+    })).rejects.toThrow('Unknown Member');
+    expect(eventBus.emit).not.toHaveBeenCalled();
+  });
 
-    expect(result).toBe('ent1'); // Still creates DB record
+  it('fails when Discord acknowledges an add but a fresh read does not confirm the role', async () => {
+    const member = makeMember('u1');
+    member.roles.add.mockImplementation(async () => undefined);
+    const guild = makeGuild([member]);
+    const supabase = makeSupabase({
+      entitlements: { data: { id: 'ent1' }, error: null },
+    });
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    await expect(service.grant({
+      customerId: 'cust1',
+      productId: 'prod1',
+      productName: 'Test',
+      orderId: 'ord1',
+      discordId: 'u1',
+      type: 'one_time',
+      source: 'purchase',
+      grantedRoleIds: ['r1'],
+      grantedChannelIds: [],
+    })).rejects.toThrow('Discord did not confirm');
+    expect(eventBus.emit).not.toHaveBeenCalled();
   });
 
   it('skips role grant when no role IDs provided', async () => {
@@ -175,7 +202,7 @@ describe('EntitlementService.grant', () => {
 });
 
 describe('EntitlementService.revoke', () => {
-  it('revokes entitlement, removes roles, emits event', async () => {
+  it('revokes a paid entitlement, leaves role removal to the durable trigger action, and emits event', async () => {
     const member = makeMember('u1', ['r1', 'r2']);
     const guild = makeGuild([member]);
 
@@ -184,6 +211,7 @@ describe('EntitlementService.revoke', () => {
       id: 'ent1',
       customer_id: 'cust1',
       product_id: 'prod1',
+      source: 'purchase',
       granted_role_ids: ['r1', 'r2'],
       license_key_id: null,
       products: { name: 'Test Product' },
@@ -202,7 +230,9 @@ describe('EntitlementService.revoke', () => {
           });
           return chain;
         }
-        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
         if (table === 'audit_logs') return supaChain();
         return supaChain();
       }),
@@ -212,12 +242,99 @@ describe('EntitlementService.revoke', () => {
     const result = await service.revoke('ent1', 'cancelled');
 
     expect(result).toBe(true);
-    expect(member.roles.remove).toHaveBeenCalledWith('r1', 'Commerce: entitlement revoked');
-    expect(member.roles.remove).toHaveBeenCalledWith('r2', 'Commerce: entitlement revoked');
+    expect(member.roles.remove).not.toHaveBeenCalled();
     expect(eventBus.emit).toHaveBeenCalledWith('entitlement.revoked', 'g1', expect.objectContaining({
       entitlementId: 'ent1',
       reason: 'cancelled',
     }));
+  });
+
+  it('directly removes roles for a non-commerce entitlement not covered by the paid trigger', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+    const entData = {
+      id: 'ent-manual',
+      customer_id: 'cust1',
+      product_id: 'prod1',
+      source: 'manual',
+      granted_role_ids: ['r1'],
+      license_key_id: null,
+      products: { name: 'Manual access' },
+    };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.limit = vi.fn(async () => ({ data: [], error: null }));
+          chain.update = vi.fn(() => {
+            const updated = supaChain();
+            updated.eq = vi.fn(() => updated);
+            updated.then = (resolve: any) => resolve({ error: null });
+            return updated;
+          });
+          return chain;
+        }
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
+        if (table === 'temp_role_grants') {
+          const chain = supaChain();
+          chain.limit = vi.fn(async () => ({ data: [], error: null }));
+          return chain;
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+    expect(await service.revoke('ent-manual', 'cancelled')).toBe(true);
+    expect(member.roles.remove).toHaveBeenCalledWith('r1', 'Commerce: entitlement revoked');
+  });
+
+  it('preserves a manual entitlement role still owned by a live paid entitlement', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+    const entData = {
+      id: 'ent-manual',
+      customer_id: 'cust1',
+      product_id: 'prod-manual',
+      source: 'manual',
+      granted_role_ids: ['r1'],
+      license_key_id: null,
+      products: { name: 'Manual access' },
+    };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.limit = vi.fn(async () => ({
+            data: [{
+              id: 'ent-paid',
+              guild_id: 'g1',
+              customer_id: 'cust1',
+              status: 'active',
+              granted_role_ids: ['r1'],
+            }],
+            error: null,
+          }));
+          chain.update = vi.fn(() => {
+            const updated = supaChain();
+            updated.then = (resolve: any) => resolve({ error: null });
+            return updated;
+          });
+          return chain;
+        }
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    expect(await service.revoke('ent-manual', 'cancelled')).toBe(true);
+    expect(member.roles.remove).not.toHaveBeenCalled();
   });
 
   it('returns false when entitlement not found', async () => {
@@ -256,7 +373,9 @@ describe('EntitlementService.revoke', () => {
           });
           return chain;
         }
-        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
         if (table === 'license_sessions') return licenseSessChain;
         if (table === 'audit_logs') return supaChain();
         return supaChain();
@@ -702,7 +821,9 @@ describe('EntitlementService.reactivate', () => {
           });
           return chain;
         }
-        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
         return supaChain();
       }),
     } as any;
@@ -722,6 +843,78 @@ describe('EntitlementService.reactivate', () => {
     const service = new EntitlementService(guild, supabase, eventBus);
     const result = await service.reactivate('ent-missing');
     expect(result).toBe(false);
+  });
+
+  it('rejects reactivation when the exact guild-scoped customer identity is missing', async () => {
+    const guild = makeGuild([makeMember('u1', [])]);
+    const entData = {
+      id: 'ent1',
+      customer_id: 'cust1',
+      granted_role_ids: ['r1'],
+    };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.update = vi.fn(() => {
+            const updateChain = supaChain();
+            updateChain.then = (resolve: any) => resolve({ error: null });
+            return updateChain;
+          });
+          return chain;
+        }
+        if (table === 'customers') return supaChain(null);
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    await expect(service.reactivate('ent1')).rejects.toThrow('customer identity');
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects reactivation when Discord does not confirm the restored role', async () => {
+    const roleAdd = vi.fn().mockResolvedValue({});
+    const member = {
+      id: 'u1',
+      roles: {
+        cache: new MockCollection(),
+        add: roleAdd,
+      },
+    };
+    const guild = {
+      id: 'g1',
+      members: { fetch: vi.fn().mockResolvedValue(member) },
+    } as any;
+    const entData = {
+      id: 'ent1',
+      customer_id: 'cust1',
+      granted_role_ids: ['r1'],
+    };
+    const supabase = {
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.update = vi.fn(() => {
+            const updateChain = supaChain();
+            updateChain.then = (resolve: any) => resolve({ error: null });
+            return updateChain;
+          });
+          return chain;
+        }
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    await expect(service.reactivate('ent1')).rejects.toThrow('Discord did not confirm');
+    expect(roleAdd).toHaveBeenCalledWith('r1', 'Commerce: entitlement granted');
+    expect(guild.members.fetch).toHaveBeenCalledTimes(2);
   });
 
   it('returns false on DB update error', async () => {
@@ -770,7 +963,9 @@ describe('EntitlementService.reactivate', () => {
           return chain;
         }
         if (table === 'alerts') return alertsChain;
-        if (table === 'customers') return supaChain({ discord_id: 'u1' });
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
         return supaChain();
       }),
     } as any;

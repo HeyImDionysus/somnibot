@@ -261,7 +261,10 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
   const alertUpdates: any[] = [];
   const failedSweepQueries: string[][] = [];
   const servedIds = new Set<string>();
-  const realtime: { handler: ((payload: { new: any }) => Promise<void>) | null } = { handler: null };
+  const realtime: {
+    handler: ((payload: { new: any }) => Promise<void>) | null;
+    handlers: Partial<Record<'INSERT' | 'UPDATE', (payload: { new: any }) => Promise<void>>>;
+  } = { handler: null, handlers: {} };
 
   const genericChain = () => {
     const chain: any = {};
@@ -370,8 +373,9 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
     }),
     channel: vi.fn(() => {
       const chan: any = {
-        on: vi.fn((_ev: string, _filter: unknown, handler: (payload: { new: any }) => Promise<void>) => {
-          realtime.handler = handler;
+        on: vi.fn((_ev: string, filter: { event?: 'INSERT' | 'UPDATE' }, handler: (payload: { new: any }) => Promise<void>) => {
+          if (filter.event) realtime.handlers[filter.event] = handler;
+          if (filter.event === 'INSERT') realtime.handler = handler;
           return chan;
         }),
         subscribe: vi.fn((cb: Function) => { cb?.('SUBSCRIBED'); return 'subscribed'; }),
@@ -570,6 +574,43 @@ describe('stale recovery lane priority', () => {
 // ── Realtime flood: per-lane concurrency budgets ───────────
 
 describe('Realtime lane budgets', () => {
+  it('dispatches staged-to-pending UPDATE releases while ignoring staged and future-backoff rows', async () => {
+    const supa = makeLaneSupa([]);
+    await startActionQueueListener(makeGuild(), supa);
+
+    const updateHandler = supa.__realtime.handlers.UPDATE;
+    expect(updateHandler).toBeTypeOf('function');
+    const baseRow = {
+      id: 'staged-release-1',
+      guild_id: 'guild-1',
+      action: 'deliver_receipt',
+      lane: 'commerce',
+      payload: {
+        guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+        order_number: 'ORD-STAGED', product_name: 'VIP Pass',
+        amount_cents: 999, currency: 'USD',
+      },
+      created_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+
+    await updateHandler!({ new: { ...baseRow, status: 'staged' } });
+    await updateHandler!({
+      new: {
+        ...baseRow,
+        id: 'future-retry-1',
+        status: 'pending',
+        next_retry_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    expect(supa.__claimOrder).toEqual([]);
+
+    await updateHandler!({ new: { ...baseRow, status: 'pending', next_retry_at: null } });
+
+    expect(supa.__claimOrder).toEqual(['staged-release-1']);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+  });
+
   it('a game event flood cannot consume commerce processing capacity', async () => {
     const guild = makeGuild();
     // bulk_send_dm handlers hang at members.fetch — simulates slow game jobs

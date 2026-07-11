@@ -136,7 +136,7 @@ vi.mock('../services/audit.js', () => ({
   writeAuditLog: vi.fn(async () => {}),
 }));
 
-import { registerEvents } from '../events/handler.js';
+import { registerEvents, sweepExpiredTempRoleGrants } from '../events/handler.js';
 
 function makeClient() {
   const handlers: Record<string, Function[]> = {};
@@ -159,6 +159,336 @@ function makeClient() {
       for (const h of handlers[event] || []) await h(...args);
     },
   } as any;
+}
+
+function makeTempRoleSweepClient(rows: Array<Record<string, unknown>>, guild: any) {
+  let tempRead = 0;
+  const deleteEq = vi.fn();
+  const guildGet = vi.fn(() => guild);
+  const from = vi.fn((table: string) => {
+    let deleting = false;
+    let targetId = '';
+    const chain: any = {};
+    for (const method of ['select', 'lt', 'order', 'gt', 'neq', 'in', 'contains', 'is']) {
+      chain[method] = vi.fn(() => chain);
+    }
+    chain.eq = vi.fn((column: string, value: unknown) => {
+      if (deleting) {
+        deleteEq(column, value);
+        if (column === 'id') targetId = String(value);
+      }
+      return chain;
+    });
+    chain.delete = vi.fn(() => {
+      deleting = true;
+      return chain;
+    });
+    chain.limit = vi.fn(async () => {
+      if (table === 'temp_role_grants') {
+        tempRead++;
+        return { data: tempRead === 1 ? rows : [], error: null };
+      }
+      if (table === 'entitlements') return { data: [], error: null };
+      return { data: [], error: null };
+    });
+    chain.maybeSingle = vi.fn(async () => (
+      deleting
+        ? { data: { id: targetId }, error: null }
+        : { data: null, error: null }
+    ));
+    chain.then = (resolve: Function) => resolve({ data: null, error: null });
+    return chain;
+  });
+
+  return {
+    client: {
+      supabase: { from },
+      guilds: { cache: { get: guildGet } },
+    } as any,
+    deleteEq,
+    guildGet,
+  };
+}
+
+function makeCommerceTempRoleSweepClient(opts: {
+  removeOnExpiry: boolean;
+  grantId?: string;
+  orderId?: string;
+  expiresAt?: string;
+  source?: string;
+  grantStatus?: 'pending' | 'applied';
+  overlappingGrants?: Array<{
+    id: string;
+    expires_at?: string;
+    remove_on_expiry?: boolean;
+  }>;
+  overlappingError?: { message: string };
+  overlappingResponses?: Array<{
+    data: Array<{
+      id: string;
+      expires_at?: string;
+      remove_on_expiry?: boolean;
+    }>;
+    error: { message: string } | null;
+  }>;
+  customers?: Array<{ id: string }>;
+  customerError?: { message: string };
+  entitlements?: Array<{ id: string }>;
+  entitlementError?: { message: string };
+  memberRoleStates?: Array<boolean | Error>;
+  removalError?: Error;
+  addError?: Error;
+  transferError?: { message: string };
+  beforeDeleteAck?: () => Promise<void>;
+  sharedTempRoleRows?: Map<string, Record<string, unknown>>;
+}) {
+  const grant = {
+    id: opts.grantId ?? 'grant-current',
+    guild_id: 'guild-1',
+    user_id: 'user-1',
+    role_id: 'role-1',
+    expires_at: opts.expiresAt ?? '2000-01-01T00:00:00.000Z',
+    source: opts.source ?? 'commerce_purchase',
+    order_id: opts.orderId ?? 'order-1',
+    grant_status: opts.grantStatus ?? 'applied',
+    remove_on_expiry: opts.removeOnExpiry,
+  };
+  let tempRead = 0;
+  let memberFetch = 0;
+  const deleteEq = vi.fn();
+  const acknowledgedDeletes: string[] = [];
+  const ownershipOr = vi.fn();
+  const successorIntentUpdates: Array<Record<string, unknown>> = [];
+  const roleRemove = vi.fn(async () => {
+    if (opts.removalError) throw opts.removalError;
+  });
+  const roleAdd = vi.fn(async () => {
+    if (opts.addError) throw opts.addError;
+  });
+  const fetch = vi.fn(async () => {
+    const state = opts.memberRoleStates?.[memberFetch++] ?? false;
+    if (state instanceof Error) throw state;
+    return {
+      roles: {
+        cache: { has: () => state },
+        add: roleAdd,
+        remove: roleRemove,
+      },
+    };
+  });
+  const guild = { members: { fetch } };
+
+  const from = vi.fn((table: string) => {
+    let deleting = false;
+    let targetId = '';
+    let updatePayload: Record<string, unknown> | null = null;
+    const filters: Array<{
+      operator: 'eq' | 'is' | 'in' | 'gt';
+      column: string;
+      value: unknown;
+    }> = [];
+    const matchesFilters = (row: Record<string, unknown>): boolean => filters.every((filter) => {
+      const actual = row[filter.column];
+      if (filter.operator === 'in') {
+        return Array.isArray(filter.value) && filter.value.includes(actual);
+      }
+      if (filter.operator === 'gt') {
+        return typeof actual === 'string'
+          && typeof filter.value === 'string'
+          && actual > filter.value;
+      }
+      return actual === filter.value;
+    });
+    const chain: any = {};
+    for (const method of ['select', 'lt', 'neq', 'contains', 'order']) {
+      chain[method] = vi.fn(() => chain);
+    }
+    chain.or = vi.fn((...args: unknown[]) => {
+      ownershipOr(...args);
+      return chain;
+    });
+    chain.delete = vi.fn(() => {
+      deleting = true;
+      return chain;
+    });
+    chain.update = vi.fn((payload: Record<string, unknown>) => {
+      updatePayload = payload;
+      successorIntentUpdates.push(payload);
+      return chain;
+    });
+    chain.eq = vi.fn((column: string, value: unknown) => {
+      if (column === 'id') targetId = String(value);
+      if (deleting) deleteEq(column, value);
+      filters.push({ operator: 'eq', column, value });
+      return chain;
+    });
+    chain.is = vi.fn((column: string, value: unknown) => {
+      filters.push({ operator: 'is', column, value });
+      return chain;
+    });
+    chain.in = vi.fn((column: string, value: unknown) => {
+      filters.push({ operator: 'in', column, value });
+      return chain;
+    });
+    chain.gt = vi.fn((column: string, value: unknown) => {
+      filters.push({ operator: 'gt', column, value });
+      return chain;
+    });
+    const normalizeOverlap = (rows: Array<{
+      id: string;
+      expires_at?: string;
+      remove_on_expiry?: boolean;
+    }>) => rows.map((row) => ({
+      guild_id: 'guild-1',
+      user_id: 'user-1',
+      role_id: 'role-1',
+      expires_at: '2999-01-01T00:00:00.000Z',
+      grant_status: 'applied',
+      remove_on_expiry: false,
+      ...row,
+    }));
+    chain.limit = vi.fn(async () => {
+      if (table === 'temp_role_grants') {
+        tempRead++;
+        if (tempRead === 1) return { data: [grant], error: null };
+        const scripted = opts.overlappingResponses?.[tempRead - 2];
+        if (scripted) return { ...scripted, data: normalizeOverlap(scripted.data) };
+        return {
+          data: normalizeOverlap(opts.overlappingGrants ?? []),
+          error: opts.overlappingError ?? null,
+        };
+      }
+      if (table === 'customers') {
+        return { data: opts.customers ?? [], error: opts.customerError ?? null };
+      }
+      if (table === 'entitlements') {
+        return { data: opts.entitlements ?? [], error: opts.entitlementError ?? null };
+      }
+      return { data: [], error: null };
+    });
+    chain.maybeSingle = vi.fn(async () => {
+      if (deleting) {
+        await opts.beforeDeleteAck?.();
+        if (opts.sharedTempRoleRows) {
+          const current = opts.sharedTempRoleRows.get(targetId);
+          if (!current || !matchesFilters(current)) return { data: null, error: null };
+          opts.sharedTempRoleRows.delete(targetId);
+        }
+        acknowledgedDeletes.push(targetId);
+        return { data: { id: targetId }, error: null };
+      }
+      if (table === 'temp_role_grants' && updatePayload?.remove_on_expiry === true) {
+        if (opts.sharedTempRoleRows) {
+          const current = opts.sharedTempRoleRows.get(targetId);
+          if (!current || !matchesFilters(current)) return { data: null, error: null };
+          Object.assign(current, updatePayload);
+        }
+        return {
+          data: opts.transferError ? null : { id: targetId, remove_on_expiry: true },
+          error: opts.transferError ?? null,
+        };
+      }
+      if (table === 'customers') {
+        const customers = opts.customers ?? [{ id: 'customer-1' }];
+        return {
+          data: customers[0] ?? null,
+          error: opts.customerError ?? null,
+        };
+      }
+      return { data: null, error: null };
+    });
+    chain.then = (resolve: Function) => resolve(
+      deleting ? { data: null, error: null } : { data: [], error: null },
+    );
+    return chain;
+  });
+
+  return {
+    client: {
+      supabase: { from },
+      guilds: { cache: { get: vi.fn(() => guild) } },
+    } as any,
+    deleteEq,
+    fetch,
+    roleRemove,
+    roleAdd,
+    ownershipOr,
+    successorIntentUpdates,
+    acknowledgedDeletes,
+  };
+}
+
+function makePaginatedTempRoleSweepClient() {
+  const preservedRows = Array.from({ length: 200 }, (_, index) => ({
+    id: `grant-${String(index).padStart(3, '0')}`,
+    guild_id: 'guild-1',
+    user_id: 'user-1',
+    role_id: `role-${index}`,
+    expires_at: '2000-01-01T00:00:00.000Z',
+    source: 'commerce_purchase',
+    order_id: null,
+    grant_status: 'applied',
+    remove_on_expiry: false,
+  }));
+  const laterSafeRow = {
+    id: 'grant-200',
+    guild_id: 'guild-1',
+    user_id: 'user-1',
+    role_id: 'role-200',
+    expires_at: '2000-01-01T00:00:00.000Z',
+    source: 'commerce_purchase',
+    order_id: 'order-200',
+    grant_status: 'applied',
+    remove_on_expiry: false,
+  };
+  const queryCursors: Array<string | null> = [];
+  const deletedIds: string[] = [];
+  const guildGet = vi.fn();
+
+  const from = vi.fn(() => {
+    let deleting = false;
+    let cursor: string | null = null;
+    let targetId = '';
+    const chain: any = {};
+    for (const method of ['select', 'lt', 'order', 'is']) {
+      chain[method] = vi.fn(() => chain);
+    }
+    chain.gt = vi.fn((column: string, value: unknown) => {
+      if (column === 'id') cursor = String(value);
+      return chain;
+    });
+    chain.delete = vi.fn(() => {
+      deleting = true;
+      return chain;
+    });
+    chain.eq = vi.fn((column: string, value: unknown) => {
+      if (deleting && column === 'id') targetId = String(value);
+      return chain;
+    });
+    chain.limit = vi.fn(async () => {
+      queryCursors.push(cursor);
+      return {
+        data: cursor === null ? preservedRows : [laterSafeRow],
+        error: null,
+      };
+    });
+    chain.maybeSingle = vi.fn(async () => {
+      deletedIds.push(targetId);
+      return { data: { id: targetId }, error: null };
+    });
+    chain.then = (resolve: Function) => resolve({ data: null, error: null });
+    return chain;
+  });
+
+  return {
+    client: {
+      supabase: { from },
+      guilds: { cache: { get: guildGet } },
+    } as any,
+    queryCursors,
+    deletedIds,
+    guildGet,
+  };
 }
 
 describe('events/handler', () => {
@@ -417,9 +747,11 @@ describe('events/handler', () => {
       // Supabase directly (no router iteration): all resolve empty.
       cronClient.supabase = {
         from: vi.fn(() => ({
-          select: vi.fn(() => ({
-            lt: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
-          })),
+           select: vi.fn(() => ({
+             lt: vi.fn(() => ({
+               order: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
+             })),
+           })),
         })),
         rpc: vi.fn(async () => ({ data: {}, error: null })),
       };
@@ -434,6 +766,519 @@ describe('events/handler', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('temporary role provenance safety', () => {
+    const grant = (source: string) => ({
+      id: 'grant-1',
+      guild_id: 'guild-1',
+      user_id: 'user-1',
+      role_id: 'role-1',
+      expires_at: '2000-01-01T00:00:00.000Z',
+      source,
+      order_id: null,
+      grant_status: 'applied',
+      remove_on_expiry: false,
+    });
+
+    it.each(['commerce_purchase', 'purchase', 'economy_purchase'])(
+      'does not remove or delete commerce provenance labeled %s',
+      async (source) => {
+        const { client: sweepClient, deleteEq, guildGet } = makeTempRoleSweepClient([grant(source)], null);
+
+        await sweepExpiredTempRoleGrants(sweepClient);
+
+        expect(guildGet).not.toHaveBeenCalled();
+        expect(deleteEq).not.toHaveBeenCalled();
+      },
+    );
+
+    it('uses an ordered ID cursor so 200 preserved legacy rows cannot starve later grants', async () => {
+      const harness = makePaginatedTempRoleSweepClient();
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.queryCursors).toEqual([null, 'grant-199']);
+      expect(harness.deletedIds).toEqual(['grant-200']);
+      expect(harness.guildGet).not.toHaveBeenCalled();
+    });
+
+    it('fails the scan when the database returns null without an error', async () => {
+      const limit = vi.fn().mockResolvedValue({ data: null, error: null });
+      const order = vi.fn(() => ({ limit }));
+      const lt = vi.fn(() => ({ order }));
+      const select = vi.fn(() => ({ lt }));
+      const guildGet = vi.fn();
+      const sweepClient = {
+        supabase: { from: vi.fn(() => ({ select })) },
+        guilds: { cache: { get: guildGet } },
+      } as any;
+
+      await sweepExpiredTempRoleGrants(sweepClient);
+
+      expect(limit).toHaveBeenCalledWith(200);
+      expect(guildGet).not.toHaveBeenCalled();
+    });
+
+    it('rejects a page with non-increasing IDs before mutating any row', async () => {
+      const malformedRows = [
+        {
+          id: 'grant-duplicate',
+          guild_id: 'guild-1',
+          user_id: 'user-1',
+          role_id: 'role-1',
+          expires_at: '2000-01-01T00:00:00.000Z',
+          source: 'commerce_purchase',
+          order_id: 'order-1',
+          grant_status: 'applied',
+          remove_on_expiry: false,
+        },
+        {
+          id: 'grant-duplicate',
+          guild_id: 'guild-1',
+          user_id: 'user-1',
+          role_id: 'role-2',
+          expires_at: '2000-01-01T00:00:00.000Z',
+          source: 'commerce_purchase',
+          order_id: 'order-2',
+          grant_status: 'applied',
+          remove_on_expiry: false,
+        },
+      ];
+      const { client: sweepClient, deleteEq, guildGet } = makeTempRoleSweepClient(
+        malformedRows,
+        null,
+      );
+
+      await sweepExpiredTempRoleGrants(sweepClient);
+
+      expect(deleteEq).not.toHaveBeenCalled();
+      expect(guildGet).not.toHaveBeenCalled();
+    });
+
+    it('deletes an expired pending grant when no Discord removal intent was persisted', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: false,
+        grantStatus: 'pending',
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('preserves an expired pending grant with removal intent because Discord ownership is ambiguous', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        grantStatus: 'pending',
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('deletes an order-backed preexisting-role grant without touching Discord', async () => {
+      const harness = makeCommerceTempRoleSweepClient({ removeOnExpiry: false });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('keeps the role for every unexpired overlapping grant, including prepared pending rows', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingGrants: [{ id: 'grant-future' }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+      expect(harness.ownershipOr).not.toHaveBeenCalled();
+      expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        remove_on_expiry: true,
+      }));
+    });
+
+    it('transfers cleanup from expired unswept A to B, then B removes the role on its expiry', async () => {
+      const firstSweep = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingGrants: [{ id: 'grant-successor', remove_on_expiry: false }],
+      });
+
+      await sweepExpiredTempRoleGrants(firstSweep.client);
+
+      expect(firstSweep.roleRemove).not.toHaveBeenCalled();
+      expect(firstSweep.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        remove_on_expiry: true,
+      }));
+      expect(firstSweep.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+
+      const successorSweep = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        memberRoleStates: [true, false],
+      });
+      await sweepExpiredTempRoleGrants(successorSweep.client);
+
+      expect(successorSweep.roleRemove).toHaveBeenCalledWith(
+        'role-1',
+        'SomniBot — temporary role expired',
+      );
+      expect(successorSweep.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('compare-deletes a stale B snapshot only after observing the transferred cleanup flag', async () => {
+      vi.useFakeTimers();
+      let releaseBDelete: (() => void) | undefined;
+      let releaseADelete: (() => void) | undefined;
+      try {
+        const aExpiry = '2030-01-01T00:00:00.000Z';
+        const bExpiry = '2030-01-02T00:00:00.000Z';
+        const sharedTempRoleRows = new Map<string, Record<string, unknown>>([
+          ['grant-a', {
+            id: 'grant-a',
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: 'role-1',
+            expires_at: aExpiry,
+            source: 'commerce_purchase',
+            order_id: 'order-a',
+            grant_status: 'applied',
+            remove_on_expiry: true,
+          }],
+          ['grant-b', {
+            id: 'grant-b',
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: 'role-1',
+            expires_at: bExpiry,
+            source: 'commerce_purchase',
+            order_id: 'order-b',
+            grant_status: 'applied',
+            remove_on_expiry: false,
+          }],
+        ]);
+
+        let reportBDeleteReached!: () => void;
+        const bDeleteReached = new Promise<void>((resolve) => { reportBDeleteReached = resolve; });
+        const bDeleteRelease = new Promise<void>((resolve) => {
+          releaseBDelete = () => resolve();
+        });
+        const staleB = makeCommerceTempRoleSweepClient({
+          grantId: 'grant-b',
+          orderId: 'order-b',
+          expiresAt: bExpiry,
+          removeOnExpiry: false,
+          sharedTempRoleRows,
+          beforeDeleteAck: async () => {
+            reportBDeleteReached();
+            await bDeleteRelease;
+          },
+        });
+
+        // A later worker has fetched B=false and built its delete predicates,
+        // but the mock holds evaluation against shared database state.
+        vi.setSystemTime(new Date('2030-01-03T00:00:00.000Z'));
+        const staleBSweep = sweepExpiredTempRoleGrants(staleB.client);
+        await bDeleteReached;
+
+        let reportADeleteReached!: () => void;
+        const aDeleteReached = new Promise<void>((resolve) => { reportADeleteReached = resolve; });
+        const aDeleteRelease = new Promise<void>((resolve) => {
+          releaseADelete = () => resolve();
+        });
+        const expiringA = makeCommerceTempRoleSweepClient({
+          grantId: 'grant-a',
+          orderId: 'order-a',
+          expiresAt: aExpiry,
+          removeOnExpiry: true,
+          overlappingGrants: [{
+            id: 'grant-b',
+            expires_at: bExpiry,
+            remove_on_expiry: false,
+          }],
+          sharedTempRoleRows,
+          beforeDeleteAck: async () => {
+            reportADeleteReached();
+            await aDeleteRelease;
+          },
+        });
+
+        // This models an earlier worker whose captured cutoff still considers
+        // B live. Its acknowledged update mutates the shared row before A's
+        // own delete is released.
+        vi.setSystemTime(new Date('2030-01-01T12:00:00.000Z'));
+        const aSweep = sweepExpiredTempRoleGrants(expiringA.client);
+        await aDeleteReached;
+        expect(sharedTempRoleRows.get('grant-b')?.remove_on_expiry).toBe(true);
+
+        // The mock now evaluates B's recorded Supabase equality predicates
+        // against B=true. The stale remove_on_expiry=false delete matches zero
+        // rows; if that predicate is omitted, this test deletes B and fails.
+        releaseBDelete!();
+        await staleBSweep;
+        expect(staleB.acknowledgedDeletes).toEqual([]);
+        expect(sharedTempRoleRows.has('grant-b')).toBe(true);
+
+        releaseADelete!();
+        await aSweep;
+        expect(expiringA.acknowledgedDeletes).toEqual(['grant-a']);
+        expect(sharedTempRoleRows.has('grant-a')).toBe(false);
+
+        vi.setSystemTime(new Date('2030-01-03T00:00:00.000Z'));
+        const laterB = makeCommerceTempRoleSweepClient({
+          grantId: 'grant-b',
+          orderId: 'order-b',
+          expiresAt: bExpiry,
+          removeOnExpiry: true,
+          memberRoleStates: [true, false],
+          sharedTempRoleRows,
+        });
+        await sweepExpiredTempRoleGrants(laterB.client);
+        expect(laterB.roleRemove).toHaveBeenCalledWith(
+          'role-1',
+          'SomniBot — temporary role expired',
+        );
+        expect(laterB.acknowledgedDeletes).toEqual(['grant-b']);
+        expect(sharedTempRoleRows.has('grant-b')).toBe(false);
+      } finally {
+        releaseBDelete?.();
+        releaseADelete?.();
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves expired provenance when successor cleanup transfer is not acknowledged', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingGrants: [{ id: 'grant-successor', remove_on_expiry: false }],
+        transferError: { message: 'database unavailable' },
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('keeps the role when a live entitlement snapshot still owns it', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        customers: [{ id: 'customer-1' }],
+        entitlements: [{ id: 'entitlement-1' }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('does not let an expiring non-commerce grant strip a live paid entitlement role', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        source: 'level_reward',
+        removeOnExpiry: true,
+        customers: [{ id: 'customer-1' }],
+        entitlements: [{ id: 'entitlement-paid' }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('does not let an expiring non-commerce grant strip an overlapping temp owner', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        source: 'level_reward',
+        removeOnExpiry: true,
+        overlappingGrants: [{ id: 'grant-future' }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('removes an owned role, confirms absence with Discord, then deletes provenance', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        memberRoleStates: [true, false],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).toHaveBeenCalledTimes(2);
+      expect(harness.roleRemove).toHaveBeenCalledWith(
+        'role-1',
+        'SomniBot — temporary role expired',
+      );
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('repairs the role when a concurrent temporary owner appears after removal', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingResponses: [
+          { data: [], error: null },
+          { data: [{ id: 'grant-concurrent' }], error: null },
+        ],
+        memberRoleStates: [true, false, false, true],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.roleAdd).toHaveBeenCalledWith(
+        'role-1',
+        expect.stringContaining('concurrent commerce owner'),
+      );
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+    });
+
+    it('restores the role and preserves provenance when post-removal ownership lookup fails', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingResponses: [
+          { data: [], error: null },
+          { data: [], error: { message: 'database unavailable' } },
+        ],
+        memberRoleStates: [true, false, false, true],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.roleAdd).toHaveBeenCalledTimes(1);
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves order-backed provenance when the Discord lookup fails', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        memberRoleStates: [new Error('lookup unavailable')],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves order-backed provenance when Discord role removal fails', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        memberRoleStates: [true],
+        removalError: new Error('missing permissions'),
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves order-backed provenance when post-removal confirmation fails', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        memberRoleStates: [true, new Error('confirmation unavailable')],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.fetch).toHaveBeenCalledTimes(2);
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves order-backed provenance when an overlap lookup fails', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingError: { message: 'database unavailable' },
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves order-backed provenance when its unique customer identity is missing', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        customers: [],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves provenance when the fresh Discord member lookup fails', async () => {
+      const fetch = vi.fn().mockRejectedValue(new Error('Discord unavailable'));
+      const { client: sweepClient, deleteEq } = makeTempRoleSweepClient(
+        [grant('level_reward')],
+        { members: { fetch } },
+      );
+
+      await sweepExpiredTempRoleGrants(sweepClient);
+
+      expect(fetch).toHaveBeenCalledWith({ user: 'user-1', force: true });
+      expect(deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('preserves provenance when Discord role removal fails', async () => {
+      const remove = vi.fn().mockRejectedValue(new Error('Missing permissions'));
+      const fetch = vi.fn().mockResolvedValue({
+        roles: {
+          cache: new Map([['role-1', {}]]),
+          remove,
+        },
+      });
+      const { client: sweepClient, deleteEq } = makeTempRoleSweepClient(
+        [grant('level_reward')],
+        { members: { fetch } },
+      );
+
+      await sweepExpiredTempRoleGrants(sweepClient);
+
+      expect(remove).toHaveBeenCalledWith('role-1', 'SomniBot — temporary role expired');
+      expect(deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('deletes non-commerce provenance only after a fresh lookup confirms the role absent', async () => {
+      const remove = vi.fn();
+      const fetch = vi.fn().mockResolvedValue({
+        roles: {
+          cache: new Map(),
+          remove,
+        },
+      });
+      const { client: sweepClient, deleteEq } = makeTempRoleSweepClient(
+        [grant('level_reward')],
+        { members: { fetch } },
+      );
+
+      await sweepExpiredTempRoleGrants(sweepClient);
+
+      expect(fetch).toHaveBeenCalledWith({ user: 'user-1', force: true });
+      expect(remove).not.toHaveBeenCalled();
+      expect(deleteEq).toHaveBeenCalledWith('id', 'grant-1');
+    });
   });
 
 });

@@ -18,11 +18,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/lib/api/admin-rate-limit', () => ({ checkAdminRateLimit: vi.fn() }));
 vi.mock('@/lib/api/require-owner', () => ({ requireGuildOwner: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminSupabase: vi.fn() }));
+vi.mock('@/lib/api/commerce-income-wall', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api/commerce-income-wall')>();
+  return {
+    ...actual,
+    loadProductPlans: vi.fn(),
+    loadProductTemporaryRoleIds: vi.fn(),
+    evaluateEffectivePostWriteProduct: vi.fn(),
+    assertProductRolesNotIncomeEarning: vi.fn(),
+  };
+});
 
 import { POST, PUT } from '@/app/api/store/plans/route';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import {
+  assertProductRolesNotIncomeEarning,
+  evaluateEffectivePostWriteProduct,
+  loadProductPlans,
+  loadProductTemporaryRoleIds,
+} from '@/lib/api/commerce-income-wall';
 
 import {
   buildRequest,
@@ -34,7 +50,25 @@ import {
 
 const CALLER_GUILD = 'guild-1';
 const PRODUCT_ID = '00000000-0000-0000-0000-00000000000a';
+const SOURCE_PRODUCT_ID = '00000000-0000-0000-0000-00000000000c';
 const PLAN_ID = '00000000-0000-0000-0000-00000000000b';
+
+const sourcePlan = {
+  id: PLAN_ID,
+  product_id: SOURCE_PRODUCT_ID,
+  active: true,
+  price_cents: 500,
+  paypal_plan_id: 'P-1',
+  guild_id: CALLER_GUILD,
+};
+
+const productRow = (id: string) => ({
+  id,
+  type: 'subscription',
+  active: true,
+  price_cents: 0,
+  granted_role_ids: [],
+});
 
 const basePlanBody = {
   product_id: PRODUCT_ID,
@@ -59,6 +93,16 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: CALLER_GUILD });
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
+    (loadProductPlans as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (loadProductTemporaryRoleIds as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (evaluateEffectivePostWriteProduct as ReturnType<typeof vi.fn>).mockReturnValue({
+      buyable: false,
+      grantedRoleIds: [],
+      selectedPlan: null,
+    });
+    (assertProductRolesNotIncomeEarning as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+    });
   });
 
   describe('POST', () => {
@@ -95,7 +139,10 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
     });
 
     it('creates the plan when the product belongs to the caller guild', async () => {
-      productsTable.maybeSingle.mockResolvedValue({ data: { id: PRODUCT_ID }, error: null });
+      productsTable.maybeSingle.mockResolvedValue({
+        data: productRow(PRODUCT_ID),
+        error: null,
+      });
       plansTable.single.mockResolvedValue({
         data: { id: PLAN_ID, ...basePlanBody, guild_id: CALLER_GUILD },
         error: null,
@@ -118,7 +165,11 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
 
   describe('PUT', () => {
     it('404s and never updates when re-parenting to a cross-guild product_id', async () => {
-      productsTable.maybeSingle.mockResolvedValue({ data: null, error: null });
+      plansTable.maybeSingle.mockResolvedValue({ data: sourcePlan, error: null });
+      productsTable.maybeSingle
+        .mockResolvedValueOnce({ data: productRow(SOURCE_PRODUCT_ID), error: null })
+        .mockResolvedValueOnce({ data: null, error: null });
+      (loadProductPlans as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sourcePlan]);
 
       const res = await PUT(buildRequest('/api/store/plans', {
         method: 'PUT',
@@ -134,9 +185,15 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
     });
 
     it('applies the update when re-parenting to a product the caller guild owns', async () => {
-      productsTable.maybeSingle.mockResolvedValue({ data: { id: PRODUCT_ID }, error: null });
+      plansTable.maybeSingle.mockResolvedValue({ data: sourcePlan, error: null });
+      productsTable.maybeSingle
+        .mockResolvedValueOnce({ data: productRow(SOURCE_PRODUCT_ID), error: null })
+        .mockResolvedValueOnce({ data: productRow(PRODUCT_ID), error: null });
+      (loadProductPlans as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([sourcePlan])
+        .mockResolvedValueOnce([]);
       plansTable.single.mockResolvedValue({
-        data: { id: PLAN_ID, product_id: PRODUCT_ID, guild_id: CALLER_GUILD },
+        data: { ...sourcePlan, product_id: PRODUCT_ID },
         error: null,
       });
 
@@ -155,9 +212,15 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
       expect(plansTable.eq).toHaveBeenCalledWith('guild_id', CALLER_GUILD);
     });
 
-    it('does not consult products when product_id is not being changed', async () => {
+    it('evaluates complete post-write state when product_id is not changed', async () => {
+      plansTable.maybeSingle.mockResolvedValue({ data: sourcePlan, error: null });
+      productsTable.maybeSingle.mockResolvedValue({
+        data: productRow(SOURCE_PRODUCT_ID),
+        error: null,
+      });
+      (loadProductPlans as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sourcePlan]);
       plansTable.single.mockResolvedValue({
-        data: { id: PLAN_ID, name: 'Renamed', guild_id: CALLER_GUILD },
+        data: { ...sourcePlan, name: 'Renamed' },
         error: null,
       });
 
@@ -167,7 +230,8 @@ describe('/api/store/plans — cross-guild product_id injection', () => {
       }) as never);
 
       expect(res.status).toBe(200);
-      expect(productsTable.maybeSingle).not.toHaveBeenCalled();
+      expect(productsTable.maybeSingle).toHaveBeenCalled();
+      expect(evaluateEffectivePostWriteProduct).toHaveBeenCalled();
     });
   });
 });

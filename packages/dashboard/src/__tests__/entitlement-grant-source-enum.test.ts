@@ -8,10 +8,10 @@
  * 'promotion' (which the DB rejects at insert with a raw CHECK violation)
  * and was missing 'giveaway' (which the DB allows).
  *
- * COMPLIANCE: do NOT add new source values here — the bot's
- * commerce-role-guard deny-lists non-purchase sources ('giveaway',
- * 'manual', 'automation'); any NEW source requires a real-money-or-not
- * decision there first. This suite pins the zod enum to the existing DB
+ * COMPLIANCE: do NOT add new source values here — the atomic role-income RPC
+ * classifies ('giveaway', 'manual', 'automation') as non-purchase sources;
+ * any NEW source requires a real-money-or-not decision in that DB invariant
+ * first. This suite pins the zod enum to the existing DB
  * CHECK values so invalid sources die as clean 400s at validation instead
  * of surfacing as DB errors.
  */

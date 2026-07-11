@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 123 migration files in packages/supabase/migrations/
+ * Source: 126 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -896,9 +896,13 @@ export interface DbOrder {
   discount_cents: number;
   promotion_id: string | null;
   source: 'purchase' | 'giveaway' | 'manual' | 'automation';
-  status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled';
+  status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review';
   created_at: string;
   updated_at: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
+  grant_snapshot_frozen_at: string | null;
 }
 
 // — Commerce — Licensing —
@@ -1079,7 +1083,7 @@ export interface DbBotActionQueue {
   guild_id: string;
   action: string;
   payload: Record<string, unknown>;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'staged' | 'pending' | 'processing' | 'completed' | 'failed';
   result: Record<string, unknown> | null;
   error_message: string | null;
   created_at: string;
@@ -1093,6 +1097,7 @@ export interface DbBotActionQueue {
   next_retry_at: string | null;
   retry_count: number;
   lane: 'commerce' | 'game';
+  idempotency_key: string | null;
 }
 
 export interface DbAlert {
@@ -1365,6 +1370,40 @@ export interface DbButtonRoles {
   active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface DbCommerceProductTempRoleConfig {
+  id: string;
+  product_id: string;
+  guild_id: string;
+  role_id: string;
+  duration_seconds: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbCommerceRoleMetadataMigrationIssues {
+  id: string;
+  product_id: string;
+  guild_id: string;
+  role_id: string | null;
+  issue_type: 'invalid_role_id' | 'invalid_duration' | 'orphan_duration' | 'unsupported_product_type' | 'ambiguous_permanent_history' | 'ambiguous_historical_role' | 'invalid_historical_roles';
+  details: Json;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export interface DbCommerceTempRoleMigrationIssues {
+  id: string;
+  temp_role_grant_id: string;
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  source: string | null;
+  source_id: string | null;
+  issue_type: string;
+  resolved_at: string | null;
+  created_at: string;
 }
 
 export interface DbEconomyAchievementDefs {
@@ -1720,6 +1759,23 @@ export interface DbEconomyRoleIncome {
   created_at: string;
 }
 
+export interface DbEconomyRoleIncomeClaims {
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  next_available_at: string;
+  last_request_id: string;
+  updated_at: string;
+}
+
+export interface DbEconomyRoleIncomeRequests {
+  guild_id: string;
+  user_id: string;
+  request_id: string;
+  result: Json;
+  created_at: string;
+}
+
 export interface DbEconomyStreaks {
   guild_id: string;
   user_id: string;
@@ -1920,6 +1976,13 @@ export interface DbTempRoleGrants {
   source: string;
   source_id: string | null;
   created_at: string;
+  order_id: string | null;
+  grant_status: 'pending' | 'applied';
+  remove_on_expiry: boolean;
+  applied_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
 }
 
 export interface DbTutorialConfigs {

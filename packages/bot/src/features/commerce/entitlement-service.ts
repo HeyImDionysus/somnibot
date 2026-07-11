@@ -65,8 +65,11 @@ export class EntitlementService {
       return null;
     }
 
-    // Grant Discord roles
-    await this.grantRoles(opts.discordId, opts.grantedRoleIds);
+    // Discord delivery is part of successful fulfillment. The entitlement row
+    // is deliberately durable first, so a queue retry can find this exact
+    // order-scoped row and idempotently repair any missing roles. Do not report
+    // success until a fresh Discord read confirms every purchased role.
+    await this.ensureGrantedRoles(opts.discordId, opts.grantedRoleIds);
 
     // Fire event
     this.eventBus.emit('entitlement.granted', guildId, {
@@ -167,17 +170,40 @@ export class EntitlementService {
     }
 
     // Get customer discord_id — scoped to guild_id
-    const { data: customer } = await this.supabase
+    const { data: customer, error: customerError } = await this.supabase
       .from('customers')
-      .select('discord_id')
+      .select('id, guild_id, discord_id')
       .eq('id', ent.customer_id)
       .eq('guild_id', guildId)
-      .single();
+      .maybeSingle();
 
-    const discordId = customer?.discord_id;
+    const customerIdentityValid = !customerError
+      && customer?.id === ent.customer_id
+      && customer?.guild_id === guildId
+      && typeof customer?.discord_id === 'string'
+      && customer.discord_id.length > 0;
+    const discordId = customerIdentityValid ? customer.discord_id : null;
+    // Paid entitlement terminal transitions are protected by
+    // commerce_entitlements_enqueue_role_revocation: the status update above
+    // and an exact, retryable revoke_roles intent commit in one transaction.
+    // Removing here as well would bypass the action handler's shared-owner
+    // preflight and could strip a role that another live entitlement still
+    // grants. Non-commerce entitlements are not covered by that trigger and
+    // retain the direct removal path.
+    const usesDurablePaidRoleRevocation = ent.source == null || ent.source === 'purchase';
     if (discordId) {
-      // Revoke Discord roles
-      await this.revokeRoles(discordId, ent.granted_role_ids ?? []);
+      if (!usesDurablePaidRoleRevocation) {
+        try {
+          await this.revokeRolesSafely(
+            ent.customer_id,
+            discordId,
+            ent.granted_role_ids ?? [],
+          );
+        } catch (err) {
+          log.error(`Failed to revoke non-commerce roles for ${discordId}:`, err);
+          return false;
+        }
+      }
 
       // Fire event
       this.eventBus.emit('entitlement.revoked', guildId, {
@@ -187,6 +213,12 @@ export class EntitlementService {
         productName: ent.products?.name ?? 'Unknown',
         reason,
       });
+    } else if (!usesDurablePaidRoleRevocation && (ent.granted_role_ids ?? []).length > 0) {
+      log.error('Cannot verify non-commerce customer identity for role revocation:', {
+        entitlementId,
+        detail: customerError?.message ?? 'missing or mismatched customer',
+      });
+      return false;
     }
 
     // Also revoke associated license sessions. NOTE: license_sessions has no
@@ -345,14 +377,17 @@ export class EntitlementService {
   async reactivate(entitlementId: string): Promise<boolean> {
     const guildId = this.guild.id;
 
-    const { data: ent } = await this.supabase
+    const { data: ent, error: entitlementError } = await this.supabase
       .from('entitlements')
       .select('*')
       .eq('id', entitlementId)
       .eq('guild_id', guildId)
       .single();
 
-    if (!ent) return false;
+    if (entitlementError || !ent) {
+      log.error('Failed to load entitlement for reactivation:', entitlementError?.message);
+      return false;
+    }
 
     const { error } = await this.supabase
       .from('entitlements')
@@ -383,15 +418,26 @@ export class EntitlementService {
     }
 
     // Re-grant roles
-    const { data: customer } = await this.supabase
+    const { data: customer, error: customerError } = await this.supabase
       .from('customers')
-      .select('discord_id')
+      .select('id, guild_id, discord_id')
       .eq('id', ent.customer_id)
-      .single();
+      .eq('guild_id', guildId)
+      .maybeSingle();
 
-    if (customer?.discord_id) {
-      await this.grantRoles(customer.discord_id, ent.granted_role_ids ?? []);
+    if (
+      customerError
+      || !customer
+      || customer.id !== ent.customer_id
+      || customer.guild_id !== guildId
+      || typeof customer.discord_id !== 'string'
+      || customer.discord_id.length === 0
+    ) {
+      throw new Error(
+        `Failed to verify customer identity for entitlement reactivation: ${customerError?.message ?? 'missing or mismatched customer'}`,
+      );
     }
+    await this.ensureGrantedRoles(customer.discord_id, ent.granted_role_ids ?? []);
 
     log.info(`Entitlement reactivated: ${entitlementId}`);
     return true;
@@ -399,31 +445,177 @@ export class EntitlementService {
 
   // ── Role helpers ──────────────────────────────────
 
-  private async grantRoles(discordId: string, roleIds: string[]): Promise<void> {
+  async ensureGrantedRoles(discordId: string, roleIds: string[]): Promise<void> {
     if (!roleIds.length) return;
-    try {
-      const member = await this.guild.members.fetch(discordId);
-      for (const roleId of roleIds) {
-        if (!member.roles.cache.has(roleId)) {
-          await member.roles.add(roleId, 'Commerce: entitlement granted');
-        }
+
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    for (const roleId of [...new Set(roleIds)]) {
+      if (!member.roles.cache.has(roleId)) {
+        await member.roles.add(roleId, 'Commerce: entitlement granted');
       }
-    } catch (err) {
-      log.error(`Failed to grant roles to ${discordId}:`, err);
+    }
+
+    member = await this.guild.members.fetch({ user: discordId, force: true });
+    const missingRoleIds = [...new Set(roleIds)].filter(
+      (roleId) => !member.roles.cache.has(roleId),
+    );
+    if (missingRoleIds.length > 0) {
+      throw new Error(
+        `Discord did not confirm ${missingRoleIds.length} purchased role(s) for ${discordId}`,
+      );
     }
   }
 
-  private async revokeRoles(discordId: string, roleIds: string[]): Promise<void> {
+  private async ensureRolePresentAndConfirm(
+    discordId: string,
+    roleId: string,
+    reason: string,
+  ) {
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    if (!member.roles.cache.has(roleId)) {
+      await member.roles.add(roleId, reason);
+      member = await this.guild.members.fetch({ user: discordId, force: true });
+    }
+    if (!member.roles.cache.has(roleId)) {
+      throw new Error(`Discord did not confirm retained role ${roleId}`);
+    }
+    return member;
+  }
+
+  private async hasOtherLiveRoleOwner(
+    customerId: string,
+    discordId: string,
+    roleId: string,
+  ): Promise<boolean> {
+    const { data: entitlementOwners, error: entitlementError } = await this.supabase
+      .from('entitlements')
+      .select('id, guild_id, customer_id, status, granted_role_ids')
+      .eq('guild_id', this.guild.id)
+      .eq('customer_id', customerId)
+      .in('status', ['active', 'pending', 'grace_period', 'suspended'])
+      .contains('granted_role_ids', [roleId])
+      .order('id', { ascending: true })
+      .limit(1);
+    if (entitlementError) {
+      throw new Error(`entitlement ownership lookup failed: ${entitlementError.message}`);
+    }
+    if (!Array.isArray(entitlementOwners) || entitlementOwners.length > 1) {
+      throw new Error('entitlement ownership lookup returned malformed data');
+    }
+    if (entitlementOwners.length === 1) {
+      const owner = entitlementOwners[0];
+      if (
+        typeof owner?.id !== 'string'
+        || owner.id.length === 0
+        || owner.guild_id !== this.guild.id
+        || owner.customer_id !== customerId
+        || typeof owner.status !== 'string'
+        || !['active', 'pending', 'grace_period', 'suspended'].includes(owner.status)
+        || !Array.isArray(owner.granted_role_ids)
+        || !owner.granted_role_ids.every((value) => typeof value === 'string')
+        || !owner.granted_role_ids.includes(roleId)
+      ) {
+        throw new Error('entitlement ownership lookup returned a mismatched row');
+      }
+      return true;
+    }
+
+    const nowIso = new Date().toISOString();
+    const { data: tempOwners, error: tempError } = await this.supabase
+      .from('temp_role_grants')
+      .select('id, guild_id, user_id, role_id, expires_at, grant_status')
+      .eq('guild_id', this.guild.id)
+      .eq('user_id', discordId)
+      .eq('role_id', roleId)
+      .in('grant_status', ['pending', 'applied'])
+      .gt('expires_at', nowIso)
+      .order('id', { ascending: true })
+      .limit(1);
+    if (tempError) throw new Error(`temporary ownership lookup failed: ${tempError.message}`);
+    if (!Array.isArray(tempOwners) || tempOwners.length > 1) {
+      throw new Error('temporary ownership lookup returned malformed data');
+    }
+    if (tempOwners.length === 0) return false;
+    const owner = tempOwners[0];
+    if (
+      typeof owner?.id !== 'string'
+      || owner.id.length === 0
+      || owner.guild_id !== this.guild.id
+      || owner.user_id !== discordId
+      || owner.role_id !== roleId
+      || typeof owner.expires_at !== 'string'
+      || Date.parse(owner.expires_at) <= Date.parse(nowIso)
+      || (owner.grant_status !== 'pending' && owner.grant_status !== 'applied')
+    ) {
+      throw new Error('temporary ownership lookup returned a mismatched row');
+    }
+    return true;
+  }
+
+  private async revokeRolesSafely(
+    customerId: string,
+    discordId: string,
+    roleIds: string[],
+  ): Promise<void> {
     if (!roleIds.length) return;
-    try {
-      const member = await this.guild.members.fetch(discordId);
-      for (const roleId of roleIds) {
+
+    const uniqueRoleIds = [...new Set(roleIds)];
+    if (
+      uniqueRoleIds.length !== roleIds.length
+      || uniqueRoleIds.some((roleId) =>
+        typeof roleId !== 'string' || roleId.length === 0 || roleId.trim() !== roleId)
+    ) {
+      throw new Error('non-commerce role snapshot is malformed');
+    }
+
+    const retained = new Set<string>();
+    for (const roleId of uniqueRoleIds) {
+      if (await this.hasOtherLiveRoleOwner(customerId, discordId, roleId)) {
+        retained.add(roleId);
+      }
+    }
+
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    for (const roleId of retained) {
+      if (!member.roles.cache.has(roleId)) {
+        member = await this.ensureRolePresentAndConfirm(
+          discordId,
+          roleId,
+          'Commerce: repair shared role during entitlement revocation',
+        );
+      }
+    }
+
+    for (const roleId of uniqueRoleIds) {
+      if (retained.has(roleId)) continue;
+      if (member.roles.cache.has(roleId)) {
+        await member.roles.remove(roleId, 'Commerce: entitlement revoked');
+        member = await this.guild.members.fetch({ user: discordId, force: true });
         if (member.roles.cache.has(roleId)) {
-          await member.roles.remove(roleId, 'Commerce: entitlement revoked');
+          throw new Error(`Discord did not confirm revoked role ${roleId}`);
         }
       }
-    } catch (err) {
-      log.error(`Failed to revoke roles from ${discordId}:`, err);
+
+      try {
+        if (await this.hasOtherLiveRoleOwner(customerId, discordId, roleId)) {
+          member = await this.ensureRolePresentAndConfirm(
+            discordId,
+            roleId,
+            'Commerce: repair concurrent shared role owner',
+          );
+        }
+      } catch (err) {
+        try {
+          member = await this.ensureRolePresentAndConfirm(
+            discordId,
+            roleId,
+            'Commerce: preserve role during ownership uncertainty',
+          );
+        } catch {
+          // Preserve the original ownership failure as the retry reason.
+        }
+        throw err;
+      }
     }
   }
 }

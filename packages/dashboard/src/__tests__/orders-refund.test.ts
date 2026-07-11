@@ -72,4 +72,25 @@ describe('POST /api/orders/[id]/refund', () => {
     const res = await POST(refundReq({ reason: 'dup' }), { params });
     expect(res.status).toBe(400);
   });
+
+  it('relies on the entitlement trigger instead of inserting a legacy role queue row', async () => {
+    mockAuthSuccess(requireGuildOwner as ReturnType<typeof vi.fn>, { guildId: 'guild-1' });
+    mock._query.single.mockResolvedValue({
+      data: {
+        id: 'order-123',
+        status: 'completed',
+        guild_id: 'guild-1',
+        amount_cents: 1_000,
+        payments: [],
+      },
+    });
+
+    const res = await POST(refundReq({ reason: 'requested' }), { params });
+
+    expect(res.status).toBe(200);
+    expect(mock.from).not.toHaveBeenCalledWith('bot_action_queue');
+    expect(mock._query.update).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'expired' }),
+    );
+  });
 });

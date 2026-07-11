@@ -5,6 +5,7 @@
  * Each handler deals with one PayPal event type (or a small group).
  */
 
+import { createHash } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
 import {
@@ -33,59 +34,686 @@ function requireSupabaseSuccess(error: unknown, operation: string) {
   }
 }
 
+type AdminSupabase = ReturnType<typeof createAdminSupabase>;
+const LIFECYCLE_SCAN_PAGE_SIZE = 500;
+
+interface FrozenGrantSnapshot {
+  order_id: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  temporary_role_grants_snapshot: Array<{ role_id: string; duration_seconds: number }>;
+  grant_snapshot_frozen_at: string;
+}
+
+interface CaptureFinalization {
+  order_id: string;
+  order_status: 'completed' | 'pending_review' | 'refunded' | 'disputed';
+  payment_id: string;
+  payment_created: boolean;
+}
+
+interface FinancialAmount {
+  amountCents: number;
+  currency: string;
+}
+
+interface AuthoritativeSubscriptionContract extends FinancialAmount {
+  providerPlanId: string;
+}
+
+interface FulfillmentQueueRow {
+  id: string;
+  guild_id: string;
+  action: string;
+  payload: Record<string, unknown>;
+  status: string;
+  idempotency_key: string;
+}
+
+interface FulfillmentExpectation {
+  idempotencyKey: string;
+  action: string;
+  guildId: string;
+  orderId: string;
+  fulfillmentType: string;
+  payload?: Record<string, unknown>;
+}
+
+interface CommerceOrderRow {
+  id: string;
+  order_number: string;
+  customer_id: string;
+  guild_id: string;
+  product_id: string;
+  plan_id?: string | null;
+  amount_cents: number;
+  currency: string;
+  status: string;
+  grant_snapshot_frozen_at?: string | null;
+  paypal_order_id?: string | null;
+  paypal_subscription_id?: string | null;
+}
+
+interface EntitlementLifecycleRow {
+  id: string;
+  license_key_id: string | null;
+}
+
+interface LicenseKeyLifecycleRow {
+  id: string;
+}
+
+interface RefundAmountRow {
+  id: string;
+  amount_cents: number | null;
+}
+
+interface CustomerIdentityRow {
+  id: string;
+  guild_id: string;
+  discord_id: string;
+}
+
+interface SubscriptionPlanIdentityRow {
+  id: string;
+  guild_id: string;
+  product_id: string;
+  paypal_plan_id: string;
+}
+
+interface SubscriptionLifecycleOrderRow {
+  id: string;
+  order_number: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  paypal_subscription_id: string;
+}
+
+interface SubscriptionProductIdentityRow {
+  id: string;
+  guild_id: string;
+  name: string;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+async function fetchAllLifecycleRowsById<T extends { id: string }>(
+  fetchPage: (
+    afterId: string | null,
+  ) => Promise<{ data: T[] | null; error: unknown }>,
+  operation: string,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let afterId: string | null = null;
+
+  for (;;) {
+    const { data, error } = await fetchPage(afterId);
+    requireSupabaseSuccess(error, operation);
+    if (!Array.isArray(data)) throw new Error(`${operation}: query returned no data`);
+
+    let previousId = afterId;
+    for (const row of data) {
+      if (!row || !isNonEmptyString(row.id) || (previousId !== null && row.id <= previousId)) {
+        throw new Error(`${operation}: invalid id cursor order`);
+      }
+      previousId = row.id;
+    }
+    rows.push(...data);
+    if (data.length < LIFECYCLE_SCAN_PAGE_SIZE) return rows;
+    afterId = data[data.length - 1]!.id;
+  }
+}
+
+async function requireExactCustomerIdentity(
+  supabase: AdminSupabase,
+  input: {
+    customerId: string;
+    guildId: string;
+    expectedDiscordId?: string;
+    operation: string;
+  },
+): Promise<CustomerIdentityRow> {
+  const { data, error } = await supabase
+    .from('customers')
+    .select('id, guild_id, discord_id')
+    .eq('id', input.customerId)
+    .eq('guild_id', input.guildId)
+    .maybeSingle();
+  requireSupabaseSuccess(error, input.operation);
+  if (
+    !data ||
+    data.id !== input.customerId ||
+    data.guild_id !== input.guildId ||
+    !isNonEmptyString(data.discord_id) ||
+    (input.expectedDiscordId !== undefined && data.discord_id !== input.expectedDiscordId)
+  ) {
+    throw new Error(`${input.operation}: customer identity mismatch`);
+  }
+  return data as CustomerIdentityRow;
+}
+
+async function requireExactSubscriptionPlan(
+  supabase: AdminSupabase,
+  input: {
+    planId: string;
+    guildId: string;
+    productId: string;
+    providerPlanId: string;
+  },
+): Promise<SubscriptionPlanIdentityRow> {
+  const { data, error } = await supabase
+    .from('plans')
+    .select('id, guild_id, product_id, paypal_plan_id')
+    .eq('id', input.planId)
+    .eq('guild_id', input.guildId)
+    .eq('product_id', input.productId)
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to load subscription plan identity');
+  if (
+    !data ||
+    data.id !== input.planId ||
+    data.guild_id !== input.guildId ||
+    data.product_id !== input.productId ||
+    !isNonEmptyString(data.paypal_plan_id) ||
+    data.paypal_plan_id !== input.providerPlanId
+  ) {
+    throw new Error('Subscription provider plan identity mismatch');
+  }
+  return data as SubscriptionPlanIdentityRow;
+}
+
+async function requireProductDisplayName(
+  supabase: AdminSupabase,
+  productId: string,
+  operation: string,
+): Promise<string> {
+  // Product ids are globally unique. Captured funds are authorized by the
+  // immutable order contract, so a later catalog guild move must not make the
+  // display-name lookup re-authorize or dead-letter that sale.
+  const { data, error } = await supabase
+    .from('products')
+    .select('id, name')
+    .eq('id', productId)
+    .maybeSingle();
+  requireSupabaseSuccess(error, operation);
+  if (!data || data.id !== productId || !isNonEmptyString(data.name)) {
+    throw new Error(`Product ${productId} has no exact display identity`);
+  }
+  return data.name;
+}
+
+async function loadSubscriptionLifecycleContext(
+  supabase: AdminSupabase,
+  subscriptionId: string,
+  operation: string,
+): Promise<{
+  order: SubscriptionLifecycleOrderRow;
+  product: SubscriptionProductIdentityRow;
+  customer: CustomerIdentityRow;
+}> {
+  const { data: orderData, error: orderError } = await supabase
+    .from('orders')
+    .select('id, order_number, guild_id, customer_id, product_id, paypal_subscription_id')
+    .eq('paypal_subscription_id', subscriptionId)
+    .maybeSingle();
+  requireSupabaseSuccess(orderError, `${operation}: failed to load order`);
+  if (
+    !orderData ||
+    !isNonEmptyString(orderData.id) ||
+    !isNonEmptyString(orderData.order_number) ||
+    !isNonEmptyString(orderData.guild_id) ||
+    !isNonEmptyString(orderData.customer_id) ||
+    !isNonEmptyString(orderData.product_id) ||
+    orderData.paypal_subscription_id !== subscriptionId
+  ) {
+    throw new Error(`${operation}: order identity mismatch`);
+  }
+  const order = orderData as SubscriptionLifecycleOrderRow;
+
+  const { data: productData, error: productError } = await supabase
+    .from('products')
+    .select('id, guild_id, name')
+    .eq('id', order.product_id)
+    .eq('guild_id', order.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(productError, `${operation}: failed to load product`);
+  if (
+    !productData ||
+    productData.id !== order.product_id ||
+    productData.guild_id !== order.guild_id ||
+    !isNonEmptyString(productData.name)
+  ) {
+    throw new Error(`${operation}: product identity mismatch`);
+  }
+
+  const customer = await requireExactCustomerIdentity(supabase, {
+    customerId: order.customer_id,
+    guildId: order.guild_id,
+    operation: `${operation}: failed to load customer`,
+  });
+  return {
+    order,
+    product: productData as SubscriptionProductIdentityRow,
+    customer,
+  };
+}
+
+function parseStringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => !isNonEmptyString(entry))) {
+    throw new Error(`${label} is malformed`);
+  }
+  return [...new Set(value)];
+}
+
+function parseTemporaryRoleSnapshot(
+  value: unknown,
+): Array<{ role_id: string; duration_seconds: number }> {
+  if (!Array.isArray(value)) throw new Error('Temporary role snapshot is malformed');
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    const roleId = (entry as { role_id?: unknown } | null)?.role_id;
+    const durationSeconds = (entry as { duration_seconds?: unknown } | null)?.duration_seconds;
+    if (
+      !entry ||
+      typeof entry !== 'object' ||
+      !isNonEmptyString(roleId) ||
+      !/^\d{17,20}$/.test(roleId) ||
+      seen.has(roleId) ||
+      !Number.isSafeInteger(durationSeconds) ||
+      Number(durationSeconds) <= 0 ||
+      Number(durationSeconds) > 315_360_000
+    ) {
+      throw new Error('Temporary role snapshot is malformed');
+    }
+    seen.add(roleId);
+    return {
+      role_id: roleId,
+      duration_seconds: Number(durationSeconds),
+    };
+  });
+}
+
+function parseFrozenGrantSnapshot(data: unknown): FrozenGrantSnapshot {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Order grant snapshot RPC returned malformed data');
+  }
+  const candidate = data as Record<string, unknown>;
+  if (!isNonEmptyString(candidate.order_id) || !isNonEmptyString(candidate.grant_snapshot_frozen_at)) {
+    throw new Error('Order grant snapshot RPC returned malformed identity');
+  }
+  return {
+    order_id: candidate.order_id,
+    granted_role_ids_snapshot: parseStringArray(
+      candidate.granted_role_ids_snapshot,
+      'Permanent role snapshot',
+    ),
+    granted_channel_ids_snapshot: parseStringArray(
+      candidate.granted_channel_ids_snapshot,
+      'Channel snapshot',
+    ),
+    temporary_role_grants_snapshot: parseTemporaryRoleSnapshot(
+      candidate.temporary_role_grants_snapshot,
+    ),
+    grant_snapshot_frozen_at: candidate.grant_snapshot_frozen_at,
+  };
+}
+
+function parseCaptureFinalization(data: unknown): CaptureFinalization {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Capture finalization RPC returned malformed data');
+  }
+  const candidate = data as Record<string, unknown>;
+  if (
+    !isNonEmptyString(candidate.order_id) ||
+    !['completed', 'pending_review', 'refunded', 'disputed'].includes(
+      String(candidate.order_status),
+    ) ||
+    !isNonEmptyString(candidate.payment_id) ||
+    typeof candidate.payment_created !== 'boolean'
+  ) {
+    throw new Error('Capture finalization RPC returned malformed data');
+  }
+  return candidate as unknown as CaptureFinalization;
+}
+
+async function finalizePayPalCapture(
+  supabase: AdminSupabase,
+  input: {
+    order: CommerceOrderRow;
+    paypalCaptureId: string;
+    amountCents: number;
+    currency: string;
+  },
+): Promise<CaptureFinalization> {
+  const { order, paypalCaptureId, amountCents, currency } = input;
+  const { data, error } = await supabase.rpc(
+    'commerce_finalize_paypal_capture',
+    {
+      p_order_id: order.id,
+      p_guild_id: order.guild_id,
+      p_customer_id: order.customer_id,
+      p_product_id: order.product_id,
+      p_paypal_order_id: order.paypal_order_id,
+      p_paypal_capture_id: paypalCaptureId,
+      p_amount_cents: amountCents,
+      p_currency: currency,
+    },
+  );
+  requireSupabaseSuccess(error, 'Failed to finalize captured payment');
+  const finalization = parseCaptureFinalization(data);
+  if (finalization.order_id !== order.id) {
+    throw new Error('Capture finalization RPC returned the wrong order');
+  }
+  return finalization;
+}
+
+function shouldSkipCaptureFulfillment(
+  finalization: CaptureFinalization,
+  input: {
+    order: CommerceOrderRow;
+    amountCents: number;
+    currency: string;
+  },
+): boolean {
+  const { order, amountCents, currency } = input;
+  if (finalization.order_status === 'refunded' || finalization.order_status === 'disputed') {
+    if (finalization.payment_created) {
+      throw new Error('Capture successor-state replay unexpectedly created a payment');
+    }
+    console.info(
+      `[Webhook] Capture finalization preserved successor order state ${finalization.order_status}; ` +
+        `skipping fulfillment for ${order.order_number}`,
+    );
+    return true;
+  }
+  if (finalization.order_status === 'pending_review') {
+    console.error(
+      `[Webhook] AMOUNT/CURRENCY MISMATCH: PayPal captured ${amountCents} ${currency} ` +
+        `but order ${order.id} expected ${order.amount_cents} ${order.currency}. ` +
+        `Order flagged as pending_review — manual intervention required.`,
+    );
+    console.warn(
+      `[Webhook] Skipping auto-fulfillment for order ${order.order_number} due to amount mismatch. ` +
+        `Resolve via dashboard → Orders → pending_review.`,
+    );
+    return true;
+  }
+  return false;
+}
+
+function parseFinancialAmount(
+  amountCents: unknown,
+  currency: unknown,
+  label: string,
+): FinancialAmount {
+  if (
+    !Number.isSafeInteger(amountCents) ||
+    Number(amountCents) < 0 ||
+    !isNonEmptyString(currency) ||
+    !/^[A-Z]{3}$/.test(currency)
+  ) {
+    throw new Error(`${label} has malformed financial state`);
+  }
+  return { amountCents: Number(amountCents), currency };
+}
+
+function parseCapturedAmountToCents(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value)) {
+    return null;
+  }
+  const cents = Math.round(Number(value) * 100);
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
+async function requireAuthoritativeSubscriptionAmount(
+  subscriptionId: string,
+): Promise<AuthoritativeSubscriptionContract> {
+  const subAmount = await getSubscriptionAmount(subscriptionId);
+  if (
+    !subAmount ||
+    !isNonEmptyString(subAmount.currency) ||
+    !isNonEmptyString(subAmount.planId) ||
+    subAmount.planId.trim() !== subAmount.planId
+  ) {
+    throw new Error(
+      `Subscription ${subscriptionId} authoritative billing amount is unavailable`,
+    );
+  }
+  try {
+    const financial = parseFinancialAmount(
+      subAmount.amountCents,
+      subAmount.currency.toUpperCase(),
+      `Subscription ${subscriptionId} authoritative billing amount`,
+    );
+    return { ...financial, providerPlanId: subAmount.planId };
+  } catch {
+    throw new Error(
+      `Subscription ${subscriptionId} authoritative billing amount is unavailable`,
+    );
+  }
+}
+
+function payloadValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((entry, index) => payloadValuesEqual(entry, right[index]));
+  }
+  if (
+    left &&
+    right &&
+    typeof left === 'object' &&
+    typeof right === 'object'
+  ) {
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord).sort();
+    const rightKeys = Object.keys(rightRecord).sort();
+    return leftKeys.length === rightKeys.length &&
+      leftKeys.every(
+        (key, index) =>
+          key === rightKeys[index] &&
+          payloadValuesEqual(leftRecord[key], rightRecord[key]),
+      );
+  }
+  return false;
+}
+
+function validateQueueRow(
+  data: unknown,
+  expected: FulfillmentExpectation,
+): FulfillmentQueueRow {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Fulfillment outbox returned no row');
+  }
+  const row = data as Record<string, unknown>;
+  const payload = row.payload;
+  if (
+    !isNonEmptyString(row.id) ||
+    row.idempotency_key !== expected.idempotencyKey ||
+    row.action !== expected.action ||
+    row.guild_id !== expected.guildId ||
+    !payload ||
+    typeof payload !== 'object' ||
+    (payload as Record<string, unknown>).order_id !== expected.orderId ||
+    (payload as Record<string, unknown>).fulfillment_type !== expected.fulfillmentType ||
+    !isNonEmptyString(row.status)
+  ) {
+    throw new Error('Fulfillment outbox row failed identity validation');
+  }
+  if (expected.payload) {
+    const payloadRecord = payload as Record<string, unknown>;
+    if (!isNonEmptyString(payloadRecord.product_name)) {
+      throw new Error('Fulfillment outbox row failed payload validation');
+    }
+    for (const [key, value] of Object.entries(expected.payload)) {
+      if (!payloadValuesEqual(payloadRecord[key], value)) {
+        throw new Error(`Fulfillment outbox row failed payload validation (${key})`);
+      }
+    }
+  }
+  return row as unknown as FulfillmentQueueRow;
+}
+
+async function loadFulfillmentByIdempotencyKey(
+  supabase: AdminSupabase,
+  expected: Parameters<typeof validateQueueRow>[1],
+): Promise<FulfillmentQueueRow | null> {
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .select('id, guild_id, action, payload, status, idempotency_key')
+    .eq('idempotency_key', expected.idempotencyKey)
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to inspect fulfillment outbox');
+  return data ? validateQueueRow(data, expected) : null;
+}
+
+async function stageFulfillment(
+  supabase: AdminSupabase,
+  expected: Parameters<typeof validateQueueRow>[1],
+  payload: Record<string, unknown>,
+): Promise<FulfillmentQueueRow> {
+  const existing = await loadFulfillmentByIdempotencyKey(supabase, expected);
+  if (existing) return existing;
+
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .insert({
+      guild_id: expected.guildId,
+      action: expected.action,
+      payload,
+      status: 'staged',
+      idempotency_key: expected.idempotencyKey,
+    })
+    .select('id, guild_id, action, payload, status, idempotency_key')
+    .single();
+  if (error?.code === '23505') {
+    const raced = await loadFulfillmentByIdempotencyKey(supabase, expected);
+    if (raced) return raced;
+  }
+  requireSupabaseSuccess(error, 'Failed to stage fulfillment outbox');
+  return validateQueueRow(data, expected);
+}
+
+async function releaseStagedFulfillment(
+  supabase: AdminSupabase,
+  row: FulfillmentQueueRow,
+): Promise<void> {
+  if (row.status !== 'staged') return;
+  const { data, error } = await supabase
+    .from('bot_action_queue')
+    .update({ status: 'pending', error: null, next_retry_at: null })
+    .eq('id', row.id)
+    .eq('status', 'staged')
+    .select('id')
+    .maybeSingle();
+  requireSupabaseSuccess(error, 'Failed to release staged fulfillment');
+  if (!data) {
+    const current = await loadFulfillmentByIdempotencyKey(supabase, {
+      idempotencyKey: row.idempotency_key,
+      action: row.action,
+      guildId: row.guild_id,
+      orderId: String(row.payload.order_id ?? ''),
+      fulfillmentType: String(row.payload.fulfillment_type ?? ''),
+    });
+    if (!current || current.status === 'staged') {
+      throw new Error('Failed to release staged fulfillment');
+    }
+  }
+}
+
+async function freezeOrderGrantSnapshot(
+  supabase: AdminSupabase,
+  order: CommerceOrderRow,
+): Promise<FrozenGrantSnapshot> {
+  const { data, error } = await supabase.rpc('commerce_freeze_order_grant_snapshot', {
+    p_order_id: order.id,
+    p_guild_id: order.guild_id,
+    p_customer_id: order.customer_id,
+    p_product_id: order.product_id,
+  });
+  requireSupabaseSuccess(error, 'Failed to freeze order grant snapshot');
+  const snapshot = parseFrozenGrantSnapshot(data);
+  if (snapshot.order_id !== order.id) {
+    throw new Error('Order grant snapshot RPC returned the wrong order');
+  }
+  return snapshot;
+}
+
+async function ensureStagedLicenseKey(
+  supabase: AdminSupabase,
+  order: CommerceOrderRow,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const licenseKeyId = payload.license_key_id;
+  const plaintext = payload.license_key_plaintext;
+  if (licenseKeyId == null && plaintext == null) return;
+  if (!isNonEmptyString(licenseKeyId) || !isNonEmptyString(plaintext)) {
+    throw new Error('Staged license key payload is malformed');
+  }
+
+  const groups = plaintext.split('-');
+  if (groups.length !== 5 || groups[0] !== 'SMNI' || groups.slice(1).some((group) => group.length !== 4)) {
+    throw new Error('Staged license key plaintext is malformed');
+  }
+  const keyHash = createHash('sha256').update(plaintext).digest('hex');
+  const row = {
+    id: licenseKeyId,
+    order_id: order.id,
+    customer_id: order.customer_id,
+    product_id: order.product_id,
+    guild_id: order.guild_id,
+    key_hash: keyHash,
+    key_prefix: 'SMNI',
+    key_suffix: groups[4]!,
+    bound_discord_id: String(payload.discord_id ?? ''),
+    status: 'pending_activation',
+  };
+  if (!isNonEmptyString(row.bound_discord_id)) {
+    throw new Error('Staged license key Discord identity is malformed');
+  }
+
+  const { data, error } = await supabase
+    .from('license_keys')
+    .insert(row)
+    .select('id, order_id, customer_id, product_id, guild_id, key_hash')
+    .single();
+  if (!error) {
+    if (!data || data.id !== licenseKeyId) throw new Error('License key insert returned no row');
+    return;
+  }
+  if (error.code !== '23505') {
+    throw new Error(`Failed to persist staged license key: ${error.message}`);
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from('license_keys')
+    .select('id, order_id, customer_id, product_id, guild_id, key_hash')
+    .eq('id', licenseKeyId)
+    .maybeSingle();
+  requireSupabaseSuccess(existingError, 'Failed to inspect staged license key');
+  if (
+    !existing ||
+    existing.order_id !== order.id ||
+    existing.customer_id !== order.customer_id ||
+    existing.product_id !== order.product_id ||
+    existing.guild_id !== order.guild_id ||
+    existing.key_hash !== keyHash
+  ) {
+    throw new Error('Existing staged license key failed identity validation');
+  }
+}
+
 const EXPIRABLE_ENTITLEMENT_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
 const EXPIRY_RETRY_ENTITLEMENT_STATUSES = [
   ...EXPIRABLE_ENTITLEMENT_STATUSES,
   'expired',
 ];
-
-function completedRevokeHadFailedRoles(result: unknown): boolean {
-  if (!result || typeof result !== 'object' || !('failed' in result)) {
-    return false;
-  }
-  const failed = (result as { failed?: unknown }).failed;
-  return Array.isArray(failed) && failed.length > 0;
-}
-
-async function hasQueuedRoleRevocation(
-  supabase: ReturnType<typeof createAdminSupabase>,
-  input: {
-    guildId: string;
-    discordId: string;
-    orderId: string;
-    reason: string;
-    productId?: string;
-  },
-): Promise<boolean> {
-  const payloadFilter: Record<string, string> = {
-    discord_id: input.discordId,
-    order_id: input.orderId,
-    reason: input.reason,
-  };
-  if (input.productId) {
-    payloadFilter.product_id = input.productId;
-  }
-
-  const { data, error } = await supabase
-    .from('bot_action_queue')
-    .select('id, status, result')
-    .eq('guild_id', input.guildId)
-    .eq('action', 'revoke_roles')
-    .in('status', ['pending', 'processing', 'completed'])
-    .contains('payload', payloadFilter)
-    .limit(1000);
-  requireSupabaseSuccess(
-    error,
-    'Failed to inspect queued role revocation',
-  );
-  if (!Array.isArray(data)) return false;
-  return data.some((row) => {
-    if (!row || typeof row !== 'object') return false;
-    const status = (row as { status?: unknown }).status;
-    if (status !== 'completed') return true;
-    return !completedRevokeHadFailedRoles((row as { result?: unknown }).result);
-  });
-}
 
 /**
  * W2 codex round 2: retry-dedupe probe for cancellation/suspension
@@ -124,9 +752,12 @@ async function hasQueuedOrderFulfillment(
     .eq('action', input.action)
     .in('status', ['pending', 'processing', 'completed'])
     .contains('payload', payloadFilter)
-    .limit(1000);
+    .limit(1);
   requireSupabaseSuccess(error, `Failed to inspect queued ${input.action}`);
-  return Array.isArray(data) && data.length > 0;
+  if (!Array.isArray(data) || data.some((row) => !row || !isNonEmptyString(row.id))) {
+    throw new Error(`Failed to inspect queued ${input.action}: query returned malformed data`);
+  }
+  return data.length > 0;
 }
 
 async function hasQueuedSubscriptionExpiredAuditEvent(
@@ -152,12 +783,17 @@ async function hasQueuedSubscriptionExpiredAuditEvent(
         productId: input.productId,
       },
     })
-    .limit(1000);
+    .limit(1);
   requireSupabaseSuccess(
     error,
     'Failed to inspect queued subscription expired audit event',
   );
-  return Array.isArray(data) && data.length > 0;
+  if (!Array.isArray(data) || data.some((row) => !row || !isNonEmptyString(row.id))) {
+    throw new Error(
+      'Failed to inspect queued subscription expired audit event: query returned malformed data',
+    );
+  }
+  return data.length > 0;
 }
 
 function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): string | null {
@@ -294,7 +930,13 @@ export async function handlePaymentCaptured(
     }
   }
 
-  if (!meta) {
+  if (
+    !meta ||
+    !isNonEmptyString(meta.guild_id) ||
+    !isNonEmptyString(meta.product_id) ||
+    !isNonEmptyString(meta.customer_id) ||
+    !isNonEmptyString(meta.discord_id)
+  ) {
     const captureId = resource.id as string | undefined;
     console.error(
       `[Webhook] Payment captured but custom_id is missing or malformed — ` +
@@ -306,148 +948,197 @@ export async function handlePaymentCaptured(
     );
   }
 
-  const { data: order } = await supabase
-    .from('orders')
-    .select('*')
-    .eq('customer_id', meta.customer_id)
-    .eq('product_id', meta.product_id)
-    .eq('status', 'pending')
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (!order) {
-    console.log('[Webhook] No pending order found for payment');
-    return;
-  }
-
   const paypalCaptureId = resource.id as string;
-  const amountValue = capture.amount?.value;
-  const amountCents = amountValue
-    ? Math.round(parseFloat(amountValue) * 100)
-    : order.amount_cents;
-
-  let amountMismatch = false;
-  if (amountValue && order.amount_cents > 0) {
-    const expectedCents = order.amount_cents;
-    if (amountCents !== expectedCents) {
-      amountMismatch = true;
-      console.error(
-        `[Webhook] AMOUNT MISMATCH: PayPal captured ${amountCents} cents but order ${order.id} ` +
-          `expected ${expectedCents} cents. Customer ${meta.customer_id}, product ${meta.product_id}. ` +
-          `Order flagged as pending_review — manual intervention required.`,
-      );
-    }
+  if (!isNonEmptyString(paypalCaptureId)) {
+    throw new Error('Payment capture is missing its provider id');
   }
-
-  const orderStatus = amountMismatch ? 'pending_review' : 'completed';
-  await supabase
-    .from('orders')
-    .update({ status: orderStatus, updated_at: new Date().toISOString() })
-    .eq('id', order.id);
-
-  await supabase.from('payments').insert({
-    order_id: order.id,
-    customer_id: meta.customer_id,
-    guild_id: meta.guild_id,
-    paypal_payment_id: paypalCaptureId,
-    amount_cents: amountCents,
-    currency: order.currency,
-    status: amountMismatch ? 'pending_review' : 'completed',
+  const paypalOrderId = capture.supplementary_data?.related_ids?.order_id;
+  await requireExactCustomerIdentity(supabase, {
+    customerId: meta.customer_id,
+    guildId: meta.guild_id,
+    expectedDiscordId: meta.discord_id,
+    operation: 'Failed to validate captured payment customer',
   });
 
-  if (amountMismatch) {
-    console.warn(
-      `[Webhook] Skipping auto-fulfillment for order ${order.order_number} due to amount mismatch. ` +
-        `Resolve via dashboard → Orders → pending_review.`,
-    );
-    return;
-  }
-
-  const { error: rpcError } = await supabase.rpc('increment_customer_totals', {
-    p_customer_id: meta.customer_id,
-    p_amount: amountCents,
-  });
-  if (rpcError) {
-    console.warn(
-      '[Webhook] increment_customer_totals RPC failed, retrying once:',
-      rpcError.message,
-    );
-    const { error: retryError } = await supabase.rpc(
-      'increment_customer_totals',
-      {
-        p_customer_id: meta.customer_id,
-        p_amount: amountCents,
-      },
-    );
-    if (retryError) {
-      console.error(
-        '[Webhook] increment_customer_totals failed after retry:',
-        retryError.message,
-        '— customer totals may be stale until next reconciliation run',
-      );
-    }
-  }
-
-  const { data: product } = await supabase
-    .from('products')
-    .select('*')
-    .eq('id', meta.product_id)
-    .single();
-
-  if (!product) {
-    throw new Error(`Product ${meta.product_id} not found`);
-  }
-
-  const { data: licenseConfig } = await supabase
-    .from('product_license_config')
-    .select('*')
-    .eq('product_id', meta.product_id)
+  // A resumed event first follows the capture's unique payment row back to
+  // the exact order. Before the first successful payment insert, the order is
+  // still pending and can be resolved from the signed checkout identities.
+  const { data: existingPayment, error: existingPaymentError } = await supabase
+    .from('payments')
+    .select('order_id')
+    .eq('paypal_payment_id', paypalCaptureId)
     .maybeSingle();
+  requireSupabaseSuccess(existingPaymentError, 'Failed to inspect captured payment');
+  const replayingExistingPayment = isNonEmptyString(existingPayment?.order_id);
 
-  let licenseKeyId: string | undefined;
-  let plaintextKey: string | undefined;
-
-  if (licenseConfig) {
-    const key = generateLicenseKey();
-    plaintextKey = key.plaintext;
-
-    const { data: insertedKey } = await supabase
-      .from('license_keys')
-      .insert({
-        order_id: order.id,
-        customer_id: meta.customer_id,
-        product_id: meta.product_id,
-        guild_id: meta.guild_id,
-        key_hash: key.hash,
-        key_prefix: key.prefix,
-        key_suffix: key.suffix,
-        bound_discord_id: meta.discord_id,
-        status: 'pending_activation',
-      })
-      .select('id')
-      .single();
-
-    licenseKeyId = insertedKey?.id;
+  let order: CommerceOrderRow | null = null;
+  if (existingPayment?.order_id) {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, paypal_order_id')
+      .eq('id', existingPayment.order_id)
+      .eq('guild_id', meta.guild_id)
+      .maybeSingle();
+    requireSupabaseSuccess(error, 'Failed to load captured order');
+    order = data as CommerceOrderRow | null;
+  } else {
+    if (!isNonEmptyString(paypalOrderId)) {
+      throw new Error(
+        `Payment capture ${paypalCaptureId} is missing its PayPal order identity`,
+      );
+    }
+    const { data, error } = await supabase
+      .from('orders')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, paypal_order_id')
+      .eq('guild_id', meta.guild_id)
+      .eq('customer_id', meta.customer_id)
+      .eq('product_id', meta.product_id)
+      .eq('paypal_order_id', paypalOrderId)
+      .eq('status', 'pending')
+      .maybeSingle();
+    requireSupabaseSuccess(error, 'Failed to load pending captured order');
+    order = data as CommerceOrderRow | null;
   }
 
-  await queueFulfillment(supabase, 'fulfill_purchase', meta.guild_id, {
-    fulfillment_type: 'one_time_purchase',
-    guild_id: meta.guild_id,
-    customer_id: meta.customer_id,
-    discord_id: meta.discord_id,
-    product_id: meta.product_id,
-    product_name: product.name,
-    order_id: order.id,
-    order_number: order.order_number,
-    amount_cents: amountCents,
-    currency: order.currency,
-    granted_role_ids: product.granted_role_ids ?? [],
-    granted_channel_ids: product.granted_channel_ids ?? [],
-    license_key_id: licenseKeyId,
-    license_key_plaintext: plaintextKey,
-    entitlement_type: 'one_time',
+  if (
+    !order ||
+    !isNonEmptyString(order.id) ||
+    !isNonEmptyString(order.order_number) ||
+    order.guild_id !== meta.guild_id ||
+    order.customer_id !== meta.customer_id ||
+    order.product_id !== meta.product_id ||
+    !isNonEmptyString(order.paypal_order_id) ||
+    (isNonEmptyString(paypalOrderId) && order.paypal_order_id !== paypalOrderId) ||
+    !Number.isSafeInteger(order.amount_cents) ||
+    !isNonEmptyString(order.currency)
+  ) {
+    throw new Error(`Captured payment ${paypalCaptureId} has no matching order identity`);
+  }
+
+  const amountCents = parseCapturedAmountToCents(capture.amount?.value);
+  if (amountCents == null) {
+    throw new Error(`Payment capture ${paypalCaptureId} has an invalid amount`);
+  }
+  const rawCaptureCurrency = capture.amount?.currency_code;
+  if (!isNonEmptyString(rawCaptureCurrency) || !/^[A-Za-z]{3}$/.test(rawCaptureCurrency)) {
+    throw new Error(`Payment capture ${paypalCaptureId} has an invalid currency`);
+  }
+  const captureCurrency = rawCaptureCurrency.toUpperCase();
+  const amountMatches = amountCents === order.amount_cents
+    && captureCurrency === order.currency.toUpperCase();
+
+  const replayFinalization = replayingExistingPayment
+    ? await finalizePayPalCapture(supabase, {
+      order,
+      paypalCaptureId,
+      amountCents,
+      currency: captureCurrency,
+    })
+    : null;
+  if (replayFinalization) {
+    if (replayFinalization.payment_created) {
+      throw new Error('Capture replay unexpectedly created a payment');
+    }
+    if (shouldSkipCaptureFulfillment(replayFinalization, {
+      order,
+      amountCents,
+      currency: captureCurrency,
+    })) return;
+  }
+
+  // The finalizer requires the sold access contract to be frozen for both
+  // completed and pending_review outcomes. A financial mismatch still must
+  // not stage or release any fulfillment.
+  const snapshot = await freezeOrderGrantSnapshot(supabase, order);
+  const expected: FulfillmentExpectation = {
+    idempotencyKey: `paypal:capture:${paypalCaptureId}:fulfill_purchase`,
+    action: 'fulfill_purchase',
+    guildId: order.guild_id,
+    orderId: order.id,
+    fulfillmentType: 'one_time_purchase',
+    ...(amountMatches
+      ? {
+          payload: {
+            fulfillment_type: 'one_time_purchase',
+            guild_id: order.guild_id,
+            customer_id: order.customer_id,
+            discord_id: meta.discord_id,
+            product_id: order.product_id,
+            order_id: order.id,
+            order_number: order.order_number,
+            paypal_capture_id: paypalCaptureId,
+            amount_cents: amountCents,
+            currency: captureCurrency,
+            granted_role_ids: snapshot.granted_role_ids_snapshot,
+            granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+            temporary_role_grants: snapshot.temporary_role_grants_snapshot,
+            entitlement_type: 'one_time',
+          },
+        }
+      : {}),
+  };
+  let staged: FulfillmentQueueRow | null = null;
+  if (amountMatches) {
+    staged = await loadFulfillmentByIdempotencyKey(supabase, expected);
+  }
+  if (amountMatches && !staged) {
+    const productName = await requireProductDisplayName(
+      supabase,
+      order.product_id,
+      'Failed to load captured product display identity',
+    );
+
+    const { data: licenseConfig, error: licenseConfigError } = await supabase
+      .from('product_license_config')
+      .select('product_id')
+      .eq('product_id', order.product_id)
+      .maybeSingle();
+    requireSupabaseSuccess(licenseConfigError, 'Failed to load product license configuration');
+
+    const license = licenseConfig ? generateLicenseKey() : null;
+    staged = await stageFulfillment(supabase, expected, {
+      fulfillment_type: 'one_time_purchase',
+      guild_id: order.guild_id,
+      customer_id: order.customer_id,
+      discord_id: meta.discord_id,
+      product_id: order.product_id,
+      product_name: productName,
+      order_id: order.id,
+      order_number: order.order_number,
+      paypal_capture_id: paypalCaptureId,
+      amount_cents: amountCents,
+      currency: captureCurrency,
+      granted_role_ids: snapshot.granted_role_ids_snapshot,
+      granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+      temporary_role_grants: snapshot.temporary_role_grants_snapshot,
+      ...(license
+        ? {
+            license_key_id: crypto.randomUUID(),
+            license_key_plaintext: license.plaintext,
+          }
+        : {}),
+      entitlement_type: 'one_time',
+    });
+  }
+
+  // The sold grant contract is frozen before every first finalization. Exact
+  // payments additionally have an immutable grant/license payload durably
+  // staged; mismatches have no queue row and can only become pending_review.
+  const finalization = replayFinalization ?? await finalizePayPalCapture(supabase, {
+    order,
+    paypalCaptureId,
+    amountCents,
+    currency: captureCurrency,
   });
+  if (shouldSkipCaptureFulfillment(finalization, {
+    order,
+    amountCents,
+    currency: captureCurrency,
+  })) return;
+  if (!staged) throw new Error('Completed capture has no staged grant snapshot');
+
+  await ensureStagedLicenseKey(supabase, order, staged.payload);
+  await releaseStagedFulfillment(supabase, staged);
 
   console.log(
     `[Webhook] Order completed + fulfillment queued: ${order.order_number} for ${meta.discord_id}`,
@@ -465,7 +1156,7 @@ export async function handleSubscriptionActivated(
     ? parsed.data
     : { id: String(resource.id ?? '') };
   const customId = capture.custom_id;
-  if (!customId) return;
+  if (!customId) throw new Error('Subscription activation is missing custom_id');
 
   let meta: {
     guild_id: string;
@@ -488,63 +1179,279 @@ export async function handleSubscriptionActivated(
       meta = raw;
     }
   } catch {
-    console.error(
-      '[Webhook] Malformed custom_id in subscription event:',
-      customId,
-    );
-    return;
+    throw new Error('Subscription activation has malformed custom_id');
+  }
+
+  if (
+    !isNonEmptyString(meta.guild_id) ||
+    !isNonEmptyString(meta.product_id) ||
+    !isNonEmptyString(meta.plan_id) ||
+    !isNonEmptyString(meta.customer_id) ||
+    !isNonEmptyString(meta.discord_id)
+  ) {
+    throw new Error('Subscription activation has malformed custom_id');
   }
 
   const subscriptionId = resource.id as string;
-
-  // V5-Audit §2.1: Fetch the actual billing amount from PayPal instead of
-  // recording 0. Falls back to 0 if the lookup fails — the amount will be
-  // corrected when PAYMENT.SALE.COMPLETED fires.
-  const subAmount = await getSubscriptionAmount(subscriptionId);
-  const amountCents = subAmount?.amountCents ?? 0;
-  const currency = subAmount?.currency ?? 'USD';
-
-  const { data: order } = await supabase
-    .from('orders')
-    .insert({
-      order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
-      customer_id: meta.customer_id,
-      guild_id: meta.guild_id,
-      product_id: meta.product_id,
-      plan_id: meta.plan_id,
-      paypal_subscription_id: subscriptionId,
-      amount_cents: amountCents,
-      currency,
-      status: 'completed',
-      source: 'purchase',
-    })
-    .select('id, order_number')
-    .single();
-
-  if (!order) return;
-
-  const { data: product } = await supabase
-    .from('products')
-    .select('name, granted_role_ids, granted_channel_ids')
-    .eq('id', meta.product_id)
-    .single();
-
-  await queueFulfillment(supabase, 'fulfill_subscription', meta.guild_id, {
-    fulfillment_type: 'subscription_activated',
-    guild_id: meta.guild_id,
-    customer_id: meta.customer_id,
-    discord_id: meta.discord_id,
-    product_id: meta.product_id,
-    product_name: product?.name ?? 'Subscription',
-    order_id: order.id,
-    order_number: order.order_number,
-    plan_id: meta.plan_id,
-    amount_cents: amountCents,
-    currency,
-    granted_role_ids: product?.granted_role_ids ?? [],
-    granted_channel_ids: product?.granted_channel_ids ?? [],
-    entitlement_type: 'subscription',
+  if (!isNonEmptyString(subscriptionId)) throw new Error('Subscription activation has no provider id');
+  await requireExactCustomerIdentity(supabase, {
+    customerId: meta.customer_id,
+    guildId: meta.guild_id,
+    expectedDiscordId: meta.discord_id,
+    operation: 'Failed to validate subscription customer',
   });
+
+  const { data: existingOrder, error: existingOrderError } = await supabase
+    .from('orders')
+    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
+    .eq('paypal_subscription_id', subscriptionId)
+    .eq('guild_id', meta.guild_id)
+    .maybeSingle();
+  requireSupabaseSuccess(existingOrderError, 'Failed to inspect subscription order');
+
+  let order = existingOrder as CommerceOrderRow | null;
+  if (
+    order && (
+      !isNonEmptyString(order.id) ||
+      !isNonEmptyString(order.order_number) ||
+      order.guild_id !== meta.guild_id ||
+      order.customer_id !== meta.customer_id ||
+      order.product_id !== meta.product_id ||
+      order.plan_id !== meta.plan_id ||
+      order.paypal_subscription_id !== subscriptionId ||
+      !['pending', 'completed'].includes(order.status)
+    )
+  ) {
+    throw new Error('Subscription order failed identity validation');
+  }
+
+  let firstProviderContract: AuthoritativeSubscriptionContract | null = null;
+  let prevalidatedProviderPlanId: string | null = null;
+
+  if (!order) {
+    firstProviderContract = await requireAuthoritativeSubscriptionAmount(subscriptionId);
+    await requireExactSubscriptionPlan(supabase, {
+      planId: meta.plan_id,
+      guildId: meta.guild_id,
+      productId: meta.product_id,
+      providerPlanId: firstProviderContract.providerPlanId,
+    });
+    prevalidatedProviderPlanId = firstProviderContract.providerPlanId;
+    const { data, error } = await supabase
+      .from('orders')
+      .insert({
+        order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
+        customer_id: meta.customer_id,
+        guild_id: meta.guild_id,
+        product_id: meta.product_id,
+        plan_id: meta.plan_id,
+        paypal_subscription_id: subscriptionId,
+        amount_cents: firstProviderContract.amountCents,
+        currency: firstProviderContract.currency,
+        status: 'pending',
+        source: 'purchase',
+      })
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_subscription_id')
+      .single();
+    requireSupabaseSuccess(error, 'Failed to create subscription order');
+    order = data as CommerceOrderRow | null;
+  }
+
+  if (
+    !order ||
+    !isNonEmptyString(order.id) ||
+    !isNonEmptyString(order.order_number) ||
+    order.guild_id !== meta.guild_id ||
+    order.customer_id !== meta.customer_id ||
+    order.product_id !== meta.product_id ||
+    order.plan_id !== meta.plan_id ||
+    order.paypal_subscription_id !== subscriptionId ||
+    !['pending', 'completed'].includes(order.status)
+  ) {
+    throw new Error('Subscription order failed identity validation');
+  }
+
+  const baseExpectation: FulfillmentExpectation = {
+    idempotencyKey: `paypal:subscription:${subscriptionId}:fulfill_subscription`,
+    action: 'fulfill_subscription',
+    guildId: order.guild_id,
+    orderId: order.id,
+    fulfillmentType: 'subscription_activated',
+  };
+  let staged = await loadFulfillmentByIdempotencyKey(supabase, baseExpectation);
+  let financial: FinancialAmount;
+  let providerPlanId: string;
+  let pendingFinancialUpdate: FinancialAmount | null = null;
+  if (!staged && order.status === 'completed') {
+    financial = parseFinancialAmount(
+      order.amount_cents,
+      order.currency,
+      'Completed subscription order',
+    );
+    const providerContract = firstProviderContract ??
+      await requireAuthoritativeSubscriptionAmount(subscriptionId);
+    if (
+      providerContract.amountCents !== financial.amountCents ||
+      providerContract.currency !== financial.currency
+    ) {
+      throw new Error('Completed subscription order disagrees with PayPal financial state');
+    }
+    providerPlanId = providerContract.providerPlanId;
+  } else if (!staged) {
+    // Every first/pending activation is checked against PayPal. A provider
+    // outage is retryable; silently trusting a local plan price can grant a
+    // subscription whose provider amount has diverged.
+    const providerContract = firstProviderContract ??
+      await requireAuthoritativeSubscriptionAmount(subscriptionId);
+    financial = providerContract;
+    providerPlanId = providerContract.providerPlanId;
+    if (
+      order.amount_cents !== financial.amountCents ||
+      order.currency !== financial.currency
+    ) {
+      // Checkout freezes the access snapshot before exposing the PayPal link.
+      // The database trigger therefore permits this one narrow post-freeze
+      // correction while the exact subscription order is still pending:
+      // amount/currency only, with every identity and grant field unchanged.
+      // The compare-and-update below makes a concurrent lifecycle change a
+      // retryable failure instead of overwriting it.
+      pendingFinancialUpdate = financial;
+    }
+  } else {
+    financial = parseFinancialAmount(
+      staged.payload.amount_cents,
+      staged.payload.currency,
+      'Staged subscription fulfillment',
+    );
+    if (
+      financial.amountCents !== order.amount_cents ||
+      financial.currency !== order.currency
+    ) {
+      throw new Error('Staged subscription fulfillment disagrees with the order financial state');
+    }
+    const stagedProviderPlanId = staged.payload.paypal_plan_id;
+    if (!isNonEmptyString(stagedProviderPlanId)) {
+      throw new Error('Staged subscription fulfillment has malformed provider plan identity');
+    }
+    providerPlanId = stagedProviderPlanId;
+  }
+
+  const trustFrozenOrderContract = isNonEmptyString(order.grant_snapshot_frozen_at);
+  // A frozen order is the sold contract. Current catalog ownership or plan
+  // attachment may legitimately have moved after checkout; only new and
+  // still-unfrozen orders are authorized against that mutable configuration.
+  if (!trustFrozenOrderContract && prevalidatedProviderPlanId !== providerPlanId) {
+    await requireExactSubscriptionPlan(supabase, {
+      planId: meta.plan_id,
+      guildId: order.guild_id,
+      productId: order.product_id,
+      providerPlanId,
+    });
+  }
+
+  if (pendingFinancialUpdate) {
+    const { data: pricedOrder, error: priceError } = await supabase
+      .from('orders')
+      .update({
+        amount_cents: pendingFinancialUpdate.amountCents,
+        currency: pendingFinancialUpdate.currency,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', order.id)
+      .eq('guild_id', order.guild_id)
+      .eq('status', 'pending')
+      .eq('amount_cents', order.amount_cents)
+      .eq('currency', order.currency)
+      .select('id')
+      .maybeSingle();
+    requireSupabaseSuccess(priceError, 'Failed to persist subscription billing amount');
+    if (!pricedOrder) throw new Error('Subscription billing amount update lost its state race');
+    order.amount_cents = pendingFinancialUpdate.amountCents;
+    order.currency = pendingFinancialUpdate.currency;
+  }
+
+  const snapshot = await freezeOrderGrantSnapshot(supabase, order);
+  const expected: FulfillmentExpectation = {
+    ...baseExpectation,
+    payload: {
+      fulfillment_type: 'subscription_activated',
+      guild_id: order.guild_id,
+      customer_id: order.customer_id,
+      discord_id: meta.discord_id,
+      product_id: order.product_id,
+      order_id: order.id,
+      order_number: order.order_number,
+      paypal_subscription_id: subscriptionId,
+      plan_id: meta.plan_id,
+      paypal_plan_id: providerPlanId,
+      granted_role_ids: snapshot.granted_role_ids_snapshot,
+      granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+      temporary_role_grants: undefined,
+      license_key_id: undefined,
+      license_key_plaintext: undefined,
+      entitlement_type: 'subscription',
+    },
+  };
+  if (staged) staged = validateQueueRow(staged, expected);
+
+  if (!staged) {
+    const productName = await requireProductDisplayName(
+      supabase,
+      order.product_id,
+      'Failed to load subscription product display identity',
+    );
+
+    staged = await stageFulfillment(supabase, expected, {
+      fulfillment_type: 'subscription_activated',
+      guild_id: order.guild_id,
+      customer_id: order.customer_id,
+      discord_id: meta.discord_id,
+      product_id: order.product_id,
+      product_name: productName,
+      order_id: order.id,
+      order_number: order.order_number,
+      paypal_subscription_id: subscriptionId,
+      plan_id: meta.plan_id,
+      paypal_plan_id: providerPlanId,
+      amount_cents: financial.amountCents,
+      currency: financial.currency,
+      granted_role_ids: snapshot.granted_role_ids_snapshot,
+      granted_channel_ids: snapshot.granted_channel_ids_snapshot,
+      entitlement_type: 'subscription',
+    });
+  }
+
+  const stagedFinancial = parseFinancialAmount(
+    staged.payload.amount_cents,
+    staged.payload.currency,
+    'Staged subscription fulfillment',
+  );
+  if (
+    stagedFinancial.amountCents !== financial.amountCents ||
+    stagedFinancial.currency !== financial.currency
+  ) {
+    throw new Error('Staged subscription fulfillment changed financial identity');
+  }
+
+  if (order.status === 'pending') {
+    const { data: completedOrder, error: completeError } = await supabase
+      .from('orders')
+      .update({
+        status: 'completed',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', order.id)
+      .eq('guild_id', order.guild_id)
+      .eq('status', 'pending')
+      .eq('amount_cents', financial.amountCents)
+      .eq('currency', financial.currency)
+      .select('id')
+      .maybeSingle();
+    requireSupabaseSuccess(completeError, 'Failed to complete subscription order');
+    if (!completedOrder) throw new Error('Subscription order completion lost its state race');
+  }
+
+  await releaseStagedFulfillment(supabase, staged);
 
   console.log(
     `[Webhook] Subscription activated + fulfillment queued: ${subscriptionId} for ${meta.discord_id}`,
@@ -564,30 +1471,15 @@ export async function handleSubscriptionCancelled(
   resource: Record<string, unknown>,
   options: SubscriptionQueueOptions = {},
 ) {
-  const subscriptionId = resource.id as string;
-  if (!subscriptionId) return;
-
-  const { data: order } = await supabase
-    .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id')
-    .eq('paypal_subscription_id', subscriptionId)
-    .single();
-
-  if (!order) return;
-
-  const { data: product } = await supabase
-    .from('products')
-    .select('name')
-    .eq('id', order.product_id)
-    .single();
-
-  const { data: customer } = await supabase
-    .from('customers')
-    .select('discord_id')
-    .eq('id', order.customer_id)
-    .single();
-
-  if (!customer?.discord_id) return;
+  const subscriptionId = resource.id;
+  if (!isNonEmptyString(subscriptionId)) {
+    throw new Error('Subscription cancellation has no provider id');
+  }
+  const { order, product, customer } = await loadSubscriptionLifecycleContext(
+    supabase,
+    subscriptionId,
+    'Subscription cancellation',
+  );
 
   // W2 codex round 2: on a resumed retry the failed attempt may already have
   // queued this fulfillment — don't queue a duplicate (double DM / event).
@@ -613,7 +1505,7 @@ export async function handleSubscriptionCancelled(
     customer_id: order.customer_id,
     discord_id: customer.discord_id,
     product_id: order.product_id,
-    product_name: product?.name ?? 'Subscription',
+    product_name: product.name,
     order_id: order.id,
     order_number: order.order_number,
     amount_cents: 0,
@@ -645,20 +1537,30 @@ export async function handleSubscriptionExpired(
   resource: Record<string, unknown>,
   options: { retryingFailedEvent?: boolean } = {},
 ) {
-  const subscriptionId = resource.id as string;
-  if (!subscriptionId) return;
+  const subscriptionId = resource.id;
+  if (!isNonEmptyString(subscriptionId)) {
+    throw new Error('Subscription expiry has no provider id');
+  }
 
-  const { data: orders, error: orderError } = await supabase
+  const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id, plan_id, status, created_at')
+    .select('id, order_number, guild_id, customer_id, product_id, plan_id, status, paypal_subscription_id')
     .eq('paypal_subscription_id', subscriptionId)
-    .order('created_at', { ascending: false })
-    .limit(100);
+    .maybeSingle();
 
   requireSupabaseSuccess(orderError, 'Failed to load expired subscription order');
-  const orderRows = Array.isArray(orders) ? orders : orders ? [orders] : [];
-  const order = orderRows.find((row) => row.status === 'completed') ?? orderRows[0];
-  if (!order) return;
+  if (
+    !order ||
+    !isNonEmptyString(order.id) ||
+    !isNonEmptyString(order.order_number) ||
+    !isNonEmptyString(order.guild_id) ||
+    !isNonEmptyString(order.customer_id) ||
+    !isNonEmptyString(order.product_id) ||
+    !isNonEmptyString(order.status) ||
+    order.paypal_subscription_id !== subscriptionId
+  ) {
+    throw new Error('Expired subscription order identity mismatch');
+  }
 
   const now = new Date().toISOString();
   const entitlementLookupStatuses = options.retryingFailedEvent
@@ -668,29 +1570,43 @@ export async function handleSubscriptionExpired(
     ? ['pending_activation', 'active', 'suspended', 'expired']
     : ['pending_activation', 'active', 'suspended'];
 
-  const { data: activeEntitlements, error: activeEntitlementsError } = await supabase
-    .from('entitlements')
-    .select('id, customer_id, granted_role_ids, license_key_id')
-    .eq('order_id', order.id)
-    .eq('guild_id', order.guild_id)
-    .eq('product_id', order.product_id)
-    .in('status', entitlementLookupStatuses)
-    .limit(1000);
-  requireSupabaseSuccess(
-    activeEntitlementsError,
+  const activeEntitlements = await fetchAllLifecycleRowsById<EntitlementLifecycleRow>(
+    async (afterId) => {
+      let query = supabase
+        .from('entitlements')
+        .select('id, license_key_id')
+        .eq('order_id', order.id)
+        .eq('guild_id', order.guild_id)
+        .eq('product_id', order.product_id)
+        .in('status', entitlementLookupStatuses)
+        .order('id', { ascending: true })
+        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
+      if (afterId !== null) query = query.gt('id', afterId);
+      return await query as {
+        data: EntitlementLifecycleRow[] | null;
+        error: unknown;
+      };
+    },
     'Failed to load active entitlements for subscription expiry',
   );
 
-  const { data: activeLicenseKeys, error: activeLicenseKeysError } = await supabase
-    .from('license_keys')
-    .select('id')
-    .eq('order_id', order.id)
-    .eq('guild_id', order.guild_id)
-    .eq('product_id', order.product_id)
-    .in('status', licenseKeyLookupStatuses)
-    .limit(1000);
-  requireSupabaseSuccess(
-    activeLicenseKeysError,
+  const activeLicenseKeys = await fetchAllLifecycleRowsById<LicenseKeyLifecycleRow>(
+    async (afterId) => {
+      let query = supabase
+        .from('license_keys')
+        .select('id')
+        .eq('order_id', order.id)
+        .eq('guild_id', order.guild_id)
+        .eq('product_id', order.product_id)
+        .in('status', licenseKeyLookupStatuses)
+        .order('id', { ascending: true })
+        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
+      if (afterId !== null) query = query.gt('id', afterId);
+      return await query as {
+        data: LicenseKeyLifecycleRow[] | null;
+        error: unknown;
+      };
+    },
     'Failed to load active license keys for subscription expiry',
   );
 
@@ -705,34 +1621,10 @@ export async function handleSubscriptionExpired(
     ]),
   ];
 
-  const expiredRoleIds = [
-    ...new Set(
-      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
-    ),
-  ];
-
-  let remainingEntitlements: Array<{ granted_role_ids?: string[] | null }> = [];
-  if (expiredRoleIds.length > 0) {
-    const { data, error } = await supabase
-      .from('entitlements')
-      .select('granted_role_ids')
-      .eq('customer_id', order.customer_id)
-      .eq('guild_id', order.guild_id)
-      .neq('order_id', order.id)
-      .in('status', ['active', 'pending', 'grace_period'])
-      .limit(1000);
-    requireSupabaseSuccess(
-      error,
-      'Failed to load role-preserving entitlements for subscription expiry',
-    );
-    remainingEntitlements = data ?? [];
-  }
-
-  const preservedRoleIds = new Set(
-    (remainingEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
-  );
-  const roleIds = expiredRoleIds.filter((roleId) => !preservedRoleIds.has(roleId));
-
+  // This terminal status transition atomically enqueues identity-rich
+  // revoke_roles rows through commerce_entitlements_enqueue_role_revocation.
+  // Do not add a second payload-only queue row here: it would bypass the
+  // trigger's shared-owner/re-activation safety.
   const { error: expireEntitlementsError } = await supabase
     .from('entitlements')
     .update({
@@ -810,72 +1702,37 @@ export async function handleSubscriptionExpired(
     (activeEntitlements?.length ?? 0) > 0 || licenseKeyIds.length > 0;
 
   if (hadActiveAccess) {
-    const { data: customer, error: customerError } = await supabase
-      .from('customers')
-      .select('discord_id')
-      .eq('id', order.customer_id)
-      .eq('guild_id', order.guild_id)
-      .maybeSingle();
-    requireSupabaseSuccess(
-      customerError,
-      'Failed to load customer for subscription expiry fulfillment',
-    );
+    const customer = await requireExactCustomerIdentity(supabase, {
+      customerId: order.customer_id,
+      guildId: order.guild_id,
+      operation: 'Failed to load customer for subscription expiry fulfillment',
+    });
+    let shouldQueueAuditEvent = true;
+    if (options.retryingFailedEvent) {
+      shouldQueueAuditEvent = !(await hasQueuedSubscriptionExpiredAuditEvent(
+        supabase,
+        {
+          guildId: order.guild_id,
+          discordId: customer.discord_id,
+          orderId: order.id,
+          productId: order.product_id,
+        },
+      ));
+    }
 
-    if (customer?.discord_id) {
-      let shouldQueueRoleRevocation = roleIds.length > 0;
-      if (shouldQueueRoleRevocation && options.retryingFailedEvent) {
-        shouldQueueRoleRevocation = !(await hasQueuedRoleRevocation(
-          supabase,
-          {
-            guildId: order.guild_id,
-            discordId: customer.discord_id,
-            orderId: order.id,
-            productId: order.product_id,
-            reason: 'subscription_expired',
-          },
-        ));
-      }
-
-      if (shouldQueueRoleRevocation) {
-        const queued = await queueFulfillment(supabase, 'revoke_roles', order.guild_id, {
-          discord_id: customer.discord_id,
-          role_ids: roleIds,
-          reason: 'subscription_expired',
-          order_id: order.id,
-          product_id: order.product_id,
-        });
-        if (!queued) {
-          throw new Error('Failed to queue role revocation for subscription expiry');
-        }
-      }
-
-      let shouldQueueAuditEvent = true;
-      if (options.retryingFailedEvent) {
-        shouldQueueAuditEvent = !(await hasQueuedSubscriptionExpiredAuditEvent(
-          supabase,
-          {
-            guildId: order.guild_id,
-            discordId: customer.discord_id,
-            orderId: order.id,
-            productId: order.product_id,
-          },
-        ));
-      }
-
-      if (shouldQueueAuditEvent) {
-        const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
-          event_type: 'subscription.expired',
-          event_data: {
-            discordId: customer.discord_id,
-            orderId: order.id,
-            productId: order.product_id,
-            planId: order.plan_id ?? '',
-            status: 'expired',
-          },
-        });
-        if (!queued) {
-          throw new Error('Failed to queue subscription expired audit event');
-        }
+    if (shouldQueueAuditEvent) {
+      const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
+        event_type: 'subscription.expired',
+        event_data: {
+          discordId: customer.discord_id,
+          orderId: order.id,
+          productId: order.product_id,
+          planId: order.plan_id ?? '',
+          status: 'expired',
+        },
+      });
+      if (!queued) {
+        throw new Error('Failed to queue subscription expired audit event');
       }
     }
   }
@@ -895,7 +1752,7 @@ export async function handleSubscriptionExpired(
         product_id: order.product_id,
         entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
         license_key_ids: licenseKeyIds,
-        role_ids: roleIds,
+        role_revocation_source: 'entitlement_status_trigger',
       },
     })
     .then(
@@ -917,30 +1774,15 @@ export async function handleSubscriptionSuspended(
   resource: Record<string, unknown>,
   options: SubscriptionQueueOptions = {},
 ) {
-  const subscriptionId = resource.id as string;
-  if (!subscriptionId) return;
-
-  const { data: order } = await supabase
-    .from('orders')
-    .select('id, order_number, guild_id, customer_id, product_id')
-    .eq('paypal_subscription_id', subscriptionId)
-    .single();
-
-  if (!order) return;
-
-  const { data: product } = await supabase
-    .from('products')
-    .select('name')
-    .eq('id', order.product_id)
-    .single();
-
-  const { data: customer } = await supabase
-    .from('customers')
-    .select('discord_id')
-    .eq('id', order.customer_id)
-    .single();
-
-  if (!customer?.discord_id) return;
+  const subscriptionId = resource.id;
+  if (!isNonEmptyString(subscriptionId)) {
+    throw new Error('Subscription suspension has no provider id');
+  }
+  const { order, product, customer } = await loadSubscriptionLifecycleContext(
+    supabase,
+    subscriptionId,
+    'Subscription suspension',
+  );
 
   // W2 codex round 2: same retry dedupe as handleSubscriptionCancelled.
   if (options.retryingFailedEvent) {
@@ -965,7 +1807,7 @@ export async function handleSubscriptionSuspended(
     customer_id: order.customer_id,
     discord_id: customer.discord_id,
     product_id: order.product_id,
-    product_name: product?.name ?? 'Subscription',
+    product_name: product.name,
     order_id: order.id,
     order_number: order.order_number,
     amount_cents: 0,
@@ -996,41 +1838,88 @@ export async function handleSubscriptionPayment(
   resource: Record<string, unknown>,
 ) {
   const parsed = paypalSaleResourceSchema.safeParse(resource);
-  const sale: PayPalSaleResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
-
+  if (!parsed.success) throw new Error('Subscription payment payload is malformed');
+  const sale: PayPalSaleResource = parsed.data;
+  const providerPaymentId = sale.id;
   const billingAgreementId = sale.billing_agreement_id;
-  if (!billingAgreementId) return;
+  const amountCents = parseCapturedAmountToCents(sale.amount?.total);
+  const rawCurrency = sale.amount?.currency;
+  if (
+    !isNonEmptyString(providerPaymentId) ||
+    !isNonEmptyString(billingAgreementId) ||
+    amountCents == null ||
+    !isNonEmptyString(rawCurrency) ||
+    !/^[A-Za-z]{3}$/.test(rawCurrency)
+  ) {
+    throw new Error('Subscription payment provider identity or amount is malformed');
+  }
+  const currency = rawCurrency.toUpperCase();
 
-  const { data: order } = await supabase
+  const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('id, customer_id, guild_id')
+    .select('id, customer_id, guild_id, paypal_subscription_id')
     .eq('paypal_subscription_id', billingAgreementId)
-    .single();
+    .maybeSingle();
+  requireSupabaseSuccess(orderError, 'Failed to load subscription payment order');
+  if (
+    !order ||
+    !isNonEmptyString(order.id) ||
+    !isNonEmptyString(order.customer_id) ||
+    !isNonEmptyString(order.guild_id) ||
+    order.paypal_subscription_id !== billingAgreementId
+  ) {
+    throw new Error('Subscription payment order identity mismatch');
+  }
 
-  if (!order) return;
-
-  const amountValue = sale.amount?.total;
-  const amountCents = amountValue
-    ? Math.round(parseFloat(amountValue) * 100)
-    : 0;
-
-  await supabase.from('payments').insert({
+  const expectedPayment = {
     order_id: order.id,
     customer_id: order.customer_id,
     guild_id: order.guild_id,
-    paypal_payment_id: resource.id as string,
+    paypal_payment_id: providerPaymentId,
     amount_cents: amountCents,
-    // W2 codex round 2: persist the sale's actual currency instead of a
-    // hardcoded 'USD' — the refund currency-mismatch guard compares against
-    // this value, and a wrong label turned legitimate partial refunds on
-    // non-USD plans into full revocations.
-    currency: sale.amount?.currency ?? 'USD',
+    currency,
     status: 'completed',
-  });
+  };
+  const validatePayment = (data: unknown): void => {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Subscription payment persistence returned no row');
+    }
+    const row = data as Record<string, unknown>;
+    if (
+      !isNonEmptyString(row.id) ||
+      row.order_id !== expectedPayment.order_id ||
+      row.customer_id !== expectedPayment.customer_id ||
+      row.guild_id !== expectedPayment.guild_id ||
+      row.paypal_payment_id !== expectedPayment.paypal_payment_id ||
+      row.amount_cents !== expectedPayment.amount_cents ||
+      row.currency !== expectedPayment.currency ||
+      row.status !== expectedPayment.status
+    ) {
+      throw new Error('Subscription payment persistence identity mismatch');
+    }
+  };
 
-  console.log(`[Webhook] Subscription payment recorded: ${resource.id}`);
+  const { data: insertedPayment, error: insertError } = await supabase
+    .from('payments')
+    .insert(expectedPayment)
+    .select('id, order_id, customer_id, guild_id, paypal_payment_id, amount_cents, currency, status')
+    .single();
+  if (insertError) {
+    if (!isUniqueViolation(insertError)) {
+      throw new Error(`Failed to persist subscription payment: ${formatSupabaseError(insertError)}`);
+    }
+    const { data: existingPayment, error: existingError } = await supabase
+      .from('payments')
+      .select('id, order_id, customer_id, guild_id, paypal_payment_id, amount_cents, currency, status')
+      .eq('paypal_payment_id', providerPaymentId)
+      .maybeSingle();
+    requireSupabaseSuccess(existingError, 'Failed to inspect replayed subscription payment');
+    validatePayment(existingPayment);
+  } else {
+    validatePayment(insertedPayment);
+  }
+
+  console.log(`[Webhook] Subscription payment recorded: ${providerPaymentId}`);
 }
 
 // ── Capture Refunded / Reversed ─────────────────────
@@ -1254,8 +2143,9 @@ function formatCents(cents: number | null, currency: string | null): string {
  *
  * W2 semantics:
  *  - FULL refund/reversal → revoke entitlements, license keys and their
- *    active license sessions, queue Discord role revocation, and write the
- *    audit trail. The payments.status flip to refunded/reversed happens LAST:
+ *    active license sessions, and write the audit trail. The entitlement
+ *    status trigger atomically owns Discord role-revocation enqueueing. The
+ *    payments.status flip to refunded/reversed happens LAST:
  *    it is the commit marker the replay guard keys off, so a crash mid-way
  *    leaves the event retryable instead of half-revoked-but-skipped.
  *  - PARTIAL refund → access is NOT auto-revoked. The refund is recorded,
@@ -1341,13 +2231,23 @@ async function handleExternalPaymentRefunded(
   }
 
   // Locally recorded cumulative total (includes this refund's row).
-  const { data: recordedRefunds, error: recordedRefundsError } = await supabase
-    .from('payment_refunds')
-    .select('amount_cents')
-    .eq('payment_id', payment.id)
-    .limit(1000);
-  requireSupabaseSuccess(recordedRefundsError, 'Failed to load recorded refunds for payment');
-  const locallyRecordedCents = (recordedRefunds ?? []).reduce(
+  const recordedRefunds = await fetchAllLifecycleRowsById<RefundAmountRow>(
+    async (afterId) => {
+      let query = supabase
+        .from('payment_refunds')
+        .select('id, amount_cents')
+        .eq('payment_id', payment.id)
+        .order('id', { ascending: true })
+        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
+      if (afterId !== null) query = query.gt('id', afterId);
+      return await query as {
+        data: RefundAmountRow[] | null;
+        error: unknown;
+      };
+    },
+    'Failed to load recorded refunds for payment',
+  );
+  const locallyRecordedCents = recordedRefunds.reduce(
     (sum, row) =>
       sum + (typeof row?.amount_cents === 'number' ? row.amount_cents : 0),
     0,
@@ -1442,27 +2342,49 @@ async function handleExternalPaymentRefunded(
   // ── FULL refund/reversal: revoke everything, marker last ──
 
   // On a resumed retry, entitlements may already be expired by the failed
-  // attempt — include them so the role revocation is still computed/queued.
+  // attempt — include their identities for grace-alert and session cleanup.
   const entitlementLookupStatuses = options.retryingFailedEvent
     ? EXPIRY_RETRY_ENTITLEMENT_STATUSES
     : EXPIRABLE_ENTITLEMENT_STATUSES;
 
-  const { data: activeEntitlements, error: entitlementsError } = await supabase
-    .from('entitlements')
-    .select('id, customer_id, granted_role_ids, license_key_id')
-    .eq('order_id', orderId)
-    .in('status', entitlementLookupStatuses)
-    .limit(1000);
-  requireSupabaseSuccess(entitlementsError, 'Failed to load entitlements for refund revocation');
+  const activeEntitlements = await fetchAllLifecycleRowsById<EntitlementLifecycleRow>(
+    async (afterId) => {
+      let query = supabase
+        .from('entitlements')
+        .select('id, license_key_id')
+        .eq('order_id', orderId)
+        .eq('guild_id', payment.guild_id)
+        .in('status', entitlementLookupStatuses)
+        .order('id', { ascending: true })
+        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
+      if (afterId !== null) query = query.gt('id', afterId);
+      return await query as {
+        data: EntitlementLifecycleRow[] | null;
+        error: unknown;
+      };
+    },
+    'Failed to load entitlements for refund revocation',
+  );
 
   // All of the order's license keys (any status) so already-revoked keys from
   // a crashed earlier attempt still get their sessions deactivated.
-  const { data: orderLicenseKeys, error: orderLicenseKeysError } = await supabase
-    .from('license_keys')
-    .select('id')
-    .eq('order_id', orderId)
-    .limit(1000);
-  requireSupabaseSuccess(orderLicenseKeysError, 'Failed to load license keys for refund revocation');
+  const orderLicenseKeys = await fetchAllLifecycleRowsById<LicenseKeyLifecycleRow>(
+    async (afterId) => {
+      let query = supabase
+        .from('license_keys')
+        .select('id')
+        .eq('order_id', orderId)
+        .eq('guild_id', payment.guild_id)
+        .order('id', { ascending: true })
+        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
+      if (afterId !== null) query = query.gt('id', afterId);
+      return await query as {
+        data: LicenseKeyLifecycleRow[] | null;
+        error: unknown;
+      };
+    },
+    'Failed to load license keys for refund revocation',
+  );
 
   const licenseKeyIds = [
     ...new Set([
@@ -1475,41 +2397,11 @@ async function handleExternalPaymentRefunded(
     ]),
   ];
 
-  const revokedRoleIds = [
-    ...new Set(
-      (activeEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
-    ),
-  ];
-  const customerId: string | null =
-    (typeof payment.customer_id === 'string' && payment.customer_id) ||
-    activeEntitlements?.[0]?.customer_id ||
-    null;
-
-  // Preserve roles still granted by the customer's other live entitlements
-  // (same rule as subscription expiry) — a refund of product A must not strip
-  // a role the customer still pays for through product B.
-  let roleIds = revokedRoleIds;
-  if (revokedRoleIds.length > 0 && customerId) {
-    const { data: remainingEntitlements, error: remainingError } = await supabase
-      .from('entitlements')
-      .select('granted_role_ids')
-      .eq('customer_id', customerId)
-      .eq('guild_id', payment.guild_id)
-      .neq('order_id', orderId)
-      .in('status', ['active', 'pending', 'grace_period'])
-      .limit(1000);
-    requireSupabaseSuccess(
-      remainingError,
-      'Failed to load role-preserving entitlements for refund',
-    );
-    const preservedRoleIds = new Set(
-      (remainingEntitlements ?? []).flatMap((ent) => ent.granted_role_ids ?? []),
-    );
-    roleIds = revokedRoleIds.filter((roleId) => !preservedRoleIds.has(roleId));
-  }
-
   const nowIso = new Date().toISOString();
 
+  // The entitlement-status trigger is the sole Discord role-revocation
+  // producer. Its queue insert commits with this update and carries the exact
+  // entitlement identity needed for shared-role and re-activation checks.
   const { error: expireEntitlementsError } = await supabase
     .from('entitlements')
     .update({
@@ -1573,43 +2465,6 @@ async function handleExternalPaymentRefunded(
     );
   }
 
-  if (roleIds.length > 0 && customerId) {
-    const { data: customer, error: customerError } = await supabase
-      .from('customers')
-      .select('discord_id')
-      .eq('id', customerId)
-      .maybeSingle();
-    requireSupabaseSuccess(customerError, 'Failed to load customer for refund role revocation');
-
-    if (customer?.discord_id) {
-      let shouldQueueRoleRevocation = true;
-      if (options.retryingFailedEvent) {
-        shouldQueueRoleRevocation = !(await hasQueuedRoleRevocation(supabase, {
-          guildId: payment.guild_id,
-          discordId: customer.discord_id,
-          orderId,
-          reason: refundStatus,
-        }));
-      }
-
-      if (shouldQueueRoleRevocation) {
-        const queued = await queueFulfillment(supabase, 'revoke_roles', payment.guild_id, {
-          discord_id: customer.discord_id,
-          role_ids: roleIds,
-          reason: refundStatus,
-          order_id: orderId,
-        });
-        if (!queued) {
-          throw new Error('Failed to queue role revocation for refund');
-        }
-      }
-    } else {
-      console.warn(
-        `[Webhook] ${eventType} for order ${orderId} — customer has no discord_id, Discord roles not revoked`,
-      );
-    }
-  }
-
   const { error: auditError } = await supabase.from('audit_logs').insert({
     guild_id: payment.guild_id,
     actor_type: 'system',
@@ -1631,7 +2486,7 @@ async function handleExternalPaymentRefunded(
       cumulative_refunded_cents: cumulativeRefundedCents,
       entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
       license_key_ids: licenseKeyIds,
-      role_ids: roleIds,
+      role_revocation_source: 'entitlement_status_trigger',
     },
   });
   requireSupabaseSuccess(auditError, 'Failed to write refund audit log');

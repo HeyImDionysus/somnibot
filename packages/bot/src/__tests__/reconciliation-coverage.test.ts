@@ -20,12 +20,29 @@ function makeSupabase(tableData: Record<string, any> = {}) {
   const fromMock = vi.fn();
   fromMock.mockImplementation((table: string) => {
     const chain: Record<string, any> = {};
+    const eqFilters = new Map<string, unknown>();
     const methods = ['select', 'eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'in', 'order', 'limit', 'range', 'single', 'insert', 'update', 'delete', 'maybeSingle'];
     for (const m of methods) {
       chain[m] = vi.fn().mockReturnValue(chain);
     }
-    const data = tableData[table] ?? null;
-    chain.then = (resolve: (v: any) => void) => resolve({ data, error: null });
+    chain.eq = vi.fn((column: string, value: unknown) => {
+      eqFilters.set(column, value);
+      return chain;
+    });
+    const data = tableData[table]
+      ?? (table === 'entitlements' || table === 'license_sessions'
+        ? []
+        : table === 'customers'
+          ? [{ id: 'c1', guild_id: 'g1', discord_id: 'u1' }]
+          : null);
+    chain.then = (resolve: (v: any) => void) => {
+      let filtered = data;
+      if (table === 'entitlements' && Array.isArray(data) && eqFilters.has('status')) {
+        const status = eqFilters.get('status');
+        filtered = data.filter((row) => (row.status ?? 'active') === status);
+      }
+      resolve({ data: filtered, error: null });
+    };
     (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
@@ -33,13 +50,11 @@ function makeSupabase(tableData: Record<string, any> = {}) {
 }
 
 function makeGuild(overrides: Record<string, any> = {}) {
-  const memberRolesCache = new Map<string, boolean>();
-  if (overrides.missingRoles) {
-    // Role is NOT in cache
-  } else {
-    memberRolesCache.set = () => memberRolesCache;
-  }
+  let hasRole = !overrides.missingRoles;
   const rolesCacheGet = vi.fn().mockReturnValue({ id: 'r1', name: 'Premium' });
+  const add = vi.fn(async () => {
+    if (!overrides.addHasNoEffect) hasRole = true;
+  });
 
   return {
     id: 'g1',
@@ -47,9 +62,9 @@ function makeGuild(overrides: Record<string, any> = {}) {
       fetch: vi.fn().mockResolvedValue({
         roles: {
           cache: {
-            has: vi.fn().mockReturnValue(overrides.missingRoles ? false : true),
+            has: vi.fn(() => hasRole),
           },
-          add: vi.fn().mockResolvedValue(undefined),
+          add,
           remove: vi.fn().mockResolvedValue(undefined),
         },
       }),
@@ -76,7 +91,7 @@ describe('runReconciliation', () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { discord_id: 'u1' } },
+        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
       ],
     });
     guild = makeGuild({ missingRoles: false });
@@ -89,7 +104,7 @@ describe('runReconciliation', () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { discord_id: 'u1' } },
+        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
       ],
     });
     guild = makeGuild({ missingRoles: true });
@@ -99,11 +114,28 @@ describe('runReconciliation', () => {
     expect(findings.roles_regranted).toBe(1);
   });
 
+  it('does not count a Discord add that a forced refetch cannot confirm', async () => {
+    supabase = makeSupabase({
+      reconciliation_runs: { id: 'run1' },
+      entitlements: [
+        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
+      ],
+    });
+    guild = makeGuild({ missingRoles: true, addHasNoEffect: true });
+
+    const findings = await runReconciliation(guild as any, supabase as any);
+
+    expect(findings.roles_missing).toBe(1);
+    expect(findings.roles_regranted).toBe(0);
+    expect(findings.errors.some((error) => error.includes('did not confirm'))).toBe(true);
+    expect(guild.members.fetch).toHaveBeenCalledWith({ user: 'u1', force: true });
+  });
+
   it('handles empty role_ids', async () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e1', customer_id: 'c1', granted_role_ids: [], product_id: 'p1', customers: { discord_id: 'u1' } },
+        { id: 'e1', customer_id: 'c1', granted_role_ids: [], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
       ],
     });
     guild = makeGuild();
@@ -125,11 +157,30 @@ describe('runReconciliation', () => {
     expect(findings.roles_missing).toBe(0);
   });
 
+  it('rejects an active entitlement joined to a customer from another guild', async () => {
+    supabase = makeSupabase({
+      reconciliation_runs: { id: 'run1' },
+      entitlements: [{
+        id: 'e1',
+        customer_id: 'c1',
+        granted_role_ids: ['r1'],
+        product_id: 'p1',
+        customers: { id: 'c1', guild_id: 'g2', discord_id: 'u1' },
+      }],
+    });
+    guild = makeGuild();
+
+    const findings = await runReconciliation(guild as any, supabase as any);
+
+    expect(findings.errors.some((error) => error.includes('customer identity'))).toBe(true);
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+  });
+
   it('handles member not found (unknown member)', async () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { discord_id: 'u1' } },
+        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
       ],
     });
     guild = makeGuild();
@@ -142,7 +193,7 @@ describe('runReconciliation', () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { discord_id: 'u1' } },
+        { id: 'e1', customer_id: 'c1', granted_role_ids: ['r1'], product_id: 'p1', customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' } },
       ],
     });
     guild = makeGuild();
@@ -156,9 +207,13 @@ describe('runReconciliation', () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       entitlements: [
-        { id: 'e2', customer_id: 'c2', granted_role_ids: ['r2'], status: 'grace_period', grace_period_ends_at: pastDate },
+        {
+          id: 'e2', customer_id: 'c2', granted_role_ids: ['r2'], product_id: 'p2',
+          order_id: 'order-2', license_key_id: null, status: 'grace_period',
+          grace_period_ends_at: pastDate, source: 'purchase', type: 'subscription',
+        },
       ],
-      customers: { discord_id: 'u2' },
+      customers: [{ id: 'c2', guild_id: 'g1', discord_id: 'u2' }],
     });
     guild = makeGuild();
     // Mock so roles.cache.has returns true (to trigger removal)
@@ -178,9 +233,9 @@ describe('runReconciliation', () => {
     supabase = makeSupabase({
       reconciliation_runs: { id: 'run1' },
       license_sessions: [
-        { id: 's1', last_seen_at: staleTime, license_key_id: 'lk1', license_keys: { product_id: 'p1' } },
+        { id: 's1', last_seen_at: staleTime, license_key_id: 'lk1', license_keys: { product_id: 'p1', guild_id: 'g1' } },
       ],
-      product_license_config: { offline_grace_period_seconds: 3600 },
+      product_license_config: [{ product_id: 'p1', offline_grace_period_seconds: 3600 }],
     });
     guild = makeGuild();
     const findings = await runReconciliation(guild as any, supabase as any);

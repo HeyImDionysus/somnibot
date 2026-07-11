@@ -182,6 +182,32 @@ const embedUpdate = z.object({
 
 // ── Product schemas ─────────────────────────────────
 
+const reservedCommerceMetadataKeys = [
+  'grant_role_id',
+  'historical_grant_role_ids',
+  'role_duration_hours',
+] as const;
+
+const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
+  for (const key of reservedCommerceMetadataKeys) {
+    if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message:
+          `Commerce metadata key "${key}" is no longer supported; migrate role grants to canonical granted_role_ids.`,
+      });
+    }
+  }
+});
+
+const productPlanDefinition = z.object({
+  name: safeName.optional(),
+  interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']).optional(),
+  interval_count: z.number().int().min(1).max(12).optional(),
+  price_cents: z.number().int().min(0).max(999999).optional(),
+}).strict();
+
 const productCreate = z.object({
   name: safeName,
   description: safeDescription,
@@ -193,8 +219,8 @@ const productCreate = z.object({
   granted_channel_ids: snowflakeArray,
   active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
-  metadata: z.record(z.unknown()).optional(),
-  plans: z.array(z.record(z.unknown())).optional(),
+  metadata: productMetadata.optional(),
+  plans: z.array(productPlanDefinition).max(50).optional(),
 });
 
 // STRICT update schema — mass-assignment guard.
@@ -230,14 +256,19 @@ const productUpdate = productCreate
 const planCreate = z.object({
   product_id: uuid,
   name: safeName,
-  paypal_plan_id: z.string().max(64).optional(),
+  paypal_plan_id: z.string().trim().min(1).max(64).nullable().optional(),
   interval_unit: z.string().max(32),
   interval_count: z.number().int().min(1).max(12).default(1),
   price_cents: z.number().int().min(0).max(999999),
   currency: z.string().length(3).default('USD'),
   trial_days: z.number().int().min(0).max(365).optional(),
   active: z.boolean().default(true),
-});
+}).strict();
+
+const planUpdate = planCreate
+  .partial()
+  .extend({ id: uuid })
+  .strict();
 
 // ── Promotion schemas ───────────────────────────────
 
@@ -274,8 +305,8 @@ const entitlementGrant = z.object({
   // the same union as EntitlementService.grant. The previous enum accepted
   // 'gift'/'promotion', which passed validation but died at insert with a
   // raw DB CHECK violation. COMPLIANCE: do NOT add new values here — the
-  // bot's commerce-role-guard deny-lists non-purchase sources; any new
-  // source needs a real-money-or-not decision there first.
+  // atomic role-income RPC classifies these non-purchase sources explicitly;
+  // any new source needs a real-money-or-not decision in that DB invariant.
   source: z.enum(['purchase', 'giveaway', 'manual', 'automation']).default('manual'),
   expires_at: z.string().datetime().optional().nullable(),
   granted_role_ids: snowflakeArray,
@@ -693,6 +724,7 @@ export const schemas = {
   },
   plan: {
     create: planCreate,
+    update: planUpdate,
   },
   promotion: {
     create: promotionCreate,

@@ -18,7 +18,11 @@ import { notifyBot } from '@/lib/notify-bot';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
-import { assertIncomeRoleNotCommerceGranted } from '@/lib/api/commerce-income-wall';
+import {
+  assertIncomeRoleNotCommerceGranted,
+  COMMERCE_INCOME_WALL_MESSAGE,
+  isCommerceIncomeWallConflictError,
+} from '@/lib/api/commerce-income-wall';
 
 export async function POST(request: NextRequest) {
   const rateLimited = await checkAdminRateLimit(request, 'write');
@@ -48,6 +52,9 @@ export async function POST(request: NextRequest) {
       );
 
     if (error) {
+      if (isCommerceIncomeWallConflictError(error)) {
+        return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
+      }
       return dbError(error, 'economy/role-income');
     }
 

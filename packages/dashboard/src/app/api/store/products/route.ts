@@ -17,13 +17,12 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError, apiError, apiServerError } from '@/lib/api/response';
 import {
   assertProductRolesNotIncomeEarning,
-  findSubscriptionsWithChargeablePlan,
-  isBuyableProduct,
-  metadataGrantRoleIds,
-  metadataGrantVectorApplies,
-  preserveSoldMetadataGrantHistory,
-  sanitizeClientMetadataHistory,
-  type WallCheckResult,
+  COMMERCE_INCOME_WALL_MESSAGE,
+  evaluateEffectivePostWriteProduct,
+  isCommerceIncomeWallConflictError,
+  loadProductPlans,
+  loadProductTemporaryRoleIds,
+  type PlanWallFields,
 } from '@/lib/api/commerce-income-wall';
 
 // ── PayPal Helpers ─────────────────────────────────────
@@ -31,6 +30,22 @@ import {
 type PayPalSyncResult =
   | { ok: true; id: string }
   | { ok: false; error: string };
+
+interface PreparedPlan {
+  id: string;
+  name: string;
+  intervalUnit: string;
+  intervalCount: number;
+  priceCents: number;
+  paypalPlanId: string | null;
+}
+
+function commerceWriteError(error: { message: string; code?: string }) {
+  if (isCommerceIncomeWallConflictError(error)) {
+    return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
+  }
+  return dbError(error, 'store/products');
+}
 
 function paypalNotReadyResponse(message: string) {
   return NextResponse.json(
@@ -265,67 +280,67 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  interface PlanDefinition {
-    name?: string;
-    interval_unit?: string;
-    interval_count?: number;
-    price_cents?: number;
-  }
-
-  let normalizedPlanDefs = Array.isArray(planDefs)
-    ? planDefs.map((rawPlan) => rawPlan as PlanDefinition)
-    : [];
+  const normalizedPlanDefs = (type === 'subscription' ? (planDefs ?? []) : []).map(
+    (planDef) => ({
+      name: planDef.name,
+      intervalUnit: planDef.interval_unit ?? 'MONTH',
+      intervalCount: planDef.interval_count ?? 1,
+      priceCents: planDef.price_cents ?? price_cents,
+    }),
+  );
   const hasPaidSubscriptionPlan = type === 'subscription'
-    && normalizedPlanDefs.some((planDef) => (planDef.price_cents ?? price_cents) > 0);
+    && normalizedPlanDefs.some((planDef) => planDef.priceCents > 0);
   const requiresPayPal = type !== 'free' && (price_cents > 0 || hasPaidSubscriptionPlan);
 
-  // Compliance wall: a BUYABLE product's granted roles must not earn
-  // role-income (real money → wagerable currency). Checked before any PayPal
-  // call or DB write so a rejected product creates nothing. See the DECISION
-  // MATRIX in commerce-income-wall.ts. Roles under test: the
-  // `granted_role_ids` array (V1) plus, only when the metadata vector fires
-  // for this type (one-time products — subscriptions never consume it), the
-  // single `metadata.grant_role_id` role (V2).
-  //
-  // BUYABILITY at create time: a STAGED product (active=false), a zero-price
-  // one-time product, and a subscription without a chargeable plan are not
-  // real-money purchase paths and must not be blocked. Subscriptions are
-  // judged by the plan definitions in THIS request (when no plan defs are
-  // given, a priced product auto-creates one default plan at `price_cents`);
-  // adding a chargeable plan later re-runs the wall in /api/store/plans, and
-  // every buyability-flipping PUT re-runs it below.
-  const rolesToGrant = [
-    ...(granted_role_ids ?? []),
-    ...(metadataGrantVectorApplies(type) ? metadataGrantRoleIds(metadata) : []),
-  ];
-  const createHasChargeablePlan = type === 'subscription'
-    && (normalizedPlanDefs.length > 0 ? hasPaidSubscriptionPlan : price_cents > 0);
-  let wall: WallCheckResult;
-  try {
-    wall = await assertProductRolesNotIncomeEarning(
-      supabase,
-      guildId,
-      rolesToGrant,
-      isBuyableProduct(
-        { type, active: active ?? true, price_cents },
-        { hasChargeablePlan: createHasChargeablePlan },
-      ),
-    );
-  } catch (err) {
-    // Fail CLOSED: an unreadable wall must abort the write, never wave it on.
-    return apiServerError(err, 'store/products');
-  }
-  if (!wall.ok) {
-    return apiError(wall.message, 409);
+  if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
+    normalizedPlanDefs.push({
+      name: `${name} — MONTH`,
+      intervalUnit: 'MONTH',
+      intervalCount: 1,
+      priceCents: price_cents,
+    });
   }
 
-  if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
-    normalizedPlanDefs = [{
-      name: `${name} — MONTH`,
-      interval_unit: 'MONTH',
-      interval_count: 1,
-      price_cents,
-    }];
+  // Freeze stable local plan IDs before the wall check. Every plan that this
+  // request will create at PayPal is represented as PayPal-backed now, before
+  // any external side effect. This includes an explicit zero-price plan under
+  // a positive-price subscription parent.
+  const preparedPlans: PreparedPlan[] = normalizedPlanDefs.map((planDef) => {
+    const id = crypto.randomUUID();
+    return {
+      id,
+      name: planDef.name ?? `${name} — ${planDef.intervalUnit}`,
+      intervalUnit: planDef.intervalUnit,
+      intervalCount: planDef.intervalCount,
+      priceCents: planDef.priceCents,
+      paypalPlanId: requiresPayPal ? `pending-paypal-plan:${id}` : null,
+    };
+  });
+
+  try {
+    const evaluation = evaluateEffectivePostWriteProduct(
+      {
+        type,
+        active: active ?? true,
+        price_cents,
+        granted_role_ids: granted_role_ids ?? [],
+      },
+      preparedPlans.map<PlanWallFields>((plan) => ({
+        id: plan.id,
+        active: true,
+        price_cents: plan.priceCents,
+        paypal_plan_id: plan.paypalPlanId,
+      })),
+      [],
+    );
+    const wall = await assertProductRolesNotIncomeEarning(
+      supabase,
+      guildId,
+      evaluation,
+    );
+    if (!wall.ok) return apiError(wall.message, 409);
+  } catch (err) {
+    return apiServerError(err, 'store/products');
   }
 
   let paypalProductId: string | null = null;
@@ -341,32 +356,25 @@ export async function POST(req: NextRequest) {
     paypalProductId = paypalProduct.id;
   }
 
-  const createdPlans: { name: string; paypalPlanId: string }[] = [];
-
   if (type === 'subscription' && requiresPayPal && paypalProductId) {
-    for (const planDef of normalizedPlanDefs) {
-      const planName = planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`;
+    for (const plan of preparedPlans) {
       const paypalPlan = await createPayPalBillingPlan(
         paypalProductId,
-        planName,
-        planDef.price_cents ?? price_cents,
+        plan.name,
+        plan.priceCents,
         currency ?? 'USD',
-        planDef.interval_unit ?? 'MONTH',
-        planDef.interval_count ?? 1,
+        plan.intervalUnit,
+        plan.intervalCount,
       );
       if (!paypalPlan.ok) {
         return paypalNotReadyResponse(paypalPlan.error);
       }
-      createdPlans.push({ name: planName, paypalPlanId: paypalPlan.id });
+      plan.paypalPlanId = paypalPlan.id;
     }
   }
 
-  // 2. Create product in database. Strip any client-supplied
-  // `historical_grant_role_ids`: that key is SERVER-OWNED V4 compliance
-  // evidence, only ever written by preserveSoldMetadataGrantHistory() from
-  // verified sale history. A brand-new product has sold nothing, so accepting
-  // an owner-forged history here would let them block income config for
-  // arbitrary roles. See the DECISION MATRIX (V4) in commerce-income-wall.ts.
+  // Create the product only after PayPal and the friendly wall precheck pass.
+  // Reserved legacy role metadata has already been rejected by validation.
   const { data, error } = await supabase
     .from('products')
     .insert({
@@ -382,42 +390,47 @@ export async function POST(req: NextRequest) {
       granted_channel_ids: granted_channel_ids ?? [],
       active: active ?? true,
       sort_order: sort_order ?? 0,
-      metadata: sanitizeClientMetadataHistory(metadata),
+      metadata: metadata ?? {},
     })
     .select()
     .single();
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
+  }
+  if (!data) {
+    return apiServerError(new Error('product insert returned no row'), 'store/products');
   }
 
-  // 3. Auto-create PayPal Billing Plans for subscription products
+  // Persist the exact local IDs and PayPal-backed plan set evaluated above.
   const savedPlans: { id: string; paypalPlanId: string }[] = [];
 
   if (type === 'subscription' && requiresPayPal && paypalProductId) {
-    for (const [index, planDef] of normalizedPlanDefs.entries()) {
-      const { data: plan } = await supabase
+    for (const planDef of preparedPlans) {
+      const { data: plan, error: planError } = await supabase
         .from('plans')
         .insert({
+          id: planDef.id,
           product_id: data.id,
           guild_id: guildId,
-          name: createdPlans[index]?.name ?? planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
-          paypal_plan_id: createdPlans[index]?.paypalPlanId ?? null,
-          interval_unit: planDef.interval_unit ?? 'MONTH',
-          interval_count: planDef.interval_count ?? 1,
-          price_cents: planDef.price_cents ?? price_cents,
+          name: planDef.name,
+          paypal_plan_id: planDef.paypalPlanId,
+          interval_unit: planDef.intervalUnit,
+          interval_count: planDef.intervalCount,
+          price_cents: planDef.priceCents,
           currency: currency ?? 'USD',
           active: true,
         })
         .select('id')
         .single();
 
-      if (plan) {
-        const createdPlan = createdPlans[index];
-        if (createdPlan) {
-          savedPlans.push({ id: plan.id, paypalPlanId: createdPlan.paypalPlanId });
-        }
+      if (planError) {
+        return commerceWriteError(planError);
       }
+      if (!plan || !planDef.paypalPlanId) {
+        return apiServerError(new Error('plan insert returned no row'), 'store/products');
+      }
+      savedPlans.push({ id: plan.id, paypalPlanId: planDef.paypalPlanId });
     }
   }
 
@@ -458,29 +471,16 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
-  // Compliance wall: an update must never leave a BUYABLE product granting a
-  // role that earns role-income. Re-check whenever the update touches ANY
-  // field that can (a) change what roles are granted, or (b) make the product
-  // a real-money purchase path — flipping only `active` false→true or
-  // `price_cents` 0→paid on a product with an overlapping income role opens
-  // the laundering path without touching roles or `type`. See the DECISION
-  // MATRIX in commerce-income-wall.ts; buyability is evaluated on EFFECTIVE
-  // (stored + updated) values, with subscriptions judged by their stored
-  // plans (isChargeablePlan).
   const WALL_TRIGGER_FIELDS = [
     'granted_role_ids',
-    'metadata',
     'type',
     'active',
     'price_cents',
   ] as const;
   if (WALL_TRIGGER_FIELDS.some((f) => f in updates)) {
-    // Fail CLOSED: the stored row is half of the effective values — if it
-    // cannot be read, the wall cannot be evaluated and the update must abort
-    // (an `active: true` write must never skip the stored granted roles).
     const { data: existing, error: existingErr } = await supabase
       .from('products')
-      .select('type, granted_role_ids, metadata, active, price_cents')
+      .select('type, granted_role_ids, active, price_cents')
       .eq('id', id)
       .eq('guild_id', guildId)
       .maybeSingle();
@@ -497,56 +497,32 @@ export async function PUT(req: NextRequest) {
     const effectiveType = pick('type', existing.type) as string | undefined;
     const effectiveActive = pick('active', existing.active) as boolean | undefined;
     const effectivePrice = pick('price_cents', existing.price_cents) as number | undefined;
-    const effectiveMetadata = pick('metadata', existing.metadata);
-    const effectiveRoles = [
-      ...(((pick('granted_role_ids', existing.granted_role_ids)) as string[] | null) ?? []),
-      // V2 only fires for one-time products — a subscription never consumes
-      // the metadata role, so it must not block there (V3/V4 history is
-      // enforced on the role-income side, not by this product write).
-      ...(metadataGrantVectorApplies(effectiveType)
-        ? metadataGrantRoleIds(effectiveMetadata)
-        : []),
-    ];
+    const effectiveRoles = pick('granted_role_ids', existing.granted_role_ids) as
+      | string[]
+      | undefined;
 
     try {
-      // Subscription buyability depends on the product's stored plans — a
-      // chargeable plan may already exist when `active` flips true.
-      const hasChargeablePlan = effectiveType === 'subscription'
-        ? (await findSubscriptionsWithChargeablePlan(supabase, guildId, [id])).has(id)
-        : false;
-
+      const plans = effectiveType === 'subscription'
+        ? await loadProductPlans(supabase, guildId, id)
+        : [];
+      const temporaryRoleIds = await loadProductTemporaryRoleIds(supabase, guildId, id);
+      const evaluation = evaluateEffectivePostWriteProduct(
+        {
+          type: effectiveType as string,
+          active: effectiveActive as boolean,
+          price_cents: effectivePrice as number,
+          granted_role_ids: effectiveRoles as string[],
+        },
+        plans,
+        temporaryRoleIds,
+      );
       const wall = await assertProductRolesNotIncomeEarning(
         supabase,
         guildId,
-        effectiveRoles,
-        isBuyableProduct(
-          { type: effectiveType, active: effectiveActive, price_cents: effectivePrice },
-          { hasChargeablePlan },
-        ),
+        evaluation,
       );
-      if (!wall.ok) {
-        return apiError(wall.message, 409);
-      }
-
-      // V4 MAINTENANCE: when the edit replaces `metadata`, preserve recorded
-      // history and record a stripped SOLD permanent grant role — buyers of a
-      // permanent metadata role have no per-user record, so the product's
-      // metadata is the only place the evidence can live. Append-only: a
-      // client-supplied metadata object can never erase it.
-      if ('metadata' in updates) {
-        const mergedMetadata = await preserveSoldMetadataGrantHistory(
-          supabase,
-          guildId,
-          id,
-          existing.metadata,
-          (updates as Record<string, unknown>).metadata,
-        );
-        if (mergedMetadata) {
-          (updates as Record<string, unknown>).metadata = mergedMetadata;
-        }
-      }
+      if (!wall.ok) return apiError(wall.message, 409);
     } catch (err) {
-      // Fail CLOSED: an unreadable wall or history lookup aborts the update.
       return apiServerError(err, 'store/products');
     }
   }
@@ -566,7 +542,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
   }
 
   // Notify bot so it hot-reloads product changes
@@ -599,7 +575,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
   }
 
   // Notify bot so deactivated product is no longer purchasable

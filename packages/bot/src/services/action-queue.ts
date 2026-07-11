@@ -67,6 +67,7 @@ interface ActionRow {
   action: string;
   payload: Record<string, unknown>;
   status: string;
+  next_retry_at?: string | null;
   /** 'commerce' | 'game' — stamped by the DB trigger at insert. */
   lane?: string;
 }
@@ -728,36 +729,434 @@ async function handleTestWelcome(
 /**
  * Revoke Discord roles from a member (e.g., after a refund).
  */
-async function handleRevokeRoles(
-  guild: Guild,
-  _supabase: SupabaseClient,
-  payload: Record<string, unknown>,
-): Promise<ActionResult> {
-  const discordId = payload.discord_id as string;
-  const roleIds = payload.role_ids as string[];
-  const reason = (payload.reason as string) || 'Role revocation';
+const LIVE_ROLE_OWNER_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
 
-  if (!discordId) return { success: false, error: 'Missing discord_id' };
-  if (!roleIds || !Array.isArray(roleIds) || roleIds.length === 0) {
-    return { success: false, error: 'Missing or empty role_ids' };
+type RevokeOwnershipIdentity = {
+  guildId: string;
+  discordId: string;
+  entitlementId: string;
+  customerId: string;
+  orderId: string;
+  productId: string;
+  terminalStatus: 'cancelled' | 'expired' | 'revoked';
+};
+
+const REVOKE_IDENTITY_FIELDS = [
+  'entitlement_id',
+  'customer_id',
+  'order_id',
+  'product_id',
+] as const;
+
+const REVOKE_ACTION_SOURCES = new Set([
+  'entitlement_status_trigger',
+  'entitlement_terminal_migration_backfill',
+]);
+
+const TERMINAL_REASON_TO_STATUS = {
+  entitlement_cancelled: 'cancelled',
+  entitlement_expired: 'expired',
+  entitlement_revoked: 'revoked',
+} as const;
+
+function parseRevokeOwnershipIdentity(
+  payload: Record<string, unknown>,
+  guildId: string,
+): { identity: RevokeOwnershipIdentity | null; error?: string } {
+  const hasCompleteCore = REVOKE_IDENTITY_FIELDS.every((field) => Object.hasOwn(payload, field));
+  if (!hasCompleteCore) return { identity: null, error: 'Invalid revoke_roles identity payload' };
+
+  if (typeof payload.source !== 'string' || !REVOKE_ACTION_SOURCES.has(payload.source)) {
+    return { identity: null, error: 'Invalid revoke_roles action source' };
   }
 
-  const member = await guild.members.fetch(discordId).catch(() => null);
+  const terminalStatus = typeof payload.reason === 'string'
+    ? TERMINAL_REASON_TO_STATUS[payload.reason as keyof typeof TERMINAL_REASON_TO_STATUS]
+    : undefined;
+  if (!terminalStatus) {
+    return { identity: null, error: 'Invalid revoke_roles terminal reason' };
+  }
+
+  for (const field of REVOKE_IDENTITY_FIELDS) {
+    const value = payload[field];
+    if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+      return { identity: null, error: `Invalid revoke_roles ${field}` };
+    }
+  }
+
+  if (
+    Object.hasOwn(payload, 'guild_id')
+    && (
+      typeof payload.guild_id !== 'string'
+      || payload.guild_id.length === 0
+      || payload.guild_id.trim() !== payload.guild_id
+      || payload.guild_id !== guildId
+    )
+  ) {
+    return { identity: null, error: 'revoke_roles guild_id does not match the action guild' };
+  }
+  return {
+    identity: {
+      guildId,
+      discordId: payload.discord_id as string,
+      entitlementId: payload.entitlement_id as string,
+      customerId: payload.customer_id as string,
+      orderId: payload.order_id as string,
+      productId: payload.product_id as string,
+      terminalStatus,
+    },
+  };
+}
+
+async function validateRevokeOrigin(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleIds: string[],
+): Promise<void> {
+  const { data, error } = await supabase
+    .from('entitlements')
+    .select('id, guild_id, customer_id, order_id, product_id, status, source, granted_role_ids')
+    .eq('id', identity.entitlementId)
+    .eq('guild_id', identity.guildId)
+    .eq('customer_id', identity.customerId)
+    .eq('order_id', identity.orderId)
+    .eq('product_id', identity.productId)
+    .maybeSingle();
+
+  if (error) throw new Error(`revoke origin lookup failed: ${error.message}`);
+
+  const origin = data as Record<string, unknown> | null;
+  const grantedRoleIds = Array.isArray(origin?.granted_role_ids)
+    ? origin.granted_role_ids
+    : null;
+  const grantedRoleIdSet = grantedRoleIds ? new Set(grantedRoleIds) : null;
+  const hasExpectedStatus = origin?.status === identity.terminalStatus
+    || (
+      typeof origin?.status === 'string'
+      && LIVE_ROLE_OWNER_STATUSES.includes(origin.status)
+    );
+  if (
+    !origin
+    || origin.id !== identity.entitlementId
+    || origin.guild_id !== identity.guildId
+    || origin.customer_id !== identity.customerId
+    || origin.order_id !== identity.orderId
+    || origin.product_id !== identity.productId
+    || !hasExpectedStatus
+    || (origin.source !== 'purchase' && origin.source !== null)
+    || !grantedRoleIds
+    || !grantedRoleIds.every((roleId) =>
+      typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
+    || grantedRoleIdSet?.size !== grantedRoleIds.length
+    || grantedRoleIdSet?.size !== roleIds.length
+    || !roleIds.every((roleId) => grantedRoleIdSet.has(roleId))
+  ) {
+    throw new Error('revoke origin lookup returned a malformed or mismatched entitlement');
+  }
+}
+
+async function validateRevokeCustomerIdentity(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+): Promise<void> {
+  const { data, error } = await supabase
+    .from('customers')
+    .select('id, guild_id, discord_id')
+    .eq('id', identity.customerId)
+    .eq('guild_id', identity.guildId)
+    .maybeSingle();
+
+  if (error) throw new Error(`customer identity lookup failed: ${error.message}`);
+  if (
+    !data
+    || data.id !== identity.customerId
+    || data.guild_id !== identity.guildId
+    || data.discord_id !== identity.discordId
+  ) {
+    throw new Error('customer identity lookup returned a malformed or mismatched result');
+  }
+}
+
+async function hasLiveEntitlementRoleOwner(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('entitlements')
+    .select('id, guild_id, customer_id, status, granted_role_ids')
+    .eq('guild_id', identity.guildId)
+    .eq('customer_id', identity.customerId)
+    .in('status', LIVE_ROLE_OWNER_STATUSES)
+    .contains('granted_role_ids', [roleId])
+    .order('id', { ascending: true })
+    .limit(1);
+
+  if (error) throw new Error(`shared role ownership lookup failed: ${error.message}`);
+  if (!Array.isArray(data) || data.length > 1) {
+    throw new Error('shared role ownership lookup returned a malformed result');
+  }
+  if (data.length === 0) return false;
+
+  const owner = data[0] as Record<string, unknown> | null;
+  if (
+    !owner
+    || typeof owner.id !== 'string'
+    || owner.id.length === 0
+    || owner.guild_id !== identity.guildId
+    || owner.customer_id !== identity.customerId
+    || typeof owner.status !== 'string'
+    || !LIVE_ROLE_OWNER_STATUSES.includes(owner.status)
+    || !Array.isArray(owner.granted_role_ids)
+    || !owner.granted_role_ids.every((id) => typeof id === 'string')
+    || !owner.granted_role_ids.includes(roleId)
+  ) {
+    throw new Error('shared role ownership lookup returned a malformed entitlement');
+  }
+  return true;
+}
+
+async function hasLiveTemporaryRoleOwner(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleId: string,
+): Promise<boolean> {
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('temp_role_grants')
+    .select('id, guild_id, user_id, role_id, expires_at, grant_status, remove_on_expiry')
+    .eq('guild_id', identity.guildId)
+    .eq('user_id', identity.discordId)
+    .eq('role_id', roleId)
+    .in('grant_status', ['pending', 'applied'])
+    .gt('expires_at', nowIso)
+    .order('id', { ascending: true })
+    .limit(1);
+
+  if (error) throw new Error(`temporary role ownership lookup failed: ${error.message}`);
+  if (!Array.isArray(data) || data.length > 1) {
+    throw new Error('temporary role ownership lookup returned a malformed result');
+  }
+  if (data.length === 0) return false;
+
+  const owner = data[0] as Record<string, unknown> | null;
+  const expiresAt = typeof owner?.expires_at === 'string'
+    ? Date.parse(owner.expires_at)
+    : Number.NaN;
+  if (
+    !owner
+    || typeof owner.id !== 'string'
+    || owner.id.length === 0
+    || owner.guild_id !== identity.guildId
+    || owner.user_id !== identity.discordId
+    || owner.role_id !== roleId
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= Date.parse(nowIso)
+    || (owner.grant_status !== 'applied' && owner.grant_status !== 'pending')
+    || typeof owner.remove_on_expiry !== 'boolean'
+  ) {
+    throw new Error('temporary role ownership lookup returned a malformed grant');
+  }
+  return true;
+}
+
+async function hasLiveRoleOwner(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleId: string,
+): Promise<boolean> {
+  if (await hasLiveEntitlementRoleOwner(supabase, identity, roleId)) return true;
+  return hasLiveTemporaryRoleOwner(supabase, identity, roleId);
+}
+
+async function ensureDiscordRolePresentAndConfirm(
+  guild: Guild,
+  discordId: string,
+  roleId: string,
+  reason: string,
+) {
+  let member = await guild.members.fetch({ user: discordId, force: true });
+  if (!member.roles.cache.has(roleId)) {
+    await member.roles.add(roleId, reason);
+    member = await guild.members.fetch({ user: discordId, force: true });
+  }
+  if (!member.roles.cache.has(roleId)) {
+    throw new Error('Discord did not confirm the retained role');
+  }
+  return member;
+}
+
+export async function handleRevokeRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const discordId = payload.discord_id;
+  const rawRoleIds = payload.role_ids;
+  const reason = typeof payload.reason === 'string' && payload.reason.length > 0
+    ? payload.reason
+    : 'Role revocation';
+
+  if (typeof discordId !== 'string' || discordId.length === 0 || discordId.trim() !== discordId) {
+    return { success: false, error: 'Missing required valid discord_id', retryable: false };
+  }
+  if (
+    !Array.isArray(rawRoleIds)
+    || rawRoleIds.length === 0
+    || !rawRoleIds.every((roleId) =>
+      typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
+  ) {
+    return { success: false, error: 'Missing required valid role_ids', retryable: false };
+  }
+  if (new Set(rawRoleIds as string[]).size !== rawRoleIds.length) {
+    return { success: false, error: 'Duplicate role_ids are not allowed', retryable: false };
+  }
+  const roleIds = [...new Set(rawRoleIds as string[])];
+
+  const parsedIdentity = parseRevokeOwnershipIdentity(payload, guild.id);
+  if (parsedIdentity.error) {
+    return { success: false, error: parsedIdentity.error, retryable: true };
+  }
+
+  const retained: string[] = [];
+  if (parsedIdentity.identity) {
+    try {
+      // Complete every database check before the first Discord mutation. If
+      // any lookup fails or is malformed, the whole action remains retryable
+      // and no role is removed on partial evidence.
+      await validateRevokeOrigin(supabase, parsedIdentity.identity, roleIds);
+      await validateRevokeCustomerIdentity(supabase, parsedIdentity.identity);
+      for (const roleId of roleIds) {
+        if (await hasLiveRoleOwner(supabase, parsedIdentity.identity, roleId)) {
+          retained.push(roleId);
+        }
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        error: `Role ownership verification failed: ${detail}`,
+        retryable: true,
+        data: { discordId, removed: [], retained: [], failed: roleIds, reason },
+      };
+    }
+  }
+
+  const removableRoleIds = roleIds.filter((roleId) => !retained.includes(roleId));
+  let member = await guild.members.fetch({ user: discordId, force: true }).catch(() => null);
   if (!member) {
-    return { success: false, error: `Member ${discordId} not found in guild` };
+    return {
+      success: false,
+      error: `Member ${discordId} could not be verified in guild`,
+      retryable: true,
+    };
   }
 
   const removed: string[] = [];
+  const absent: string[] = [];
   const failed: string[] = [];
 
-  for (const roleId of roleIds) {
-    if (member.roles.cache.has(roleId)) {
-      try {
-        await member.roles.remove(roleId, `SomniBot — ${reason}`);
-        removed.push(roleId);
-      } catch {
-        failed.push(roleId);
+  // A previous attempt may have removed a role just before a new owner became
+  // visible. Repair every role that the preflight says must be retained before
+  // attempting any destructive mutation in this run.
+  try {
+    for (const roleId of retained) {
+      if (!member.roles.cache.has(roleId)) {
+        member = await ensureDiscordRolePresentAndConfirm(
+          guild,
+          discordId,
+          roleId,
+          `SomniBot — repair retained role (${reason})`,
+        );
       }
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Failed to repair retained role ownership: ${detail}`,
+      retryable: true,
+      data: { discordId, removed, retained, absent, failed: retained, reason },
+    };
+  }
+
+  for (const roleId of removableRoleIds) {
+    if (!member.roles.cache.has(roleId)) {
+      if (parsedIdentity.identity) {
+        try {
+          if (await hasLiveRoleOwner(supabase, parsedIdentity.identity, roleId)) {
+            member = await ensureDiscordRolePresentAndConfirm(
+              guild,
+              discordId,
+              roleId,
+              `SomniBot — repair concurrent role owner (${reason})`,
+            );
+            retained.push(roleId);
+            continue;
+          }
+        } catch (err) {
+          // Ownership became unknowable after the destructive preflight. Keep
+          // access conservatively and retry until the database can prove the
+          // role is unowned.
+          try {
+            member = await ensureDiscordRolePresentAndConfirm(
+              guild,
+              discordId,
+              roleId,
+              `SomniBot — preserve role during ownership uncertainty (${reason})`,
+            );
+          } catch {
+            // The retry remains required either way.
+          }
+          failed.push(roleId);
+          continue;
+        }
+      }
+      absent.push(roleId);
+      continue;
+    }
+
+    try {
+      await member.roles.remove(roleId, `SomniBot — ${reason}`);
+      const confirmed = await guild.members.fetch({ user: discordId, force: true });
+      if (confirmed.roles.cache.has(roleId)) {
+        throw new Error('Discord still reports the role after removal');
+      }
+      member = confirmed;
+
+      if (parsedIdentity.identity) {
+        try {
+          if (await hasLiveRoleOwner(supabase, parsedIdentity.identity, roleId)) {
+            member = await ensureDiscordRolePresentAndConfirm(
+              guild,
+              discordId,
+              roleId,
+              `SomniBot — repair concurrent role owner (${reason})`,
+            );
+            retained.push(roleId);
+            continue;
+          }
+        } catch {
+          // A database failure after removal must not leave a possibly-owned
+          // role absent. Re-add first, then keep the action retryable.
+          try {
+            member = await ensureDiscordRolePresentAndConfirm(
+              guild,
+              discordId,
+              roleId,
+              `SomniBot — preserve role during ownership uncertainty (${reason})`,
+            );
+          } catch {
+            // The failed list below retains the durable retry either way.
+          }
+          failed.push(roleId);
+          continue;
+        }
+      }
+
+      removed.push(roleId);
+    } catch {
+      failed.push(roleId);
     }
   }
 
@@ -778,13 +1177,13 @@ async function handleRevokeRoles(
       success: false,
       error: `Failed to revoke ${failed.length} of ${roleIds.length} role(s) from ${discordId}`,
       retryable: true,
-      data: { discordId, removed, failed, reason },
+      data: { discordId, removed, retained, absent, failed, reason },
     };
   }
 
   return {
     success: true,
-    data: { discordId, removed, failed, reason },
+    data: { discordId, removed, retained, absent, failed, reason },
   };
 }
 
@@ -1295,7 +1694,7 @@ async function processAction(
  * Start listening for bot action queue items.
  *
  * 1. Process any existing pending actions (in case we missed them while offline)
- * 2. Subscribe to Realtime INSERT events on bot_action_queue
+ * 2. Subscribe to Realtime INSERT events and staged→pending UPDATE releases
  * 3. Once the subscription is SUBSCRIBED, sweep pending rows again — rows
  *    inserted between step 1's snapshot and the subscription going live
  *    (e.g. deliver_receipt re-delivery rows queued by step 1 itself) are
@@ -1426,10 +1825,10 @@ async function recoverStaleActions(
   }
   if (requeuedCount > 0) {
     log.info(`Re-queued ${requeuedCount} stale action(s) for processing`);
-    // The recovery RPC flipped them back to 'pending', but Realtime only
-    // fires on INSERT — re-fetch and feed them through processAction so
-    // they get picked up immediately on this worker instead of waiting
-    // for the next restart.
+    // The recovery RPC flipped them back to 'pending'. Realtime UPDATE now
+    // observes that release too, but re-fetch and feed them explicitly so
+    // recovery remains immediate even during a subscription outage; the
+    // atomic claim deduplicates the two paths.
     //
     // Lane priority must hold at the QUERY level, not in memory: the RPC
     // returns EVERY stale row (uncapped), so a game flood can hand back more
@@ -1708,7 +2107,8 @@ export async function startActionQueueListener(
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();
 
-  // V11 Audit H-5: Subscribe to new inserts with automatic reconnection.
+  // V11 Audit H-5: Subscribe to new inserts and pending-state releases with
+  // automatic reconnection.
   // The Supabase Realtime subscription can silently disconnect (server
   // restart, network blip). On error/timeout/closed we resubscribe after
   // a delay, with exponential backoff capped at 30s.
@@ -1716,6 +2116,24 @@ export async function startActionQueueListener(
   const MAX_RECONNECT_DELAY = 30_000;
 
   function subscribeToQueue(): void {
+    const dispatchPendingAction = async (payload: { new: Record<string, unknown> }) => {
+      const action = payload.new as unknown as ActionRow;
+      if (action.status !== 'pending') return;
+
+      // A handler retry also UPDATEs a row back to pending, but with a future
+      // next_retry_at. Do not let Realtime bypass its durable backoff. Staged
+      // outbox releases have no future retry and dispatch immediately.
+      const nextRetryAt = action.next_retry_at ? Date.parse(action.next_retry_at) : Number.NaN;
+      if (Number.isFinite(nextRetryAt) && nextRetryAt > Date.now()) return;
+
+      // Realtime callbacks are fire-and-forget, so admission goes through the
+      // shared per-lane scheduler. The atomic claim deduplicates INSERT/UPDATE
+      // deliveries against startup, reconnect, and periodic sweeps.
+      await scheduler.run(laneOf(action), () =>
+        processAction(guild, supabase, action, scheduler),
+      );
+    };
+
     supabase
       .channel(`bot-action-queue-${Date.now()}`)
       .on(
@@ -1726,23 +2144,17 @@ export async function startActionQueueListener(
           table: 'bot_action_queue',
           filter: `guild_id=eq.${guild.id}`,
         },
-        async (payload) => {
-          const action = payload.new as ActionRow;
-          if (action.status === 'pending') {
-            // Realtime dispatches each INSERT callback fire-and-forget
-            // (phoenix invokes bindings without awaiting them), so a
-            // game-job flood becomes N concurrent handler invocations that
-            // would otherwise occupy every in-process slot. Admission goes
-            // through the per-lane budgets: game events over budget wait
-            // in-process WITHOUT claiming their rows (they stay 'pending'
-            // and crash-safe), while commerce events are admitted
-            // immediately under the commerce budget — waiting here can not
-            // delay dispatch of later events.
-            await scheduler.run(laneOf(action), () =>
-              processAction(guild, supabase, action, scheduler),
-            );
-          }
+        dispatchPendingAction,
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'bot_action_queue',
+          filter: `guild_id=eq.${guild.id}`,
         },
+        dispatchPendingAction,
       )
       .subscribe((status, err) => {
         if (status === 'SUBSCRIBED') {
@@ -1750,7 +2162,7 @@ export async function startActionQueueListener(
           reconnectDelay = 1_000; // reset backoff on success
           // Rows inserted after the startup sweep read its snapshot but
           // before this subscription became active are invisible to both
-          // paths — Realtime only fires for future INSERTs. The startup
+          // paths — Realtime only fires for future changes. The startup
           // sweep itself creates such rows: a fulfill_purchase processed
           // from the offline backlog whose receipt DM fails inserts a new
           // pending deliver_receipt row, which would otherwise sit pending

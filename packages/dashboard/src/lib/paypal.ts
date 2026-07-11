@@ -190,9 +190,23 @@ export async function getPayPalWebhookId(): Promise<string> {
  *
  * Returns amount in cents and the currency code, or null on failure.
  */
+export interface PayPalSubscriptionContract {
+  amountCents: number;
+  currency: string;
+  planId: string;
+}
+
+function parsePayPalAmountCents(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value)) {
+    return null;
+  }
+  const cents = Math.round(Number(value) * 100);
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
 export async function getSubscriptionAmount(
   subscriptionId: string,
-): Promise<{ amountCents: number; currency: string } | null> {
+): Promise<PayPalSubscriptionContract | null> {
   try {
     const config = await getPayPalRuntimeConfig();
     const token = await getPayPalToken(config);
@@ -214,14 +228,23 @@ export async function getSubscriptionAmount(
       data.billing_info?.last_payment?.amount ??
       data.plan?.billing_cycles?.[0]?.pricing_scheme?.fixed_price;
 
-    if (!amount?.value) return null;
+    const amountCents = parsePayPalAmountCents(amount?.value);
+    const currency = typeof amount?.currency_code === 'string'
+      ? amount.currency_code.toUpperCase()
+      : null;
+    const planId = typeof data.plan_id === 'string' ? data.plan_id : null;
+    if (
+      amountCents == null ||
+      !currency ||
+      !/^[A-Z]{3}$/.test(currency) ||
+      !planId ||
+      planId.trim() !== planId
+    ) {
+      return null;
+    }
 
-    const cents = Math.round(parseFloat(amount.value) * 100);
-    if (!Number.isFinite(cents) || cents < 0) return null;
-
-    return { amountCents: cents, currency: (amount.currency_code ?? 'USD').toUpperCase() };
+    return { amountCents, currency, planId };
   } catch {
-    // Non-critical — order still created, amount updated on PAYMENT.SALE.COMPLETED
     return null;
   }
 }

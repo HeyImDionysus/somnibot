@@ -65,13 +65,50 @@ describe('payment-handler', () => {
  * prove WHICH plan row checkout selects, instead of just asserting that some
  * chain method was called.
  */
-function makeQueryEngine(tables: Record<string, any[]>) {
+function makeQueryEngine(
+  tables: Record<string, any[]>,
+  options: { orderInsertError?: string; freezeError?: string } = {},
+) {
   const inserts: Record<string, any[]> = {};
+  const rpc = vi.fn(async (name: string, args?: Record<string, unknown>) => {
+    if (name === 'commerce_select_checkout_plan') {
+      const candidates = [...(tables.plans ?? [])]
+        .filter((plan) =>
+          plan.guild_id === args?.p_guild_id
+          && plan.product_id === args?.p_product_id
+          && plan.active === true
+          && typeof plan.paypal_plan_id === 'string'
+          && plan.paypal_plan_id.trim().length > 0,
+        )
+        .sort((left, right) =>
+          left.price_cents - right.price_cents
+          || String(left.id).localeCompare(String(right.id)),
+        );
+      return { data: candidates.slice(0, 1), error: null };
+    }
+    if (name === 'commerce_freeze_order_grant_snapshot') {
+      if (options.freezeError) {
+        return { data: null, error: { message: options.freezeError } };
+      }
+      return {
+        data: {
+          order_id: args?.p_order_id,
+          granted_role_ids_snapshot: [],
+          granted_channel_ids_snapshot: [],
+          temporary_role_grants_snapshot: [],
+          grant_snapshot_frozen_at: '2026-07-11T00:00:00.000Z',
+        },
+        error: null,
+      };
+    }
+    return { data: 'ORD-TEST-1', error: null };
+  });
   const supabase = {
     from(table: string) {
       let rows = [...(tables[table] ?? [])];
       const chain: any = {
         select: () => chain,
+        update: () => chain,
         eq: (col: string, val: any) => {
           rows = rows.filter((r) => r[col] === val);
           return chain;
@@ -96,6 +133,16 @@ function makeQueryEngine(tables: Record<string, any[]>) {
           }),
         maybeSingle: () => Promise.resolve({ data: rows[0] ?? null, error: null }),
         insert: (obj: any) => {
+          if (table === 'orders' && options.orderInsertError) {
+            const failedInsert: any = {
+              select: () => failedInsert,
+              single: () => Promise.resolve({
+                data: null,
+                error: { message: options.orderInsertError },
+              }),
+            };
+            return failedInsert;
+          }
           (inserts[table] ??= []).push(obj);
           const inserted = { id: `${table}-new`, ...obj };
           const insChain: any = {
@@ -105,12 +152,13 @@ function makeQueryEngine(tables: Record<string, any[]>) {
           };
           return insChain;
         },
+        then: (resolve: Function) => resolve({ data: rows, error: null }),
       };
       return chain;
     },
-    rpc: vi.fn(async () => ({ data: 'ORD-TEST-1', error: null })),
+    rpc,
   } as any;
-  return { supabase, inserts };
+  return { supabase, inserts, rpc };
 }
 
 function makePayPalFetch() {
@@ -127,6 +175,15 @@ function makePayPalFetch() {
         JSON.stringify({
           id: 'SUB-1',
           links: [{ rel: 'approve', href: 'https://paypal.example/approve' }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (u.includes('/v2/checkout/orders')) {
+      return new Response(
+        JSON.stringify({
+          id: 'PAYPAL-ORDER-1',
+          links: [{ rel: 'approve', href: 'https://paypal.example/approve-order' }],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -155,6 +212,13 @@ const subscriptionProduct = {
   active: true,
   price_cents: 500,
   currency: 'USD',
+};
+
+const oneTimeProduct = {
+  ...subscriptionProduct,
+  name: 'Permanent Access',
+  type: 'one_time',
+  price_cents: 1_000,
 };
 
 /** Attacker-owned row: victim's product_id, attacker's guild_id, $0 so it
@@ -247,4 +311,214 @@ describe('handleBuyButton — cross-guild plan injection (subscription checkout)
       expect.objectContaining({ content: expect.stringContaining('No active subscription plan') }),
     );
   });
+
+  it('skips cheaper null and blank PayPal IDs and selects the first chargeable plan', async () => {
+    const { supabase, inserts, rpc } = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      plans: [
+        { ...legitPlan, id: 'plan-null', price_cents: 0, paypal_plan_id: null },
+        { ...legitPlan, id: 'plan-blank', price_cents: 1, paypal_plan_id: '   ' },
+        legitPlan,
+      ],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      makeInteraction(), supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(rpc).toHaveBeenCalledWith('commerce_select_checkout_plan', {
+      p_guild_id: VICTIM_GUILD,
+      p_product_id: 'prod-1',
+    });
+    const subCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/v1/billing/subscriptions'));
+    const payload = JSON.parse((subCall![1] as RequestInit).body as string);
+    expect(payload.plan_id).toBe('P-LEGIT');
+    expect(inserts.orders[0]?.plan_id).toBe('plan-legit');
+  });
+
+  it('keeps a zero-price PayPal-backed plan chargeable and selects it', async () => {
+    const zeroPricePlan = {
+      ...legitPlan,
+      id: 'plan-zero',
+      price_cents: 0,
+      paypal_plan_id: 'P-ZERO',
+      name: 'Provider-Priced Plan',
+    };
+    const { supabase, inserts } = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      plans: [legitPlan, zeroPricePlan],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      makeInteraction(), supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const subCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/v1/billing/subscriptions'));
+    const payload = JSON.parse((subCall![1] as RequestInit).body as string);
+    expect(payload.plan_id).toBe('P-ZERO');
+    expect(inserts.orders[0]).toMatchObject({ plan_id: 'plan-zero', amount_cents: 0 });
+  });
+
+  it('breaks equal-price plan ties by ascending plan ID', async () => {
+    const lowerIdPlan = {
+      ...legitPlan,
+      id: '00000000-0000-0000-0000-000000000001',
+      paypal_plan_id: 'P-LOW-ID',
+    };
+    const higherIdPlan = {
+      ...legitPlan,
+      id: '00000000-0000-0000-0000-000000000002',
+      paypal_plan_id: 'P-HIGH-ID',
+    };
+    const { supabase, inserts } = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      plans: [higherIdPlan, lowerIdPlan],
+      orders: [],
+    });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await handleBuyButton(
+      makeInteraction(), supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    const subCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/v1/billing/subscriptions'));
+    const payload = JSON.parse((subCall![1] as RequestInit).body as string);
+    expect(payload.plan_id).toBe('P-LOW-ID');
+    expect(inserts.orders[0]?.plan_id).toBe(lowerIdPlan.id);
+  });
+
+  it('fails loudly when the authoritative checkout selector is unavailable', async () => {
+    const { supabase, inserts, rpc } = makeQueryEngine({
+      products: [subscriptionProduct],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      plans: [legitPlan],
+      orders: [],
+    });
+    (rpc as any).mockImplementation(async (name: string) => name === 'commerce_select_checkout_plan'
+      ? { data: null, error: { message: 'database unavailable' } }
+      : { data: 'ORD-TEST-1', error: null });
+    const fetchMock = makePayPalFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const interaction = makeInteraction();
+
+    await handleBuyButton(
+      interaction, supabase, VICTIM_GUILD,
+      'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+    );
+
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/v1/billing/subscriptions'))).toBe(false);
+    expect(inserts.orders ?? []).toHaveLength(0);
+    expect(interaction.editReply).toHaveBeenCalledWith({
+      content: expect.stringContaining('plan verification failed'),
+    });
+  });
+});
+
+describe('handleBuyButton — durable checkout snapshot boundary', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function setup(
+    type: 'one_time' | 'subscription',
+    options: { orderInsertError?: string; freezeError?: string } = {},
+  ) {
+    const product = type === 'one_time' ? oneTimeProduct : subscriptionProduct;
+    const engine = makeQueryEngine({
+      products: [product],
+      customers: [{ id: 'cust-1', guild_id: VICTIM_GUILD, discord_id: 'user-1' }],
+      entitlements: [],
+      plans: type === 'subscription' ? [legitPlan] : [],
+      orders: [],
+    }, options);
+    vi.stubGlobal('fetch', makePayPalFetch());
+    return { ...engine, interaction: makeInteraction() };
+  }
+
+  it.each(['one_time', 'subscription'] as const)(
+    'persists and freezes the exact %s order before exposing an approval link',
+    async (type) => {
+      const { supabase, rpc, interaction } = setup(type);
+
+      await handleBuyButton(
+        interaction, supabase, VICTIM_GUILD,
+        'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+      );
+
+      expect(rpc).toHaveBeenCalledWith('commerce_freeze_order_grant_snapshot', {
+        p_order_id: 'orders-new',
+        p_guild_id: VICTIM_GUILD,
+        p_customer_id: 'cust-1',
+        p_product_id: 'prod-1',
+      });
+      expect(interaction.editReply).toHaveBeenLastCalledWith(
+        expect.objectContaining({ components: expect.any(Array) }),
+      );
+      const freezeCallOrder = rpc.mock.invocationCallOrder[
+        rpc.mock.calls.findIndex(([name]) => name === 'commerce_freeze_order_grant_snapshot')
+      ];
+      expect(freezeCallOrder).toBeLessThan(interaction.editReply.mock.invocationCallOrder.at(-1)!);
+    },
+  );
+
+  it.each(['one_time', 'subscription'] as const)(
+    'does not expose a %s approval link when the local order insert fails',
+    async (type) => {
+      const { supabase, rpc, interaction } = setup(type, { orderInsertError: 'database unavailable' });
+
+      await handleBuyButton(
+        interaction, supabase, VICTIM_GUILD,
+        'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+      );
+
+      expect(rpc.mock.calls.some(([name]) => name === 'commerce_freeze_order_grant_snapshot')).toBe(false);
+      expect(interaction.editReply).toHaveBeenLastCalledWith({
+        content: expect.stringContaining('could not be safely recorded'),
+      });
+      expect(
+        interaction.editReply.mock.calls.some(
+          (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['one_time', 'subscription'] as const)(
+    'does not expose a %s approval link when snapshot freeze fails',
+    async (type) => {
+      const { supabase, rpc, interaction } = setup(type, { freezeError: 'sale contract changed' });
+
+      await handleBuyButton(
+        interaction, supabase, VICTIM_GUILD,
+        'https://api.paypal.example', 'client-id', 'secret', 'https://dashboard.example',
+      );
+
+      expect(rpc.mock.calls.some(([name]) => name === 'commerce_freeze_order_grant_snapshot')).toBe(true);
+      expect(interaction.editReply).toHaveBeenLastCalledWith({
+        content: expect.stringContaining('configuration changed'),
+      });
+      expect(
+        interaction.editReply.mock.calls.some(
+          (call: Array<{ components?: unknown }>) => Array.isArray(call[0]?.components),
+        ),
+      ).toBe(false);
+    },
+  );
 });

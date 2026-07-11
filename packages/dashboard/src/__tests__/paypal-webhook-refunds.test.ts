@@ -2,8 +2,8 @@
  * Refund / reversal semantics for POST /api/paypal/webhook.
  *
  * W2 hardening — differentiated refund handling:
- *  (a) FULL refund  → revoke entitlements + license keys + license sessions,
- *      queue Discord role revocation, write a reliable audit trail.
+ *  (a) FULL refund  → revoke entitlements + license keys + license sessions;
+ *      the terminal entitlement trigger owns Discord revocation atomically.
  *  (b) PARTIAL refund → do NOT auto-revoke; record the refund, raise an
  *      operator-review alert, and audit the decision.
  *  (c) Idempotency → replayed refund events must not double-process
@@ -109,6 +109,7 @@ function makeResolvedChain(
     'maybeSingle',
     'in',
     'neq',
+    'gt',
     'is',
     'lt',
     'contains',
@@ -159,9 +160,18 @@ function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
     const callCount = tableCallCounts.get(table) ?? 0;
     tableCallCounts.set(table, callCount + 1);
     const tableRows = rows[table] ?? { data: null, error: null };
-    const resolved = Array.isArray(tableRows)
+    const selected = Array.isArray(tableRows)
       ? tableRows[Math.min(callCount, tableRows.length - 1)]
       : tableRows;
+    const resolved = table === 'payment_refunds' && Array.isArray(selected.data)
+      ? {
+          ...selected,
+          data: selected.data.map((row, index) => ({
+            id: `refund-row-${callCount}-${String(index).padStart(4, '0')}`,
+            ...(row as Record<string, unknown>),
+          })),
+        }
+      : selected;
 
     return makeResolvedChain(
       resolved,
@@ -206,7 +216,7 @@ const basePayment = {
 };
 
 describe('PayPal webhook — full refund semantics', () => {
-  it('full capture refund revokes entitlements, license keys, sessions and queues role revocation', async () => {
+  it('full capture refund revokes durable access and delegates roles to the atomic trigger', async () => {
     const { inserts, updates, inCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
@@ -225,7 +235,7 @@ describe('PayPal webhook — full refund semantics', () => {
           ],
           error: null,
         },
-        { data: [], error: null }, // role-preservation lookup (other orders)
+        { data: null, error: null }, // terminal entitlement update
         { data: null, error: null }, // revocation update
       ],
       license_keys: [
@@ -306,21 +316,12 @@ describe('PayPal webhook — full refund semantics', () => {
       values: ['license-1', 'license-2'],
     });
 
-    // Role revocation queued for the bot
-    expect(inserts).toContainEqual({
-      table: 'bot_action_queue',
-      payload: expect.objectContaining({
-        guild_id: 'guild-1',
-        action: 'revoke_roles',
-        payload: expect.objectContaining({
-          discord_id: 'discord-1',
-          role_ids: ['role-1', 'role-2'],
-          reason: 'refunded',
-          order_id: 'order-1',
-        }),
-        status: 'pending',
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({ action: 'revoke_roles' }),
       }),
-    });
+    );
 
     // Audit trail with refund details
     expect(inserts).toContainEqual({
@@ -340,13 +341,46 @@ describe('PayPal webhook — full refund semantics', () => {
           payment_amount_cents: 1000,
           entitlement_ids: ['entitlement-1'],
           license_key_ids: ['license-1', 'license-2'],
-          role_ids: ['role-1', 'role-2'],
+          role_revocation_source: 'entitlement_status_trigger',
         }),
       }),
     });
   });
 
-  it('full refund preserves roles still granted by other active entitlements', async () => {
+  it('keyset-paginates every recorded refund before classifying cumulative scope', async () => {
+    const firstPage = Array.from({ length: 500 }, () => ({ amount_cents: 1 }));
+    const { updates } = useWebhookRows({
+      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+      payment_refunds: [
+        { data: null, error: null },
+        { data: firstPage, error: null },
+        { data: [{ amount_cents: 500 }], error: null },
+      ],
+      entitlements: [{ data: [], error: null }, { data: null, error: null }],
+      license_keys: [{ data: [], error: null }, { data: null, error: null }],
+      audit_logs: { data: null, error: null },
+      orders: { data: null, error: null },
+    });
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-PAGE-501',
+        amount: { value: '0.01', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-REFUND-PAGE-501',
+    });
+
+    const res = await POST(req as never);
+
+    expect(res.status).toBe(200);
+    expect(updates).toContainEqual({
+      table: 'payments',
+      payload: expect.objectContaining({ status: 'refunded' }),
+    });
+  });
+
+  it('full refund emits no legacy partial queue for shared or suspended role owners', async () => {
     const { inserts } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
@@ -366,7 +400,7 @@ describe('PayPal webhook — full refund semantics', () => {
           error: null,
         },
         {
-          data: [{ granted_role_ids: ['role-shared', 'role-other'] }],
+          data: [{ status: 'suspended', granted_role_ids: ['role-shared', 'role-other'] }],
           error: null,
         },
         { data: null, error: null },
@@ -390,13 +424,12 @@ describe('PayPal webhook — full refund semantics', () => {
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(inserts).toContainEqual({
-      table: 'bot_action_queue',
-      payload: expect.objectContaining({
-        action: 'revoke_roles',
-        payload: expect.objectContaining({ role_ids: ['role-1'] }),
+    expect(inserts).not.toContainEqual(
+      expect.objectContaining({
+        table: 'bot_action_queue',
+        payload: expect.objectContaining({ action: 'revoke_roles' }),
       }),
-    });
+    );
   });
 
   it('capture reversal (chargeback) always revokes in full even with a partial amount', async () => {
@@ -538,7 +571,6 @@ describe('PayPal webhook — full refund semantics', () => {
           ],
           error: null,
         },
-        { data: [], error: null },
         { data: null, error: { message: 'entitlement update failed' } },
       ],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
@@ -565,7 +597,7 @@ describe('PayPal webhook — full refund semantics', () => {
     errorSpy.mockRestore();
   });
 
-  it('full refund returns 500 when role revocation cannot be queued', async () => {
+  it('full refund no longer performs a second legacy role queue insert', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { updates } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
@@ -604,8 +636,8 @@ describe('PayPal webhook — full refund semantics', () => {
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(500);
-    expect(updates).not.toContainEqual({
+    expect(res.status).toBe(200);
+    expect(updates).toContainEqual({
       table: 'payments',
       payload: expect.objectContaining({ status: 'refunded' }),
     });
@@ -835,7 +867,7 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
     errorSpy.mockRestore();
   });
 
-  it('failed refund events are resumable — the PayPal retry re-processes them', async () => {
+  it('failed refund events resume without creating a legacy partial role queue', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
@@ -894,16 +926,12 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
 
       const res = await POST(req as never);
       expect(res.status).toBe(200);
-      expect(inserts).toContainEqual({
-        table: 'bot_action_queue',
-        payload: expect.objectContaining({
-          action: 'revoke_roles',
-          payload: expect.objectContaining({
-            role_ids: ['role-1'],
-            reason: 'refunded',
-          }),
+      expect(inserts).not.toContainEqual(
+        expect.objectContaining({
+          table: 'bot_action_queue',
+          payload: expect.objectContaining({ action: 'revoke_roles' }),
         }),
-      });
+      );
       expect(updates).toContainEqual({
         table: 'webhook_events',
         payload: expect.objectContaining({ result: 'success' }),
@@ -913,7 +941,7 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
     }
   });
 
-  it('refund retry does not queue duplicate role revocation already queued by the failed attempt', async () => {
+  it('refund retry never recreates a legacy role revocation from a failed attempt', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
@@ -994,10 +1022,27 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
   it('PAYMENT.SALE.COMPLETED persists the sale currency instead of hardcoded USD', async () => {
     const { inserts } = useWebhookRows({
       orders: {
-        data: { id: 'order-sub-eur', customer_id: 'customer-1', guild_id: 'guild-1' },
+        data: {
+          id: 'order-sub-eur',
+          customer_id: 'customer-1',
+          guild_id: 'guild-1',
+          paypal_subscription_id: 'SUB-EUR-1',
+        },
         error: null,
       },
-      payments: { data: null, error: null },
+      payments: {
+        data: {
+          id: 'payment-sale-eur-1',
+          order_id: 'order-sub-eur',
+          customer_id: 'customer-1',
+          guild_id: 'guild-1',
+          paypal_payment_id: 'SALE-EUR-1',
+          amount_cents: 999,
+          currency: 'EUR',
+          status: 'completed',
+        },
+        error: null,
+      },
     });
 
     const req = makeReplay({
@@ -1021,6 +1066,229 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
         status: 'completed',
       }),
     });
+  });
+
+  it('PAYMENT.SALE.COMPLETED retries when its exact subscription order read fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts } = useWebhookRows({
+        orders: { data: null, error: { message: 'order lookup unavailable' } },
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-ORDER-READ-FAIL',
+          billing_agreement_id: 'SUB-ORDER-READ-FAIL',
+          amount: { total: '9.99', currency: 'EUR' },
+        },
+        id: 'EVT-SALE-ORDER-READ-FAIL',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'payments' }));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('PAYMENT.SALE.COMPLETED retries when the payment insert fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      useWebhookRows({
+        orders: {
+          data: {
+            id: 'order-insert-fail',
+            customer_id: 'customer-1',
+            guild_id: 'guild-1',
+            paypal_subscription_id: 'SUB-INSERT-FAIL',
+          },
+          error: null,
+        },
+        payments: { data: null, error: { code: '08006', message: 'write unavailable' } },
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-INSERT-FAIL',
+          billing_agreement_id: 'SUB-INSERT-FAIL',
+          amount: { total: '9.99', currency: 'EUR' },
+        },
+        id: 'EVT-SALE-INSERT-FAIL',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('PAYMENT.SALE.COMPLETED accepts a 23505 replay only when the persisted row is exact', async () => {
+    const { inserts } = useWebhookRows({
+      orders: {
+        data: {
+          id: 'order-exact-replay',
+          customer_id: 'customer-1',
+          guild_id: 'guild-1',
+          paypal_subscription_id: 'SUB-EXACT-REPLAY',
+        },
+        error: null,
+      },
+      payments: [
+        { data: null, error: { code: '23505', message: 'duplicate payment' } },
+        {
+          data: {
+            id: 'payment-exact-replay',
+            order_id: 'order-exact-replay',
+            customer_id: 'customer-1',
+            guild_id: 'guild-1',
+            paypal_payment_id: 'SALE-EXACT-REPLAY',
+            amount_cents: 999,
+            currency: 'EUR',
+            status: 'completed',
+          },
+          error: null,
+        },
+      ],
+    });
+    const req = makeReplay({
+      event_type: 'PAYMENT.SALE.COMPLETED',
+      resource: {
+        id: 'SALE-EXACT-REPLAY',
+        billing_agreement_id: 'SUB-EXACT-REPLAY',
+        amount: { total: '9.99', currency: 'EUR' },
+      },
+      id: 'EVT-SALE-EXACT-REPLAY',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+  });
+
+  it('errored PAYMENT.SALE.COMPLETED redelivery resumes through exact 23505 validation', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
+    );
+    try {
+      const { inserts, updates } = useWebhookRows({
+        orders: [
+          {
+            data: [
+              {
+                guild_id: 'guild-1',
+                status: 'completed',
+                created_at: '2026-07-11T00:00:00.000Z',
+              },
+            ],
+            error: null,
+          },
+          {
+            data: {
+              id: 'order-resumed-sale',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_subscription_id: 'SUB-RESUMED-SALE',
+            },
+            error: null,
+          },
+        ],
+        webhook_events: [
+          { data: [], error: null },
+          { data: { result: 'error', processed_at: new Date().toISOString() }, error: null },
+          { data: { event_id: 'EVT-SALE-RESUMED' }, error: null },
+          { data: null, error: null },
+        ],
+        payments: [
+          { data: null, error: { code: '23505', message: 'duplicate payment' } },
+          {
+            data: {
+              id: 'payment-resumed-sale',
+              order_id: 'order-resumed-sale',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_payment_id: 'SALE-RESUMED',
+              amount_cents: 999,
+              currency: 'EUR',
+              status: 'completed',
+            },
+            error: null,
+          },
+        ],
+      });
+      const req = makeSignedWebhook({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-RESUMED',
+          billing_agreement_id: 'SUB-RESUMED-SALE',
+          amount: { total: '9.99', currency: 'EUR' },
+        },
+        id: 'EVT-SALE-RESUMED',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ result: null, error_details: null }),
+      });
+      expect(updates).toContainEqual({
+        table: 'webhook_events',
+        payload: expect.objectContaining({ result: 'success' }),
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('PAYMENT.SALE.COMPLETED rejects a 23505 replay whose persisted row differs', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      useWebhookRows({
+        orders: {
+          data: {
+            id: 'order-mismatched-replay',
+            customer_id: 'customer-1',
+            guild_id: 'guild-1',
+            paypal_subscription_id: 'SUB-MISMATCHED-REPLAY',
+          },
+          error: null,
+        },
+        payments: [
+          { data: null, error: { code: '23505', message: 'duplicate payment' } },
+          {
+            data: {
+              id: 'payment-mismatched-replay',
+              order_id: 'order-mismatched-replay',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_payment_id: 'SALE-MISMATCHED-REPLAY',
+              amount_cents: 1,
+              currency: 'EUR',
+              status: 'completed',
+            },
+            error: null,
+          },
+        ],
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-MISMATCHED-REPLAY',
+          billing_agreement_id: 'SUB-MISMATCHED-REPLAY',
+          amount: { total: '9.99', currency: 'EUR' },
+        },
+        id: 'EVT-SALE-MISMATCHED-REPLAY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('partial sale refund on a legacy USD-labeled payment stays partial when the payload confirms the sale currency', async () => {
@@ -1162,11 +1430,18 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
           guild_id: 'guild-1',
           customer_id: 'customer-1',
           product_id: 'product-1',
+          paypal_subscription_id: 'SUB-CANCEL-QUEUE-FAIL',
         },
         error: null,
       },
-      products: { data: { name: 'Subscription' }, error: null },
-      customers: { data: { discord_id: 'discord-1' }, error: null },
+      products: {
+        data: { id: 'product-1', guild_id: 'guild-1', name: 'Subscription' },
+        error: null,
+      },
+      customers: {
+        data: { id: 'customer-1', guild_id: 'guild-1', discord_id: 'discord-1' },
+        error: null,
+      },
       bot_action_queue: { data: null, error: { message: 'queue insert failed' } },
     });
 
@@ -1191,11 +1466,18 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
           guild_id: 'guild-1',
           customer_id: 'customer-1',
           product_id: 'product-1',
+          paypal_subscription_id: 'SUB-SUSPEND-QUEUE-FAIL',
         },
         error: null,
       },
-      products: { data: { name: 'Subscription' }, error: null },
-      customers: { data: { discord_id: 'discord-1' }, error: null },
+      products: {
+        data: { id: 'product-1', guild_id: 'guild-1', name: 'Subscription' },
+        error: null,
+      },
+      customers: {
+        data: { id: 'customer-1', guild_id: 'guild-1', discord_id: 'discord-1' },
+        error: null,
+      },
       bot_action_queue: { data: null, error: { message: 'queue insert failed' } },
     });
 
@@ -1238,12 +1520,19 @@ describe('PayPal webhook — subscription cancellation/suspension queue reliabil
             guild_id: 'guild-1',
             customer_id: 'customer-1',
             product_id: 'product-1',
+            paypal_subscription_id: input.eventId.replace(/^EVT-/, ''),
           },
           error: null,
         },
       ],
-      products: { data: { name: 'Subscription' }, error: null },
-      customers: { data: { discord_id: 'discord-1' }, error: null },
+      products: {
+        data: { id: 'product-1', guild_id: 'guild-1', name: 'Subscription' },
+        error: null,
+      },
+      customers: {
+        data: { id: 'customer-1', guild_id: 'guild-1', discord_id: 'discord-1' },
+        error: null,
+      },
       bot_action_queue: [
         input.queueProbe, // retry dedupe probe
         { data: null, error: null }, // fulfillment insert

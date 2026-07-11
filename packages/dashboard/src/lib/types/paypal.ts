@@ -43,6 +43,7 @@ export const paypalCaptureResourceSchema = z.object({
   supplementary_data: z.object({
     related_ids: z.object({
       capture_id: z.string().optional(),
+      order_id: z.string().optional(),
     }).optional(),
   }).optional(),
   links: z.array(paypalLinkSchema).optional(),

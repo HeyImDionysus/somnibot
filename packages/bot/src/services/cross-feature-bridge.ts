@@ -5,12 +5,8 @@
  *
  * 1. Ban / Kick → remove active giveaway entries, close open tickets
  * 2. Level Up → check for discount unlock thresholds, grant roles
- * 3. Purchase Complete → grant XP bonus, emit celebration
- * 4. Fraud Flag → auto-flag related tickets, notify owner
- * 5. Ticket Closed → trigger satisfaction survey (future), log resolution time
- * 6. Infraction Created → check escalation thresholds, remove giveaway entries if ban
- * 7. Giveaway Won → auto-fulfill if commerce product prize
- * 8. Music Idle → pause after timeout, free resources
+ * 3. Ticket Closed → trigger satisfaction survey, log resolution time
+ * 4. Infraction Created → check escalation thresholds, remove giveaway entries if ban
  *
  * GAP 3: Features Completely Siloed
  *
@@ -146,36 +142,11 @@ export class CrossFeatureBridge {
       }
     });
 
-    // ── 3. Purchase Complete → XP bonus + Role grants ──────
+    // Purchase fulfillment is owned by the canonical entitlement pipeline.
+    // Cross-feature listeners must not derive Discord roles from mutable
+    // product metadata or convert real-money purchases into game XP.
 
-    this.on('purchase.completed', async (event) => {
-      const userId = event.data.discordId;
-      const productName = event.data.productName ?? 'a product';
-      const orderId = event.data.orderId;
-      const productId = event.data.productId;
-      if (!userId) return;
-
-      // 3a. Grant XP bonus for purchase (atomic — handles upsert, increment, and level recalc)
-      const XP_BONUS = 500;
-      const { error: xpError } = await this.supabase.rpc('increment_member_xp', {
-        p_guild_id: this.guild.id,
-        p_member_id: userId,
-        p_xp_amount: XP_BONUS,
-      });
-
-      if (xpError) {
-        log.error(`Failed to grant purchase XP to ${userId}:`, xpError.message);
-      } else {
-        log.info(`Granted ${XP_BONUS} XP to ${userId} for purchase ${orderId}`);
-      }
-
-      // 3b. Grant Discord role if this product is a role-grant item
-      if (productId) {
-        await this.grantPurchaseRole(userId, productId);
-      }
-    });
-
-    // ── 4. Ticket Closed → Resolution metrics + Satisfaction Survey ─────
+    // ── 3. Ticket Closed → Resolution metrics + Satisfaction Survey ─────
 
     this.on('ticket.closed', async (event) => {
       const ticketId = event.data.ticketId;
@@ -215,14 +186,14 @@ export class CrossFeatureBridge {
         await this.valkey.ltrim(`stats:tickets:${this.guild.id}:resolution_times`, 0, 99).catch(() => { /* fire-and-forget stats */ });
       }
 
-      // 4b. Satisfaction survey DM
+      // 3b. Satisfaction survey DM
       const creatorId = event.data.userDiscordId;
       if (creatorId) {
         await this.sendSatisfactionSurvey(ticketId, creatorId);
       }
     });
 
-    // ── 5. Infraction → Escalation + Giveaway cleanup ──────
+    // ── 4. Infraction → Escalation + Giveaway cleanup ──────
 
     this.on('infraction.created', async (event) => {
       const userId = event.data.userId;
@@ -235,7 +206,7 @@ export class CrossFeatureBridge {
       }
     });
 
-    // ── 6. Giveaway Ended → Commerce fulfillment ───────────
+    // ── 5. Giveaway Ended → Commerce fulfillment ───────────
     // NOTE: Giveaway prize fulfillment is handled by GiveawayFulfillmentService,
     // which listens to the same event with proper product lookup, customer
     // creation, and EntitlementService.grant() calls. Removed duplicate handler
@@ -311,53 +282,6 @@ export class CrossFeatureBridge {
       });
     } catch (err) {
       log.error('Satisfaction survey failed:', { error: String(err) });
-    }
-  }
-
-  private async grantPurchaseRole(userId: string, productId: string): Promise<void> {
-    try {
-      // V10 Audit H-2: Was querying 'economy_items' but purchase.completed
-      // events come from the commerce system where productId refers to 'products'.
-      const { data: product } = await this.supabase
-        .from('products')
-        .select('metadata')
-        .eq('id', productId)
-        .maybeSingle();
-
-      if (!product) return;
-      const metadata = product.metadata as Record<string, unknown> | null;
-      const roleId = metadata?.grant_role_id as string | undefined;
-      if (!roleId) return;
-
-      const member = await this.guild.members.fetch(userId).catch(() => null);
-      if (!member) return;
-
-      const roleDurationHours = metadata?.role_duration_hours as number | undefined;
-      const durationMs = roleDurationHours ? roleDurationHours * 3600_000 : null;
-
-      // This path is reached from the commerce `purchase.completed` event and
-      // resolves `productId` against the REAL-money `products` table (see V10
-      // H-2 above), so the audit provenance must be commerce-accurate — never
-      // the play-money game-economy label 'economy_purchase'. Conflating the
-      // two money systems mislabels real-money records as game events.
-      await member.roles.add(roleId, 'SomniBot commerce purchase — role item');
-      log.info(`Granted role ${roleId} to ${userId} via commerce purchase`);
-
-      // If temporary role, schedule removal
-      if (durationMs) {
-        const expiresAt = new Date(Date.now() + durationMs).toISOString();
-        await this.supabase.from('temp_role_grants').insert({
-          guild_id: this.guild.id,
-          user_id: userId,
-          role_id: roleId,
-          expires_at: expiresAt,
-          source: 'commerce_purchase',
-          source_id: productId,
-        });
-        log.info(`Temporary role ${roleId} for ${userId} expires at ${expiresAt}`);
-      }
-    } catch (err) {
-      log.error('Role grant from purchase failed:', { error: String(err) });
     }
   }
 

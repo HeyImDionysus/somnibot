@@ -119,6 +119,383 @@ function trackCronHandle(cronHandles: NodeJS.Timeout[], handle: NodeJS.Timeout):
   cronHandles.push(handle);
 }
 
+const COMMERCE_TEMP_ROLE_SOURCES = new Set(['commerce_purchase', 'economy_purchase', 'purchase']);
+const LIVE_ENTITLEMENT_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
+const TEMP_ROLE_GRANT_SWEEP_PAGE_SIZE = 200;
+
+type ExpiredTempRoleGrant = {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  expires_at: string;
+  source: string | null;
+  order_id: string | null;
+  grant_status: 'pending' | 'applied';
+  remove_on_expiry: boolean;
+};
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value;
+}
+
+function isExpiredTempRoleGrant(value: unknown): value is ExpiredTempRoleGrant {
+  if (!value || typeof value !== 'object') return false;
+  const grant = value as Partial<ExpiredTempRoleGrant>;
+  return (
+    isNonBlankString(grant.id)
+    && isNonBlankString(grant.guild_id)
+    && isNonBlankString(grant.user_id)
+    && isNonBlankString(grant.role_id)
+    && isNonBlankString(grant.expires_at)
+    && Number.isFinite(Date.parse(grant.expires_at))
+    && (grant.source === null || isNonBlankString(grant.source))
+    && (grant.order_id === null || isNonBlankString(grant.order_id))
+    && (grant.grant_status === 'pending' || grant.grant_status === 'applied')
+    && typeof grant.remove_on_expiry === 'boolean'
+  );
+}
+
+async function deleteTempRoleGrant(
+  client: Pick<SomniClient, 'supabase'>,
+  grant: ExpiredTempRoleGrant,
+): Promise<boolean> {
+  try {
+    let query = client.supabase
+      .from('temp_role_grants')
+      .delete()
+      .eq('id', grant.id)
+      .eq('guild_id', grant.guild_id)
+      .eq('user_id', grant.user_id)
+      .eq('role_id', grant.role_id)
+      .eq('expires_at', grant.expires_at)
+      .eq('grant_status', grant.grant_status)
+      .eq('remove_on_expiry', grant.remove_on_expiry);
+
+    query = grant.source === null
+      ? query.is('source', null)
+      : query.eq('source', grant.source);
+    query = grant.order_id === null
+      ? query.is('order_id', null)
+      : query.eq('order_id', grant.order_id);
+
+    const { data: deleted, error } = await query
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      log.error('Temp role grant provenance deletion failed', {
+        grantId: grant.id,
+        error: error.message,
+      });
+      return false;
+    }
+    if (deleted?.id !== grant.id) {
+      log.warn('Temp role grant changed before provenance deletion; stale sweep preserved it', {
+        grantId: grant.id,
+      });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    log.error('Temp role grant provenance deletion failed', {
+      grantId: grant.id,
+      error: String(err),
+    });
+    return false;
+  }
+}
+
+async function hasOtherLiveRoleOwner(
+  client: Pick<SomniClient, 'supabase'>,
+  grant: ExpiredTempRoleGrant,
+  nowIso: string,
+): Promise<boolean> {
+  const { data: overlappingGrants, error: overlappingError } = await client.supabase
+    .from('temp_role_grants')
+    .select('id, guild_id, user_id, role_id, expires_at, grant_status, remove_on_expiry')
+    .eq('guild_id', grant.guild_id)
+    .eq('user_id', grant.user_id)
+    .eq('role_id', grant.role_id)
+    .neq('id', grant.id)
+    .in('grant_status', ['pending', 'applied'])
+    .gt('expires_at', nowIso)
+    .order('id', { ascending: true })
+    .limit(1);
+  if (overlappingError) {
+    throw new Error(`overlapping grant lookup failed: ${overlappingError.message}`);
+  }
+  if (!Array.isArray(overlappingGrants) || overlappingGrants.length > 1) {
+    throw new Error('overlapping grant lookup returned a malformed result');
+  }
+  if (overlappingGrants.length > 0) {
+    const successor = overlappingGrants[0];
+    const successorExpiry = Date.parse(successor?.expires_at ?? '');
+    if (
+      !successor
+      || !isNonBlankString(successor.id)
+      || successor.guild_id !== grant.guild_id
+      || successor.user_id !== grant.user_id
+      || successor.role_id !== grant.role_id
+      || !Number.isFinite(successorExpiry)
+      || successorExpiry <= Date.parse(nowIso)
+      || (successor.grant_status !== 'pending' && successor.grant_status !== 'applied')
+      || typeof successor.remove_on_expiry !== 'boolean'
+    ) {
+      throw new Error('overlapping grant lookup returned a mismatched successor');
+    }
+
+    // If this expiring provenance owned removal, hand that responsibility to
+    // the deterministic live successor before deleting the current row. This
+    // closes the window where B is purchased after A expired but before A's
+    // sweep: B sees the role already present, while A must teach B that the
+    // shared role still needs final cleanup.
+    if (grant.remove_on_expiry && !successor.remove_on_expiry) {
+      const { data: transferred, error: transferError } = await client.supabase
+        .from('temp_role_grants')
+        .update({ remove_on_expiry: true, updated_at: new Date().toISOString() })
+        .eq('id', successor.id)
+        .eq('guild_id', grant.guild_id)
+        .eq('user_id', grant.user_id)
+        .eq('role_id', grant.role_id)
+        .in('grant_status', ['pending', 'applied'])
+        .gt('expires_at', nowIso)
+        .select('id, remove_on_expiry')
+        .maybeSingle();
+      if (
+        transferError
+        || transferred?.id !== successor.id
+        || transferred.remove_on_expiry !== true
+      ) {
+        throw new Error(
+          `overlapping grant removal-intent transfer failed: ${transferError?.message ?? 'unacknowledged update'}`,
+        );
+      }
+    }
+    return true;
+  }
+
+  const { data: customer, error: customerError } = await client.supabase
+    .from('customers')
+    .select('id')
+    .eq('guild_id', grant.guild_id)
+    .eq('discord_id', grant.user_id)
+    .maybeSingle();
+  if (customerError) {
+    throw new Error(`customer lookup failed: ${customerError.message}`);
+  }
+  if (!customer) {
+    if (COMMERCE_TEMP_ROLE_SOURCES.has(grant.source ?? '')) {
+      throw new Error('customer lookup returned a missing commerce identity');
+    }
+    return false;
+  }
+  if (!isNonBlankString(customer.id)) {
+    throw new Error('customer lookup returned a malformed or missing identity');
+  }
+
+  const { data: entitlements, error: entitlementError } = await client.supabase
+    .from('entitlements')
+    .select('id')
+    .eq('guild_id', grant.guild_id)
+    .eq('customer_id', customer.id)
+    .in('status', LIVE_ENTITLEMENT_STATUSES)
+    .contains('granted_role_ids', [grant.role_id])
+    .limit(1);
+  if (entitlementError) {
+    throw new Error(`entitlement lookup failed: ${entitlementError.message}`);
+  }
+  if (!Array.isArray(entitlements) || entitlements.length > 1) {
+    throw new Error('entitlement lookup returned a malformed result');
+  }
+  return entitlements.length > 0;
+}
+
+async function removeDiscordRoleAndConfirm(
+  client: Pick<SomniClient, 'guilds'>,
+  grant: ExpiredTempRoleGrant,
+): Promise<void> {
+  const guild = client.guilds.cache.get(grant.guild_id);
+  if (!guild) throw new Error('guild is unavailable');
+
+  let member = await guild.members.fetch({ user: grant.user_id, force: true });
+  if (!member.roles.cache.has(grant.role_id)) return;
+
+  await member.roles.remove(grant.role_id, 'SomniBot — temporary role expired');
+  member = await guild.members.fetch({ user: grant.user_id, force: true });
+  if (member.roles.cache.has(grant.role_id)) {
+    throw new Error('Discord still reports the expired role after removal');
+  }
+}
+
+async function ensureDiscordRoleAndConfirm(
+  client: Pick<SomniClient, 'guilds'>,
+  grant: ExpiredTempRoleGrant,
+): Promise<void> {
+  const guild = client.guilds.cache.get(grant.guild_id);
+  if (!guild) throw new Error('guild is unavailable');
+
+  let member = await guild.members.fetch({ user: grant.user_id, force: true });
+  if (!member.roles.cache.has(grant.role_id)) {
+    await member.roles.add(
+      grant.role_id,
+      'SomniBot — repair role retained by a concurrent commerce owner',
+    );
+    member = await guild.members.fetch({ user: grant.user_id, force: true });
+  }
+  if (!member.roles.cache.has(grant.role_id)) {
+    throw new Error('Discord did not confirm the concurrently-owned role');
+  }
+}
+
+async function sweepExpiredTempRoleGrant(
+  client: Pick<SomniClient, 'guilds' | 'supabase'>,
+  grant: ExpiredTempRoleGrant,
+  nowIso: string,
+): Promise<'removed' | 'preserved'> {
+  if (!grant.source) return 'preserved';
+
+  try {
+    const commerceGrant = COMMERCE_TEMP_ROLE_SOURCES.has(grant.source);
+
+    // Legacy commerce rows lack an order-scoped identity and remove intent.
+    // Quarantine them rather than guessing whether this process added the
+    // member's role.
+    if (commerceGrant && !grant.order_id) return 'preserved';
+
+    if (commerceGrant && grant.grant_status === 'pending') {
+      if (!grant.remove_on_expiry) {
+        return await deleteTempRoleGrant(client, grant) ? 'removed' : 'preserved';
+      }
+
+      // A pending row with removal intent is deliberately ambiguous: Discord
+      // may have rejected the add, or the add may have succeeded before its
+      // confirmation/acknowledgement failed. Never remove a role on that
+      // uncertainty; preserve the row for retry/operator reconciliation.
+      log.warn('Ambiguous pending commerce role grant preserved after expiry', {
+        grantId: grant.id,
+        orderId: grant.order_id,
+      });
+      return 'preserved';
+    }
+
+    if (commerceGrant && grant.grant_status !== 'applied') {
+      log.error('Temp role grant has an unknown lifecycle state; provenance preserved', {
+        grantId: grant.id,
+        grantStatus: grant.grant_status,
+      });
+      return 'preserved';
+    }
+
+    if (commerceGrant && !grant.remove_on_expiry) {
+      return await deleteTempRoleGrant(client, grant) ? 'removed' : 'preserved';
+    }
+
+    if (await hasOtherLiveRoleOwner(client, grant, nowIso)) {
+      return await deleteTempRoleGrant(client, grant) ? 'removed' : 'preserved';
+    }
+
+    await removeDiscordRoleAndConfirm(client, grant);
+
+    try {
+      if (await hasOtherLiveRoleOwner(client, grant, new Date().toISOString())) {
+        await ensureDiscordRoleAndConfirm(client, grant);
+      }
+    } catch (ownershipError) {
+      // Ownership is source-agnostic. If the post-removal read fails, restore
+      // the role for both commerce and non-commerce grants rather than strand
+      // a concurrent paid/manual/temp owner.
+      try {
+        await ensureDiscordRoleAndConfirm(client, grant);
+      } catch (repairError) {
+        throw new Error(
+          `post-removal ownership verification failed (${String(ownershipError)}); role repair failed (${String(repairError)})`,
+        );
+      }
+      throw new Error(
+        `post-removal ownership verification failed; role was restored (${String(ownershipError)})`,
+      );
+    }
+
+    return await deleteTempRoleGrant(client, grant) ? 'removed' : 'preserved';
+  } catch (err) {
+    log.error('Temp role expiry failed for grant; provenance preserved', {
+      grantId: grant.id,
+      error: String(err),
+    });
+    return 'preserved';
+  }
+}
+
+/** Sweep every expired role grant without deleting independent or unverified roles. */
+export async function sweepExpiredTempRoleGrants(
+  client: Pick<SomniClient, 'guilds' | 'supabase'>,
+): Promise<void> {
+  const nowIso = new Date().toISOString();
+  let cursor: string | null = null;
+  let removed = 0;
+  let preserved = 0;
+
+  while (true) {
+    let query = client.supabase
+      .from('temp_role_grants')
+      .select('id, guild_id, user_id, role_id, expires_at, source, order_id, grant_status, remove_on_expiry')
+      .lt('expires_at', nowIso);
+    if (cursor !== null) query = query.gt('id', cursor);
+
+    let expired: ExpiredTempRoleGrant[];
+    try {
+      const result = await query
+        .order('id', { ascending: true })
+        .limit(TEMP_ROLE_GRANT_SWEEP_PAGE_SIZE);
+      if (result.error) {
+        log.error('Temp role expiry lookup failed', { error: result.error.message });
+        return;
+      }
+      if (!Array.isArray(result.data)) {
+        log.error('Temp role expiry lookup returned a malformed result');
+        return;
+      }
+      expired = result.data;
+    } catch (err) {
+      log.error('Temp role expiry sweep error', { error: String(err) });
+      return;
+    }
+
+    if (expired.length === 0) break;
+
+    let previousId = cursor;
+    for (const grant of expired) {
+      if (
+        !isExpiredTempRoleGrant(grant)
+        || (previousId !== null && grant.id <= previousId)
+      ) {
+        log.error('Temp role expiry page is malformed or not strictly ordered; sweep stopped safely', {
+          cursor,
+        });
+        return;
+      }
+      previousId = grant.id;
+    }
+
+    for (const grant of expired) {
+      const outcome = await sweepExpiredTempRoleGrant(client, grant, nowIso);
+      if (outcome === 'removed') removed++;
+      else preserved++;
+    }
+
+    if (expired.length < TEMP_ROLE_GRANT_SWEEP_PAGE_SIZE) break;
+
+    const nextCursor = expired.at(-1)?.id;
+    if (!nextCursor || nextCursor === cursor) {
+      log.error('Temp role expiry cursor did not advance; sweep stopped safely', { cursor });
+      return;
+    }
+    cursor = nextCursor;
+  }
+
+  log.info('Temp role sweep complete', { removed, preserved });
+}
+
 export function registerEvents(client: SomniClient): void {
   // ── Safety nets ──
   registerProcessSafetyNets();
@@ -437,38 +814,13 @@ export function registerEvents(client: SomniClient): void {
     }
   }, 30 * 60 * 1000));
 
-  // Temp role grant expiry sweep (every 15 min)
-  // Audit Finding #3: temp_role_grants rows have expires_at but were never swept.
-  trackCronHandle(cronHandles, setInterval(async () => {
-    try {
-      const { data: expired } = await client.supabase
-        .from('temp_role_grants')
-        .select('id, guild_id, user_id, role_id')
-        .lt('expires_at', new Date().toISOString())
-        .limit(200);
-
-      if (!expired || expired.length === 0) return;
-
-      for (const grant of expired) {
-        try {
-          const guild = client.guilds.cache.get(grant.guild_id);
-          if (guild) {
-            const member = await guild.members.fetch(grant.user_id).catch(() => null);
-            if (member && member.roles.cache.has(grant.role_id)) {
-              await member.roles.remove(grant.role_id, 'SomniBot — temporary role expired');
-            }
-          }
-          await client.supabase.from('temp_role_grants').delete().eq('id', grant.id);
-        } catch (err) {
-          log.error('Temp role expiry failed for grant', { grantId: grant.id, error: String(err) });
-        }
-      }
-
-      log.info(`Temp role sweep: expired ${expired.length} grant(s)`);
-    } catch (err) {
-      log.error('Temp role expiry sweep error', { error: String(err) });
-    }
-  }, 15 * 60 * 1000));
+  // Temporary role expiry sweep (every 15 min). Commerce rows are acted on
+  // only when their order-scoped lifecycle state proves safe ownership;
+  // legacy or ambiguous provenance is preserved for reconciliation.
+  trackCronHandle(cronHandles, setInterval(
+    () => sweepExpiredTempRoleGrants(client),
+    15 * 60 * 1000,
+  ));
 
   // Data retention prune (every 6 hours)
   // V5 Audit §14.P3b: Iterate guilds and prune each individually so a failure
