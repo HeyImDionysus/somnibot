@@ -222,8 +222,9 @@ describe('finding 1 — cleanup_member_economy removes a forfeited member from t
     }
   });
 
-  it('a banned member cannot be paid on a successful resolution', async () => {
-    // Force a guaranteed success: base chance 95 clamps the roll to always win.
+  it('a banned member cannot be paid by a positive settlement credit', async () => {
+    // Resolution deliberately remains random: the production function caps the
+    // chance at 95%, so no configured chance can guarantee a successful roll.
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     await seedWallet(INITIATOR, ENTRY_FEE);
     await supa.rpc('economy_subtract_balance', {
@@ -245,17 +246,21 @@ describe('finding 1 — cleanup_member_economy removes a forfeited member from t
       });
 
       const bannedBefore = await walletOf(BANNED);
+      const joinerBefore = await walletOf(JOINER_A);
 
-      // Resolve: claim freezes the (2-member) crew, then credit each.
+      // Claim freezes the two eligible rows regardless of the random outcome.
+      // Use an explicit positive settlement amount below so this test isolates
+      // the payout authorization invariant instead of depending on that roll.
       const { data: claimData, error: claimErr } = await supa.rpc('heist_claim_for_resolution', {
         p_heist_id: heistId, p_min_participants: MIN,
       });
       expect(claimErr).toBeNull();
       const claim = Array.isArray(claimData) ? claimData[0] : claimData;
       expect(claim.claimed).toBe(true);
-      expect(claim.outcome).toBe('success');
       // Crew count excludes the banned member — split over 2, not 3.
       expect(claim.participant_count).toBe(2);
+      const positiveSettlement = Math.floor(TARGET_PAYOUT / claim.participant_count);
+      expect(positiveSettlement).toBeGreaterThan(0);
 
       // Credit the frozen crew (claimed_at IS NOT NULL). The banned member is not
       // among them — their row was deleted — so a credit attempt is a no-op.
@@ -267,15 +272,19 @@ describe('finding 1 — cleanup_member_economy removes a forfeited member from t
       const frozenIds = (frozen ?? []).map((r) => r.user_id);
       expect(frozenIds).not.toContain(BANNED);
       for (const uid of frozenIds) {
-        await supa.rpc('heist_credit_participant', {
-          p_heist_id: heistId, p_guild_id: GUILD_ID, p_user_id: uid, p_amount: claim.payout_each,
+        const { data: paid, error: payErr } = await supa.rpc('heist_credit_participant', {
+          p_heist_id: heistId, p_guild_id: GUILD_ID, p_user_id: uid, p_amount: positiveSettlement,
         });
+        expect(payErr).toBeNull();
+        expect(paid).toBe(true);
       }
+      expect(await walletOf(JOINER_A)).toBe(joinerBefore + positiveSettlement);
 
       // Even a stray credit attempt for the banned member pays nothing (no row).
-      const { data: strayPaid } = await supa.rpc('heist_credit_participant', {
-        p_heist_id: heistId, p_guild_id: GUILD_ID, p_user_id: BANNED, p_amount: claim.payout_each,
+      const { data: strayPaid, error: strayErr } = await supa.rpc('heist_credit_participant', {
+        p_heist_id: heistId, p_guild_id: GUILD_ID, p_user_id: BANNED, p_amount: positiveSettlement,
       });
+      expect(strayErr).toBeNull();
       expect(strayPaid).toBe(false);
 
       // The banned member's wallet is untouched — never paid a heist share.
