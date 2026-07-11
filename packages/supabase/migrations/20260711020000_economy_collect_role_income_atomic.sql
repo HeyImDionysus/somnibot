@@ -14,6 +14,8 @@
 -- unrelated order history are deliberately not sale evidence.
 -- =============================================================================
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.economy_role_income_claims (
   guild_id          TEXT        NOT NULL REFERENCES public.guild(id) ON DELETE CASCADE,
   user_id           TEXT        NOT NULL,
@@ -610,3 +612,5 @@ REVOKE ALL ON FUNCTION public.economy_collect_role_income(TEXT, TEXT, TEXT[], TE
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.economy_collect_role_income(TEXT, TEXT, TEXT[], TEXT)
   TO service_role;
+
+COMMIT;

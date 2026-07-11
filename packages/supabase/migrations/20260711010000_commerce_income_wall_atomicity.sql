@@ -13,6 +13,8 @@
 -- transaction commits, covering dirty-state validation, constraints, and all
 -- trigger installation below. Reads remain available; writes to these three
 -- commerce configuration tables wait for the migration to finish.
+BEGIN;
+
 LOCK TABLE public.products IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE public.plans IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE public.economy_role_income IN SHARE ROW EXCLUSIVE MODE;
@@ -332,3 +334,5 @@ REVOKE ALL ON FUNCTION public.commerce_income_wall_lock_row() FROM authenticated
 REVOKE ALL ON FUNCTION public.commerce_income_wall_validate_row() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.commerce_income_wall_validate_row() FROM anon;
 REVOKE ALL ON FUNCTION public.commerce_income_wall_validate_row() FROM authenticated;
+
+COMMIT;

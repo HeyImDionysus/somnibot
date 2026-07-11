@@ -15,6 +15,8 @@
 -- reserved-key stripping, and installation of the no-legacy-key constraint.
 -- Operational impact: product writers wait for this entire migration file, so
 -- deploy during a low-write window and monitor lock wait/transaction duration.
+BEGIN;
+
 LOCK TABLE public.products IN SHARE ROW EXCLUSIVE MODE;
 
 -- A composite key keeps typed temporary-role config guild-consistent without
@@ -1915,3 +1917,5 @@ GRANT EXECUTE ON FUNCTION public.prune_expired_data(TEXT)
 -- Restate trigger-helper lockdown after replacing the assertion function.
 REVOKE ALL ON FUNCTION public.commerce_assert_income_wall_guild(TEXT)
   FROM PUBLIC, anon, authenticated;
+
+COMMIT;
