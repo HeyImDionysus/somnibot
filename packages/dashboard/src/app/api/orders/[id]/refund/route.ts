@@ -61,6 +61,10 @@ export async function POST(
             headers: {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${token}`,
+              // A local revocation failure must leave the route retryable.
+              // Reuse the order UUID so a retry cannot create a second
+              // provider refund while it repairs the local transition.
+              'PayPal-Request-Id': orderId,
             },
             body: JSON.stringify({
               note_to_payer: body.reason ?? 'Refund issued',
@@ -79,14 +83,11 @@ export async function POST(
     }
   }
 
-  // Update order status
-  await supabase
-    .from('orders')
-    .update({ status: 'refunded', updated_at: new Date().toISOString() })
-    .eq('id', orderId);
-
-  // Revoke entitlements
-  const { data: revokedEntitlements } = await supabase
+  // Revoke entitlements before marking the order terminal. The terminal
+  // transition's database trigger writes the Discord role-revocation outbox
+  // in the same transaction; if either part fails, no later local refund
+  // effects may run and the non-terminal order remains retryable.
+  const { data: revokedEntitlements, error: entitlementRevocationError } = await supabase
     .from('entitlements')
     .update({
       status: 'expired',
@@ -96,6 +97,36 @@ export async function POST(
     .eq('order_id', orderId)
     .in('status', ['active', 'pending', 'grace_period'])
     .select('id');
+
+  if (entitlementRevocationError) {
+    console.error('[Commerce] Failed to persist entitlement revocation for refund:', {
+      orderId,
+      guildId,
+      error: entitlementRevocationError.message,
+    });
+    return NextResponse.json(
+      { success: false, error: 'Refund could not be finalized. Please retry.' },
+      { status: 500 },
+    );
+  }
+
+  const { error: orderStatusError } = await supabase
+    .from('orders')
+    .update({ status: 'refunded', updated_at: new Date().toISOString() })
+    .eq('id', orderId)
+    .eq('guild_id', guildId);
+
+  if (orderStatusError) {
+    console.error('[Commerce] Failed to persist refunded order status:', {
+      orderId,
+      guildId,
+      error: orderStatusError.message,
+    });
+    return NextResponse.json(
+      { success: false, error: 'Refund could not be finalized. Please retry.' },
+      { status: 500 },
+    );
+  }
 
   // W2 codex round 2: the revocation above expires 'grace_period' rows, a
   // terminal transition that strands any open 'entitlement_grace_period'

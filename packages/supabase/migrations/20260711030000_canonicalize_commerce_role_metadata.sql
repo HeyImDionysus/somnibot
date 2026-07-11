@@ -1362,17 +1362,13 @@ BEGIN
 
   v_target_status := CASE
     WHEN p_amount_cents = v_order.amount_cents
-     AND p_currency = v_order.currency
+     -- Provider input is canonical uppercase. Historical orders predate that
+     -- contract, so normalize only the stored value's case for comparison;
+     -- malformed whitespace or other currency text still cannot compare.
+     AND p_currency = pg_catalog.upper(v_order.currency)
       THEN 'completed'
     ELSE 'pending_review'
   END;
-
-  -- Both a matching capture and a pending-review mismatch are irreversible
-  -- provider evidence. Freeze the expected sale contract before recording
-  -- either outcome so a later exact replay cannot bless a rewritten order.
-  IF v_order.grant_snapshot_frozen_at IS NULL THEN
-    RAISE EXCEPTION 'commerce_finalize_paypal_capture: order grant snapshot is not frozen';
-  END IF;
 
   SELECT payment.*
     INTO v_payment
@@ -1384,7 +1380,10 @@ BEGIN
        OR v_payment.customer_id IS DISTINCT FROM p_customer_id
        OR v_payment.guild_id IS DISTINCT FROM p_guild_id
        OR v_payment.amount_cents IS DISTINCT FROM p_amount_cents
-       OR v_payment.currency IS DISTINCT FROM p_currency
+       -- Legacy capture writers copied the order currency verbatim, before
+       -- provider currency was canonicalized. Normalize stored case only;
+       -- whitespace, malformed text, and a different code still fail closed.
+       OR pg_catalog.upper(v_payment.currency) IS DISTINCT FROM p_currency
        OR v_payment.provider IS DISTINCT FROM 'paypal' THEN
       RAISE EXCEPTION 'commerce_finalize_paypal_capture: existing capture identity mismatch';
     END IF;
@@ -1420,6 +1419,14 @@ BEGIN
       'payment_id', v_payment.id,
       'payment_created', false
     );
+  END IF;
+
+  -- Existing provider proof is replay-only and can safely predate the grant
+  -- snapshot migration after its full identity and successor state validate
+  -- above. A new capture (matching or pending-review) still requires the
+  -- immutable sale contract so it cannot bless a rewritten legacy order.
+  IF v_order.grant_snapshot_frozen_at IS NULL THEN
+    RAISE EXCEPTION 'commerce_finalize_paypal_capture: order grant snapshot is not frozen';
   END IF;
 
   IF v_order.status <> 'pending' THEN

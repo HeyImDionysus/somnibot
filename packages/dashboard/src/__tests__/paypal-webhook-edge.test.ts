@@ -312,7 +312,7 @@ function createCaptureRecoveryHarness(options: {
     }
     if (name === 'commerce_finalize_paypal_capture') {
       const completed = args.p_amount_cents === state.order.amount_cents
-        && String(args.p_currency).toUpperCase() === state.order.currency
+        && String(args.p_currency).toUpperCase() === String(state.order.currency).toUpperCase()
         && args.p_paypal_order_id === state.order.paypal_order_id;
       if (state.order.status === 'refunded' || state.order.status === 'disputed') {
         const exactReplay = completed
@@ -327,6 +327,25 @@ function createCaptureRecoveryHarness(options: {
           data: {
             order_id: state.order.id,
             order_status: state.order.status,
+            payment_id: state.payment.id,
+            payment_created: false,
+          },
+          error: null,
+        };
+      }
+      if (state.order.status === 'completed' && state.payment) {
+        const exactReplay = completed
+          && state.payment.paypal_payment_id === args.p_paypal_capture_id;
+        if (!exactReplay) {
+          return {
+            data: null,
+            error: { message: 'completed replay identity mismatch', code: 'P0001' },
+          };
+        }
+        return {
+          data: {
+            order_id: state.order.id,
+            order_status: 'completed',
             payment_id: state.payment.id,
             payment_created: false,
           },
@@ -2059,6 +2078,39 @@ describe('PayPal webhook — edge cases', () => {
         ]);
       },
     );
+
+    it('treats a duplicate legacy completed capture without a frozen snapshot as a no-op', async () => {
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      try {
+        const { supabase, state, rpc } = createCaptureRecoveryHarness();
+        state.order.status = 'completed';
+        state.order.grant_snapshot_frozen_at = null;
+        state.payment = {
+          id: 'payment-1',
+          order_id: state.order.id,
+          paypal_payment_id: 'CAPTURE-RECOVERY-1',
+        };
+
+        await handlePaymentCaptured(supabase, captureResource);
+
+        expect(state.order.status).toBe('completed');
+        expect(state.order.grant_snapshot_frozen_at).toBeNull();
+        expect(state.frozenSnapshot).toBeNull();
+        expect(state.queue).toBeNull();
+        expect(state.licenseKey).toBeNull();
+        expect(state.totalsApplied).toBe(0);
+        expect(state.inserts).toEqual([]);
+        expect(state.updates).toEqual([]);
+        expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+          'commerce_finalize_paypal_capture',
+        ]);
+        expect(infoSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Exact legacy capture replay has no frozen grant snapshot'),
+        );
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
 
     it('fails closed when PayPal omits the captured amount', async () => {
       const { supabase, state } = createCaptureRecoveryHarness();

@@ -1167,6 +1167,171 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
   });
 
+  it.each([
+    ['refunded', 'refunded'],
+    ['reversed', 'refunded'],
+    ['reversed', 'disputed'],
+  ] as const)(
+    'PAYMENT.SALE.COMPLETED treats an exact %s sale replay with a %s order as a successor-state no-op',
+    async (successorStatus, successorOrderStatus) => {
+      const { inserts, updates } = useWebhookRows({
+        orders: {
+          data: {
+            id: 'order-successor-replay',
+            customer_id: 'customer-1',
+            guild_id: 'guild-1',
+            paypal_subscription_id: 'SUB-SUCCESSOR-REPLAY',
+            status: successorOrderStatus,
+          },
+          error: null,
+        },
+        payments: [
+          { data: null, error: { code: '23505', message: 'duplicate payment' } },
+          {
+            data: {
+              id: 'payment-successor-replay',
+              order_id: 'order-successor-replay',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_payment_id: 'SALE-SUCCESSOR-REPLAY',
+              amount_cents: 999,
+              currency: 'EUR',
+              status: successorStatus,
+            },
+            error: null,
+          },
+        ],
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-SUCCESSOR-REPLAY',
+          billing_agreement_id: 'SUB-SUCCESSOR-REPLAY',
+          amount: { total: '9.99', currency: 'EUR' },
+        },
+        id: `EVT-SALE-SUCCESSOR-${successorStatus.toUpperCase()}-${successorOrderStatus.toUpperCase()}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(200);
+      expect(inserts.filter(({ table }) => table === 'payments')).toHaveLength(1);
+      expect(updates.filter(({ table }) => table === 'payments')).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['refunded', 'completed'],
+    ['refunded', 'disputed'],
+    ['reversed', 'completed'],
+    ['reversed', 'pending'],
+  ] as const)(
+    'PAYMENT.SALE.COMPLETED rejects an exact %s payment replay paired with a %s order',
+    async (successorStatus, orderStatus) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        useWebhookRows({
+          orders: {
+            data: {
+              id: 'order-successor-state-mismatch',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_subscription_id: 'SUB-SUCCESSOR-STATE-MISMATCH',
+              status: orderStatus,
+            },
+            error: null,
+          },
+          payments: [
+            { data: null, error: { code: '23505', message: 'duplicate payment' } },
+            {
+              data: {
+                id: 'payment-successor-state-mismatch',
+                order_id: 'order-successor-state-mismatch',
+                customer_id: 'customer-1',
+                guild_id: 'guild-1',
+                paypal_payment_id: 'SALE-SUCCESSOR-STATE-MISMATCH',
+                amount_cents: 999,
+                currency: 'EUR',
+                status: successorStatus,
+              },
+              error: null,
+            },
+          ],
+        });
+        const req = makeReplay({
+          event_type: 'PAYMENT.SALE.COMPLETED',
+          resource: {
+            id: 'SALE-SUCCESSOR-STATE-MISMATCH',
+            billing_agreement_id: 'SUB-SUCCESSOR-STATE-MISMATCH',
+            amount: { total: '9.99', currency: 'EUR' },
+          },
+          id: `EVT-SALE-SUCCESSOR-STATE-MISMATCH-${successorStatus}-${orderStatus}`,
+        });
+
+        const res = await POST(req as never);
+        expect(res.status).toBe(500);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['provider payment', { paypal_payment_id: 'SALE-DIFFERENT' }],
+    ['order', { order_id: 'order-different' }],
+    ['amount', { amount_cents: 1 }],
+    ['currency', { currency: 'USD' }],
+  ])(
+    'PAYMENT.SALE.COMPLETED rejects a successor-state replay with a different %s identity',
+    async (_identity, persistedOverride) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        useWebhookRows({
+          orders: {
+            data: {
+              id: 'order-successor-mismatch',
+              customer_id: 'customer-1',
+              guild_id: 'guild-1',
+              paypal_subscription_id: 'SUB-SUCCESSOR-MISMATCH',
+              status: 'refunded',
+            },
+            error: null,
+          },
+          payments: [
+            { data: null, error: { code: '23505', message: 'duplicate payment' } },
+            {
+              data: {
+                id: 'payment-successor-mismatch',
+                order_id: 'order-successor-mismatch',
+                customer_id: 'customer-1',
+                guild_id: 'guild-1',
+                paypal_payment_id: 'SALE-SUCCESSOR-MISMATCH',
+                amount_cents: 999,
+                currency: 'EUR',
+                status: 'refunded',
+                ...persistedOverride,
+              },
+              error: null,
+            },
+          ],
+        });
+        const req = makeReplay({
+          event_type: 'PAYMENT.SALE.COMPLETED',
+          resource: {
+            id: 'SALE-SUCCESSOR-MISMATCH',
+            billing_agreement_id: 'SUB-SUCCESSOR-MISMATCH',
+            amount: { total: '9.99', currency: 'EUR' },
+          },
+          id: `EVT-SALE-SUCCESSOR-MISMATCH-${String(_identity)}`,
+        });
+
+        const res = await POST(req as never);
+        expect(res.status).toBe(500);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
+
   it('errored PAYMENT.SALE.COMPLETED redelivery resumes through exact 23505 validation', async () => {
     const originalFetch = global.fetch;
     global.fetch = vi.fn().mockResolvedValue(

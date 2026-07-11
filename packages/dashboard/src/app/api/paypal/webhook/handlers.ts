@@ -975,7 +975,7 @@ export async function handlePaymentCaptured(
   if (existingPayment?.order_id) {
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
       .eq('id', existingPayment.order_id)
       .eq('guild_id', meta.guild_id)
       .maybeSingle();
@@ -989,7 +989,7 @@ export async function handlePaymentCaptured(
     }
     const { data, error } = await supabase
       .from('orders')
-      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, paypal_order_id')
+      .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, grant_snapshot_frozen_at, paypal_order_id')
       .eq('guild_id', meta.guild_id)
       .eq('customer_id', meta.customer_id)
       .eq('product_id', meta.product_id)
@@ -1044,6 +1044,17 @@ export async function handlePaymentCaptured(
       amountCents,
       currency: captureCurrency,
     })) return;
+    if (
+      replayFinalization.order_status === 'completed'
+      && order.status === 'completed'
+      && order.grant_snapshot_frozen_at === null
+    ) {
+      console.info(
+        `[Webhook] Exact legacy capture replay has no frozen grant snapshot; ` +
+          `skipping fulfillment recovery for ${order.order_number}`,
+      );
+      return;
+    }
   }
 
   // The finalizer requires the sold access contract to be frozen for both
@@ -1857,7 +1868,7 @@ export async function handleSubscriptionPayment(
 
   const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('id, customer_id, guild_id, paypal_subscription_id')
+    .select('id, customer_id, guild_id, status, paypal_subscription_id')
     .eq('paypal_subscription_id', billingAgreementId)
     .maybeSingle();
   requireSupabaseSuccess(orderError, 'Failed to load subscription payment order');
@@ -1880,11 +1891,16 @@ export async function handleSubscriptionPayment(
     currency,
     status: 'completed',
   };
-  const validatePayment = (data: unknown): void => {
+  const validatePayment = (
+    data: unknown,
+    allowSuccessorState = false,
+  ): 'completed' | 'refunded' | 'reversed' => {
     if (!data || typeof data !== 'object') {
       throw new Error('Subscription payment persistence returned no row');
     }
     const row = data as Record<string, unknown>;
+    const validStatus = row.status === expectedPayment.status
+      || (allowSuccessorState && (row.status === 'refunded' || row.status === 'reversed'));
     if (
       !isNonEmptyString(row.id) ||
       row.order_id !== expectedPayment.order_id ||
@@ -1893,10 +1909,11 @@ export async function handleSubscriptionPayment(
       row.paypal_payment_id !== expectedPayment.paypal_payment_id ||
       row.amount_cents !== expectedPayment.amount_cents ||
       row.currency !== expectedPayment.currency ||
-      row.status !== expectedPayment.status
+      !validStatus
     ) {
       throw new Error('Subscription payment persistence identity mismatch');
     }
+    return row.status as 'completed' | 'refunded' | 'reversed';
   };
 
   const { data: insertedPayment, error: insertError } = await supabase
@@ -1914,7 +1931,20 @@ export async function handleSubscriptionPayment(
       .eq('paypal_payment_id', providerPaymentId)
       .maybeSingle();
     requireSupabaseSuccess(existingError, 'Failed to inspect replayed subscription payment');
-    validatePayment(existingPayment);
+    const replayStatus = validatePayment(existingPayment, true);
+    if (replayStatus !== 'completed') {
+      const validSuccessorOrderState = replayStatus === 'refunded'
+        ? order.status === 'refunded'
+        : order.status === 'refunded' || order.status === 'disputed';
+      if (!validSuccessorOrderState) {
+        throw new Error('Subscription payment successor state mismatch');
+      }
+      console.info(
+        `[Webhook] Subscription payment replay preserved successor state ${replayStatus}; ` +
+          `skipping persistence for ${providerPaymentId}`,
+      );
+      return;
+    }
   } else {
     validatePayment(insertedPayment);
   }

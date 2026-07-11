@@ -1012,6 +1012,157 @@ describe('commerce income wall database invariant', () => {
     expect(totals).toMatchObject({ total_spent_cents: 1_000, total_orders: 1 });
   });
 
+  it('replays only exact legacy capture proof with lowercase stored currencies', async () => {
+    const productId = await createProduct();
+    const { data: customer, error: customerError } = await supa
+      .from('customers')
+      .insert({
+        guild_id: GUILD_A,
+        discord_id: nextSnowflake(),
+        discord_username: nextName('legacy-capture-customer'),
+        total_spent_cents: 1_000,
+        total_orders: 1,
+      })
+      .select('id')
+      .single();
+    expect(customerError).toBeNull();
+
+    const paypalOrderId = nextName('legacy-paypal-order');
+    const captureId = nextName('legacy-capture');
+    const { data: order, error: orderError } = await supa
+      .from('orders')
+      .insert({
+        order_number: nextName('legacy-order'),
+        customer_id: customer!.id,
+        guild_id: GUILD_A,
+        product_id: productId,
+        paypal_order_id: paypalOrderId,
+        amount_cents: 1_000,
+        currency: 'usd',
+        source: 'purchase',
+        status: 'completed',
+      })
+      .select('id,grant_snapshot_frozen_at')
+      .single();
+    expect(orderError).toBeNull();
+    expect(order?.grant_snapshot_frozen_at).toBeNull();
+
+    const { data: payment, error: paymentError } = await supa
+      .from('payments')
+      .insert({
+        order_id: order!.id,
+        customer_id: customer!.id,
+        guild_id: GUILD_A,
+        paypal_payment_id: captureId,
+        amount_cents: 1_000,
+        currency: 'usd',
+        status: 'completed',
+        provider: 'paypal',
+      })
+      .select('id')
+      .single();
+    expect(paymentError).toBeNull();
+
+    const finalizeArgs = {
+      p_order_id: order!.id,
+      p_guild_id: GUILD_A,
+      p_customer_id: customer!.id,
+      p_product_id: productId,
+      p_paypal_order_id: paypalOrderId,
+      p_paypal_capture_id: captureId,
+      p_amount_cents: 1_000,
+      p_currency: 'USD',
+    };
+    const exactReplay = await supa.rpc('commerce_finalize_paypal_capture', finalizeArgs);
+    expect(exactReplay.error).toBeNull();
+    expect(exactReplay.data).toMatchObject({
+      order_id: order!.id,
+      order_status: 'completed',
+      payment_id: payment!.id,
+      payment_created: false,
+    });
+
+    const { data: replayedOrder, error: replayedOrderError } = await supa
+      .from('orders')
+      .select('status,grant_snapshot_frozen_at')
+      .eq('id', order!.id)
+      .single();
+    expect(replayedOrderError).toBeNull();
+    expect(replayedOrder).toMatchObject({
+      status: 'completed',
+      grant_snapshot_frozen_at: null,
+    });
+
+    const amountForgery = await supa.rpc('commerce_finalize_paypal_capture', {
+      ...finalizeArgs,
+      p_amount_cents: 999,
+    });
+    expect(amountForgery.error?.message).toContain('existing capture identity mismatch');
+
+    const currencyForgery = await supa.rpc('commerce_finalize_paypal_capture', {
+      ...finalizeArgs,
+      p_currency: 'EUR',
+    });
+    expect(currencyForgery.error?.message).toContain('existing capture identity mismatch');
+
+    const malformedPaymentCurrency = await supa
+      .from('payments')
+      .update({ currency: ' usd' })
+      .eq('id', payment!.id);
+    expect(malformedPaymentCurrency.error).toBeNull();
+    const malformedPaymentReplay = await supa.rpc(
+      'commerce_finalize_paypal_capture',
+      finalizeArgs,
+    );
+    expect(malformedPaymentReplay.error?.message).toContain(
+      'existing capture identity mismatch',
+    );
+    const restorePaymentCurrency = await supa
+      .from('payments')
+      .update({ currency: 'usd' })
+      .eq('id', payment!.id);
+    expect(restorePaymentCurrency.error).toBeNull();
+
+    const malformedOrderCurrency = await supa
+      .from('orders')
+      .update({ currency: 'usd ' })
+      .eq('id', order!.id);
+    expect(malformedOrderCurrency.error).toBeNull();
+    const malformedOrderReplay = await supa.rpc(
+      'commerce_finalize_paypal_capture',
+      finalizeArgs,
+    );
+    expect(malformedOrderReplay.error?.message).toContain('successor state mismatch');
+    const restoreOrderCurrency = await supa
+      .from('orders')
+      .update({ currency: 'usd' })
+      .eq('id', order!.id);
+    expect(restoreOrderCurrency.error).toBeNull();
+
+    const forgedCaptureId = nextName('forged-legacy-capture');
+    const unknownCapture = await supa.rpc('commerce_finalize_paypal_capture', {
+      ...finalizeArgs,
+      p_paypal_capture_id: forgedCaptureId,
+    });
+    expect(unknownCapture.error?.message).toContain('grant snapshot is not frozen');
+
+    const { data: absentForgery, error: absentForgeryError } = await supa
+      .from('payments')
+      .select('id')
+      .eq('paypal_payment_id', forgedCaptureId)
+      .maybeSingle();
+    expect(absentForgeryError).toBeNull();
+    expect(absentForgery).toBeNull();
+
+    const { data: totals, error: totalsError } = await supa
+      .from('customers')
+      .select('total_spent_cents,total_orders')
+      .eq('id', customer!.id)
+      .single();
+    expect(totalsError).toBeNull();
+    expect(totals).toMatchObject({ total_spent_cents: 1_000, total_orders: 1 });
+  });
+
   it('accepts only exact pending-review capture replay without changing totals', async () => {
     const discordId = nextSnowflake();
     const productId = await createProduct();
