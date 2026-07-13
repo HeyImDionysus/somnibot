@@ -189,7 +189,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_bot_action_queue_idempotency_key
 -- predate order-level grant snapshots but already have an exact staged outbox
 -- payload. The queue id is intentionally an immutable UUID marker rather than
 -- a foreign key: normal queue retention must not erase or block this contract.
--- Only the validating SECURITY DEFINER RPC below may insert a row; workers get
+-- Only the privileged validation RPC below may insert a row; workers get
 -- read-only access so a null order snapshot is trusted only with this evidence.
 CREATE TABLE IF NOT EXISTS public.commerce_legacy_subscription_grant_contracts (
   order_id UUID PRIMARY KEY
