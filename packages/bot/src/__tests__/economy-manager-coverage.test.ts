@@ -109,6 +109,10 @@ function makeSupabase(overrides: Record<string, unknown> = {}) {
   };
 
   const rpcResults: Record<string, unknown> = {
+    economy_get_or_create_wallet: {
+      data: makeWallet({ wallet: 100, total_earned: 100 }),
+      error: null,
+    },
     economy_add_balance: { data: null, error: null },
     economy_subtract_balance: { data: null, error: null },
     economy_bank_deposit: { data: 500, error: null },
@@ -241,26 +245,50 @@ describe('EconomyManager', () => {
       const w = await em.getOrCreateWallet('u1');
       expect(w.user_id).toBe('u1');
       expect(w.wallet).toBe(1000);
+      expect(supabase.rpc).not.toHaveBeenCalledWith(
+        'economy_get_or_create_wallet',
+        expect.anything(),
+      );
     });
 
     it('creates wallet with starting balance when none exists', async () => {
-      // First call returns null (no wallet), second returns the created one
-      let callCount = 0;
       supabase.from.mockImplementation((table: string) => {
         if (table === 'economy_wallets') {
-          callCount++;
-          if (callCount === 1) {
-            // getOrCreateWallet initial fetch — wallet doesn't exist
-            return chainBuilder({ data: null, error: null });
-          }
-          // Subsequent calls (upsert + re-reads)
-          return chainBuilder({ data: makeWallet({ wallet: 100 }) });
+          return chainBuilder({ data: null, error: null });
         }
         return chainBuilder({ data: supabase._configData });
       });
 
       const w = await em.getOrCreateWallet('u1');
       expect(w.wallet).toBe(100);
+      expect(w.total_earned).toBe(100);
+      expect(supabase.rpc).toHaveBeenCalledWith('economy_get_or_create_wallet', {
+        p_guild_id: 'g1',
+        p_user_id: 'u1',
+      });
+      expect(supabase.from).not.toHaveBeenCalledWith('economy_transactions');
+    });
+
+    it('preserves the configured fallback when wallet initialization fails', async () => {
+      supabase = makeSupabase({
+        economy_get_or_create_wallet: {
+          data: null,
+          error: { message: 'initializer unavailable' },
+        },
+      });
+      supabase.from.mockImplementation((table: string) => {
+        if (table === 'economy_wallets') return chainBuilder({ data: null, error: null });
+        return chainBuilder({ data: supabase._configData });
+      });
+      em = new EconomyManager(guild as any, supabase as any, valkey as any);
+
+      const w = await em.getOrCreateWallet('u1');
+      expect(w).toMatchObject({
+        guild_id: 'g1',
+        user_id: 'u1',
+        wallet: 100,
+        total_earned: 100,
+      });
     });
   });
 

@@ -52,6 +52,7 @@ import {
 } from './action-queue-lanes.js';
 import { eventBus } from './event-bus.js';
 import { runReconciliation } from './reconciliation.js';
+import { findLiveTemporaryRoleOwner } from './temp-role-ownership.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
 import { createLogger, type DriftItem, type PlatformEventMap, type PlatformEventType } from '@somnibot/shared';
 
@@ -730,6 +731,8 @@ async function handleTestWelcome(
  * Revoke Discord roles from a member (e.g., after a refund).
  */
 const LIVE_ROLE_OWNER_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
+const TEMP_ROLE_ID_PATTERN = /^\d{17,20}$/;
+const MAX_TEMP_ROLE_DURATION_SECONDS = 315_360_000;
 
 type RevokeOwnershipIdentity = {
   guildId: string;
@@ -812,6 +815,7 @@ async function validateRevokeOrigin(
   supabase: SupabaseClient,
   identity: RevokeOwnershipIdentity,
   roleIds: string[],
+  tempRoleGrantIds: string[],
 ): Promise<void> {
   const { data, error } = await supabase
     .from('entitlements')
@@ -848,10 +852,135 @@ async function validateRevokeOrigin(
     || !grantedRoleIds.every((roleId) =>
       typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
     || grantedRoleIdSet?.size !== grantedRoleIds.length
-    || grantedRoleIdSet?.size !== roleIds.length
-    || !roleIds.every((roleId) => grantedRoleIdSet.has(roleId))
   ) {
     throw new Error('revoke origin lookup returned a malformed or mismatched entitlement');
+  }
+
+  const { data: orderData, error: orderError } = await supabase
+    .from('orders')
+    .select('id, guild_id, customer_id, product_id, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
+    .eq('id', identity.orderId)
+    .eq('guild_id', identity.guildId)
+    .eq('customer_id', identity.customerId)
+    .eq('product_id', identity.productId)
+    .maybeSingle();
+  if (orderError) throw new Error(`revoke order contract lookup failed: ${orderError.message}`);
+
+  const order = orderData as Record<string, unknown> | null;
+  const frozenAt = order?.grant_snapshot_frozen_at;
+  const frozenSnapshot = order?.temporary_role_grants_snapshot;
+  if (
+    !order
+    || order.id !== identity.orderId
+    || order.guild_id !== identity.guildId
+    || order.customer_id !== identity.customerId
+    || order.product_id !== identity.productId
+    || (
+      frozenAt !== null
+      && (
+        typeof frozenAt !== 'string'
+        || frozenAt.length === 0
+        || !Number.isFinite(Date.parse(frozenAt))
+      )
+    )
+    || !Array.isArray(frozenSnapshot)
+  ) {
+    throw new Error('revoke order contract lookup returned malformed or mismatched data');
+  }
+
+  const frozenDurations = new Map<string, number>();
+  if (frozenAt === null) {
+    if (frozenSnapshot.length !== 0) {
+      throw new Error('legacy revoke order contains an unfrozen temporary-role snapshot');
+    }
+  } else {
+    for (const entry of frozenSnapshot) {
+      const snapshot = entry as Record<string, unknown> | null;
+      if (
+        !snapshot
+        || typeof snapshot.role_id !== 'string'
+        || !TEMP_ROLE_ID_PATTERN.test(snapshot.role_id)
+        || !Number.isSafeInteger(snapshot.duration_seconds)
+        || Number(snapshot.duration_seconds) <= 0
+        || Number(snapshot.duration_seconds) > MAX_TEMP_ROLE_DURATION_SECONDS
+        || frozenDurations.has(snapshot.role_id)
+      ) {
+        throw new Error('revoke order temporary-role snapshot is malformed');
+      }
+      frozenDurations.set(snapshot.role_id, Number(snapshot.duration_seconds));
+    }
+  }
+
+  const { data: tempGrantData, error: tempGrantError } = await supabase
+    .from('temp_role_grants')
+    .select('id, guild_id, user_id, role_id, order_id, source, source_id, duration_seconds, grant_status, remove_on_expiry')
+    .eq('order_id', identity.orderId)
+    .eq('guild_id', identity.guildId)
+    .order('id', { ascending: true });
+  if (tempGrantError) {
+    throw new Error(`revoke temporary-role provenance lookup failed: ${tempGrantError.message}`);
+  }
+  if (!Array.isArray(tempGrantData)) {
+    throw new Error('revoke temporary-role provenance lookup returned malformed data');
+  }
+
+  if (frozenAt === null && tempGrantData.length !== 0) {
+    throw new Error('legacy revoke order has unverified temporary-role provenance');
+  }
+
+  const expectedRoleIds = new Set<string>(grantedRoleIds as string[]);
+  const capturedTempGrantIds = new Set(tempRoleGrantIds);
+  const validatedCapturedGrantIds = new Set<string>();
+  for (const rawGrant of tempGrantData) {
+    const grant = rawGrant as Record<string, unknown> | null;
+    if (
+      !grant
+      || typeof grant.id !== 'string'
+      || grant.id.length === 0
+      || grant.guild_id !== identity.guildId
+      || grant.user_id !== identity.discordId
+      || grant.order_id !== identity.orderId
+      || (
+        (grant.grant_status === 'removed' && grant.source !== 'commerce_reconciled')
+        || (grant.grant_status !== 'removed' && grant.source !== 'commerce_purchase')
+      )
+      || grant.source_id !== identity.productId
+      || typeof grant.remove_on_expiry !== 'boolean'
+      || (
+        grant.grant_status !== 'pending'
+        && grant.grant_status !== 'applied'
+        && grant.grant_status !== 'removed'
+      )
+      || typeof grant.role_id !== 'string'
+      || frozenDurations.get(grant.role_id) !== grant.duration_seconds
+    ) {
+      throw new Error('revoke temporary-role provenance lookup returned a mismatched grant');
+    }
+    if (grant.remove_on_expiry && capturedTempGrantIds.has(grant.id)) {
+      expectedRoleIds.add(grant.role_id);
+      validatedCapturedGrantIds.add(grant.id);
+    } else if (
+      grant.remove_on_expiry
+      && (grant.grant_status === 'pending' || grant.grant_status === 'applied')
+    ) {
+      // A live removal-owned row existing at action creation must have been
+      // frozen into the payload. Removed rows not captured by a later refund
+      // are historical tombstones and do not reclaim a manually re-added role.
+      throw new Error('revoke payload omitted live temporary-role provenance');
+    } else if (capturedTempGrantIds.has(grant.id)) {
+      throw new Error('revoke payload captured temporary-role provenance without removal ownership');
+    }
+  }
+
+  if (validatedCapturedGrantIds.size !== tempRoleGrantIds.length) {
+    throw new Error('revoke temporary-role grant IDs do not match durable provenance');
+  }
+
+  if (
+    expectedRoleIds.size !== roleIds.length
+    || !roleIds.every((roleId) => expectedRoleIds.has(roleId))
+  ) {
+    throw new Error('revoke role set does not match the exact entitlement and temporary-role contract');
   }
 }
 
@@ -921,43 +1050,15 @@ async function hasLiveTemporaryRoleOwner(
   identity: RevokeOwnershipIdentity,
   roleId: string,
 ): Promise<boolean> {
-  const nowIso = new Date().toISOString();
-  const { data, error } = await supabase
-    .from('temp_role_grants')
-    .select('id, guild_id, user_id, role_id, expires_at, grant_status, remove_on_expiry')
-    .eq('guild_id', identity.guildId)
-    .eq('user_id', identity.discordId)
-    .eq('role_id', roleId)
-    .in('grant_status', ['pending', 'applied'])
-    .gt('expires_at', nowIso)
-    .order('id', { ascending: true })
-    .limit(1);
-
-  if (error) throw new Error(`temporary role ownership lookup failed: ${error.message}`);
-  if (!Array.isArray(data) || data.length > 1) {
-    throw new Error('temporary role ownership lookup returned a malformed result');
-  }
-  if (data.length === 0) return false;
-
-  const owner = data[0] as Record<string, unknown> | null;
-  const expiresAt = typeof owner?.expires_at === 'string'
-    ? Date.parse(owner.expires_at)
-    : Number.NaN;
-  if (
-    !owner
-    || typeof owner.id !== 'string'
-    || owner.id.length === 0
-    || owner.guild_id !== identity.guildId
-    || owner.user_id !== identity.discordId
-    || owner.role_id !== roleId
-    || !Number.isFinite(expiresAt)
-    || expiresAt <= Date.parse(nowIso)
-    || (owner.grant_status !== 'applied' && owner.grant_status !== 'pending')
-    || typeof owner.remove_on_expiry !== 'boolean'
-  ) {
-    throw new Error('temporary role ownership lookup returned a malformed grant');
-  }
-  return true;
+  return (await findLiveTemporaryRoleOwner(supabase, {
+    guildId: identity.guildId,
+    userId: identity.discordId,
+    roleId,
+    // The DB RPC requires both a completed parent and an exact live
+    // entitlement. Including this order safely preserves legitimate
+    // reactivation while a terminal current lifecycle naturally returns null.
+    excludeOrderId: null,
+  })) !== null;
 }
 
 async function hasLiveRoleOwner(
@@ -993,6 +1094,7 @@ export async function handleRevokeRoles(
 ): Promise<ActionResult> {
   const discordId = payload.discord_id;
   const rawRoleIds = payload.role_ids;
+  const rawTempRoleGrantIds = payload.temporary_role_grant_ids;
   const reason = typeof payload.reason === 'string' && payload.reason.length > 0
     ? payload.reason
     : 'Role revocation';
@@ -1012,6 +1114,15 @@ export async function handleRevokeRoles(
     return { success: false, error: 'Duplicate role_ids are not allowed', retryable: false };
   }
   const roleIds = [...new Set(rawRoleIds as string[])];
+  if (
+    !Array.isArray(rawTempRoleGrantIds)
+    || !rawTempRoleGrantIds.every((grantId) =>
+      typeof grantId === 'string' && grantId.length > 0 && grantId.trim() === grantId)
+    || new Set(rawTempRoleGrantIds).size !== rawTempRoleGrantIds.length
+  ) {
+    return { success: false, error: 'Missing required valid temporary_role_grant_ids', retryable: true };
+  }
+  const tempRoleGrantIds = rawTempRoleGrantIds as string[];
 
   const parsedIdentity = parseRevokeOwnershipIdentity(payload, guild.id);
   if (parsedIdentity.error) {
@@ -1024,7 +1135,12 @@ export async function handleRevokeRoles(
       // Complete every database check before the first Discord mutation. If
       // any lookup fails or is malformed, the whole action remains retryable
       // and no role is removed on partial evidence.
-      await validateRevokeOrigin(supabase, parsedIdentity.identity, roleIds);
+      await validateRevokeOrigin(
+        supabase,
+        parsedIdentity.identity,
+        roleIds,
+        tempRoleGrantIds,
+      );
       await validateRevokeCustomerIdentity(supabase, parsedIdentity.identity);
       for (const roleId of roleIds) {
         if (await hasLiveRoleOwner(supabase, parsedIdentity.identity, roleId)) {

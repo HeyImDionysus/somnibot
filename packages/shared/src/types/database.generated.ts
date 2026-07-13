@@ -1372,6 +1372,25 @@ export interface DbButtonRoles {
   updated_at: string;
 }
 
+export interface DbCommerceLegacySubscriptionGrantContracts {
+  order_id: string;
+  source_queue_id: string;
+  guild_id: string;
+  customer_id: string;
+  discord_id: string;
+  product_id: string;
+  product_name: string;
+  order_number: string;
+  plan_id: string;
+  paypal_subscription_id: string;
+  paypal_plan_id: string;
+  amount_cents: number;
+  currency: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  persisted_at: string;
+}
+
 export interface DbCommerceProductTempRoleConfig {
   id: string;
   product_id: string;
@@ -1977,7 +1996,8 @@ export interface DbTempRoleGrants {
   source_id: string | null;
   created_at: string;
   order_id: string | null;
-  grant_status: 'pending' | 'applied';
+  grant_status: 'pending' | 'applied' | 'removed';
+  duration_seconds: number | null;
   remove_on_expiry: boolean;
   applied_at: string | null;
   attempts: number;

@@ -45,6 +45,14 @@ interface FrozenGrantSnapshot {
   grant_snapshot_frozen_at: string;
 }
 
+interface LegacySubscriptionGrantContract {
+  order_id: string;
+  source_queue_id: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  persisted_at: string;
+}
+
 interface CaptureFinalization {
   order_id: string;
   order_status: 'completed' | 'pending_review' | 'refunded' | 'disputed';
@@ -361,6 +369,36 @@ function parseFrozenGrantSnapshot(data: unknown): FrozenGrantSnapshot {
   };
 }
 
+function parseLegacySubscriptionGrantContract(
+  data: unknown,
+): LegacySubscriptionGrantContract {
+  if (!data || typeof data !== 'object') {
+    throw new Error('Legacy subscription grant contract RPC returned malformed data');
+  }
+  const candidate = data as Record<string, unknown>;
+  if (
+    !isNonEmptyString(candidate.order_id)
+    || !isNonEmptyString(candidate.source_queue_id)
+    || !isNonEmptyString(candidate.persisted_at)
+    || !Number.isFinite(Date.parse(candidate.persisted_at))
+  ) {
+    throw new Error('Legacy subscription grant contract RPC returned malformed identity');
+  }
+  return {
+    order_id: candidate.order_id,
+    source_queue_id: candidate.source_queue_id,
+    granted_role_ids_snapshot: parseStringArray(
+      candidate.granted_role_ids_snapshot,
+      'Legacy subscription role snapshot',
+    ),
+    granted_channel_ids_snapshot: parseStringArray(
+      candidate.granted_channel_ids_snapshot,
+      'Legacy subscription channel snapshot',
+    ),
+    persisted_at: candidate.persisted_at,
+  };
+}
+
 function parseCaptureFinalization(data: unknown): CaptureFinalization {
   if (!data || typeof data !== 'object') {
     throw new Error('Capture finalization RPC returned malformed data');
@@ -643,6 +681,26 @@ async function freezeOrderGrantSnapshot(
     throw new Error('Order grant snapshot RPC returned the wrong order');
   }
   return snapshot;
+}
+
+async function adoptLegacySubscriptionGrantContract(
+  supabase: AdminSupabase,
+  order: CommerceOrderRow,
+  staged: FulfillmentQueueRow,
+): Promise<LegacySubscriptionGrantContract> {
+  const { data, error } = await supabase.rpc(
+    'commerce_adopt_legacy_subscription_grant_contract',
+    {
+      p_order_id: order.id,
+      p_source_queue_id: staged.id,
+    },
+  );
+  requireSupabaseSuccess(error, 'Failed to persist legacy subscription grant contract');
+  const contract = parseLegacySubscriptionGrantContract(data);
+  if (contract.order_id !== order.id || contract.source_queue_id !== staged.id) {
+    throw new Error('Legacy subscription grant contract RPC returned the wrong identity');
+  }
+  return contract;
 }
 
 async function ensureStagedLicenseKey(
@@ -1348,10 +1406,20 @@ export async function handleSubscriptionActivated(
   }
 
   const trustFrozenOrderContract = isNonEmptyString(order.grant_snapshot_frozen_at);
-  // A frozen order is the sold contract. Current catalog ownership or plan
-  // attachment may legitimately have moved after checkout; only new and
-  // still-unfrozen orders are authorized against that mutable configuration.
-  if (!trustFrozenOrderContract && prevalidatedProviderPlanId !== providerPlanId) {
+  const hasDurableGrantContract = trustFrozenOrderContract || staged !== null;
+  const completedLegacyNoGrantContract =
+    order.status === 'completed' && !hasDurableGrantContract;
+  // A frozen order or its already-staged outbox payload is the sold contract.
+  // Current catalog ownership or plan attachment may legitimately have moved
+  // after checkout. A completed legacy row with no durable grant contract is
+  // also never re-authorized against today's catalog: exact customer, order,
+  // subscription, local plan, and PayPal financial identities were validated
+  // above, and this branch can only no-op without creating access.
+  if (
+    !hasDurableGrantContract
+    && !completedLegacyNoGrantContract
+    && prevalidatedProviderPlanId !== providerPlanId
+  ) {
     await requireExactSubscriptionPlan(supabase, {
       planId: meta.plan_id,
       guildId: order.guild_id,
@@ -1381,7 +1449,26 @@ export async function handleSubscriptionActivated(
     order.currency = pendingFinancialUpdate.currency;
   }
 
-  const snapshot = await freezeOrderGrantSnapshot(supabase, order);
+  if (completedLegacyNoGrantContract) {
+    // Legacy completed orders predate immutable grant snapshots. Their exact
+    // PayPal subscription, customer, order, local-plan metadata, and financial
+    // identities have already been validated above, but freezing now would
+    // either fail (the RPC only accepts pending orders) or grant today's
+    // mutable product configuration.
+    console.info(
+      `[Webhook] Exact legacy subscription replay has no durable grant contract; ` +
+        `skipping fulfillment recovery for ${order.order_number}`,
+    );
+    return;
+  }
+
+  const snapshot = !trustFrozenOrderContract && staged
+    // A staged row written before completion is recoverable only after the
+    // database locks it with the completed legacy order, validates every
+    // identity/financial/grant field, and persists an immutable contract that
+    // the bot can independently require. Current catalog grants are never read.
+    ? await adoptLegacySubscriptionGrantContract(supabase, order, staged)
+    : await freezeOrderGrantSnapshot(supabase, order);
   const expected: FulfillmentExpectation = {
     ...baseExpectation,
     payload: {

@@ -339,6 +339,207 @@ REVOKE ALL ON FUNCTION public.purge_member_data(TEXT, TEXT)
 GRANT EXECUTE ON FUNCTION public.purge_member_data(TEXT, TEXT)
   TO service_role;
 
+CREATE OR REPLACE FUNCTION public.economy_get_or_create_wallet(
+  p_guild_id TEXT,
+  p_user_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_wallet public.economy_wallets%ROWTYPE;
+  v_starting_balance BIGINT := 0;
+  v_wallet_created BOOLEAN := false;
+BEGIN
+  IF p_guild_id IS NULL OR btrim(p_guild_id) = '' THEN
+    RAISE EXCEPTION 'economy_get_or_create_wallet: p_guild_id is required';
+  END IF;
+  IF p_user_id IS NULL OR btrim(p_user_id) = '' THEN
+    RAISE EXCEPTION 'economy_get_or_create_wallet: p_user_id is required';
+  END IF;
+
+  -- Bot wallet initialization and role-income collection both use this
+  -- member-scoped lock, closing their insert/update race.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'economy-role-income:' || p_guild_id || ':' || p_user_id,
+      0
+    )
+  );
+
+  SELECT wallet.*
+    INTO v_wallet
+    FROM public.economy_wallets AS wallet
+   WHERE wallet.guild_id = p_guild_id
+     AND wallet.user_id = p_user_id
+     FOR UPDATE;
+
+  IF FOUND THEN
+    RETURN pg_catalog.to_jsonb(v_wallet);
+  END IF;
+
+  SELECT COALESCE(config.economy_starting_balance, 0)
+    INTO v_starting_balance
+    FROM public.guild_config AS config
+   WHERE config.guild_id = p_guild_id;
+  v_starting_balance := COALESCE(v_starting_balance, 0);
+
+  INSERT INTO public.economy_wallets (
+    guild_id,
+    user_id,
+    wallet,
+    bank,
+    total_earned,
+    total_spent
+  ) VALUES (
+    p_guild_id,
+    p_user_id,
+    v_starting_balance,
+    0,
+    v_starting_balance,
+    0
+  )
+  ON CONFLICT (guild_id, user_id)
+  DO NOTHING
+  RETURNING * INTO v_wallet;
+  v_wallet_created := FOUND;
+
+  -- A legacy or administrative writer may not yet share the advisory lock.
+  -- If it won the primary-key race, return that authoritative existing row and
+  -- leave starting-balance ownership with the transaction that inserted it.
+  IF NOT v_wallet_created THEN
+    SELECT wallet.*
+      INTO v_wallet
+      FROM public.economy_wallets AS wallet
+     WHERE wallet.guild_id = p_guild_id
+       AND wallet.user_id = p_user_id
+       FOR UPDATE;
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'economy_get_or_create_wallet: wallet creation raced with deletion';
+    END IF;
+  ELSIF v_starting_balance > 0 THEN
+    INSERT INTO public.economy_transactions (
+      guild_id,
+      user_id,
+      type,
+      amount,
+      balance_after,
+      description
+    ) VALUES (
+      p_guild_id,
+      p_user_id,
+      'admin_add',
+      v_starting_balance,
+      v_starting_balance,
+      'Starting balance'
+    );
+  END IF;
+
+  RETURN pg_catalog.to_jsonb(v_wallet);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.economy_get_or_create_wallet(TEXT, TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.economy_get_or_create_wallet(TEXT, TEXT)
+  TO service_role;
+
+-- All production credit paths converge on the same wallet initializer. This
+-- replaces the earlier upsert, which could win a first-wallet race without the
+-- configured starting balance or its ledger entry.
+CREATE OR REPLACE FUNCTION public.economy_add_balance(
+  p_guild_id TEXT,
+  p_user_id TEXT,
+  p_amount BIGINT
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF p_amount <= 0 THEN
+    RAISE EXCEPTION 'Amount must be positive, got %', p_amount;
+  END IF;
+
+  PERFORM public.economy_get_or_create_wallet(p_guild_id, p_user_id);
+
+  UPDATE public.economy_wallets
+     SET wallet = wallet + p_amount,
+         total_earned = total_earned + p_amount,
+         updated_at = now()
+   WHERE guild_id = p_guild_id
+     AND user_id = p_user_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'economy_add_balance: wallet initialization returned no row';
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.economy_add_balance(TEXT, TEXT, BIGINT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.economy_add_balance(TEXT, TEXT, BIGINT)
+  TO service_role;
+
+CREATE OR REPLACE FUNCTION public.economy_credit_wallet(
+  p_guild_id TEXT,
+  p_user_id TEXT,
+  p_amount BIGINT,
+  p_reason TEXT DEFAULT 'credit'
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_balance BIGINT;
+BEGIN
+  IF p_amount <= 0 THEN
+    RAISE EXCEPTION 'economy_credit_wallet: p_amount must be positive, got %', p_amount;
+  END IF;
+
+  PERFORM public.economy_get_or_create_wallet(p_guild_id, p_user_id);
+
+  UPDATE public.economy_wallets
+     SET wallet = wallet + p_amount,
+         total_earned = total_earned + p_amount,
+         updated_at = now()
+   WHERE guild_id = p_guild_id
+     AND user_id = p_user_id
+  RETURNING wallet INTO v_balance;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'economy_credit_wallet: wallet initialization returned no row';
+  END IF;
+
+  INSERT INTO public.economy_transactions (
+    guild_id,
+    user_id,
+    type,
+    amount,
+    balance_after,
+    description
+  ) VALUES (
+    p_guild_id,
+    p_user_id,
+    'level_bonus',
+    p_amount,
+    v_balance,
+    p_reason
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.economy_credit_wallet(TEXT, TEXT, BIGINT, TEXT)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.economy_credit_wallet(TEXT, TEXT, BIGINT, TEXT)
+  TO service_role;
+
 CREATE OR REPLACE FUNCTION public.economy_collect_role_income(
   p_guild_id TEXT,
   p_user_id TEXT,
@@ -373,10 +574,14 @@ BEGIN
     RAISE EXCEPTION 'economy_collect_role_income: p_request_id is required';
   END IF;
 
-  -- Serialize every collection for one guild member.  The durable request row
-  -- below handles exact replays; this lock handles distinct simultaneous IDs.
-  PERFORM pg_advisory_xact_lock(
-    hashtextextended('economy-role-income:' || p_guild_id || ':' || p_user_id, 0)
+  -- Serialize every collection and wallet initialization for one guild member.
+  -- The durable request row handles replays; this lock handles distinct IDs
+  -- and the missing-wallet race.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'economy-role-income:' || p_guild_id || ':' || p_user_id,
+      0
+    )
   );
 
   SELECT r.result
@@ -537,28 +742,14 @@ BEGIN
   END LOOP;
 
   IF v_total > 0 THEN
-    INSERT INTO public.economy_wallets (
-      guild_id,
-      user_id,
-      wallet,
-      bank,
-      total_earned,
-      total_spent,
-      updated_at
-    ) VALUES (
-      p_guild_id,
-      p_user_id,
-      v_total,
-      0,
-      v_total,
-      0,
-      v_now
-    )
-    ON CONFLICT (guild_id, user_id)
-    DO UPDATE SET
-      wallet = public.economy_wallets.wallet + EXCLUDED.wallet,
-      total_earned = public.economy_wallets.total_earned + EXCLUDED.total_earned,
-      updated_at = EXCLUDED.updated_at
+    PERFORM public.economy_get_or_create_wallet(p_guild_id, p_user_id);
+
+    UPDATE public.economy_wallets
+       SET wallet = wallet + v_total,
+           total_earned = total_earned + v_total,
+           updated_at = v_now
+     WHERE guild_id = p_guild_id
+       AND user_id = p_user_id
     RETURNING wallet INTO v_balance;
 
     INSERT INTO public.economy_transactions (

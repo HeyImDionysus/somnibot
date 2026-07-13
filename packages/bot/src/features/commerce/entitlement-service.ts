@@ -7,6 +7,7 @@
 import type { Guild, GuildMember } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from '../../services/event-bus.js';
+import { findLiveTemporaryRoleOwner } from '../../services/temp-role-ownership.js';
 import { createLogger } from '@somnibot/shared';
 
 const log = createLogger('Entitlement');
@@ -520,36 +521,11 @@ export class EntitlementService {
       return true;
     }
 
-    const nowIso = new Date().toISOString();
-    const { data: tempOwners, error: tempError } = await this.supabase
-      .from('temp_role_grants')
-      .select('id, guild_id, user_id, role_id, expires_at, grant_status')
-      .eq('guild_id', this.guild.id)
-      .eq('user_id', discordId)
-      .eq('role_id', roleId)
-      .in('grant_status', ['pending', 'applied'])
-      .gt('expires_at', nowIso)
-      .order('id', { ascending: true })
-      .limit(1);
-    if (tempError) throw new Error(`temporary ownership lookup failed: ${tempError.message}`);
-    if (!Array.isArray(tempOwners) || tempOwners.length > 1) {
-      throw new Error('temporary ownership lookup returned malformed data');
-    }
-    if (tempOwners.length === 0) return false;
-    const owner = tempOwners[0];
-    if (
-      typeof owner?.id !== 'string'
-      || owner.id.length === 0
-      || owner.guild_id !== this.guild.id
-      || owner.user_id !== discordId
-      || owner.role_id !== roleId
-      || typeof owner.expires_at !== 'string'
-      || Date.parse(owner.expires_at) <= Date.parse(nowIso)
-      || (owner.grant_status !== 'pending' && owner.grant_status !== 'applied')
-    ) {
-      throw new Error('temporary ownership lookup returned a mismatched row');
-    }
-    return true;
+    return (await findLiveTemporaryRoleOwner(this.supabase, {
+      guildId: this.guild.id,
+      userId: discordId,
+      roleId,
+    })) !== null;
   }
 
   private async revokeRolesSafely(

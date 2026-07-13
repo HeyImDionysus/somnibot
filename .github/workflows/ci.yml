@@ -567,6 +567,7 @@ jobs:
             # 20260711020000_economy_collect_role_income_atomic
             "economy_role_income_claims" "economy_role_income_requests"
             # 20260711030000_canonicalize_commerce_role_metadata
+            "commerce_legacy_subscription_grant_contracts"
             "commerce_product_temp_role_config"
             "commerce_role_metadata_migration_issues"
             "commerce_temp_role_migration_issues"

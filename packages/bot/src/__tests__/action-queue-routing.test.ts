@@ -142,10 +142,30 @@ function makeOwnershipSupa(
     },
     error: null,
   },
+  orderResponse: { data: unknown; error: { message: string } | null } = {
+    data: {
+      id: 'order-1',
+      guild_id: 'guild-1',
+      customer_id: 'customer-1',
+      product_id: 'product-1',
+      temporary_role_grants_snapshot: [],
+      grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+    },
+    error: null,
+  },
+  originTempGrantResponse: { data: unknown; error: { message: string } | null } = {
+    data: [],
+    error: null,
+  },
 ) {
   const queryCalls: Array<{ method: string; args: unknown[] }> = [];
   const from = vi.fn((table: string) => {
-    if (table !== 'entitlements' && table !== 'customers' && table !== 'temp_role_grants') {
+    if (
+      table !== 'entitlements'
+      && table !== 'customers'
+      && table !== 'orders'
+      && table !== 'temp_role_grants'
+    ) {
       throw new Error(`Unexpected table: ${table}`);
     }
     const chain: any = {};
@@ -161,10 +181,24 @@ function makeOwnershipSupa(
         ? entitlementResponses.shift() ?? { data: [], error: null }
         : temporaryResponses.shift() ?? { data: [], error: null };
     });
-    chain.maybeSingle = vi.fn(async () => table === 'customers' ? customerResponse : originResponse);
+    chain.maybeSingle = vi.fn(async () => {
+      if (table === 'customers') return customerResponse;
+      if (table === 'orders') return orderResponse;
+      return originResponse;
+    });
+    chain.then = (resolve: Function) => resolve(
+      table === 'temp_role_grants' ? originTempGrantResponse : { data: [], error: null },
+    );
     return chain;
   });
-  return { supabase: { from } as any, from, queryCalls };
+  const rpc = vi.fn(async (name: string) => {
+    if (name !== 'commerce_find_live_temp_role_owner') return { data: null, error: null };
+    const response = temporaryResponses.shift() ?? { data: null, error: null };
+    if (response.error) return response;
+    const owner = Array.isArray(response.data) ? response.data[0] ?? null : response.data;
+    return { data: owner, error: null };
+  });
+  return { supabase: { from, rpc } as any, from, queryCalls };
 }
 
 function makeRevokeGuild(
@@ -202,6 +236,7 @@ const identityRevokePayload = {
   guild_id: 'guild-1',
   discord_id: 'user-1',
   role_ids: ['role-1'],
+  temporary_role_grant_ids: [],
   entitlement_id: 'ent-terminal',
   customer_id: 'customer-1',
   order_id: 'order-1',
@@ -223,15 +258,17 @@ function liveOwner(roleId = 'role-1') {
 function liveTemporaryOwner(
   roleId = 'role-1',
   grantStatus: 'pending' | 'applied' = 'applied',
+  expiresAt = '2999-01-01T00:00:00.000Z',
 ) {
   return {
     id: 'temp-owner',
     guild_id: 'guild-1',
     user_id: 'user-1',
     role_id: roleId,
-    expires_at: '2999-01-01T00:00:00.000Z',
+    expires_at: expiresAt,
     grant_status: grantStatus,
     remove_on_expiry: false,
+    order_id: 'order-2',
   };
 }
 
@@ -333,6 +370,58 @@ describe('revoke_roles shared-ownership safety', () => {
     expect(harness.remove).not.toHaveBeenCalled();
   });
 
+  it('retains a temp-only role when its exact order was reactivated before a stale revoke ran', async () => {
+    const tempRoleId = '12345678901234567';
+    const tempGrantId = 'temp-current';
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }],
+      undefined,
+      [{
+        data: [{
+          id: tempGrantId, guild_id: 'guild-1', user_id: 'user-1', role_id: tempRoleId,
+          expires_at: '2999-01-01T00:00:00.000Z', grant_status: 'applied',
+          remove_on_expiry: true, order_id: 'order-1',
+        }],
+        error: null,
+      }],
+      {
+        data: {
+          id: 'ent-terminal', guild_id: 'guild-1', customer_id: 'customer-1',
+          order_id: 'order-1', product_id: 'product-1', status: 'active',
+          source: 'purchase', granted_role_ids: [],
+        },
+        error: null,
+      },
+      {
+        data: {
+          id: 'order-1', guild_id: 'guild-1', customer_id: 'customer-1',
+          product_id: 'product-1', grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+          temporary_role_grants_snapshot: [{ role_id: tempRoleId, duration_seconds: 60 }],
+        },
+        error: null,
+      },
+      {
+        data: [{
+          id: tempGrantId, guild_id: 'guild-1', user_id: 'user-1', role_id: tempRoleId,
+          order_id: 'order-1', source: 'commerce_purchase', source_id: 'product-1',
+          duration_seconds: 60, grant_status: 'applied', remove_on_expiry: true,
+        }],
+        error: null,
+      },
+    );
+    const harness = makeRevokeGuild([[tempRoleId]]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, {
+      ...identityRevokePayload,
+      role_ids: [tempRoleId],
+      temporary_role_grant_ids: [tempGrantId],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.retained).toEqual([tempRoleId]);
+    expect(harness.remove).not.toHaveBeenCalled();
+  });
+
   it.each(['applied', 'pending'] as const)(
     'retains a role owned by an unexpired %s temporary commerce grant',
     async (grantStatus) => {
@@ -348,17 +437,48 @@ describe('revoke_roles shared-ownership safety', () => {
       expect(result.success).toBe(true);
       expect(result.data?.retained).toEqual(['role-1']);
       expect(harness.remove).not.toHaveBeenCalled();
-      expect(queryCalls.some((call) => call.method === 'or')).toBe(false);
       expect(queryCalls).toContainEqual({
-        method: 'in',
-        args: ['grant_status', ['pending', 'applied']],
-      });
-      expect(queryCalls).toContainEqual({
-        method: 'order',
-        args: ['id', { ascending: true }],
+        method: 'contains',
+        args: ['granted_role_ids', ['role-1']],
       });
     },
   );
+
+  it('retains a role owned by a delayed pending grant after its provisional timestamp', async () => {
+    const { supabase, queryCalls } = makeOwnershipSupa(
+      [{ data: [], error: null }],
+      undefined,
+      [{ data: [liveTemporaryOwner('role-1', 'pending', '2000-01-01T00:00:00.000Z')], error: null }],
+    );
+    const harness = makeRevokeGuild([['role-1']]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.retained).toEqual(['role-1']);
+    expect(harness.remove).not.toHaveBeenCalled();
+    expect(queryCalls).toContainEqual({
+      method: 'contains',
+      args: ['granted_role_ids', ['role-1']],
+    });
+  });
+
+  it('treats an applied temp owner that crosses expiry before the caller read as not live', async () => {
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }, { data: [], error: null }],
+      undefined,
+      [{
+        data: [liveTemporaryOwner('role-1', 'applied', '2000-01-01T00:00:00.000Z')],
+        error: null,
+      }],
+    );
+    const harness = makeRevokeGuild([['role-1'], []]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.removed).toEqual(['role-1']);
+  });
 
   it('repairs a role when a live owner appears after Discord removal', async () => {
     const { supabase } = makeOwnershipSupa([
@@ -488,7 +608,7 @@ describe('revoke_roles shared-ownership safety', () => {
     const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
 
     expect(result).toMatchObject({ success: false, retryable: true });
-    expect(result.error).toContain('revoke origin');
+    expect(result.error).toContain('revoke role set');
     expect(harness.fetch).not.toHaveBeenCalled();
     expect(harness.remove).not.toHaveBeenCalled();
   });
@@ -512,7 +632,7 @@ describe('revoke_roles shared-ownership safety', () => {
     const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
 
     expect(result).toMatchObject({ success: false, retryable: true });
-    expect(result.error).toContain('revoke origin');
+    expect(result.error).toContain('revoke role set');
     expect(harness.fetch).not.toHaveBeenCalled();
     expect(harness.remove).not.toHaveBeenCalled();
   });
@@ -607,6 +727,105 @@ describe('revoke_roles shared-ownership safety', () => {
     expect(result).toMatchObject({ success: false, retryable: true });
     expect(harness.remove).toHaveBeenCalledTimes(1);
     expect(harness.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts a payload-captured temp grant after the sweeper tombstones it', async () => {
+    const tempRoleId = '12345678901234567';
+    const tempGrantId = 'temp-grant-1';
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }, { data: [], error: null }],
+      undefined,
+      [],
+      {
+        data: {
+          id: 'ent-terminal', guild_id: 'guild-1', customer_id: 'customer-1',
+          order_id: 'order-1', product_id: 'product-1', status: 'expired',
+          source: 'purchase', granted_role_ids: [],
+        },
+        error: null,
+      },
+      {
+        data: {
+          id: 'order-1', guild_id: 'guild-1', customer_id: 'customer-1',
+          product_id: 'product-1', grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+          temporary_role_grants_snapshot: [{ role_id: tempRoleId, duration_seconds: 60 }],
+        },
+        error: null,
+      },
+      {
+        data: [{
+          id: tempGrantId, guild_id: 'guild-1', user_id: 'user-1', role_id: tempRoleId,
+          order_id: 'order-1', source: 'commerce_reconciled', source_id: 'product-1',
+          duration_seconds: 60, grant_status: 'removed', remove_on_expiry: true,
+        }],
+        error: null,
+      },
+    );
+    const harness = makeRevokeGuild([[tempRoleId], []]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, {
+      ...identityRevokePayload,
+      role_ids: [tempRoleId],
+      temporary_role_grant_ids: [tempGrantId],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.removed).toEqual([tempRoleId]);
+  });
+
+  it('ignores an uncaptured removed temp tombstone on a later permanent-role refund', async () => {
+    const tempRoleId = '12345678901234567';
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }, { data: [], error: null }],
+      undefined,
+      [],
+      undefined,
+      {
+        data: {
+          id: 'order-1', guild_id: 'guild-1', customer_id: 'customer-1',
+          product_id: 'product-1', grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+          temporary_role_grants_snapshot: [{ role_id: tempRoleId, duration_seconds: 60 }],
+        },
+        error: null,
+      },
+      {
+        data: [{
+          id: 'old-temp', guild_id: 'guild-1', user_id: 'user-1', role_id: tempRoleId,
+          order_id: 'order-1', source: 'commerce_reconciled', source_id: 'product-1',
+          duration_seconds: 60, grant_status: 'removed', remove_on_expiry: true,
+        }],
+        error: null,
+      },
+    );
+    const harness = makeRevokeGuild([['role-1'], []]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.removed).toEqual(['role-1']);
+  });
+
+  it('accepts the permanent-only legacy terminal contract when no temp provenance exists', async () => {
+    const { supabase } = makeOwnershipSupa(
+      [{ data: [], error: null }, { data: [], error: null }],
+      undefined,
+      [],
+      undefined,
+      {
+        data: {
+          id: 'order-1', guild_id: 'guild-1', customer_id: 'customer-1',
+          product_id: 'product-1', grant_snapshot_frozen_at: null,
+          temporary_role_grants_snapshot: [],
+        },
+        error: null,
+      },
+    );
+    const harness = makeRevokeGuild([['role-1'], []]);
+
+    const result = await handleRevokeRoles(harness.guild, supabase, identityRevokePayload);
+
+    expect(result.success).toBe(true);
+    expect(result.data?.removed).toEqual(['role-1']);
   });
 
   it('rejects a legacy partial-identity payload retryably without touching Discord', async () => {
@@ -887,7 +1106,7 @@ describe('action-queue deep routing', () => {
     // Should log error and continue
   });
 
-  it('routes a legacy revoke_roles action into retry without touching Discord', async () => {
+  it('rejects a legacy revoke_roles action without touching Discord', async () => {
     const actions = [{
       id: 'act-17', guild_id: 'guild-1', action: 'revoke_roles', status: 'pending',
       payload: { discord_id: 'user-1', role_ids: ['role-1'], reason: 'Subscription expired' },
@@ -911,7 +1130,7 @@ describe('action-queue deep routing', () => {
     const supa = makeSupa(actions);
     await startActionQueueListener(guild, supa);
     expect(guild.members.fetch).not.toHaveBeenCalled();
-    expect((supa.__queueUpdates as Record<string, unknown>[]).map((u) => u.status)).toContain('pending');
+    expect((supa.__queueUpdates as Record<string, unknown>[]).map((u) => u.status)).toContain('failed');
   });
 
   it('rejects a partial revoke_roles identity before attempting any role removal', async () => {
@@ -947,7 +1166,7 @@ describe('action-queue deep routing', () => {
 
     expect(remove).not.toHaveBeenCalled();
     const statuses = (supa.__queueUpdates as Record<string, unknown>[]).map((u) => u.status);
-    expect(statuses).toContain('pending');
+    expect(statuses).toContain('failed');
     expect(statuses).not.toContain('completed');
   });
 

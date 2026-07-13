@@ -262,6 +262,7 @@ describe('EntitlementService.revoke', () => {
       products: { name: 'Manual access' },
     };
     const supabase = {
+      rpc: vi.fn(async () => ({ data: null, error: null })),
       from: vi.fn((table: string) => {
         if (table === 'entitlements') {
           const chain = supaChain(entData);
@@ -289,6 +290,62 @@ describe('EntitlementService.revoke', () => {
     const service = new EntitlementService(guild, supabase, eventBus);
     expect(await service.revoke('ent-manual', 'cancelled')).toBe(true);
     expect(member.roles.remove).toHaveBeenCalledWith('r1', 'Commerce: entitlement revoked');
+  });
+
+  it('preserves a manual role owned by a delayed pending paid grant', async () => {
+    const member = makeMember('u1', ['r1']);
+    const guild = makeGuild([member]);
+    const entData = {
+      id: 'ent-manual',
+      customer_id: 'cust1',
+      product_id: 'prod1',
+      source: 'manual',
+      granted_role_ids: ['r1'],
+      license_key_id: null,
+      products: { name: 'Manual access' },
+    };
+    const rpc = vi.fn(async () => ({
+      data: {
+        id: 'grant-pending',
+        guild_id: 'g1',
+        user_id: 'u1',
+        role_id: 'r1',
+        expires_at: '2000-01-01T00:00:00.000Z',
+        grant_status: 'pending',
+        remove_on_expiry: true,
+        order_id: 'order-paid',
+      },
+      error: null,
+    }));
+    const supabase = {
+      rpc,
+      from: vi.fn((table: string) => {
+        if (table === 'entitlements') {
+          const chain = supaChain(entData);
+          chain.limit = vi.fn(async () => ({ data: [], error: null }));
+          chain.update = vi.fn(() => {
+            const updated = supaChain();
+            updated.eq = vi.fn(() => updated);
+            updated.then = (resolve: any) => resolve({ error: null });
+            return updated;
+          });
+          return chain;
+        }
+        if (table === 'customers') {
+          return supaChain({ id: 'cust1', guild_id: 'g1', discord_id: 'u1' });
+        }
+        return supaChain();
+      }),
+    } as any;
+
+    const service = new EntitlementService(guild, supabase, eventBus);
+
+    expect(await service.revoke('ent-manual', 'cancelled')).toBe(true);
+    expect(member.roles.remove).not.toHaveBeenCalled();
+    expect(rpc).toHaveBeenCalledWith(
+      'commerce_find_live_temp_role_owner',
+      expect.objectContaining({ p_guild_id: 'g1', p_user_id: 'u1', p_role_id: 'r1' }),
+    );
   });
 
   it('preserves a manual entitlement role still owned by a live paid entitlement', async () => {

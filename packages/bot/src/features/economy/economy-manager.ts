@@ -261,36 +261,28 @@ export class EconomyManager {
 
     if (existing) return existing as WalletData;
 
+    const { data: created, error: createErr } = await this.supabase.rpc(
+      'economy_get_or_create_wallet',
+      {
+        p_guild_id: this.guild.id,
+        p_user_id: userId,
+      },
+    );
+
+    if (createErr) {
+      log.error('getOrCreateWallet initialization RPC failed', {
+        userId,
+        detail: createErr.message,
+      });
+    }
+
+    if (created) return created as WalletData;
+
+    // Preserve the established non-throwing fallback when persistence fails.
     const cfg = await this.loadConfig();
     const startBal = cfg.economy_starting_balance;
 
-    const { data: created, error: upsertErr } = await this.supabase
-      .from('economy_wallets')
-      .upsert(
-        {
-          guild_id: this.guild.id,
-          user_id: userId,
-          wallet: startBal,
-          bank: 0,
-          bank_max: 10000,
-          passive: false,
-          total_earned: startBal,
-          total_spent: 0,
-        },
-        { onConflict: 'guild_id,user_id' },
-      )
-      .select('*')
-      .single();
-
-    if (upsertErr) {
-      log.error('getOrCreateWallet upsert failed', { userId, detail: upsertErr.message });
-    }
-
-    if (startBal > 0 && created) {
-      await this.recordTransaction(userId, 'admin_add', startBal, startBal, 'Starting balance');
-    }
-
-    return (created ?? {
+    return {
       guild_id: this.guild.id,
       user_id: userId,
       wallet: startBal,
@@ -299,7 +291,7 @@ export class EconomyManager {
       passive: false,
       total_earned: startBal,
       total_spent: 0,
-    }) as WalletData;
+    } as WalletData;
   }
 
   /**

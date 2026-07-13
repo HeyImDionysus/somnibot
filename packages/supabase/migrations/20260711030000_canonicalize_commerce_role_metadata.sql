@@ -185,6 +185,54 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_bot_action_queue_idempotency_key
   ON public.bot_action_queue (idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
+-- A narrow compatibility boundary for completed subscription orders that
+-- predate order-level grant snapshots but already have an exact staged outbox
+-- payload. The queue id is intentionally an immutable UUID marker rather than
+-- a foreign key: normal queue retention must not erase or block this contract.
+-- Only the validating SECURITY DEFINER RPC below may insert a row; workers get
+-- read-only access so a null order snapshot is trusted only with this evidence.
+CREATE TABLE IF NOT EXISTS public.commerce_legacy_subscription_grant_contracts (
+  order_id UUID PRIMARY KEY
+    REFERENCES public.orders(id) ON DELETE CASCADE,
+  source_queue_id UUID NOT NULL UNIQUE,
+  guild_id TEXT NOT NULL,
+  customer_id UUID NOT NULL,
+  discord_id TEXT NOT NULL,
+  product_id UUID NOT NULL,
+  product_name TEXT NOT NULL,
+  order_number TEXT NOT NULL,
+  plan_id UUID NOT NULL,
+  paypal_subscription_id TEXT NOT NULL,
+  paypal_plan_id TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL CHECK (amount_cents >= 0),
+  currency TEXT NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
+  granted_role_ids_snapshot TEXT[] NOT NULL,
+  granted_channel_ids_snapshot TEXT[] NOT NULL,
+  persisted_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+  CONSTRAINT commerce_legacy_subscription_contract_roles_valid
+    CHECK (public.commerce_valid_snowflake_snapshot(granted_role_ids_snapshot)),
+  CONSTRAINT commerce_legacy_subscription_contract_channels_valid
+    CHECK (public.commerce_valid_snowflake_snapshot(granted_channel_ids_snapshot)),
+  CONSTRAINT commerce_legacy_subscription_contract_text_identity_valid
+    CHECK (
+      guild_id = pg_catalog.btrim(guild_id) AND guild_id <> ''
+      AND discord_id = pg_catalog.btrim(discord_id) AND discord_id <> ''
+      AND product_name = pg_catalog.btrim(product_name) AND product_name <> ''
+      AND order_number = pg_catalog.btrim(order_number) AND order_number <> ''
+      AND paypal_subscription_id = pg_catalog.btrim(paypal_subscription_id)
+      AND paypal_subscription_id <> ''
+      AND paypal_plan_id = pg_catalog.btrim(paypal_plan_id)
+      AND paypal_plan_id <> ''
+    )
+);
+
+ALTER TABLE public.commerce_legacy_subscription_grant_contracts
+  ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.commerce_legacy_subscription_grant_contracts
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT ON public.commerce_legacy_subscription_grant_contracts
+  TO service_role;
+
 CREATE TABLE IF NOT EXISTS public.commerce_product_temp_role_config (
   id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   product_id       UUID        NOT NULL,
@@ -260,12 +308,25 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.commerce_role_metadata_migr
 ALTER TABLE public.temp_role_grants
   ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES public.orders(id),
   ADD COLUMN IF NOT EXISTS grant_status TEXT NOT NULL DEFAULT 'applied'
-    CHECK (grant_status IN ('pending', 'applied')),
+    CHECK (grant_status IN ('pending', 'applied', 'removed')),
+  ADD COLUMN IF NOT EXISTS duration_seconds INTEGER
+    CHECK (
+      duration_seconds IS NULL
+      OR (duration_seconds > 0 AND duration_seconds <= 315360000)
+    ),
   ADD COLUMN IF NOT EXISTS remove_on_expiry BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   ADD COLUMN IF NOT EXISTS last_error TEXT,
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- IF NOT EXISTS may have preserved the earlier two-state check from a partial
+-- migration attempt. Normalize it before any sweeper writes tombstones.
+ALTER TABLE public.temp_role_grants
+  DROP CONSTRAINT IF EXISTS temp_role_grants_grant_status_check;
+ALTER TABLE public.temp_role_grants
+  ADD CONSTRAINT temp_role_grants_grant_status_check
+  CHECK (grant_status IN ('pending', 'applied', 'removed'));
 
 UPDATE public.temp_role_grants
    SET applied_at = COALESCE(applied_at, created_at),
@@ -1281,6 +1342,215 @@ REVOKE ALL ON FUNCTION public.commerce_freeze_order_grant_snapshot(UUID, TEXT, U
 GRANT EXECUTE ON FUNCTION public.commerce_freeze_order_grant_snapshot(UUID, TEXT, UUID, UUID)
   TO service_role;
 
+-- Persist the only safe recovery contract for a completed legacy
+-- subscription: an exact staged outbox payload written before the order lost
+-- its normal freeze transition. This never reads today's product or plan grant
+-- configuration. The order and queue are locked together, every payload field
+-- is checked against the paid order/customer identity, and replay may only
+-- return the same immutable row.
+CREATE OR REPLACE FUNCTION public.commerce_adopt_legacy_subscription_grant_contract(
+  p_order_id UUID,
+  p_source_queue_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_order public.orders%ROWTYPE;
+  v_queue public.bot_action_queue%ROWTYPE;
+  v_contract public.commerce_legacy_subscription_grant_contracts%ROWTYPE;
+  v_roles TEXT[] := '{}'::TEXT[];
+  v_channels TEXT[] := '{}'::TEXT[];
+  v_had_contract BOOLEAN := false;
+BEGIN
+  IF p_order_id IS NULL OR p_source_queue_id IS NULL THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: order and queue are required';
+  END IF;
+
+  SELECT paid_order.*
+    INTO v_order
+    FROM public.orders AS paid_order
+   WHERE paid_order.id = p_order_id
+   FOR UPDATE;
+
+  IF v_order.id IS NULL
+     OR v_order.status <> 'completed'
+     OR v_order.grant_snapshot_frozen_at IS NOT NULL
+     OR v_order.guild_id IS NULL
+     OR v_order.customer_id IS NULL
+     OR v_order.product_id IS NULL
+     OR v_order.plan_id IS NULL
+     OR v_order.paypal_subscription_id IS NULL
+     OR pg_catalog.btrim(v_order.paypal_subscription_id) = ''
+     OR NOT COALESCE((v_order.source = 'purchase' OR v_order.source IS NULL), false) THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: legacy order identity mismatch';
+  END IF;
+
+  SELECT contract.*
+    INTO v_contract
+    FROM public.commerce_legacy_subscription_grant_contracts AS contract
+   WHERE contract.order_id = v_order.id
+   FOR SHARE;
+  v_had_contract := v_contract.order_id IS NOT NULL;
+
+  SELECT queue.*
+    INTO v_queue
+    FROM public.bot_action_queue AS queue
+   WHERE queue.id = p_source_queue_id
+   FOR SHARE;
+
+  IF v_queue.id IS NULL
+     OR v_queue.guild_id <> v_order.guild_id
+     OR v_queue.action <> 'fulfill_subscription'
+     OR v_queue.lane <> 'commerce'
+     OR v_queue.idempotency_key IS DISTINCT FROM (
+       'paypal:subscription:' || v_order.paypal_subscription_id || ':fulfill_subscription'
+     )
+     OR (
+       NOT v_had_contract
+       AND v_queue.status <> 'staged'
+     )
+     OR (
+       v_had_contract
+       AND v_queue.status NOT IN ('staged', 'pending', 'processing', 'completed', 'failed')
+     ) THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: staged queue identity mismatch';
+  END IF;
+
+  IF pg_catalog.jsonb_typeof(v_queue.payload) IS DISTINCT FROM 'object'
+     OR v_queue.payload ->> 'fulfillment_type' IS DISTINCT FROM 'subscription_activated'
+     OR v_queue.payload ->> 'entitlement_type' IS DISTINCT FROM 'subscription'
+     OR v_queue.payload ->> 'guild_id' IS DISTINCT FROM v_order.guild_id
+     OR v_queue.payload ->> 'customer_id' IS DISTINCT FROM v_order.customer_id::TEXT
+     OR v_queue.payload ->> 'product_id' IS DISTINCT FROM v_order.product_id::TEXT
+     OR v_queue.payload ->> 'order_id' IS DISTINCT FROM v_order.id::TEXT
+     OR v_queue.payload ->> 'order_number' IS DISTINCT FROM v_order.order_number
+     OR v_queue.payload ->> 'plan_id' IS DISTINCT FROM v_order.plan_id::TEXT
+     OR v_queue.payload ->> 'paypal_subscription_id'
+          IS DISTINCT FROM v_order.paypal_subscription_id
+     OR pg_catalog.jsonb_typeof(v_queue.payload -> 'amount_cents') IS DISTINCT FROM 'number'
+     OR (v_queue.payload ->> 'amount_cents')::NUMERIC
+          IS DISTINCT FROM v_order.amount_cents::NUMERIC
+     OR v_queue.payload ->> 'currency' IS DISTINCT FROM v_order.currency
+     OR v_queue.payload ->> 'discord_id' IS NULL
+     OR pg_catalog.btrim(v_queue.payload ->> 'discord_id') = ''
+     OR v_queue.payload ->> 'product_name' IS NULL
+     OR pg_catalog.btrim(v_queue.payload ->> 'product_name') = ''
+     OR v_queue.payload ->> 'paypal_plan_id' IS NULL
+     OR pg_catalog.btrim(v_queue.payload ->> 'paypal_plan_id') = ''
+     OR pg_catalog.jsonb_typeof(v_queue.payload -> 'granted_role_ids') IS DISTINCT FROM 'array'
+     OR pg_catalog.jsonb_typeof(v_queue.payload -> 'granted_channel_ids') IS DISTINCT FROM 'array'
+     OR COALESCE(v_queue.payload -> 'temporary_role_grants', '[]'::JSONB) <> '[]'::JSONB
+     OR v_queue.payload ? 'license_key_id'
+     OR v_queue.payload ? 'license_key_plaintext' THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: staged payload mismatch';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+      FROM public.customers AS customer
+     WHERE customer.id = v_order.customer_id
+       AND customer.guild_id = v_order.guild_id
+       AND customer.discord_id = v_queue.payload ->> 'discord_id'
+  ) THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: customer identity mismatch';
+  END IF;
+
+  SELECT COALESCE(
+           pg_catalog.array_agg(role_row.value ORDER BY role_row.ordinality),
+           '{}'::TEXT[]
+         )
+    INTO v_roles
+    FROM pg_catalog.jsonb_array_elements_text(
+      v_queue.payload -> 'granted_role_ids'
+    ) WITH ORDINALITY AS role_row(value, ordinality);
+
+  SELECT COALESCE(
+           pg_catalog.array_agg(channel_row.value ORDER BY channel_row.ordinality),
+           '{}'::TEXT[]
+         )
+    INTO v_channels
+    FROM pg_catalog.jsonb_array_elements_text(
+      v_queue.payload -> 'granted_channel_ids'
+    ) WITH ORDINALITY AS channel_row(value, ordinality);
+
+  IF NOT public.commerce_valid_snowflake_snapshot(v_roles)
+     OR NOT public.commerce_valid_snowflake_snapshot(v_channels) THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: staged grant snapshot is malformed';
+  END IF;
+
+  IF NOT v_had_contract THEN
+    INSERT INTO public.commerce_legacy_subscription_grant_contracts (
+      order_id,
+      source_queue_id,
+      guild_id,
+      customer_id,
+      discord_id,
+      product_id,
+      product_name,
+      order_number,
+      plan_id,
+      paypal_subscription_id,
+      paypal_plan_id,
+      amount_cents,
+      currency,
+      granted_role_ids_snapshot,
+      granted_channel_ids_snapshot
+    ) VALUES (
+      v_order.id,
+      v_queue.id,
+      v_order.guild_id,
+      v_order.customer_id,
+      v_queue.payload ->> 'discord_id',
+      v_order.product_id,
+      v_queue.payload ->> 'product_name',
+      v_order.order_number,
+      v_order.plan_id,
+      v_order.paypal_subscription_id,
+      v_queue.payload ->> 'paypal_plan_id',
+      v_order.amount_cents,
+      v_order.currency,
+      v_roles,
+      v_channels
+    )
+    RETURNING * INTO v_contract;
+  END IF;
+
+  IF v_contract.source_queue_id <> v_queue.id
+     OR v_contract.guild_id <> v_order.guild_id
+     OR v_contract.customer_id <> v_order.customer_id
+     OR v_contract.discord_id <> v_queue.payload ->> 'discord_id'
+     OR v_contract.product_id <> v_order.product_id
+     OR v_contract.product_name <> v_queue.payload ->> 'product_name'
+     OR v_contract.order_number <> v_order.order_number
+     OR v_contract.plan_id <> v_order.plan_id
+     OR v_contract.paypal_subscription_id <> v_order.paypal_subscription_id
+     OR v_contract.paypal_plan_id <> v_queue.payload ->> 'paypal_plan_id'
+     OR v_contract.amount_cents <> v_order.amount_cents
+     OR v_contract.currency <> v_order.currency
+     OR v_contract.granted_role_ids_snapshot IS DISTINCT FROM v_roles
+     OR v_contract.granted_channel_ids_snapshot IS DISTINCT FROM v_channels
+     OR NOT pg_catalog.isfinite(v_contract.persisted_at) THEN
+    RAISE EXCEPTION 'commerce_adopt_legacy_subscription_grant_contract: immutable replay mismatch';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'order_id', v_contract.order_id,
+    'source_queue_id', v_contract.source_queue_id,
+    'granted_role_ids_snapshot', pg_catalog.to_jsonb(v_contract.granted_role_ids_snapshot),
+    'granted_channel_ids_snapshot', pg_catalog.to_jsonb(v_contract.granted_channel_ids_snapshot),
+    'persisted_at', v_contract.persisted_at
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.commerce_adopt_legacy_subscription_grant_contract(UUID, UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_adopt_legacy_subscription_grant_contract(UUID, UUID)
+  TO service_role;
+
 -- Record a PayPal capture, customer totals, and the exact order transition in
 -- one transaction. A repeated capture validates identity and returns the
 -- existing result without incrementing totals again.
@@ -1514,22 +1784,10 @@ DECLARE
   v_discord_id TEXT;
   v_is_paid BOOLEAN := false;
   v_role_ids TEXT[];
+  v_temp_role_grant_ids UUID[] := '{}'::UUID[];
 BEGIN
   IF OLD.status NOT IN ('active', 'pending', 'grace_period', 'suspended')
      OR NEW.status NOT IN ('cancelled', 'expired', 'revoked') THEN
-    RETURN NEW;
-  END IF;
-
-  SELECT COALESCE(
-           pg_catalog.array_agg(DISTINCT role.value ORDER BY role.value),
-           '{}'::TEXT[]
-         )
-    INTO v_role_ids
-    FROM pg_catalog.unnest(COALESCE(OLD.granted_role_ids, '{}'::TEXT[])) AS role(value)
-   WHERE role.value IS NOT NULL
-     AND pg_catalog.btrim(role.value) <> '';
-
-  IF pg_catalog.cardinality(v_role_ids) = 0 THEN
     RETURN NEW;
   END IF;
 
@@ -1544,9 +1802,6 @@ BEGIN
     SELECT EXISTS (
       SELECT 1
         FROM public.orders AS paid_order
-        JOIN public.products AS product
-          ON product.id = paid_order.product_id
-         AND product.guild_id = paid_order.guild_id
        WHERE paid_order.id = OLD.order_id
          AND paid_order.guild_id = OLD.guild_id
          AND paid_order.customer_id = OLD.customer_id
@@ -1566,9 +1821,11 @@ BEGIN
              SELECT 1
                FROM public.payments AS payment
               WHERE payment.order_id = paid_order.id
-                AND payment.customer_id = paid_order.customer_id
-                AND payment.guild_id = paid_order.guild_id
-                AND payment.status IN ('completed', 'refunded', 'reversed')
+                 AND payment.customer_id = paid_order.customer_id
+                 AND payment.guild_id = paid_order.guild_id
+                 AND payment.amount_cents = paid_order.amount_cents
+                 AND payment.currency = paid_order.currency
+                 AND payment.status IN ('completed', 'refunded', 'reversed')
                 AND payment.paypal_payment_id IS NOT NULL
                 AND pg_catalog.btrim(payment.paypal_payment_id) <> ''
            )
@@ -1594,6 +1851,65 @@ BEGIN
     RAISE EXCEPTION 'commerce entitlement revocation: customer identity is unavailable';
   END IF;
 
+  -- Permanent entitlement roles are always owned by this entitlement. A
+  -- temporary role is owned only when an exact order-backed provenance row
+  -- says this fulfillment established removal responsibility. This preserves
+  -- roles that existed manually before fulfillment (remove_on_expiry=false).
+  WITH exact_temp_grants AS MATERIALIZED (
+    SELECT grant_row.id, grant_row.role_id
+      FROM public.temp_role_grants AS grant_row
+      JOIN public.orders AS paid_order
+        ON paid_order.id = OLD.order_id
+       AND paid_order.guild_id = OLD.guild_id
+       AND paid_order.customer_id = OLD.customer_id
+       AND paid_order.product_id = OLD.product_id
+     WHERE grant_row.order_id = OLD.order_id
+       AND grant_row.guild_id = OLD.guild_id
+       AND grant_row.user_id = v_discord_id
+       AND grant_row.source = 'commerce_purchase'
+       AND grant_row.source_id = OLD.product_id::TEXT
+       AND grant_row.grant_status IN ('pending', 'applied')
+       AND grant_row.remove_on_expiry = true
+       AND grant_row.duration_seconds IS NOT NULL
+       AND public.commerce_valid_temp_role_snapshot(
+         paid_order.temporary_role_grants_snapshot
+       )
+       AND EXISTS (
+         SELECT 1
+           FROM pg_catalog.jsonb_array_elements(
+             paid_order.temporary_role_grants_snapshot
+           ) AS frozen_grant(value)
+          WHERE frozen_grant.value ->> 'role_id' = grant_row.role_id
+            AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+              = grant_row.duration_seconds
+       )
+  ), role_values AS (
+    SELECT permanent_role.value
+      FROM pg_catalog.unnest(
+        COALESCE(OLD.granted_role_ids, '{}'::TEXT[])
+      ) AS permanent_role(value)
+     WHERE permanent_role.value IS NOT NULL
+       AND pg_catalog.btrim(permanent_role.value) <> ''
+    UNION ALL
+    SELECT exact_temp_grants.role_id
+      FROM exact_temp_grants
+  )
+  SELECT COALESCE(
+           (SELECT pg_catalog.array_agg(DISTINCT role_values.value ORDER BY role_values.value)
+              FROM role_values),
+           '{}'::TEXT[]
+         ),
+         COALESCE(
+           (SELECT pg_catalog.array_agg(exact_temp_grants.id ORDER BY exact_temp_grants.id)
+              FROM exact_temp_grants),
+           '{}'::UUID[]
+         )
+    INTO v_role_ids, v_temp_role_grant_ids;
+
+  IF pg_catalog.cardinality(v_role_ids) = 0 THEN
+    RETURN NEW;
+  END IF;
+
   INSERT INTO public.bot_action_queue (
     guild_id,
     action,
@@ -1606,6 +1922,7 @@ BEGIN
       'guild_id', OLD.guild_id,
       'discord_id', v_discord_id,
       'role_ids', pg_catalog.to_jsonb(v_role_ids),
+      'temporary_role_grant_ids', pg_catalog.to_jsonb(v_temp_role_grant_ids),
       'reason', 'entitlement_' || NEW.status,
       'entitlement_id', OLD.id,
       'customer_id', OLD.customer_id,
@@ -1649,6 +1966,7 @@ SELECT entitlement.guild_id,
          'guild_id', entitlement.guild_id,
          'discord_id', customer.discord_id,
          'role_ids', pg_catalog.to_jsonb(grants.role_ids),
+         'temporary_role_grant_ids', pg_catalog.to_jsonb(temp_grants.grant_ids),
          'reason', 'entitlement_' || entitlement.status,
          'entitlement_id', entitlement.id,
          'customer_id', entitlement.customer_id,
@@ -1664,20 +1982,70 @@ SELECT entitlement.guild_id,
    AND paid_order.guild_id = entitlement.guild_id
    AND paid_order.customer_id = entitlement.customer_id
    AND paid_order.product_id = entitlement.product_id
-  JOIN public.products AS product
-    ON product.id = paid_order.product_id
-   AND product.guild_id = paid_order.guild_id
   JOIN public.customers AS customer
     ON customer.id = entitlement.customer_id
    AND customer.guild_id = entitlement.guild_id
   CROSS JOIN LATERAL (
     SELECT pg_catalog.array_agg(DISTINCT role.value ORDER BY role.value) AS role_ids
-      FROM pg_catalog.unnest(
-        COALESCE(entitlement.granted_role_ids, '{}'::TEXT[])
+      FROM (
+        SELECT permanent_role.value
+          FROM pg_catalog.unnest(
+            COALESCE(entitlement.granted_role_ids, '{}'::TEXT[])
+          ) AS permanent_role(value)
+         WHERE permanent_role.value IS NOT NULL
+           AND pg_catalog.btrim(permanent_role.value) <> ''
+        UNION ALL
+        SELECT grant_row.role_id
+          FROM public.temp_role_grants AS grant_row
+         WHERE grant_row.order_id = entitlement.order_id
+           AND grant_row.guild_id = entitlement.guild_id
+           AND grant_row.user_id = customer.discord_id
+           AND grant_row.source = 'commerce_purchase'
+           AND grant_row.source_id = entitlement.product_id::TEXT
+           AND grant_row.grant_status IN ('pending', 'applied')
+           AND grant_row.remove_on_expiry = true
+           AND grant_row.duration_seconds IS NOT NULL
+           AND public.commerce_valid_temp_role_snapshot(
+             paid_order.temporary_role_grants_snapshot
+           )
+           AND EXISTS (
+             SELECT 1
+               FROM pg_catalog.jsonb_array_elements(
+                 paid_order.temporary_role_grants_snapshot
+               ) AS frozen_grant(value)
+              WHERE frozen_grant.value ->> 'role_id' = grant_row.role_id
+                AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+                  = grant_row.duration_seconds
+           )
       ) AS role(value)
-     WHERE role.value IS NOT NULL
-       AND pg_catalog.btrim(role.value) <> ''
   ) AS grants
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+             pg_catalog.array_agg(grant_row.id ORDER BY grant_row.id),
+             '{}'::UUID[]
+           ) AS grant_ids
+      FROM public.temp_role_grants AS grant_row
+     WHERE grant_row.order_id = entitlement.order_id
+       AND grant_row.guild_id = entitlement.guild_id
+       AND grant_row.user_id = customer.discord_id
+       AND grant_row.source = 'commerce_purchase'
+       AND grant_row.source_id = entitlement.product_id::TEXT
+       AND grant_row.grant_status IN ('pending', 'applied')
+       AND grant_row.remove_on_expiry = true
+       AND grant_row.duration_seconds IS NOT NULL
+       AND public.commerce_valid_temp_role_snapshot(
+         paid_order.temporary_role_grants_snapshot
+       )
+       AND EXISTS (
+         SELECT 1
+           FROM pg_catalog.jsonb_array_elements(
+             paid_order.temporary_role_grants_snapshot
+           ) AS frozen_grant(value)
+          WHERE frozen_grant.value ->> 'role_id' = grant_row.role_id
+            AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+              = grant_row.duration_seconds
+       )
+  ) AS temp_grants
  WHERE entitlement.status IN ('cancelled', 'expired', 'revoked')
    AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
    AND entitlement.guild_id IS NOT NULL
@@ -1701,9 +2069,11 @@ SELECT entitlement.guild_id,
        SELECT 1
          FROM public.payments AS payment
         WHERE payment.order_id = paid_order.id
-          AND payment.customer_id = paid_order.customer_id
-          AND payment.guild_id = paid_order.guild_id
-          AND payment.status IN ('completed', 'refunded', 'reversed')
+           AND payment.customer_id = paid_order.customer_id
+           AND payment.guild_id = paid_order.guild_id
+           AND payment.amount_cents = paid_order.amount_cents
+           AND payment.currency = paid_order.currency
+           AND payment.status IN ('completed', 'refunded', 'reversed')
           AND payment.paypal_payment_id IS NOT NULL
           AND pg_catalog.btrim(payment.paypal_payment_id) <> ''
      )
@@ -1766,9 +2136,14 @@ BEGIN
       JOIN public.customers AS customer
         ON customer.id = paid_order.customer_id
        AND customer.guild_id = paid_order.guild_id
-      JOIN public.products AS product
-        ON product.id = paid_order.product_id
-       AND product.guild_id = paid_order.guild_id
+      JOIN public.entitlements AS entitlement
+        ON entitlement.order_id = paid_order.id
+       AND entitlement.guild_id = paid_order.guild_id
+       AND entitlement.customer_id = paid_order.customer_id
+       AND entitlement.product_id = paid_order.product_id
+       AND entitlement.type = 'one_time'
+       AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+       AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
      WHERE paid_order.id = p_order_id
        AND paid_order.guild_id = p_guild_id
        AND paid_order.product_id = p_product_id
@@ -1807,7 +2182,7 @@ BEGIN
            )
          )
        )
-     FOR SHARE OF paid_order;
+     FOR SHARE OF paid_order, entitlement;
 
   IF v_paid_order_id IS NULL THEN
     RAISE EXCEPTION 'commerce_prepare_temp_role_grant: paid order identity mismatch';
@@ -1823,6 +2198,7 @@ BEGIN
     source,
     source_id,
     order_id,
+    duration_seconds,
     grant_status,
     attempts,
     updated_at
@@ -1834,6 +2210,7 @@ BEGIN
     'commerce_purchase',
     p_product_id::TEXT,
     p_order_id,
+    p_duration_seconds,
     'pending',
     1,
     v_prepared_at
@@ -1845,6 +2222,17 @@ BEGIN
   WHERE existing.guild_id = EXCLUDED.guild_id
     AND existing.user_id = EXCLUDED.user_id
     AND existing.source_id = EXCLUDED.source_id
+    AND existing.duration_seconds = EXCLUDED.duration_seconds
+    AND (
+      (
+        existing.grant_status IN ('pending', 'applied')
+        AND existing.source = 'commerce_purchase'
+      )
+      OR (
+        existing.grant_status = 'removed'
+        AND existing.source = 'commerce_reconciled'
+      )
+    )
   RETURNING * INTO v_grant;
 
   IF v_grant.id IS NULL THEN
@@ -1854,7 +2242,467 @@ BEGIN
   RETURN jsonb_build_object(
     'id', v_grant.id,
     'grant_status', v_grant.grant_status,
+    'remove_on_expiry', v_grant.remove_on_expiry,
     'expires_at', v_grant.expires_at
+  );
+END;
+$$;
+
+-- Resolve one authoritative live temporary-role owner. Order-backed commerce
+-- rows are live only while their exact paid parent order remains completed;
+-- terminal/refunded/cancelled parents must never retain or resurrect access.
+-- Legacy/non-commerce rows have no parent order and keep their historical
+-- applied-until-expires behavior. The optional order exclusion prevents a
+-- revocation action from treating the order being revoked as its own owner.
+CREATE OR REPLACE FUNCTION public.commerce_find_live_temp_role_owner(
+  p_guild_id TEXT,
+  p_user_id TEXT,
+  p_role_id TEXT,
+  p_exclude_grant_id UUID,
+  p_exclude_order_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_grant public.temp_role_grants%ROWTYPE;
+  v_now TIMESTAMPTZ := pg_catalog.clock_timestamp();
+BEGIN
+  IF p_guild_id IS NULL OR pg_catalog.btrim(p_guild_id) = ''
+     OR p_user_id IS NULL OR pg_catalog.btrim(p_user_id) = ''
+     OR p_role_id IS NULL OR pg_catalog.btrim(p_role_id) = '' THEN
+    RAISE EXCEPTION 'commerce_find_live_temp_role_owner: identity is required';
+  END IF;
+
+  SELECT grant_row.*
+    INTO v_grant
+    FROM public.temp_role_grants AS grant_row
+    LEFT JOIN public.orders AS paid_order
+      ON paid_order.id = grant_row.order_id
+     AND paid_order.guild_id = grant_row.guild_id
+    LEFT JOIN public.customers AS customer
+      ON customer.id = paid_order.customer_id
+     AND customer.guild_id = paid_order.guild_id
+   WHERE grant_row.guild_id = p_guild_id
+     AND grant_row.user_id = p_user_id
+     AND grant_row.role_id = p_role_id
+     AND (p_exclude_grant_id IS NULL OR grant_row.id <> p_exclude_grant_id)
+     AND (
+       p_exclude_order_id IS NULL
+       OR grant_row.order_id IS NULL
+       OR grant_row.order_id <> p_exclude_order_id
+     )
+     AND (
+       (
+         grant_row.order_id IS NULL
+         AND grant_row.grant_status = 'applied'
+         AND grant_row.expires_at > v_now
+       )
+       OR (
+         grant_row.order_id IS NOT NULL
+         AND grant_row.source = 'commerce_purchase'
+         AND grant_row.duration_seconds IS NOT NULL
+         AND grant_row.duration_seconds > 0
+         AND grant_row.duration_seconds <= 315360000
+         AND paid_order.status = 'completed'
+         AND paid_order.amount_cents > 0
+         AND paid_order.paypal_subscription_id IS NULL
+         AND paid_order.product_id::TEXT = grant_row.source_id
+         AND paid_order.grant_snapshot_frozen_at IS NOT NULL
+         AND customer.discord_id = grant_row.user_id
+         AND (
+           paid_order.source = 'purchase'
+           OR (
+             paid_order.source IS NULL
+          AND EXISTS (
+               SELECT 1
+                 FROM public.payments AS payment
+                WHERE payment.order_id = paid_order.id
+                  AND payment.customer_id = paid_order.customer_id
+                  AND payment.guild_id = paid_order.guild_id
+                  AND payment.amount_cents = paid_order.amount_cents
+                  AND payment.currency = paid_order.currency
+                  AND payment.status = 'completed'
+                  AND payment.paypal_payment_id IS NOT NULL
+                  AND pg_catalog.btrim(payment.paypal_payment_id) <> ''
+             )
+           )
+         )
+         AND public.commerce_valid_temp_role_snapshot(
+           paid_order.temporary_role_grants_snapshot
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM pg_catalog.jsonb_array_elements(
+               paid_order.temporary_role_grants_snapshot
+             ) AS frozen_grant(value)
+            WHERE frozen_grant.value ->> 'role_id' = grant_row.role_id
+              AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+                = grant_row.duration_seconds
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM public.entitlements AS entitlement
+             WHERE entitlement.order_id = paid_order.id
+               AND entitlement.guild_id = paid_order.guild_id
+               AND entitlement.customer_id = paid_order.customer_id
+               AND entitlement.product_id = paid_order.product_id
+               AND entitlement.type = 'one_time'
+               AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+               AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
+          )
+          AND (
+           grant_row.grant_status = 'pending'
+           OR (
+             grant_row.grant_status = 'applied'
+             AND grant_row.expires_at > v_now
+           )
+         )
+       )
+     )
+   ORDER BY grant_row.id ASC
+   LIMIT 1;
+
+  IF v_grant.id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'id', v_grant.id,
+    'guild_id', v_grant.guild_id,
+    'user_id', v_grant.user_id,
+    'role_id', v_grant.role_id,
+    'expires_at', v_grant.expires_at,
+    'grant_status', v_grant.grant_status,
+    'remove_on_expiry', v_grant.remove_on_expiry,
+    'order_id', v_grant.order_id
+  );
+END;
+$$;
+
+-- Inspect an exact order-backed grant after an ambiguous acknowledgement
+-- outcome. This is read-only evidence: callers use it to distinguish a lost
+-- successful response from a still-pending or terminal grant before touching
+-- Discord again.
+CREATE OR REPLACE FUNCTION public.commerce_inspect_temp_role_grant(
+  p_grant_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_grant public.temp_role_grants%ROWTYPE;
+  v_parent_status TEXT;
+  v_entitlement_is_live BOOLEAN := false;
+BEGIN
+  IF p_grant_id IS NULL THEN
+    RAISE EXCEPTION 'commerce_inspect_temp_role_grant: grant is required';
+  END IF;
+
+  SELECT grant_row,
+         paid_order.status,
+         EXISTS (
+           SELECT 1
+             FROM public.entitlements AS entitlement
+            WHERE entitlement.order_id = paid_order.id
+              AND entitlement.guild_id = paid_order.guild_id
+              AND entitlement.customer_id = paid_order.customer_id
+              AND entitlement.product_id = paid_order.product_id
+              AND entitlement.type = 'one_time'
+              AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+              AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
+         )
+    INTO v_grant, v_parent_status, v_entitlement_is_live
+    FROM public.temp_role_grants AS grant_row
+    JOIN public.orders AS paid_order
+      ON paid_order.id = grant_row.order_id
+     AND paid_order.guild_id = grant_row.guild_id
+    JOIN public.customers AS customer
+      ON customer.id = paid_order.customer_id
+     AND customer.guild_id = paid_order.guild_id
+   WHERE grant_row.id = p_grant_id
+     AND grant_row.source = 'commerce_purchase'
+     AND grant_row.order_id IS NOT NULL
+     AND grant_row.duration_seconds IS NOT NULL
+     AND grant_row.duration_seconds > 0
+     AND grant_row.duration_seconds <= 315360000
+     AND paid_order.amount_cents > 0
+     AND paid_order.paypal_subscription_id IS NULL
+     AND paid_order.product_id::TEXT = grant_row.source_id
+     AND paid_order.grant_snapshot_frozen_at IS NOT NULL
+     AND customer.discord_id = grant_row.user_id
+     AND (
+       paid_order.source = 'purchase'
+       OR (
+         paid_order.source IS NULL
+         AND EXISTS (
+           SELECT 1
+             FROM public.payments AS payment
+            WHERE payment.order_id = paid_order.id
+              AND payment.customer_id = paid_order.customer_id
+              AND payment.guild_id = paid_order.guild_id
+              AND payment.amount_cents = paid_order.amount_cents
+              AND payment.currency = paid_order.currency
+              AND payment.status IN ('completed', 'refunded', 'reversed')
+              AND payment.paypal_payment_id IS NOT NULL
+              AND pg_catalog.btrim(payment.paypal_payment_id) <> ''
+         )
+       )
+     )
+     AND public.commerce_valid_temp_role_snapshot(
+       paid_order.temporary_role_grants_snapshot
+     )
+     AND EXISTS (
+       SELECT 1
+         FROM pg_catalog.jsonb_array_elements(
+           paid_order.temporary_role_grants_snapshot
+         ) AS frozen_grant(value)
+        WHERE frozen_grant.value ->> 'role_id' = grant_row.role_id
+          AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+            = grant_row.duration_seconds
+     );
+
+  IF v_grant.id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'id', v_grant.id,
+    'guild_id', v_grant.guild_id,
+    'user_id', v_grant.user_id,
+    'role_id', v_grant.role_id,
+    'expires_at', v_grant.expires_at,
+    'duration_seconds', v_grant.duration_seconds,
+    'grant_status', v_grant.grant_status,
+    'remove_on_expiry', v_grant.remove_on_expiry,
+    'applied_at', v_grant.applied_at,
+    'order_id', v_grant.order_id,
+    'parent_order_status', v_parent_status,
+    'entitlement_is_live', v_entitlement_is_live
+  );
+END;
+$$;
+
+-- A pending row proves paid ownership before Discord mutation, but its
+-- provisional expires_at must not consume the purchased duration while the
+-- queue waits or retries.  This acknowledgement is the single idempotent
+-- transition that starts the clock after Discord has positively confirmed the
+-- role.  Replays return the original applied_at/expires_at without extension.
+CREATE OR REPLACE FUNCTION public.commerce_acknowledge_temp_role_grant(
+  p_grant_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_grant public.temp_role_grants%ROWTYPE;
+  v_applied_at TIMESTAMPTZ;
+  v_paid_order_id UUID;
+BEGIN
+  IF p_grant_id IS NULL THEN
+    RAISE EXCEPTION 'commerce_acknowledge_temp_role_grant: grant is required';
+  END IF;
+
+  SELECT grant_row.*
+    INTO v_grant
+    FROM public.temp_role_grants AS grant_row
+   WHERE grant_row.id = p_grant_id
+   FOR UPDATE;
+
+  IF v_grant.id IS NULL
+     OR v_grant.source <> 'commerce_purchase'
+     OR v_grant.order_id IS NULL
+     OR v_grant.duration_seconds IS NULL
+     OR v_grant.duration_seconds <= 0
+     OR v_grant.duration_seconds > 315360000 THEN
+    RAISE EXCEPTION 'commerce_acknowledge_temp_role_grant: provenance identity mismatch';
+  END IF;
+
+  -- Lock and revalidate the exact paid parent before starting (or replaying)
+  -- access. A refund/cancellation racing this transition either commits first
+  -- and rejects acknowledgement, or waits for this transaction and then owns
+  -- the subsequent revocation of the now-applied row.
+  SELECT paid_order.id
+    INTO v_paid_order_id
+    FROM public.orders AS paid_order
+    JOIN public.customers AS customer
+      ON customer.id = paid_order.customer_id
+     AND customer.guild_id = paid_order.guild_id
+    JOIN public.entitlements AS entitlement
+      ON entitlement.order_id = paid_order.id
+     AND entitlement.guild_id = paid_order.guild_id
+     AND entitlement.customer_id = paid_order.customer_id
+     AND entitlement.product_id = paid_order.product_id
+     AND entitlement.type = 'one_time'
+     AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+     AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
+   WHERE paid_order.id = v_grant.order_id
+     AND paid_order.guild_id = v_grant.guild_id
+     AND paid_order.product_id::TEXT = v_grant.source_id
+     AND paid_order.status = 'completed'
+     AND paid_order.amount_cents > 0
+     AND paid_order.paypal_subscription_id IS NULL
+     AND customer.discord_id = v_grant.user_id
+     AND paid_order.grant_snapshot_frozen_at IS NOT NULL
+     AND (
+       paid_order.source = 'purchase'
+       OR (
+         paid_order.source IS NULL
+         AND EXISTS (
+           SELECT 1
+             FROM public.payments AS payment
+            WHERE payment.order_id = paid_order.id
+              AND payment.customer_id = paid_order.customer_id
+              AND payment.guild_id = paid_order.guild_id
+              AND payment.amount_cents = paid_order.amount_cents
+              AND payment.currency = paid_order.currency
+              AND payment.status = 'completed'
+              AND payment.paypal_payment_id IS NOT NULL
+              AND pg_catalog.btrim(payment.paypal_payment_id) <> ''
+         )
+       )
+     )
+     AND public.commerce_valid_temp_role_snapshot(
+       paid_order.temporary_role_grants_snapshot
+     )
+     AND EXISTS (
+       SELECT 1
+         FROM pg_catalog.jsonb_array_elements(
+           paid_order.temporary_role_grants_snapshot
+         ) AS frozen_grant(value)
+        WHERE frozen_grant.value ->> 'role_id' = v_grant.role_id
+          AND (frozen_grant.value ->> 'duration_seconds')::INTEGER
+            = v_grant.duration_seconds
+     )
+   FOR SHARE OF paid_order, entitlement;
+
+  IF v_paid_order_id IS NULL THEN
+    RAISE EXCEPTION 'commerce_acknowledge_temp_role_grant: parent order is not live';
+  END IF;
+
+  IF v_grant.grant_status = 'pending' THEN
+    v_applied_at := pg_catalog.clock_timestamp();
+
+    UPDATE public.temp_role_grants
+       SET grant_status = 'applied',
+           applied_at = v_applied_at,
+           expires_at = v_applied_at
+             + (v_grant.duration_seconds * interval '1 second'),
+           last_error = NULL,
+           updated_at = v_applied_at
+     WHERE id = v_grant.id
+       AND grant_status = 'pending'
+    RETURNING * INTO v_grant;
+  ELSIF v_grant.grant_status <> 'applied'
+        OR v_grant.applied_at IS NULL THEN
+    RAISE EXCEPTION 'commerce_acknowledge_temp_role_grant: lifecycle state mismatch';
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'id', v_grant.id,
+    'grant_status', v_grant.grant_status,
+    'applied_at', v_grant.applied_at,
+    'expires_at', v_grant.expires_at
+  );
+END;
+$$;
+
+-- Atomically retire an expired or terminal order-backed grant. The final
+-- live-parent recheck shares locks with acknowledgement and entitlement
+-- transitions, closing the reactivation window between Discord cleanup and
+-- preservation of the durable revocation tombstone.
+CREATE OR REPLACE FUNCTION public.commerce_retire_temp_role_grant(
+  p_grant_id UUID,
+  p_expected_grant_status TEXT,
+  p_expected_expires_at TIMESTAMPTZ,
+  p_expected_remove_on_expiry BOOLEAN
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_grant public.temp_role_grants%ROWTYPE;
+  v_live_order_id UUID;
+BEGIN
+  SELECT grant_row.*
+    INTO v_grant
+    FROM public.temp_role_grants AS grant_row
+   WHERE grant_row.id = p_grant_id
+   FOR UPDATE;
+
+  IF v_grant.id IS NULL
+     OR v_grant.order_id IS NULL
+     OR v_grant.expires_at IS DISTINCT FROM p_expected_expires_at
+     OR v_grant.remove_on_expiry IS DISTINCT FROM p_expected_remove_on_expiry THEN
+    RAISE EXCEPTION 'commerce_retire_temp_role_grant: provenance identity mismatch';
+  END IF;
+
+  IF v_grant.grant_status = 'removed'
+     AND v_grant.source = 'commerce_reconciled' THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'id', v_grant.id,
+      'retired', true,
+      'grant_status', v_grant.grant_status,
+      'source', v_grant.source
+    );
+  END IF;
+
+  IF v_grant.grant_status IS DISTINCT FROM p_expected_grant_status
+     OR v_grant.grant_status NOT IN ('pending', 'applied')
+     OR v_grant.source <> 'commerce_purchase' THEN
+    RAISE EXCEPTION 'commerce_retire_temp_role_grant: lifecycle identity mismatch';
+  END IF;
+
+  SELECT paid_order.id
+    INTO v_live_order_id
+    FROM public.orders AS paid_order
+    JOIN public.entitlements AS entitlement
+      ON entitlement.order_id = paid_order.id
+     AND entitlement.guild_id = paid_order.guild_id
+     AND entitlement.customer_id = paid_order.customer_id
+     AND entitlement.product_id = paid_order.product_id
+     AND entitlement.type = 'one_time'
+     AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
+     AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
+   WHERE paid_order.id = v_grant.order_id
+     AND paid_order.guild_id = v_grant.guild_id
+     AND paid_order.status = 'completed'
+     AND (
+       v_grant.grant_status = 'pending'
+       OR v_grant.expires_at > pg_catalog.clock_timestamp()
+     )
+   FOR SHARE OF paid_order, entitlement;
+
+  IF v_live_order_id IS NOT NULL THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'id', v_grant.id,
+      'retired', false,
+      'grant_status', v_grant.grant_status,
+      'source', v_grant.source
+    );
+  END IF;
+
+  UPDATE public.temp_role_grants
+     SET grant_status = 'removed',
+         source = 'commerce_reconciled',
+         last_error = NULL,
+         updated_at = pg_catalog.clock_timestamp()
+   WHERE id = v_grant.id
+  RETURNING * INTO v_grant;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'id', v_grant.id,
+    'retired', true,
+    'grant_status', v_grant.grant_status,
+    'source', v_grant.source
   );
 END;
 $$;
@@ -1914,6 +2762,30 @@ REVOKE ALL ON FUNCTION public.commerce_prepare_temp_role_grant(
 ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.commerce_prepare_temp_role_grant(
   TEXT, TEXT, TEXT, UUID, UUID, INTEGER
+) TO service_role;
+
+REVOKE ALL ON FUNCTION public.commerce_find_live_temp_role_owner(
+  TEXT, TEXT, TEXT, UUID, UUID
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_find_live_temp_role_owner(
+  TEXT, TEXT, TEXT, UUID, UUID
+) TO service_role;
+
+REVOKE ALL ON FUNCTION public.commerce_inspect_temp_role_grant(UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_inspect_temp_role_grant(UUID)
+  TO service_role;
+
+REVOKE ALL ON FUNCTION public.commerce_acknowledge_temp_role_grant(UUID)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_acknowledge_temp_role_grant(UUID)
+  TO service_role;
+
+REVOKE ALL ON FUNCTION public.commerce_retire_temp_role_grant(
+  UUID, TEXT, TIMESTAMPTZ, BOOLEAN
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.commerce_retire_temp_role_grant(
+  UUID, TEXT, TIMESTAMPTZ, BOOLEAN
 ) TO service_role;
 
 REVOKE ALL ON FUNCTION public.prune_expired_data(TEXT)

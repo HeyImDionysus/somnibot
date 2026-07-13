@@ -159,6 +159,12 @@ async function cleanFixtures(): Promise<void> {
     .in('guild_id', TEST_GUILDS);
   expect(tempGrantDelete.error).toBeNull();
 
+  const entitlementDelete = await supa
+    .from('entitlements')
+    .delete()
+    .in('guild_id', TEST_GUILDS);
+  expect(entitlementDelete.error).toBeNull();
+
   const paymentDelete = await supa
     .from('payments')
     .delete()
@@ -479,6 +485,8 @@ describe('commerce income wall database invariant', () => {
 
   it('freezes immutable order grants and finalizes one capture exactly once', async () => {
     const roleId = nextSnowflake();
+    const tempRoleId = nextSnowflake();
+    const pendingTempRoleId = nextSnowflake();
     const channelId = nextSnowflake();
     const discordId = nextSnowflake();
     const productId = await createProduct({
@@ -488,10 +496,19 @@ describe('commerce income wall database invariant', () => {
     const { error: configError } = await supa.from('commerce_product_temp_role_config').insert({
       product_id: productId,
       guild_id: GUILD_A,
-      role_id: roleId,
+      role_id: tempRoleId,
       duration_seconds: 3_600,
     });
     expect(configError).toBeNull();
+    const { error: pendingConfigError } = await supa
+      .from('commerce_product_temp_role_config')
+      .insert({
+        product_id: productId,
+        guild_id: GUILD_A,
+        role_id: pendingTempRoleId,
+        duration_seconds: 1_800,
+      });
+    expect(pendingConfigError).toBeNull();
 
     const { data: customer, error: customerError } = await supa
       .from('customers')
@@ -559,7 +576,10 @@ describe('commerce income wall database invariant', () => {
       order_id: order!.id,
       granted_role_ids_snapshot: [roleId],
       granted_channel_ids_snapshot: [channelId],
-      temporary_role_grants_snapshot: [{ role_id: roleId, duration_seconds: 3_600 }],
+      temporary_role_grants_snapshot: [
+        { role_id: tempRoleId, duration_seconds: 3_600 },
+        { role_id: pendingTempRoleId, duration_seconds: 1_800 },
+      ],
     });
     expect((frozen.data as Record<string, unknown>).grant_snapshot_frozen_at).toBeTruthy();
 
@@ -576,7 +596,7 @@ describe('commerce income wall database invariant', () => {
       .from('commerce_product_temp_role_config')
       .update({ duration_seconds: 7_200 })
       .eq('product_id', productId)
-      .eq('role_id', roleId);
+      .eq('role_id', tempRoleId);
     expect(mutateTemp.error).toBeNull();
 
     const replayedFreeze = await supa.rpc('commerce_freeze_order_grant_snapshot', freezeArgs);
@@ -657,10 +677,27 @@ describe('commerce income wall database invariant', () => {
     expect(totalsError).toBeNull();
     expect(totals).toMatchObject({ total_spent_cents: 1_000, total_orders: 1 });
 
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .insert({
+        customer_id: customer!.id,
+        guild_id: GUILD_A,
+        product_id: productId,
+        order_id: order!.id,
+        type: 'one_time',
+        status: 'active',
+        source: 'purchase',
+        granted_role_ids: [roleId],
+        granted_channel_ids: [channelId],
+      })
+      .select('id')
+      .single();
+    expect(entitlementError).toBeNull();
+
     const prepared = await supa.rpc('commerce_prepare_temp_role_grant', {
       p_guild_id: GUILD_A,
       p_user_id: discordId,
-      p_role_id: roleId,
+      p_role_id: tempRoleId,
       p_order_id: order!.id,
       p_product_id: productId,
       p_duration_seconds: 3_600,
@@ -671,7 +708,7 @@ describe('commerce income wall database invariant', () => {
     const preparedReplay = await supa.rpc('commerce_prepare_temp_role_grant', {
       p_guild_id: GUILD_A,
       p_user_id: discordId,
-      p_role_id: roleId,
+      p_role_id: tempRoleId,
       p_order_id: order!.id,
       p_product_id: productId,
       p_duration_seconds: 3_600,
@@ -682,15 +719,446 @@ describe('commerce income wall database invariant', () => {
       expires_at: (prepared.data as Record<string, unknown>).expires_at,
     });
 
+    const pendingPrepared = await supa.rpc('commerce_prepare_temp_role_grant', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: pendingTempRoleId,
+      p_order_id: order!.id,
+      p_product_id: productId,
+      p_duration_seconds: 1_800,
+    });
+    expect(pendingPrepared.error).toBeNull();
+    expect(pendingPrepared.data).toMatchObject({ grant_status: 'pending' });
+    const pendingGrantId = String(
+      (pendingPrepared.data as Record<string, unknown>).id,
+    );
+
+    const pendingOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: null,
+    });
+    expect(pendingOwner.error).toBeNull();
+    expect(pendingOwner.data).toMatchObject({
+      id: (prepared.data as Record<string, unknown>).id,
+      order_id: order!.id,
+      grant_status: 'pending',
+    });
+
+    const grantExcludedOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: (prepared.data as Record<string, unknown>).id,
+      p_exclude_order_id: null,
+    });
+    expect(grantExcludedOwner.error).toBeNull();
+    expect(grantExcludedOwner.data).toBeNull();
+
+    const orderExcludedOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: order!.id,
+    });
+    expect(orderExcludedOwner.error).toBeNull();
+    expect(orderExcludedOwner.data).toBeNull();
+
+    const pendingInspection = await supa.rpc('commerce_inspect_temp_role_grant', {
+      p_grant_id: (prepared.data as Record<string, unknown>).id,
+    });
+    expect(pendingInspection.error).toBeNull();
+    expect(pendingInspection.data).toMatchObject({
+      id: (prepared.data as Record<string, unknown>).id,
+      order_id: order!.id,
+      duration_seconds: 3_600,
+      grant_status: 'pending',
+      parent_order_status: 'completed',
+      entitlement_is_live: true,
+    });
+
+    // Model a queue delay longer than the provisional timestamp. The paid
+    // duration must begin at the first successful acknowledgement, not at
+    // preparation, and replaying that acknowledgement must not extend it.
+    const grantId = String((prepared.data as Record<string, unknown>).id);
+    const delayed = await supa
+      .from('temp_role_grants')
+      .update({ expires_at: '2000-01-01T00:00:00.000Z' })
+      .eq('id', grantId);
+    expect(delayed.error).toBeNull();
+
+    const acknowledged = await supa.rpc('commerce_acknowledge_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(acknowledged.error).toBeNull();
+    expect(acknowledged.data).toMatchObject({
+      id: grantId,
+      grant_status: 'applied',
+    });
+    const appliedAt = Date.parse(
+      String((acknowledged.data as Record<string, unknown>).applied_at),
+    );
+    const expiresAt = Date.parse(
+      String((acknowledged.data as Record<string, unknown>).expires_at),
+    );
+    expect(Number.isFinite(appliedAt)).toBe(true);
+    expect(expiresAt - appliedAt).toBe(3_600_000);
+
+    const acknowledgedReplay = await supa.rpc('commerce_acknowledge_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(acknowledgedReplay.error).toBeNull();
+    expect(acknowledgedReplay.data).toEqual(acknowledged.data);
+
+    const expireAppliedGrant = await supa
+      .from('temp_role_grants')
+      .update({ expires_at: '2000-01-01T00:00:00.000Z' })
+      .eq('id', grantId);
+    expect(expireAppliedGrant.error).toBeNull();
+    const expiredOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: null,
+    });
+    expect(expiredOwner.error).toBeNull();
+    expect(expiredOwner.data).toBeNull();
+    const restoreAppliedExpiry = await supa
+      .from('temp_role_grants')
+      .update({
+        expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      })
+      .eq('id', grantId);
+    expect(restoreAppliedExpiry.error).toBeNull();
+
+    const appliedOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: null,
+    });
+    expect(appliedOwner.error).toBeNull();
+    expect(appliedOwner.data).toMatchObject({
+      id: grantId,
+      order_id: order!.id,
+      grant_status: 'applied',
+    });
+
+    const terminalOrder = await supa
+      .from('orders')
+      .update({ status: 'refunded' })
+      .eq('id', order!.id);
+    expect(terminalOrder.error).toBeNull();
+    const terminalOrderOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: null,
+    });
+    expect(terminalOrderOwner.error).toBeNull();
+    expect(terminalOrderOwner.data).toBeNull();
+    const terminalOrderInspection = await supa.rpc(
+      'commerce_inspect_temp_role_grant',
+      { p_grant_id: grantId },
+    );
+    expect(terminalOrderInspection.error).toBeNull();
+    expect(terminalOrderInspection.data).toMatchObject({
+      id: grantId,
+      grant_status: 'applied',
+      parent_order_status: 'refunded',
+      entitlement_is_live: true,
+    });
+    const restoreCompletedOrder = await supa
+      .from('orders')
+      .update({ status: 'completed' })
+      .eq('id', order!.id);
+    expect(restoreCompletedOrder.error).toBeNull();
+
+    const liveParentRetirement = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'applied',
+      p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: false,
+    });
+    expect(liveParentRetirement.error).toBeNull();
+    expect(liveParentRetirement.data).toMatchObject({
+      id: grantId,
+      retired: false,
+      grant_status: 'applied',
+      source: 'commerce_purchase',
+    });
+    const { data: preservedLiveGrant, error: preservedLiveGrantError } = await supa
+      .from('temp_role_grants')
+      .select('grant_status, source, remove_on_expiry')
+      .eq('id', grantId)
+      .single();
+    expect(preservedLiveGrantError).toBeNull();
+    expect(preservedLiveGrant).toEqual({
+      grant_status: 'applied',
+      source: 'commerce_purchase',
+      remove_on_expiry: false,
+    });
+
+    const staleLifecycleRetirement = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'pending',
+      p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: false,
+    });
+    expect(staleLifecycleRetirement.error).not.toBeNull();
+
+    const staleExpiryRetirement = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'applied',
+      p_expected_expires_at: new Date(expiresAt + 1_000).toISOString(),
+      p_expected_remove_on_expiry: false,
+    });
+    expect(staleExpiryRetirement.error).not.toBeNull();
+
+    const staleRemovalIntentRetirement = await supa.rpc(
+      'commerce_retire_temp_role_grant',
+      {
+        p_grant_id: grantId,
+        p_expected_grant_status: 'applied',
+        p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+        p_expected_remove_on_expiry: true,
+      },
+    );
+    expect(staleRemovalIntentRetirement.error).not.toBeNull();
+
+    const preparedAfterAcknowledgement = await supa.rpc('commerce_prepare_temp_role_grant', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_order_id: order!.id,
+      p_product_id: productId,
+      p_duration_seconds: 3_600,
+    });
+    expect(preparedAfterAcknowledgement.error).toBeNull();
+    expect(preparedAfterAcknowledgement.data).toMatchObject({
+      id: grantId,
+      grant_status: 'applied',
+      expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+    });
+
+    const corruptReplaySource = await supa
+      .from('temp_role_grants')
+      .update({ source: 'forged_source' })
+      .eq('id', grantId);
+    expect(corruptReplaySource.error).toBeNull();
+    const mismatchedSourceReplay = await supa.rpc('commerce_prepare_temp_role_grant', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_order_id: order!.id,
+      p_product_id: productId,
+      p_duration_seconds: 3_600,
+    });
+    expect(mismatchedSourceReplay.error).not.toBeNull();
+    const malformedInspection = await supa.rpc('commerce_inspect_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(malformedInspection.error).toBeNull();
+    expect(malformedInspection.data).toBeNull();
+    const restoreReplaySource = await supa
+      .from('temp_role_grants')
+      .update({ source: 'commerce_purchase' })
+      .eq('id', grantId);
+    expect(restoreReplaySource.error).toBeNull();
+
+    const corruptFrozenDuration = await supa
+      .from('temp_role_grants')
+      .update({ duration_seconds: 7_200 })
+      .eq('id', grantId);
+    expect(corruptFrozenDuration.error).toBeNull();
+    const mismatchedSnapshotInspection = await supa.rpc(
+      'commerce_inspect_temp_role_grant',
+      { p_grant_id: grantId },
+    );
+    expect(mismatchedSnapshotInspection.error).toBeNull();
+    expect(mismatchedSnapshotInspection.data).toBeNull();
+    const restoreFrozenDuration = await supa
+      .from('temp_role_grants')
+      .update({ duration_seconds: 3_600 })
+      .eq('id', grantId);
+    expect(restoreFrozenDuration.error).toBeNull();
+
     const mutableDurationRejected = await supa.rpc('commerce_prepare_temp_role_grant', {
       p_guild_id: GUILD_A,
       p_user_id: discordId,
-      p_role_id: roleId,
+      p_role_id: tempRoleId,
       p_order_id: order!.id,
       p_product_id: productId,
       p_duration_seconds: 7_200,
     });
     expect(mutableDurationRejected.error).not.toBeNull();
+
+    const terminalWithoutRemovalIntent = await supa
+      .from('entitlements')
+      .update({ status: 'cancelled' })
+      .eq('id', entitlement!.id);
+    expect(terminalWithoutRemovalIntent.error).toBeNull();
+    const { data: firstRevokeAction, error: firstRevokeError } = await supa
+      .from('bot_action_queue')
+      .select('payload')
+      .eq('action', 'revoke_roles')
+      .eq('guild_id', GUILD_A)
+      .contains('payload', { entitlement_id: entitlement!.id })
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    expect(firstRevokeError).toBeNull();
+    expect(firstRevokeAction?.payload).toMatchObject({
+      role_ids: [roleId],
+      temporary_role_grant_ids: [],
+    });
+
+    const terminalEntitlementOwner = await supa.rpc(
+      'commerce_find_live_temp_role_owner',
+      {
+        p_guild_id: GUILD_A,
+        p_user_id: discordId,
+        p_role_id: tempRoleId,
+        p_exclude_grant_id: null,
+        p_exclude_order_id: null,
+      },
+    );
+    expect(terminalEntitlementOwner.error).toBeNull();
+    expect(terminalEntitlementOwner.data).toBeNull();
+    const terminalEntitlementInspection = await supa.rpc(
+      'commerce_inspect_temp_role_grant',
+      { p_grant_id: grantId },
+    );
+    expect(terminalEntitlementInspection.error).toBeNull();
+    expect(terminalEntitlementInspection.data).toMatchObject({
+      id: grantId,
+      grant_status: 'applied',
+      parent_order_status: 'completed',
+      entitlement_is_live: false,
+    });
+
+    const terminalAck = await supa.rpc('commerce_acknowledge_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(terminalAck.error).not.toBeNull();
+    const terminalPrepare = await supa.rpc('commerce_prepare_temp_role_grant', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_order_id: order!.id,
+      p_product_id: productId,
+      p_duration_seconds: 3_600,
+    });
+    expect(terminalPrepare.error).not.toBeNull();
+
+    const reactivate = await supa
+      .from('entitlements')
+      .update({ status: 'active' })
+      .eq('id', entitlement!.id);
+    expect(reactivate.error).toBeNull();
+    const removalIntent = await supa
+      .from('temp_role_grants')
+      .update({ remove_on_expiry: true })
+      .in('id', [grantId, pendingGrantId]);
+    expect(removalIntent.error).toBeNull();
+
+    const reactivatedRetirement = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'applied',
+      p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: true,
+    });
+    expect(reactivatedRetirement.error).toBeNull();
+    expect(reactivatedRetirement.data).toMatchObject({
+      id: grantId,
+      retired: false,
+      grant_status: 'applied',
+      source: 'commerce_purchase',
+    });
+
+    const terminalWithRemovalIntent = await supa
+      .from('entitlements')
+      .update({ status: 'cancelled' })
+      .eq('id', entitlement!.id);
+    expect(terminalWithRemovalIntent.error).toBeNull();
+    const { data: capturedRevokeAction, error: capturedRevokeError } = await supa
+      .from('bot_action_queue')
+      .select('payload')
+      .eq('action', 'revoke_roles')
+      .eq('guild_id', GUILD_A)
+      .contains('payload', { entitlement_id: entitlement!.id })
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    expect(capturedRevokeError).toBeNull();
+    expect(capturedRevokeAction?.payload).toMatchObject({
+      role_ids: [roleId, tempRoleId, pendingTempRoleId].sort(),
+      temporary_role_grant_ids: [grantId, pendingGrantId].sort(),
+    });
+
+    const retired = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'applied',
+      p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: true,
+    });
+    expect(retired.error).toBeNull();
+    expect(retired.data).toMatchObject({
+      id: grantId,
+      retired: true,
+      grant_status: 'removed',
+      source: 'commerce_reconciled',
+    });
+    const retiredReplay = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: grantId,
+      p_expected_grant_status: 'applied',
+      p_expected_expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: true,
+    });
+    expect(retiredReplay.error).toBeNull();
+    expect(retiredReplay.data).toEqual(retired.data);
+
+    const pendingRetired = await supa.rpc('commerce_retire_temp_role_grant', {
+      p_grant_id: pendingGrantId,
+      p_expected_grant_status: 'pending',
+      p_expected_expires_at: (pendingPrepared.data as Record<string, unknown>).expires_at,
+      p_expected_remove_on_expiry: true,
+    });
+    expect(pendingRetired.error).toBeNull();
+    expect(pendingRetired.data).toMatchObject({
+      id: pendingGrantId,
+      retired: true,
+      grant_status: 'removed',
+      source: 'commerce_reconciled',
+    });
+
+    const removedOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: tempRoleId,
+      p_exclude_grant_id: null,
+      p_exclude_order_id: null,
+    });
+    expect(removedOwner.error).toBeNull();
+    expect(removedOwner.data).toBeNull();
+    const { data: tombstone, error: tombstoneError } = await supa
+      .from('temp_role_grants')
+      .select('id, grant_status, source, remove_on_expiry')
+      .eq('id', grantId)
+      .single();
+    expect(tombstoneError).toBeNull();
+    expect(tombstone).toMatchObject({
+      id: grantId,
+      grant_status: 'removed',
+      source: 'commerce_reconciled',
+      remove_on_expiry: true,
+    });
 
     const validSuccessorStates = [
       { payment: 'completed', order: 'refunded' },
@@ -929,12 +1397,21 @@ describe('commerce income wall database invariant', () => {
   });
 
   it('finalizes and replays a frozen capture after product catalog movement', async () => {
+    const roleId = nextSnowflake();
+    const discordId = nextSnowflake();
     const productId = await createProduct();
+    const tempConfig = await supa.from('commerce_product_temp_role_config').insert({
+      product_id: productId,
+      guild_id: GUILD_A,
+      role_id: roleId,
+      duration_seconds: 60,
+    });
+    expect(tempConfig.error).toBeNull();
     const { data: customer, error: customerError } = await supa
       .from('customers')
       .insert({
         guild_id: GUILD_A,
-        discord_id: nextSnowflake(),
+        discord_id: discordId,
         discord_username: nextName('moved-product-customer'),
       })
       .select('id')
@@ -1010,6 +1487,56 @@ describe('commerce income wall database invariant', () => {
       .single();
     expect(totalsError).toBeNull();
     expect(totals).toMatchObject({ total_spent_cents: 1_000, total_orders: 1 });
+
+    const { data: entitlement, error: entitlementError } = await supa
+      .from('entitlements')
+      .insert({
+        customer_id: customer!.id,
+        guild_id: GUILD_A,
+        product_id: productId,
+        order_id: order!.id,
+        type: 'one_time',
+        status: 'active',
+        source: 'purchase',
+        granted_role_ids: [],
+        granted_channel_ids: [],
+      })
+      .select('id')
+      .single();
+    expect(entitlementError).toBeNull();
+
+    const preparedAfterMove = await supa.rpc('commerce_prepare_temp_role_grant', {
+      p_guild_id: GUILD_A,
+      p_user_id: discordId,
+      p_role_id: roleId,
+      p_order_id: order!.id,
+      p_product_id: productId,
+      p_duration_seconds: 60,
+    });
+    expect(preparedAfterMove.error).toBeNull();
+    const movedGrantId = String((preparedAfterMove.data as Record<string, unknown>).id);
+    const intentAfterMove = await supa
+      .from('temp_role_grants')
+      .update({ remove_on_expiry: true })
+      .eq('id', movedGrantId);
+    expect(intentAfterMove.error).toBeNull();
+    const terminalAfterMove = await supa
+      .from('entitlements')
+      .update({ status: 'cancelled' })
+      .eq('id', entitlement!.id);
+    expect(terminalAfterMove.error).toBeNull();
+    const { data: movedRevoke, error: movedRevokeError } = await supa
+      .from('bot_action_queue')
+      .select('payload')
+      .eq('action', 'revoke_roles')
+      .eq('guild_id', GUILD_A)
+      .contains('payload', { entitlement_id: entitlement!.id })
+      .single();
+    expect(movedRevokeError).toBeNull();
+    expect(movedRevoke?.payload).toMatchObject({
+      role_ids: [roleId],
+      temporary_role_grant_ids: [movedGrantId],
+    });
   });
 
   it('replays only exact legacy capture proof with lowercase stored currencies', async () => {
@@ -1456,6 +1983,215 @@ describe('commerce income wall database invariant', () => {
     expect(pendingClaim.data?.[0]?.status).toBe('processing');
   });
 
+  it('persists and replays only an exact staged legacy subscription contract', async () => {
+    const roleId = nextSnowflake();
+    const channelId = nextSnowflake();
+    const discordId = nextSnowflake();
+    const productName = nextName('legacy-contract-product');
+    const { data: product, error: productError } = await supa
+      .from('products')
+      .insert(productRow({
+        name: productName,
+        type: 'subscription',
+        price_cents: 0,
+        granted_role_ids: [roleId],
+        granted_channel_ids: [channelId],
+      }))
+      .select('id')
+      .single();
+    expect(productError).toBeNull();
+
+    const paypalPlanId = `P-${nextName('legacy-contract-plan')}`;
+    const { data: plan, error: planError } = await supa
+      .from('plans')
+      .insert(planRow(product!.id, {
+        paypal_plan_id: paypalPlanId,
+        price_cents: 500,
+        currency: 'USD',
+      }))
+      .select('id')
+      .single();
+    expect(planError).toBeNull();
+
+    const { data: customer, error: customerError } = await supa
+      .from('customers')
+      .insert({
+        guild_id: GUILD_A,
+        discord_id: discordId,
+        discord_username: nextName('legacy-contract-customer'),
+      })
+      .select('id')
+      .single();
+    expect(customerError).toBeNull();
+
+    const orderNumber = nextName('legacy-contract-order');
+    const subscriptionId = nextName('legacy-contract-subscription');
+    const { data: order, error: orderError } = await supa
+      .from('orders')
+      .insert({
+        order_number: orderNumber,
+        customer_id: customer!.id,
+        guild_id: GUILD_A,
+        product_id: product!.id,
+        plan_id: plan!.id,
+        paypal_subscription_id: subscriptionId,
+        amount_cents: 500,
+        currency: 'USD',
+        source: 'purchase',
+        status: 'pending',
+      })
+      .select('id')
+      .single();
+    expect(orderError).toBeNull();
+    const completed = await supa
+      .from('orders')
+      .update({ status: 'completed' })
+      .eq('id', order!.id);
+    expect(completed.error).toBeNull();
+
+    const payload = {
+      fulfillment_type: 'subscription_activated',
+      entitlement_type: 'subscription',
+      guild_id: GUILD_A,
+      customer_id: customer!.id,
+      discord_id: discordId,
+      product_id: product!.id,
+      product_name: productName,
+      order_id: order!.id,
+      order_number: orderNumber,
+      plan_id: plan!.id,
+      paypal_subscription_id: subscriptionId,
+      paypal_plan_id: paypalPlanId,
+      amount_cents: 500,
+      currency: 'USD',
+      granted_role_ids: [roleId],
+      granted_channel_ids: [channelId],
+    };
+    const { data: queue, error: queueError } = await supa
+      .from('bot_action_queue')
+      .insert({
+        guild_id: GUILD_A,
+        action: 'fulfill_subscription',
+        payload,
+        status: 'staged',
+        idempotency_key: `paypal:subscription:${subscriptionId}:fulfill_subscription`,
+      })
+      .select('id,status')
+      .single();
+    expect(queueError).toBeNull();
+
+    const adoptArgs = {
+      p_order_id: order!.id,
+      p_source_queue_id: queue!.id,
+    };
+    const adopted = await supa.rpc(
+      'commerce_adopt_legacy_subscription_grant_contract',
+      adoptArgs,
+    );
+    expect(adopted.error).toBeNull();
+    expect(adopted.data).toMatchObject({
+      order_id: order!.id,
+      source_queue_id: queue!.id,
+      granted_role_ids_snapshot: [roleId],
+      granted_channel_ids_snapshot: [channelId],
+    });
+
+    const { data: contract, error: contractError } = await supa
+      .from('commerce_legacy_subscription_grant_contracts')
+      .select('*')
+      .eq('order_id', order!.id)
+      .single();
+    expect(contractError).toBeNull();
+    expect(contract).toMatchObject({
+      source_queue_id: queue!.id,
+      guild_id: GUILD_A,
+      customer_id: customer!.id,
+      discord_id: discordId,
+      product_id: product!.id,
+      product_name: productName,
+      order_number: orderNumber,
+      plan_id: plan!.id,
+      paypal_subscription_id: subscriptionId,
+      paypal_plan_id: paypalPlanId,
+      amount_cents: 500,
+      currency: 'USD',
+      granted_role_ids_snapshot: [roleId],
+      granted_channel_ids_snapshot: [channelId],
+    });
+
+    const release = await supa
+      .from('bot_action_queue')
+      .update({ status: 'pending' })
+      .eq('id', queue!.id);
+    expect(release.error).toBeNull();
+    const replay = await supa.rpc(
+      'commerce_adopt_legacy_subscription_grant_contract',
+      adoptArgs,
+    );
+    expect(replay.error).toBeNull();
+    expect(replay.data).toEqual(adopted.data);
+
+    const wrongQueue = await supa.rpc(
+      'commerce_adopt_legacy_subscription_grant_contract',
+      { ...adoptArgs, p_source_queue_id: randomUUID() },
+    );
+    expect(wrongQueue.error).not.toBeNull();
+
+    const tamperedQueue = await supa
+      .from('bot_action_queue')
+      .update({ payload: { ...payload, granted_role_ids: [nextSnowflake()] } })
+      .eq('id', queue!.id);
+    expect(tamperedQueue.error).toBeNull();
+    const tamperedReplay = await supa.rpc(
+      'commerce_adopt_legacy_subscription_grant_contract',
+      adoptArgs,
+    );
+    expect(tamperedReplay.error).not.toBeNull();
+
+    const restoredQueue = await supa
+      .from('bot_action_queue')
+      .update({ payload })
+      .eq('id', queue!.id);
+    expect(restoredQueue.error).toBeNull();
+    const changedOrder = await supa
+      .from('orders')
+      .update({ amount_cents: 501 })
+      .eq('id', order!.id);
+    expect(changedOrder.error).toBeNull();
+    const changedQueue = await supa
+      .from('bot_action_queue')
+      .update({ payload: { ...payload, amount_cents: 501 } })
+      .eq('id', queue!.id);
+    expect(changedQueue.error).toBeNull();
+    const changedOrderReplay = await supa.rpc(
+      'commerce_adopt_legacy_subscription_grant_contract',
+      adoptArgs,
+    );
+    expect(changedOrderReplay.error).not.toBeNull();
+
+    // Queue retention is intentionally independent of the immutable contract.
+    const queueDelete = await supa.from('bot_action_queue').delete().eq('id', queue!.id);
+    expect(queueDelete.error).toBeNull();
+    const retainedContract = await supa
+      .from('commerce_legacy_subscription_grant_contracts')
+      .select('order_id')
+      .eq('order_id', order!.id)
+      .single();
+    expect(retainedContract.error).toBeNull();
+
+    // Order/member retention remains authoritative and can cascade the
+    // compatibility row without an immutability trigger or queue foreign key.
+    const orderDelete = await supa.from('orders').delete().eq('id', order!.id);
+    expect(orderDelete.error).toBeNull();
+    const { data: purgedContract, error: purgedContractError } = await supa
+      .from('commerce_legacy_subscription_grant_contracts')
+      .select('order_id')
+      .eq('order_id', order!.id)
+      .maybeSingle();
+    expect(purgedContractError).toBeNull();
+    expect(purgedContract).toBeNull();
+  });
+
   it('rolls capture payment and order state back when customer totals fail', async () => {
     const productId = await createProduct({ price_cents: 1 });
     const { data: customer, error: customerError } = await supa
@@ -1575,18 +2311,226 @@ describe('commerce income wall database invariant', () => {
           'public.commerce_prepare_temp_role_grant(text,text,text,uuid,uuid,integer)',
           'EXECUTE'
         ) AS service_can_prepare,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_prepare_temp_role_grant(text,text,text,uuid,uuid,integer)',
+          'EXECUTE'
+        ) AS anon_can_prepare,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_prepare_temp_role_grant(text,text,text,uuid,uuid,integer)',
+          'EXECUTE'
+        ) AS authenticated_can_prepare,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_acknowledge_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS service_can_acknowledge,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_acknowledge_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS anon_can_acknowledge,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_acknowledge_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS authenticated_can_acknowledge,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_find_live_temp_role_owner(text,text,text,uuid,uuid)',
+          'EXECUTE'
+        ) AS service_can_find_temp_owner,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_find_live_temp_role_owner(text,text,text,uuid,uuid)',
+          'EXECUTE'
+        ) AS anon_can_find_temp_owner,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_find_live_temp_role_owner(text,text,text,uuid,uuid)',
+          'EXECUTE'
+        ) AS authenticated_can_find_temp_owner,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_inspect_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS service_can_inspect_temp_grant,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_inspect_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS authenticated_can_inspect_temp_grant,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_inspect_temp_role_grant(uuid)',
+          'EXECUTE'
+        ) AS anon_can_inspect_temp_grant,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_retire_temp_role_grant(uuid,text,timestamp with time zone,boolean)',
+          'EXECUTE'
+        ) AS service_can_retire_temp_grant,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_retire_temp_role_grant(uuid,text,timestamp with time zone,boolean)',
+          'EXECUTE'
+        ) AS anon_can_retire_temp_grant,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_retire_temp_role_grant(uuid,text,timestamp with time zone,boolean)',
+          'EXECUTE'
+        ) AS authenticated_can_retire_temp_grant,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_adopt_legacy_subscription_grant_contract(uuid,uuid)',
+          'EXECUTE'
+        ) AS service_can_adopt_legacy_contract,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.commerce_adopt_legacy_subscription_grant_contract(uuid,uuid)',
+          'EXECUTE'
+        ) AS anon_can_adopt_legacy_contract,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.commerce_adopt_legacy_subscription_grant_contract(uuid,uuid)',
+          'EXECUTE'
+        ) AS authenticated_can_adopt_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'service_role',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'SELECT'
+        ) AS service_can_read_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'service_role',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'INSERT'
+        ) AS service_can_insert_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'service_role',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'UPDATE'
+        ) AS service_can_update_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'service_role',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'DELETE'
+        ) AS service_can_delete_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'anon',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS anon_can_touch_legacy_contract,
+        pg_catalog.has_table_privilege(
+          'authenticated',
+          'public.commerce_legacy_subscription_grant_contracts',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS authenticated_can_touch_legacy_contract,
         pg_catalog.has_table_privilege(
           'anon',
           'public.commerce_product_temp_role_config',
+          'INSERT,UPDATE,DELETE'
+        ) OR pg_catalog.has_table_privilege(
+          'anon',
+          'public.commerce_product_temp_role_config',
+          'SELECT'
+        ) AS anon_can_touch_temp_config,
+        pg_catalog.has_table_privilege(
+          'authenticated',
+          'public.commerce_product_temp_role_config',
           'SELECT,INSERT,UPDATE,DELETE'
-        ) AS anon_can_touch_temp_config
+        ) AS authenticated_can_touch_temp_config,
+        pg_catalog.has_table_privilege(
+          'anon',
+          'public.commerce_role_metadata_migration_issues',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS anon_can_touch_role_metadata_issues,
+        pg_catalog.has_table_privilege(
+          'authenticated',
+          'public.commerce_role_metadata_migration_issues',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS authenticated_can_touch_role_metadata_issues,
+        pg_catalog.has_table_privilege(
+          'anon',
+          'public.commerce_temp_role_migration_issues',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS anon_can_touch_temp_role_issues,
+        pg_catalog.has_table_privilege(
+          'authenticated',
+          'public.commerce_temp_role_migration_issues',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) AS authenticated_can_touch_temp_role_issues,
+        (
+          SELECT table_class.relrowsecurity
+            FROM pg_catalog.pg_class AS table_class
+            JOIN pg_catalog.pg_namespace AS table_schema
+              ON table_schema.oid = table_class.relnamespace
+           WHERE table_schema.nspname = 'public'
+             AND table_class.relname = 'commerce_legacy_subscription_grant_contracts'
+        ) AS legacy_contract_rls,
+        (
+          SELECT table_class.relrowsecurity
+            FROM pg_catalog.pg_class AS table_class
+            JOIN pg_catalog.pg_namespace AS table_schema
+              ON table_schema.oid = table_class.relnamespace
+           WHERE table_schema.nspname = 'public'
+             AND table_class.relname = 'commerce_product_temp_role_config'
+        ) AS temp_role_config_rls,
+        (
+          SELECT table_class.relrowsecurity
+            FROM pg_catalog.pg_class AS table_class
+            JOIN pg_catalog.pg_namespace AS table_schema
+              ON table_schema.oid = table_class.relnamespace
+           WHERE table_schema.nspname = 'public'
+             AND table_class.relname = 'commerce_role_metadata_migration_issues'
+        ) AS role_metadata_issues_rls,
+        (
+          SELECT table_class.relrowsecurity
+            FROM pg_catalog.pg_class AS table_class
+            JOIN pg_catalog.pg_namespace AS table_schema
+              ON table_schema.oid = table_class.relnamespace
+           WHERE table_schema.nspname = 'public'
+             AND table_class.relname = 'commerce_temp_role_migration_issues'
+        ) AS temp_role_issues_rls
     `;
     expect(privileges[0]).toMatchObject({
       service_can_freeze: true,
       anon_can_freeze: false,
       authenticated_can_finalize: false,
       service_can_prepare: true,
+      anon_can_prepare: false,
+      authenticated_can_prepare: false,
+      service_can_acknowledge: true,
+      anon_can_acknowledge: false,
+      authenticated_can_acknowledge: false,
+      service_can_find_temp_owner: true,
+      anon_can_find_temp_owner: false,
+      authenticated_can_find_temp_owner: false,
+      service_can_inspect_temp_grant: true,
+      authenticated_can_inspect_temp_grant: false,
+      anon_can_inspect_temp_grant: false,
+      service_can_retire_temp_grant: true,
+      anon_can_retire_temp_grant: false,
+      authenticated_can_retire_temp_grant: false,
+      service_can_adopt_legacy_contract: true,
+      anon_can_adopt_legacy_contract: false,
+      authenticated_can_adopt_legacy_contract: false,
+      service_can_read_legacy_contract: true,
+      service_can_insert_legacy_contract: false,
+      service_can_update_legacy_contract: false,
+      service_can_delete_legacy_contract: false,
+      anon_can_touch_legacy_contract: false,
+      authenticated_can_touch_legacy_contract: false,
       anon_can_touch_temp_config: false,
+      authenticated_can_touch_temp_config: false,
+      anon_can_touch_role_metadata_issues: false,
+      authenticated_can_touch_role_metadata_issues: false,
+      anon_can_touch_temp_role_issues: false,
+      authenticated_can_touch_temp_role_issues: false,
+      legacy_contract_rls: true,
+      temp_role_config_rls: true,
+      role_metadata_issues_rls: true,
+      temp_role_issues_rls: true,
     });
   });
 

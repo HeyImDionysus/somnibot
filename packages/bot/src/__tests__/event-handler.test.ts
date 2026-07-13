@@ -169,7 +169,7 @@ function makeTempRoleSweepClient(rows: Array<Record<string, unknown>>, guild: an
     let deleting = false;
     let targetId = '';
     const chain: any = {};
-    for (const method of ['select', 'lt', 'order', 'gt', 'neq', 'in', 'contains', 'is']) {
+    for (const method of ['select', 'lt', 'order', 'gt', 'neq', 'in', 'contains', 'is', 'or']) {
       chain[method] = vi.fn(() => chain);
     }
     chain.eq = vi.fn((column: string, value: unknown) => {
@@ -202,7 +202,10 @@ function makeTempRoleSweepClient(rows: Array<Record<string, unknown>>, guild: an
 
   return {
     client: {
-      supabase: { from },
+      supabase: {
+        from,
+        rpc: vi.fn(async () => ({ data: null, error: null })),
+      },
       guilds: { cache: { get: guildGet } },
     } as any,
     deleteEq,
@@ -220,6 +223,7 @@ function makeCommerceTempRoleSweepClient(opts: {
   overlappingGrants?: Array<{
     id: string;
     expires_at?: string;
+    grant_status?: 'pending' | 'applied';
     remove_on_expiry?: boolean;
   }>;
   overlappingError?: { message: string };
@@ -227,6 +231,7 @@ function makeCommerceTempRoleSweepClient(opts: {
     data: Array<{
       id: string;
       expires_at?: string;
+      grant_status?: 'pending' | 'applied';
       remove_on_expiry?: boolean;
     }>;
     error: { message: string } | null;
@@ -241,6 +246,10 @@ function makeCommerceTempRoleSweepClient(opts: {
   transferError?: { message: string };
   beforeDeleteAck?: () => Promise<void>;
   sharedTempRoleRows?: Map<string, Record<string, unknown>>;
+  parentOrderStatus?: string;
+  entitlementIsLive?: boolean;
+  inspectionError?: { message: string };
+  retirementResults?: Array<{ data: unknown; error: unknown }>;
 }) {
   const grant = {
     id: opts.grantId ?? 'grant-current',
@@ -254,6 +263,8 @@ function makeCommerceTempRoleSweepClient(opts: {
     remove_on_expiry: opts.removeOnExpiry,
   };
   let tempRead = 0;
+  let ownerRead = 0;
+  let lastObservedOwner: Record<string, unknown> | null = null;
   let memberFetch = 0;
   const deleteEq = vi.fn();
   const acknowledgedDeletes: string[] = [];
@@ -277,6 +288,21 @@ function makeCommerceTempRoleSweepClient(opts: {
     };
   });
   const guild = { members: { fetch } };
+  const normalizeOverlap = (rows: Array<{
+    id: string;
+    expires_at?: string;
+    grant_status?: 'pending' | 'applied';
+    remove_on_expiry?: boolean;
+  }>) => rows.map((row) => ({
+    guild_id: 'guild-1',
+    user_id: 'user-1',
+    role_id: 'role-1',
+    expires_at: '2999-01-01T00:00:00.000Z',
+    grant_status: 'applied',
+    remove_on_expiry: false,
+    order_id: 'order-other',
+    ...row,
+  }));
 
   const from = vi.fn((table: string) => {
     let deleting = false;
@@ -300,10 +326,13 @@ function makeCommerceTempRoleSweepClient(opts: {
       return actual === filter.value;
     });
     const chain: any = {};
+    const orFilters: string[] = [];
     for (const method of ['select', 'lt', 'neq', 'contains', 'order']) {
       chain[method] = vi.fn(() => chain);
     }
     chain.or = vi.fn((...args: unknown[]) => {
+      const expression = String(args[0] ?? '');
+      orFilters.push(expression);
       ownershipOr(...args);
       return chain;
     });
@@ -318,7 +347,7 @@ function makeCommerceTempRoleSweepClient(opts: {
     });
     chain.eq = vi.fn((column: string, value: unknown) => {
       if (column === 'id') targetId = String(value);
-      if (deleting) deleteEq(column, value);
+      if (deleting || updatePayload?.grant_status === 'removed') deleteEq(column, value);
       filters.push({ operator: 'eq', column, value });
       return chain;
     });
@@ -334,23 +363,22 @@ function makeCommerceTempRoleSweepClient(opts: {
       filters.push({ operator: 'gt', column, value });
       return chain;
     });
-    const normalizeOverlap = (rows: Array<{
-      id: string;
-      expires_at?: string;
-      remove_on_expiry?: boolean;
-    }>) => rows.map((row) => ({
-      guild_id: 'guild-1',
-      user_id: 'user-1',
-      role_id: 'role-1',
-      expires_at: '2999-01-01T00:00:00.000Z',
-      grant_status: 'applied',
-      remove_on_expiry: false,
-      ...row,
-    }));
     chain.limit = vi.fn(async () => {
       if (table === 'temp_role_grants') {
         tempRead++;
-        if (tempRead === 1) return { data: [grant], error: null };
+        if (tempRead === 1) {
+          const excludesPreparedCommerce = orFilters.includes(
+            'grant_status.eq.applied,order_id.is.null',
+          );
+          if (
+            excludesPreparedCommerce
+            && grant.grant_status === 'pending'
+            && grant.order_id !== null
+          ) {
+            return { data: [], error: null };
+          }
+          return { data: [grant], error: null };
+        }
         const scripted = opts.overlappingResponses?.[tempRead - 2];
         if (scripted) return { ...scripted, data: normalizeOverlap(scripted.data) };
         return {
@@ -388,6 +416,19 @@ function makeCommerceTempRoleSweepClient(opts: {
           error: opts.transferError ?? null,
         };
       }
+      if (table === 'temp_role_grants' && updatePayload?.grant_status === 'removed') {
+        await opts.beforeDeleteAck?.();
+        if (opts.sharedTempRoleRows) {
+          const current = opts.sharedTempRoleRows.get(targetId);
+          if (!current || !matchesFilters(current)) return { data: null, error: null };
+          Object.assign(current, updatePayload);
+        }
+        acknowledgedDeletes.push(targetId);
+        return {
+          data: { id: targetId, grant_status: 'removed' },
+          error: null,
+        };
+      }
       if (table === 'customers') {
         const customers = opts.customers ?? [{ id: 'customer-1' }];
         return {
@@ -403,9 +444,86 @@ function makeCommerceTempRoleSweepClient(opts: {
     return chain;
   });
 
+  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'commerce_inspect_temp_role_grant') {
+      if (opts.inspectionError) return { data: null, error: opts.inspectionError };
+      return {
+        data: {
+          ...grant,
+          duration_seconds: 60,
+          applied_at: grant.grant_status === 'applied'
+            ? '1999-12-31T23:59:00.000Z'
+            : null,
+          parent_order_status: opts.parentOrderStatus ?? 'completed',
+          entitlement_is_live: opts.entitlementIsLive ?? true,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_find_live_temp_role_owner') {
+      ownerRead++;
+      ownershipOr('commerce_find_live_temp_role_owner');
+      const scripted = opts.overlappingResponses?.[ownerRead - 1];
+      if (scripted) {
+        const rows = normalizeOverlap(scripted.data);
+        if (rows[0]) lastObservedOwner = rows[0];
+        return { data: rows[0] ?? null, error: scripted.error };
+      }
+      if (opts.sharedTempRoleRows) {
+        const rows = normalizeOverlap(
+          [...opts.sharedTempRoleRows.values()]
+            .filter((row) =>
+              row.id !== grant.id
+              && (row.grant_status === 'pending' || row.grant_status === 'applied')
+              && row.source === 'commerce_purchase')
+            .map((row) => row as any),
+        );
+        return { data: rows[0] ?? null, error: opts.overlappingError ?? null };
+      }
+      const rows = normalizeOverlap(opts.overlappingGrants ?? []);
+      if (rows[0]) lastObservedOwner = rows[0];
+      return {
+        data: rows[0] ?? lastObservedOwner,
+        error: opts.overlappingError ?? null,
+      };
+    }
+    if (name === 'commerce_retire_temp_role_grant') {
+      const grantId = String(args.p_grant_id ?? '');
+      await opts.beforeDeleteAck?.();
+      deleteEq('id', grantId);
+      const scriptedRetirement = opts.retirementResults?.shift();
+      if (scriptedRetirement) return scriptedRetirement;
+      const tombstone = { grant_status: 'removed', source: 'commerce_reconciled' };
+      successorIntentUpdates.push(tombstone);
+      if (opts.sharedTempRoleRows) {
+        const current = opts.sharedTempRoleRows.get(grantId);
+        if (
+          !current
+          || current.grant_status !== args.p_expected_grant_status
+          || current.expires_at !== args.p_expected_expires_at
+          || current.remove_on_expiry !== args.p_expected_remove_on_expiry
+        ) {
+          return { data: null, error: { message: 'stale grant' } };
+        }
+        Object.assign(current, tombstone);
+      }
+      acknowledgedDeletes.push(grantId);
+      return {
+        data: {
+          id: grantId,
+          retired: true,
+          grant_status: 'removed',
+          source: 'commerce_reconciled',
+        },
+        error: null,
+      };
+    }
+    return { data: null, error: null };
+  });
+
   return {
     client: {
-      supabase: { from },
+      supabase: { from, rpc },
       guilds: { cache: { get: vi.fn(() => guild) } },
     } as any,
     deleteEq,
@@ -447,10 +565,11 @@ function makePaginatedTempRoleSweepClient() {
 
   const from = vi.fn(() => {
     let deleting = false;
+    let updatePayload: Record<string, unknown> | null = null;
     let cursor: string | null = null;
     let targetId = '';
     const chain: any = {};
-    for (const method of ['select', 'lt', 'order', 'is']) {
+    for (const method of ['select', 'lt', 'order', 'is', 'or', 'in']) {
       chain[method] = vi.fn(() => chain);
     }
     chain.gt = vi.fn((column: string, value: unknown) => {
@@ -461,8 +580,12 @@ function makePaginatedTempRoleSweepClient() {
       deleting = true;
       return chain;
     });
+    chain.update = vi.fn((payload: Record<string, unknown>) => {
+      updatePayload = payload;
+      return chain;
+    });
     chain.eq = vi.fn((column: string, value: unknown) => {
-      if (deleting && column === 'id') targetId = String(value);
+      if ((deleting || updatePayload !== null) && column === 'id') targetId = String(value);
       return chain;
     });
     chain.limit = vi.fn(async () => {
@@ -474,7 +597,12 @@ function makePaginatedTempRoleSweepClient() {
     });
     chain.maybeSingle = vi.fn(async () => {
       deletedIds.push(targetId);
-      return { data: { id: targetId }, error: null };
+      return {
+        data: updatePayload?.grant_status === 'removed'
+          ? { id: targetId, grant_status: 'removed' }
+          : { id: targetId },
+        error: null,
+      };
     });
     chain.then = (resolve: Function) => resolve({ data: null, error: null });
     return chain;
@@ -482,7 +610,37 @@ function makePaginatedTempRoleSweepClient() {
 
   return {
     client: {
-      supabase: { from },
+      supabase: {
+        from,
+        rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
+          if (name === 'commerce_inspect_temp_role_grant') {
+            return {
+              data: {
+                ...laterSafeRow,
+                duration_seconds: 60,
+                applied_at: '1999-12-31T23:59:00.000Z',
+                parent_order_status: 'completed',
+                entitlement_is_live: true,
+              },
+              error: null,
+            };
+          }
+          if (name === 'commerce_retire_temp_role_grant') {
+            const grantId = String(args.p_grant_id ?? '');
+            deletedIds.push(grantId);
+            return {
+              data: {
+                id: grantId,
+                retired: true,
+                grant_status: 'removed',
+                source: 'commerce_reconciled',
+              },
+              error: null,
+            };
+          }
+          return { data: null, error: null };
+        }),
+      },
       guilds: { cache: { get: guildGet } },
     } as any,
     queryCursors,
@@ -749,7 +907,9 @@ describe('events/handler', () => {
         from: vi.fn(() => ({
            select: vi.fn(() => ({
              lt: vi.fn(() => ({
-               order: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
+               or: vi.fn(() => ({
+                 order: vi.fn(() => ({ limit: vi.fn(async () => ({ data: [] })) })),
+               })),
              })),
            })),
         })),
@@ -806,8 +966,9 @@ describe('events/handler', () => {
     it('fails the scan when the database returns null without an error', async () => {
       const limit = vi.fn().mockResolvedValue({ data: null, error: null });
       const order = vi.fn(() => ({ limit }));
-      const lt = vi.fn(() => ({ order }));
-      const select = vi.fn(() => ({ lt }));
+      const or = vi.fn(() => ({ order }));
+      const inFilter = vi.fn(() => ({ or }));
+      const select = vi.fn(() => ({ in: inFilter }));
       const guildGet = vi.fn();
       const sweepClient = {
         supabase: { from: vi.fn(() => ({ select })) },
@@ -856,7 +1017,7 @@ describe('events/handler', () => {
       expect(guildGet).not.toHaveBeenCalled();
     });
 
-    it('deletes an expired pending grant when no Discord removal intent was persisted', async () => {
+    it('does not sweep a delayed order-backed pending grant before its duration starts', async () => {
       const harness = makeCommerceTempRoleSweepClient({
         removeOnExpiry: false,
         grantStatus: 'pending',
@@ -866,7 +1027,7 @@ describe('events/handler', () => {
 
       expect(harness.fetch).not.toHaveBeenCalled();
       expect(harness.roleRemove).not.toHaveBeenCalled();
-      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+      expect(harness.deleteEq).not.toHaveBeenCalled();
     });
 
     it('preserves an expired pending grant with removal intent because Discord ownership is ambiguous', async () => {
@@ -880,6 +1041,62 @@ describe('events/handler', () => {
       expect(harness.fetch).not.toHaveBeenCalled();
       expect(harness.roleRemove).not.toHaveBeenCalled();
       expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('tombstones a terminal pending preexisting-role grant without touching Discord', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: false,
+        grantStatus: 'pending',
+        parentOrderStatus: 'refunded',
+        entitlementIsLive: false,
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.fetch).not.toHaveBeenCalled();
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        grant_status: 'removed',
+        source: 'commerce_reconciled',
+      }));
+    });
+
+    it.each([
+      { grantStatus: 'pending' as const, expiresAt: '2999-01-01T00:00:00.000Z' },
+      { grantStatus: 'applied' as const, expiresAt: '2999-01-01T00:00:00.000Z' },
+    ])('promptly removes and tombstones a terminal $grantStatus owned role', async ({ grantStatus, expiresAt }) => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        grantStatus,
+        expiresAt,
+        parentOrderStatus: 'refunded',
+        entitlementIsLive: false,
+        memberRoleStates: [true, false],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        grant_status: 'removed',
+        source: 'commerce_reconciled',
+      }));
+    });
+
+    it('keeps a terminal order role owned by another exact live grant', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        parentOrderStatus: 'refunded',
+        entitlementIsLive: false,
+        overlappingGrants: [{ id: 'grant-successor', remove_on_expiry: true }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        grant_status: 'removed',
+      }));
     });
 
     it('deletes an order-backed preexisting-role grant without touching Discord', async () => {
@@ -903,7 +1120,30 @@ describe('events/handler', () => {
       expect(harness.fetch).not.toHaveBeenCalled();
       expect(harness.roleRemove).not.toHaveBeenCalled();
       expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
-      expect(harness.ownershipOr).not.toHaveBeenCalled();
+      expect(harness.ownershipOr).toHaveBeenCalled();
+      expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
+        remove_on_expiry: true,
+      }));
+    });
+
+    it('treats a delayed pending paid successor as live after its provisional expiry', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        overlappingGrants: [{
+          id: 'grant-delayed-pending',
+          expires_at: '2000-01-01T00:00:00.000Z',
+          grant_status: 'pending',
+          remove_on_expiry: false,
+        }],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).not.toHaveBeenCalled();
+      expect(harness.deleteEq).toHaveBeenCalledWith('id', 'grant-current');
+      expect(harness.ownershipOr).toHaveBeenCalledWith(
+        'commerce_find_live_temp_role_owner',
+      );
       expect(harness.successorIntentUpdates).toContainEqual(expect.objectContaining({
         remove_on_expiry: true,
       }));
@@ -1032,7 +1272,10 @@ describe('events/handler', () => {
         releaseADelete!();
         await aSweep;
         expect(expiringA.acknowledgedDeletes).toEqual(['grant-a']);
-        expect(sharedTempRoleRows.has('grant-a')).toBe(false);
+        expect(sharedTempRoleRows.get('grant-a')).toMatchObject({
+          grant_status: 'removed',
+          source: 'commerce_reconciled',
+        });
 
         vi.setSystemTime(new Date('2030-01-03T00:00:00.000Z'));
         const laterB = makeCommerceTempRoleSweepClient({
@@ -1049,7 +1292,10 @@ describe('events/handler', () => {
           'SomniBot — temporary role expired',
         );
         expect(laterB.acknowledgedDeletes).toEqual(['grant-b']);
-        expect(sharedTempRoleRows.has('grant-b')).toBe(false);
+        expect(sharedTempRoleRows.get('grant-b')).toMatchObject({
+          grant_status: 'removed',
+          source: 'commerce_reconciled',
+        });
       } finally {
         releaseBDelete?.();
         releaseADelete?.();
@@ -1164,6 +1410,55 @@ describe('events/handler', () => {
       expect(harness.roleRemove).toHaveBeenCalledTimes(1);
       expect(harness.roleAdd).toHaveBeenCalledTimes(1);
       expect(harness.deleteEq).not.toHaveBeenCalled();
+    });
+
+    it('restores access when the exact grant reactivates at the atomic retirement boundary', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        parentOrderStatus: 'refunded',
+        entitlementIsLive: false,
+        overlappingResponses: [
+          { data: [], error: null },
+          { data: [], error: null },
+          { data: [{ id: 'grant-current', remove_on_expiry: true }], error: null },
+        ],
+        retirementResults: [{
+          data: {
+            id: 'grant-current',
+            retired: false,
+            grant_status: 'applied',
+            source: 'commerce_purchase',
+          },
+          error: null,
+        }],
+        memberRoleStates: [true, false, false, true],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.roleAdd).toHaveBeenCalledTimes(1);
+      expect(harness.acknowledgedDeletes).toEqual([]);
+    });
+
+    it('preserves provenance when atomic retirement fails after terminal removal', async () => {
+      const harness = makeCommerceTempRoleSweepClient({
+        removeOnExpiry: true,
+        parentOrderStatus: 'refunded',
+        entitlementIsLive: false,
+        overlappingResponses: [
+          { data: [], error: null },
+          { data: [], error: null },
+          { data: [], error: null },
+        ],
+        retirementResults: [{ data: null, error: { message: 'database unavailable' } }],
+        memberRoleStates: [true, false],
+      });
+
+      await sweepExpiredTempRoleGrants(harness.client);
+
+      expect(harness.roleRemove).toHaveBeenCalledTimes(1);
+      expect(harness.acknowledgedDeletes).toEqual([]);
     });
 
     it('preserves order-backed provenance when the Discord lookup fails', async () => {

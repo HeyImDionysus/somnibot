@@ -16,6 +16,10 @@
 import type { Guild, User } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PlatformEventBus } from './event-bus.js';
+import {
+  findLiveTemporaryRoleOwner,
+  inspectTemporaryRoleGrant,
+} from './temp-role-ownership.js';
 import { EntitlementService } from '../features/commerce/entitlement-service.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
 import { createLogger, getGracePeriodDays } from '@somnibot/shared';
@@ -36,6 +40,8 @@ export interface FulfillmentPayload {
   order_id: string;
   order_number: string;
   plan_id?: string;
+  paypal_subscription_id?: string;
+  paypal_plan_id?: string;
   amount_cents: number;
   currency: string;
   granted_role_ids: string[];
@@ -54,7 +60,15 @@ export interface FulfillmentPayload {
 
 type PreparedTemporaryRoleGrant = {
   id: string;
-  grant_status: 'pending' | 'applied';
+  grant_status: 'pending' | 'applied' | 'removed';
+  remove_on_expiry: boolean;
+  expires_at: string;
+};
+
+type AcknowledgedTemporaryRoleGrant = {
+  id: string;
+  grant_status: 'applied';
+  applied_at: string;
   expires_at: string;
 };
 
@@ -104,7 +118,28 @@ function isPreparedTemporaryRoleGrant(value: unknown): value is PreparedTemporar
   return (
     typeof grant.id === 'string'
     && grant.id.length > 0
-    && (grant.grant_status === 'pending' || grant.grant_status === 'applied')
+    && (
+      grant.grant_status === 'pending'
+      || grant.grant_status === 'applied'
+      || grant.grant_status === 'removed'
+    )
+    && typeof grant.remove_on_expiry === 'boolean'
+    && typeof grant.expires_at === 'string'
+    && Number.isFinite(Date.parse(grant.expires_at))
+  );
+}
+
+function isAcknowledgedTemporaryRoleGrant(
+  value: unknown,
+): value is AcknowledgedTemporaryRoleGrant {
+  if (!value || typeof value !== 'object') return false;
+  const grant = value as Partial<AcknowledgedTemporaryRoleGrant>;
+  return (
+    typeof grant.id === 'string'
+    && grant.id.length > 0
+    && grant.grant_status === 'applied'
+    && typeof grant.applied_at === 'string'
+    && Number.isFinite(Date.parse(grant.applied_at))
     && typeof grant.expires_at === 'string'
     && Number.isFinite(Date.parse(grant.expires_at))
   );
@@ -486,24 +521,11 @@ export class CommerceFulfillmentService {
   ): Promise<void> {
     const { data, error } = await this.supabase
       .from('orders')
-      .select('id, guild_id, customer_id, product_id, plan_id, amount_cents, currency, source, status, granted_role_ids_snapshot, granted_channel_ids_snapshot, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
+      .select('id, order_number, guild_id, customer_id, product_id, plan_id, paypal_subscription_id, amount_cents, currency, source, status, granted_role_ids_snapshot, granted_channel_ids_snapshot, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
       .eq('id', payload.order_id)
       .eq('guild_id', payload.guild_id)
       .maybeSingle();
     if (error) throw new Error(`Failed to verify fulfillment order snapshot: ${error.message}`);
-
-    let frozenTemporaryRoleGrants: Array<{ role_id: string; duration_seconds: number }>;
-    try {
-      frozenTemporaryRoleGrants = normalizeTemporaryRoleGrants(
-        data?.temporary_role_grants_snapshot as FulfillmentPayload['temporary_role_grants'],
-      );
-    } catch {
-      throw new Error('Fulfillment order returned a malformed frozen grant snapshot');
-    }
-    const tempSnapshotsMatch = frozenTemporaryRoleGrants.length === temporaryRoleGrants.length
-      && frozenTemporaryRoleGrants.every((grant, index) =>
-        grant.role_id === temporaryRoleGrants[index]?.role_id
-        && grant.duration_seconds === temporaryRoleGrants[index]?.duration_seconds);
 
     if (
       !data
@@ -516,11 +538,83 @@ export class CommerceFulfillmentService {
       || data.currency !== payload.currency
       || (data.source !== 'purchase' && data.source !== null)
       || data.status !== 'completed'
-      || typeof data.grant_snapshot_frozen_at !== 'string'
-      || data.grant_snapshot_frozen_at.length === 0
-      || !Number.isFinite(Date.parse(data.grant_snapshot_frozen_at))
-      || !isSameUniqueStringSet(data.granted_role_ids_snapshot, payload.granted_role_ids)
-      || !isSameUniqueStringSet(data.granted_channel_ids_snapshot, payload.granted_channel_ids)
+    ) {
+      throw new Error('Fulfillment order failed exact frozen snapshot validation');
+    }
+
+    let authoritativeRoleIds: unknown = data.granted_role_ids_snapshot;
+    let authoritativeChannelIds: unknown = data.granted_channel_ids_snapshot;
+    let authoritativeTemporaryRoleGrants: unknown = data.temporary_role_grants_snapshot;
+    let hasAuthoritativeContract =
+      typeof data.grant_snapshot_frozen_at === 'string'
+      && data.grant_snapshot_frozen_at.length > 0
+      && Number.isFinite(Date.parse(data.grant_snapshot_frozen_at));
+
+    // Completed subscription rows from before order snapshots are never
+    // authorized from a null marker alone. The dashboard must first have
+    // persisted the exact staged payload through the locked adoption RPC;
+    // this read-only row survives normal queue retention and is compared in
+    // full before any entitlement or Discord mutation.
+    if (data.grant_snapshot_frozen_at === null && payload.entitlement_type === 'subscription') {
+      const { data: legacy, error: legacyError } = await this.supabase
+        .from('commerce_legacy_subscription_grant_contracts')
+        .select('order_id, source_queue_id, guild_id, customer_id, discord_id, product_id, product_name, order_number, plan_id, paypal_subscription_id, paypal_plan_id, amount_cents, currency, granted_role_ids_snapshot, granted_channel_ids_snapshot, persisted_at')
+        .eq('order_id', payload.order_id)
+        .maybeSingle();
+      if (legacyError) {
+        throw new Error(`Failed to verify legacy subscription grant contract: ${legacyError.message}`);
+      }
+
+      if (
+        !legacy
+        || typeof legacy.source_queue_id !== 'string'
+        || legacy.source_queue_id.length === 0
+        || legacy.order_id !== payload.order_id
+        || legacy.guild_id !== payload.guild_id
+        || legacy.customer_id !== payload.customer_id
+        || legacy.discord_id !== payload.discord_id
+        || legacy.product_id !== payload.product_id
+        || legacy.product_name !== payload.product_name
+        || legacy.order_number !== payload.order_number
+        || legacy.plan_id !== payload.plan_id
+        || legacy.paypal_subscription_id !== payload.paypal_subscription_id
+        || legacy.paypal_plan_id !== payload.paypal_plan_id
+        || legacy.amount_cents !== payload.amount_cents
+        || legacy.currency !== payload.currency
+        || data.order_number !== legacy.order_number
+        || data.paypal_subscription_id !== legacy.paypal_subscription_id
+        || typeof legacy.persisted_at !== 'string'
+        || !Number.isFinite(Date.parse(legacy.persisted_at))
+        || !isSameUniqueStringSet(legacy.granted_role_ids_snapshot, payload.granted_role_ids)
+        || !isSameUniqueStringSet(legacy.granted_channel_ids_snapshot, payload.granted_channel_ids)
+        || temporaryRoleGrants.length !== 0
+      ) {
+        throw new Error('Fulfillment order failed exact legacy contract validation');
+      }
+
+      authoritativeRoleIds = legacy.granted_role_ids_snapshot;
+      authoritativeChannelIds = legacy.granted_channel_ids_snapshot;
+      authoritativeTemporaryRoleGrants = [];
+      hasAuthoritativeContract = true;
+    }
+
+    let frozenTemporaryRoleGrants: Array<{ role_id: string; duration_seconds: number }>;
+    try {
+      frozenTemporaryRoleGrants = normalizeTemporaryRoleGrants(
+        authoritativeTemporaryRoleGrants as FulfillmentPayload['temporary_role_grants'],
+      );
+    } catch {
+      throw new Error('Fulfillment order returned a malformed frozen grant snapshot');
+    }
+    const tempSnapshotsMatch = frozenTemporaryRoleGrants.length === temporaryRoleGrants.length
+      && frozenTemporaryRoleGrants.every((grant, index) =>
+        grant.role_id === temporaryRoleGrants[index]?.role_id
+        && grant.duration_seconds === temporaryRoleGrants[index]?.duration_seconds);
+
+    if (
+      !hasAuthoritativeContract
+      || !isSameUniqueStringSet(authoritativeRoleIds, payload.granted_role_ids)
+      || !isSameUniqueStringSet(authoritativeChannelIds, payload.granted_channel_ids)
       || !tempSnapshotsMatch
     ) {
       throw new Error('Fulfillment order failed exact frozen snapshot validation');
@@ -604,15 +698,26 @@ export class CommerceFulfillmentService {
       }
 
       const expiresAt = Date.parse(data.expires_at);
-      if (data.grant_status === 'applied' && expiresAt <= Date.now()) {
-        // Expiry reconciliation owns already-expired applied rows. A late
-        // fulfillment replay must never resurrect their Discord role.
+      if (data.grant_status === 'removed') {
+        // An expired/terminal commerce grant remains as immutable revocation
+        // evidence. Fulfillment replays must never revive its Discord access.
         continue;
       }
-      if (data.grant_status === 'pending' && expiresAt <= Date.now()) {
-        throw new Error(`Temporary role ${grant.role_id} expired before Discord delivery`);
+      if (data.grant_status === 'applied' && expiresAt <= Date.now()) {
+        // A late fulfillment replay must never resurrect already-expired
+        // access. If this grant owns removal and the role is still present,
+        // reconcile it with the same canonical-owner checks as terminal ACK
+        // cleanup; the sweeper remains responsible for the durable tombstone.
+        await this.reconcileTerminalPendingRole(
+          payload,
+          grant.role_id,
+          data.id,
+          data.remove_on_expiry,
+        );
+        continue;
       }
 
+      let ownsRemoval = data.remove_on_expiry;
       try {
         let member = await this.guild.members.fetch({
           user: payload.discord_id,
@@ -632,6 +737,7 @@ export class CommerceFulfillmentService {
           // role is already present. Without this marker, permanent expiry
           // followed by temp expiry could strand the role forever.
           await this.persistTemporaryRoleRemovalIntent(data.id, data.grant_status);
+          ownsRemoval = true;
         }
 
         if (!roleWasPresent) {
@@ -663,24 +769,173 @@ export class CommerceFulfillmentService {
       // above is only an idempotent Discord repair/confirmation.
       if (data.grant_status === 'applied') continue;
 
-      const appliedAt = new Date().toISOString();
-      const { data: acknowledged, error: acknowledgeError } = await this.supabase
-        .from('temp_role_grants')
-        .update({
-          grant_status: 'applied',
-          applied_at: appliedAt,
-          last_error: null,
-          updated_at: appliedAt,
-        })
-        .eq('id', data.id)
-        .select('id')
-        .maybeSingle();
+      const { data: acknowledged, error: acknowledgeError } = await this.supabase.rpc(
+        'commerce_acknowledge_temp_role_grant',
+        { p_grant_id: data.id },
+      );
+      const acknowledgedDurationSeconds = isAcknowledgedTemporaryRoleGrant(acknowledged)
+        ? (Date.parse(acknowledged.expires_at) - Date.parse(acknowledged.applied_at)) / 1_000
+        : Number.NaN;
+      if (
+        acknowledgeError
+        || !isAcknowledgedTemporaryRoleGrant(acknowledged)
+        || acknowledged.id !== data.id
+        || acknowledgedDurationSeconds !== grant.duration_seconds
+      ) {
+        let detail = acknowledgeError?.message ?? 'provenance row was not acknowledged exactly';
+        try {
+          // The acknowledgement may have committed even when its response was
+          // lost. Re-read the exact row before any compensating Discord write.
+          const inspection = await inspectTemporaryRoleGrant(this.supabase, data.id);
+          const exactInspection = inspection
+            && inspection.guild_id === payload.guild_id
+            && inspection.user_id === payload.discord_id
+            && inspection.role_id === grant.role_id
+            && inspection.order_id === payload.order_id
+            && inspection.duration_seconds === grant.duration_seconds;
 
-      if (acknowledgeError || acknowledged?.id !== data.id) {
-        const detail = acknowledgeError?.message ?? 'provenance row was not acknowledged';
+          if (exactInspection && inspection.grant_status === 'applied') {
+            const appliedAt = inspection.applied_at === null
+              ? Number.NaN
+              : Date.parse(inspection.applied_at);
+            const inspectedDurationSeconds = (
+              Date.parse(inspection.expires_at) - appliedAt
+            ) / 1_000;
+            if (
+              inspection.parent_order_status === 'completed'
+              && inspection.entitlement_is_live
+              && inspectedDurationSeconds === grant.duration_seconds
+              && Date.parse(inspection.expires_at) > Date.now()
+            ) {
+              // The DB transition succeeded; only the RPC response was lost.
+              continue;
+            }
+          }
+
+          if (
+            exactInspection
+            && inspection.grant_status === 'pending'
+            && inspection.parent_order_status === 'completed'
+            && inspection.entitlement_is_live
+          ) {
+            // Ordinary transient ACK failure: the role was confirmed and the
+            // paid parent is still live. Keep access and retry acknowledgement.
+            detail += '; acknowledgement remains pending on a live order';
+          } else if (exactInspection) {
+            await this.reconcileTerminalPendingRole(
+              payload,
+              grant.role_id,
+              data.id,
+              inspection.remove_on_expiry,
+            );
+          } else {
+            detail += '; authoritative grant state was missing or mismatched';
+          }
+        } catch (cleanupError) {
+          // Inspection uncertainty is fail-closed: do not blindly remove a
+          // role whose acknowledgement may have committed.
+          detail += `; authoritative role reconciliation failed: ${
+            cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          }`;
+        }
         await this.recordTemporaryRoleFailure(data.id, detail);
         throw new Error(`Failed to acknowledge temporary role ${grant.role_id}: ${detail}`);
       }
+    }
+  }
+
+  private async reconcileTerminalPendingRole(
+    payload: FulfillmentPayload,
+    roleId: string,
+    grantId: string,
+    ownsRemoval: boolean,
+  ): Promise<void> {
+    if (!ownsRemoval) return;
+
+    const otherOwner = await this.hasOtherCanonicalLiveRoleOwner(
+      payload,
+      roleId,
+      grantId,
+      false,
+    );
+    let member = await this.guild.members.fetch({
+      user: payload.discord_id,
+      force: true,
+    });
+    if (otherOwner) {
+      if (!member.roles.cache.has(roleId)) {
+        await member.roles.add(
+          roleId,
+          'SomniBot — repair role retained by another paid owner',
+        );
+        member = await this.guild.members.fetch({
+          user: payload.discord_id,
+          force: true,
+        });
+      }
+      if (!member.roles.cache.has(roleId)) {
+        throw new Error('Discord did not confirm the role retained by another owner');
+      }
+      return;
+    }
+
+    if (member.roles.cache.has(roleId)) {
+      await member.roles.remove(
+        roleId,
+        `SomniBot — temporary commerce order ${payload.order_number} is no longer live`,
+      );
+      member = await this.guild.members.fetch({
+        user: payload.discord_id,
+        force: true,
+      });
+    }
+    if (member.roles.cache.has(roleId)) {
+      throw new Error('Discord still reports the terminal temporary role');
+    }
+
+    try {
+      if (await this.hasOtherCanonicalLiveRoleOwner(payload, roleId, grantId, false)) {
+        await member.roles.add(
+          roleId,
+          'SomniBot — repair role retained by a concurrent paid owner',
+        );
+        member = await this.guild.members.fetch({
+          user: payload.discord_id,
+          force: true,
+        });
+        if (!member.roles.cache.has(roleId)) {
+          throw new Error('Discord did not confirm the concurrently-owned role');
+        }
+      }
+    } catch (ownershipError) {
+      // A post-removal lookup failure cannot prove absence of another owner.
+      // Restore access conservatively and keep the work retryable.
+      try {
+        member = await this.guild.members.fetch({
+          user: payload.discord_id,
+          force: true,
+        });
+        if (!member.roles.cache.has(roleId)) {
+          await member.roles.add(
+            roleId,
+            'SomniBot — restore role after ownership verification failure',
+          );
+          member = await this.guild.members.fetch({
+            user: payload.discord_id,
+            force: true,
+          });
+        }
+        if (!member.roles.cache.has(roleId)) {
+          throw new Error('Discord did not confirm the conservatively restored role');
+        }
+      } catch (repairError) {
+        throw new Error(
+          `post-removal ownership verification failed (${String(ownershipError)}); role repair failed (${String(repairError)})`,
+        );
+      }
+      throw new Error(
+        `post-removal ownership verification failed; role was restored (${String(ownershipError)})`,
+      );
     }
   }
 
@@ -688,49 +943,25 @@ export class CommerceFulfillmentService {
     payload: FulfillmentPayload,
     roleId: string,
     grantId: string,
+    excludeCurrentGrant = true,
   ): Promise<boolean> {
-    const nowIso = new Date().toISOString();
-    const { data: tempOwners, error: tempError } = await this.supabase
-      .from('temp_role_grants')
-      .select('id, guild_id, user_id, role_id, expires_at, grant_status')
-      .eq('guild_id', payload.guild_id)
-      .eq('user_id', payload.discord_id)
-      .eq('role_id', roleId)
-      .neq('id', grantId)
-      .in('grant_status', ['pending', 'applied'])
-      .gt('expires_at', nowIso)
-      .order('id', { ascending: true })
-      .limit(1);
-    if (tempError) {
-      throw new Error(`Temporary role ownership lookup failed: ${tempError.message}`);
-    }
-    if (!Array.isArray(tempOwners) || tempOwners.length > 1) {
-      throw new Error('Temporary role ownership lookup returned malformed data');
-    }
-    if (tempOwners.length === 1) {
-      const owner = tempOwners[0];
-      if (
-        typeof owner?.id !== 'string'
-        || owner.id.length === 0
-        || owner.guild_id !== payload.guild_id
-        || owner.user_id !== payload.discord_id
-        || owner.role_id !== roleId
-        || !Number.isFinite(Date.parse(owner.expires_at))
-        || Date.parse(owner.expires_at) <= Date.parse(nowIso)
-        || (owner.grant_status !== 'pending' && owner.grant_status !== 'applied')
-      ) {
-        throw new Error('Temporary role ownership lookup returned a mismatched grant');
-      }
-      return true;
-    }
+    const tempOwner = await findLiveTemporaryRoleOwner(this.supabase, {
+      guildId: payload.guild_id,
+      userId: payload.discord_id,
+      roleId,
+      excludeGrantId: excludeCurrentGrant ? grantId : null,
+      excludeOrderId: null,
+    });
+    if (tempOwner) return true;
 
-    const { data: entitlementOwners, error: entitlementError } = await this.supabase
+    let entitlementQuery = this.supabase
       .from('entitlements')
-      .select('id, guild_id, customer_id, status, granted_role_ids')
+      .select('id, guild_id, customer_id, order_id, status, granted_role_ids')
       .eq('guild_id', payload.guild_id)
       .eq('customer_id', payload.customer_id)
       .in('status', ['active', 'pending', 'grace_period', 'suspended'])
-      .contains('granted_role_ids', [roleId])
+      .contains('granted_role_ids', [roleId]);
+    const { data: entitlementOwners, error: entitlementError } = await entitlementQuery
       .order('id', { ascending: true })
       .limit(1);
     if (entitlementError) {
@@ -760,7 +991,7 @@ export class CommerceFulfillmentService {
 
   private async persistTemporaryRoleRemovalIntent(
     grantId: string,
-    grantStatus: PreparedTemporaryRoleGrant['grant_status'],
+    grantStatus: 'pending' | 'applied',
   ): Promise<void> {
     const intentAt = new Date().toISOString();
     const { data, error } = await this.supabase
@@ -787,7 +1018,8 @@ export class CommerceFulfillmentService {
           last_error: detail,
           updated_at: new Date().toISOString(),
         })
-        .eq('id', grantId);
+        .eq('id', grantId)
+        .eq('grant_status', 'pending');
       if (error) {
         log.warn('Failed to record temporary role delivery error', {
           grantId,

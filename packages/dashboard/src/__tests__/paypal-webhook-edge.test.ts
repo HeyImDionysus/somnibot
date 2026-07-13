@@ -282,6 +282,7 @@ function createCaptureRecoveryHarness(options: {
       ],
     },
     frozenSnapshot: null,
+    legacySubscriptionContract: null,
     payment: null,
     queue: null,
     licenseKey: null,
@@ -299,6 +300,12 @@ function createCaptureRecoveryHarness(options: {
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
     if (name === 'commerce_freeze_order_grant_snapshot') {
+      if (state.order.status !== 'pending' && !state.order.grant_snapshot_frozen_at) {
+        return {
+          data: null,
+          error: { message: 'only pending orders can freeze a grant snapshot', code: '23514' },
+        };
+      }
       if (!state.frozenSnapshot) state.frozenSnapshot = structuredClone(state.currentSnapshot);
       state.order.grant_snapshot_frozen_at = '2026-07-11T00:00:00.000Z';
       return {
@@ -309,6 +316,30 @@ function createCaptureRecoveryHarness(options: {
         },
         error: null,
       };
+    }
+    if (name === 'commerce_adopt_legacy_subscription_grant_contract') {
+      if (
+        args.p_order_id !== state.order.id
+        || args.p_source_queue_id !== state.queue?.id
+        || !state.queue
+      ) {
+        return { data: null, error: { message: 'legacy contract identity mismatch', code: 'P0001' } };
+      }
+      const candidate = {
+        order_id: state.order.id,
+        source_queue_id: state.queue.id,
+        granted_role_ids_snapshot: structuredClone(state.queue.payload.granted_role_ids),
+        granted_channel_ids_snapshot: structuredClone(state.queue.payload.granted_channel_ids),
+        persisted_at: '2026-07-11T00:01:00.000Z',
+      };
+      if (
+        state.legacySubscriptionContract
+        && JSON.stringify(state.legacySubscriptionContract) !== JSON.stringify(candidate)
+      ) {
+        return { data: null, error: { message: 'immutable replay mismatch', code: 'P0001' } };
+      }
+      state.legacySubscriptionContract ??= candidate;
+      return { data: structuredClone(state.legacySubscriptionContract), error: null };
     }
     if (name === 'commerce_finalize_paypal_capture') {
       const completed = args.p_amount_cents === state.order.amount_cents
@@ -2324,6 +2355,220 @@ describe('PayPal webhook — edge cases', () => {
       expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
     });
 
+    it('treats an exact legacy completed subscription replay without a grant snapshot as a no-op', async () => {
+      const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+      try {
+        const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
+        state.order.status = 'completed';
+        state.order.grant_snapshot_frozen_at = null;
+        state.frozenSnapshot = null;
+        const resource = {
+          id: 'SUB-RECOVERY-1',
+          custom_id: JSON.stringify({
+            guild_id: 'guild-1',
+            product_id: 'product-1',
+            plan_id: 'plan-1',
+            customer_id: 'customer-1',
+            discord_id: 'discord-1',
+          }),
+        };
+
+        await handleSubscriptionActivated(supabase, resource);
+
+        expect(state.order).toMatchObject({
+          status: 'completed',
+          grant_snapshot_frozen_at: null,
+        });
+        expect(state.frozenSnapshot).toBeNull();
+        expect(state.queue).toBeNull();
+        expect(state.inserts).toEqual([]);
+        expect(state.updates).toEqual([]);
+        expect(rpc).not.toHaveBeenCalled();
+        expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
+        expect(infoSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Exact legacy subscription replay has no durable grant contract'),
+        );
+      } finally {
+        infoSpy.mockRestore();
+      }
+    });
+
+    it.each([
+      {
+        label: 'plan moved to another catalog owner',
+        mutateCatalog: (state: any) => {
+          state.plan.guild_id = 'guild-moved-after-sale';
+          state.plan.product_id = 'product-moved-after-sale';
+        },
+      },
+      {
+        label: 'current PayPal plan id rotated',
+        mutateCatalog: (state: any) => {
+          state.plan.paypal_plan_id = 'PAYPAL-PLAN-CURRENT-OTHER';
+        },
+      },
+      {
+        label: 'local plan deleted',
+        mutateCatalog: (state: any) => {
+          state.plan = null;
+        },
+      },
+    ])('keeps an exact legacy no-contract replay mutation-free after $label', async ({ mutateCatalog }) => {
+      const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
+      state.order.status = 'completed';
+      state.order.grant_snapshot_frozen_at = null;
+      state.frozenSnapshot = null;
+      mutateCatalog(state);
+      const resource = {
+        id: 'SUB-RECOVERY-1',
+        custom_id: JSON.stringify({
+          guild_id: 'guild-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+          customer_id: 'customer-1',
+          discord_id: 'discord-1',
+        }),
+      };
+
+      await handleSubscriptionActivated(supabase, resource);
+
+      expect(state.order).toMatchObject({
+        status: 'completed',
+        grant_snapshot_frozen_at: null,
+      });
+      expect(state.queue).toBeNull();
+      expect(state.inserts).toEqual([]);
+      expect(state.updates).toEqual([]);
+      expect(rpc).not.toHaveBeenCalled();
+      expect(getSubscriptionAmount).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a legacy completed subscription replay whose provider finances mismatch', async () => {
+      vi.mocked(getSubscriptionAmount).mockResolvedValueOnce({
+        amountCents: 1_299,
+        currency: 'USD',
+        planId: 'PAYPAL-PLAN-1',
+      });
+      const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
+      state.order.status = 'completed';
+      state.order.grant_snapshot_frozen_at = null;
+      state.frozenSnapshot = null;
+      const resource = {
+        id: 'SUB-RECOVERY-1',
+        custom_id: JSON.stringify({
+          guild_id: 'guild-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+          customer_id: 'customer-1',
+          discord_id: 'discord-1',
+        }),
+      };
+
+      await expect(handleSubscriptionActivated(supabase, resource)).rejects.toThrow(
+        'Completed subscription order disagrees with PayPal financial state',
+      );
+      expect(state.queue).toBeNull();
+      expect(state.inserts).toEqual([]);
+      expect(state.updates).toEqual([]);
+      expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('releases a recoverable legacy staged subscription without re-freezing current grants', async () => {
+      const { supabase, state, rpc } = createCaptureRecoveryHarness({
+        subscription: true,
+        failOrderCompleteAttempts: 1,
+      });
+      const resource = {
+        id: 'SUB-RECOVERY-1',
+        custom_id: JSON.stringify({
+          guild_id: 'guild-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+          customer_id: 'customer-1',
+          discord_id: 'discord-1',
+        }),
+      };
+
+      await expect(handleSubscriptionActivated(supabase, resource)).rejects.toThrow(
+        'Failed to complete subscription order',
+      );
+      expect(state.queue).toMatchObject({
+        status: 'staged',
+        payload: { granted_role_ids: [ORIGINAL_ROLE] },
+      });
+
+      state.order.status = 'completed';
+      state.order.grant_snapshot_frozen_at = null;
+      state.frozenSnapshot = null;
+      state.plan.guild_id = 'guild-moved-after-sale';
+      state.plan.product_id = 'product-moved-after-sale';
+      state.plan.paypal_plan_id = 'PAYPAL-PLAN-CURRENT-OTHER';
+      state.currentSnapshot.granted_role_ids_snapshot = ['999999999999999999'];
+      rpc.mockClear();
+
+      await handleSubscriptionActivated(supabase, resource);
+
+      expect(state.queue).toMatchObject({
+        status: 'pending',
+        payload: {
+          granted_role_ids: [ORIGINAL_ROLE],
+          granted_channel_ids: [ORIGINAL_CHANNEL],
+        },
+      });
+      expect(state.order.grant_snapshot_frozen_at).toBeNull();
+      expect(state.frozenSnapshot).toBeNull();
+      expect(state.legacySubscriptionContract).toMatchObject({
+        order_id: 'order-1',
+        source_queue_id: 'queue-1',
+        granted_role_ids_snapshot: [ORIGINAL_ROLE],
+        granted_channel_ids_snapshot: [ORIGINAL_CHANNEL],
+      });
+      expect(rpc).toHaveBeenCalledWith(
+        'commerce_adopt_legacy_subscription_grant_contract',
+        { p_order_id: 'order-1', p_source_queue_id: 'queue-1' },
+      );
+      expect(state.inserts.filter((entry: any) => entry.table === 'bot_action_queue')).toHaveLength(1);
+
+      // Adoption is idempotent after release. A later webhook replay may
+      // observe pending/processing/completed queue state, but it must recover
+      // only the exact already-persisted contract.
+      await handleSubscriptionActivated(supabase, resource);
+      expect(state.queue.status).toBe('pending');
+      expect(rpc.mock.calls.filter(
+        ([name]: [string]) => name === 'commerce_adopt_legacy_subscription_grant_contract',
+      )).toHaveLength(2);
+
+      state.queue.payload.granted_role_ids = ['999999999999999999'];
+      await expect(handleSubscriptionActivated(supabase, resource)).rejects.toThrow(
+        'Failed to persist legacy subscription grant contract: immutable replay mismatch',
+      );
+    });
+
+    it('keeps an unknown legacy-looking subscription retryable without creating access', async () => {
+      vi.mocked(getSubscriptionAmount).mockResolvedValueOnce(null);
+      const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
+      state.orders = [];
+      const resource = {
+        id: 'SUB-UNKNOWN',
+        custom_id: JSON.stringify({
+          guild_id: 'guild-1',
+          product_id: 'product-1',
+          plan_id: 'plan-1',
+          customer_id: 'customer-1',
+          discord_id: 'discord-1',
+        }),
+      };
+
+      await expect(handleSubscriptionActivated(supabase, resource)).rejects.toThrow(
+        'authoritative billing amount is unavailable',
+      );
+      expect(state.orders).toEqual([]);
+      expect(state.queue).toBeNull();
+      expect(state.inserts).toEqual([]);
+      expect(state.updates).toEqual([]);
+      expect(rpc).not.toHaveBeenCalled();
+    });
+
     it('rejects subscription metadata whose Discord identity disagrees with the customer', async () => {
       const { supabase, state, rpc } = createCaptureRecoveryHarness({ subscription: true });
       state.customer.discord_id = 'discord-other';
@@ -2697,6 +2942,7 @@ describe('PayPal webhook — edge cases', () => {
       state.order.amount_cents = 1_299;
       state.order.currency = 'EUR';
       state.frozenSnapshot = structuredClone(state.currentSnapshot);
+      state.order.grant_snapshot_frozen_at = '2026-07-11T00:00:00.000Z';
       const resource = {
         id: 'SUB-RECOVERY-1',
         custom_id: JSON.stringify({

@@ -20,6 +20,8 @@ let sql!: ReturnType<typeof postgres>;
 
 const GUILD_ID = `test-role-income-${Date.now()}`;
 const OTHER_GUILD_ID = `${GUILD_ID}-other`;
+const STARTING_BALANCE_GUILD_ID = `${GUILD_ID}-starting-balance`;
+const TEST_GUILD_IDS = [GUILD_ID, OTHER_GUILD_ID, STARTING_BALANCE_GUILD_ID];
 const USER_PREFIX = `role-income-user-${Date.now()}`;
 
 const ROLE_REPLAY = 'role-income-replay';
@@ -33,6 +35,7 @@ const ROLE_ROLLBACK = 'role-income-rollback';
 const ROLE_TRIGGER = 'role-income-trigger';
 const ROLE_STALE_QUEUE = 'role-income-stale-queue';
 const ROLE_PURGE = 'role-income-purge';
+const ROLE_STARTING_BALANCE = 'role-income-starting-balance';
 
 let inactiveProductId: string;
 let paidCustomerId: string;
@@ -46,6 +49,17 @@ type CollectionResult = {
   credited_role_ids: string[];
   blocked_role_ids: string[];
   next_available_at: string | null;
+};
+
+type WalletResult = {
+  guild_id: string;
+  user_id: string;
+  wallet: number;
+  bank: number;
+  bank_max: number;
+  passive: boolean;
+  total_earned: number;
+  total_spent: number;
 };
 
 async function collect(
@@ -63,6 +77,23 @@ async function collect(
     data: CollectionResult | null;
     error: { message: string } | null;
   }>;
+}
+
+async function initializeWallet(
+  guildId: string,
+  userId: string,
+): Promise<{ data: WalletResult | null; error: { message: string } | null }> {
+  return supa.rpc('economy_get_or_create_wallet', {
+    p_guild_id: guildId,
+    p_user_id: userId,
+  }) as unknown as Promise<{
+    data: WalletResult | null;
+    error: { message: string } | null;
+  }>;
+}
+
+function walletLockKey(guildId: string, userId: string): string {
+  return `economy-role-income:${guildId}:${userId}`;
 }
 
 async function createPaidEntitlementFixture(
@@ -136,8 +167,19 @@ beforeAll(async () => {
       name: 'Atomic Role Income Other Guild',
       owner_discord_id: '100000000000000002',
     },
+    {
+      id: STARTING_BALANCE_GUILD_ID,
+      name: 'Atomic Role Income Starting Balance Guild',
+      owner_discord_id: '100000000000000003',
+    },
   ]);
   if (guildError) throw new Error(`Guild seed failed: ${guildError.message}`);
+
+  const { error: configError } = await supa.from('guild_config').insert({
+    guild_id: STARTING_BALANCE_GUILD_ID,
+    economy_starting_balance: 100,
+  });
+  if (configError) throw new Error(`Guild config seed failed: ${configError.message}`);
 
   const paidUser = `${USER_PREFIX}-paid`;
   const manualUser = `${USER_PREFIX}-manual`;
@@ -234,30 +276,408 @@ beforeAll(async () => {
     { guild_id: GUILD_ID, role_id: ROLE_STALE_QUEUE, amount: 70, interval_minutes: 60 },
     { guild_id: GUILD_ID, role_id: ROLE_PURGE, amount: 75, interval_minutes: 60 },
     { guild_id: OTHER_GUILD_ID, role_id: ROLE_OTHER_GUILD, amount: 60, interval_minutes: 60 },
+    {
+      guild_id: STARTING_BALANCE_GUILD_ID,
+      role_id: ROLE_STARTING_BALANCE,
+      amount: 25,
+      interval_minutes: 60,
+    },
   ]);
   if (incomeError) throw new Error(`Role-income seed failed: ${incomeError.message}`);
 });
 
 afterAll(async () => {
-  await supa.from('audit_logs').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('action_queue_dlq').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('bot_action_queue').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('temp_role_grants').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('economy_role_income_requests').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('economy_role_income_claims').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('economy_transactions').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('economy_wallets').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('economy_role_income').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('entitlements').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('payments').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('orders').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('products').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('customers').delete().in('guild_id', [GUILD_ID, OTHER_GUILD_ID]);
-  await supa.from('guild').delete().in('id', [GUILD_ID, OTHER_GUILD_ID]);
+  await supa.from('audit_logs').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('action_queue_dlq').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('bot_action_queue').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('temp_role_grants').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('economy_role_income_requests').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('economy_role_income_claims').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('economy_transactions').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('economy_wallets').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('economy_role_income').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('entitlements').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('payments').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('orders').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('products').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('customers').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('guild_config').delete().in('guild_id', TEST_GUILD_IDS);
+  await supa.from('guild').delete().in('id', TEST_GUILD_IDS);
   await sql?.end({ timeout: 5 });
 });
 
 describe('economy_collect_role_income', () => {
+  it('initializes a first wallet with starting balance and audits it exactly once', async () => {
+    const userId = `${USER_PREFIX}-starting-balance-new`;
+    const requestIds = ['interaction-starting-balance-a', 'interaction-starting-balance-b'];
+    const attempts = await Promise.all(requestIds.map((requestId) => collect(
+      STARTING_BALANCE_GUILD_ID,
+      userId,
+      [ROLE_STARTING_BALANCE],
+      requestId,
+    )));
+    const creditedIndex = attempts.findIndex((attempt) => attempt.data?.status === 'credited');
+    expect(attempts.every((attempt) => attempt.error === null)).toBe(true);
+    expect(attempts.map((attempt) => attempt.data!.status).sort()).toEqual(['cooldown', 'credited']);
+    expect(creditedIndex).toBeGreaterThanOrEqual(0);
+    if (creditedIndex < 0) throw new Error('No concurrent collection was credited');
+
+    const credited = attempts[creditedIndex]!;
+    const replay = await collect(
+      STARTING_BALANCE_GUILD_ID,
+      userId,
+      [ROLE_STARTING_BALANCE],
+      requestIds[creditedIndex]!,
+    );
+
+    expect(replay.error).toBeNull();
+    expect(replay.data).toEqual(credited.data);
+    expect(credited.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 125,
+      credited_role_ids: [ROLE_STARTING_BALANCE],
+    });
+
+    const { data: wallet, error: walletError } = await supa
+      .from('economy_wallets')
+      .select('wallet,total_earned')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .single();
+    expect(walletError).toBeNull();
+    expect(wallet).toEqual({ wallet: 125, total_earned: 125 });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after,description,metadata')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .order('type', { ascending: true });
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([
+      {
+        type: 'admin_add',
+        amount: 100,
+        balance_after: 100,
+        description: 'Starting balance',
+        metadata: null,
+      },
+      {
+        type: 'role_income',
+        amount: 25,
+        balance_after: 125,
+        description: 'Role income collection',
+        metadata: {
+          request_id: requestIds[creditedIndex],
+          role_ids: [ROLE_STARTING_BALANCE],
+        },
+      },
+    ]);
+  });
+
+  it('serializes role income behind an in-flight wallet initialization', async () => {
+    const userId = `${USER_PREFIX}-initializer-wins-race`;
+    let pendingCollection!: ReturnType<typeof collect>;
+    let collectionSettled = false;
+    let collectionWasBlocked = false;
+
+    const initializedRows = await sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${walletLockKey(STARTING_BALANCE_GUILD_ID, userId)}, 0)
+        )
+      `;
+      const rows = await tx`
+        SELECT public.economy_get_or_create_wallet(
+          ${STARTING_BALANCE_GUILD_ID},
+          ${userId}
+        ) AS wallet
+      `;
+      pendingCollection = collect(
+        STARTING_BALANCE_GUILD_ID,
+        userId,
+        [ROLE_STARTING_BALANCE],
+        'interaction-initializer-wins-race',
+      );
+      void pendingCollection.then(
+        () => { collectionSettled = true; },
+        () => { collectionSettled = true; },
+      );
+      await tx`SELECT pg_catalog.pg_sleep(0.1)`;
+      collectionWasBlocked = !collectionSettled;
+      return rows;
+    });
+    const collected = await pendingCollection;
+
+    expect(collectionWasBlocked).toBe(true);
+    expect((initializedRows[0]!.wallet as WalletResult).wallet).toBe(100);
+    expect(collected.error).toBeNull();
+    expect(collected.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 125,
+    });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .order('type', { ascending: true });
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([
+      { type: 'admin_add', amount: 100, balance_after: 100 },
+      { type: 'role_income', amount: 25, balance_after: 125 },
+    ]);
+  });
+
+  it('returns the final wallet when initialization waits behind role income', async () => {
+    const userId = `${USER_PREFIX}-collector-wins-race`;
+    let pendingInitialization!: ReturnType<typeof initializeWallet>;
+    let initializationSettled = false;
+    let initializationWasBlocked = false;
+
+    const collectionRows = await sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${walletLockKey(STARTING_BALANCE_GUILD_ID, userId)}, 0)
+        )
+      `;
+      const rows = await tx`
+        SELECT public.economy_collect_role_income(
+          ${STARTING_BALANCE_GUILD_ID},
+          ${userId},
+          ARRAY[${ROLE_STARTING_BALANCE}]::TEXT[],
+          ${'interaction-collector-wins-race'}
+        ) AS result
+      `;
+      pendingInitialization = initializeWallet(STARTING_BALANCE_GUILD_ID, userId);
+      void pendingInitialization.then(
+        () => { initializationSettled = true; },
+        () => { initializationSettled = true; },
+      );
+      await tx`SELECT pg_catalog.pg_sleep(0.1)`;
+      initializationWasBlocked = !initializationSettled;
+      return rows;
+    });
+    const initialized = await pendingInitialization;
+
+    expect(initializationWasBlocked).toBe(true);
+    expect(collectionRows[0]!.result).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 125,
+    });
+    expect(initialized.error).toBeNull();
+    expect(initialized.data).toMatchObject({
+      guild_id: STARTING_BALANCE_GUILD_ID,
+      user_id: userId,
+      wallet: 125,
+      total_earned: 125,
+    });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .order('type', { ascending: true });
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([
+      { type: 'admin_add', amount: 100, balance_after: 100 },
+      { type: 'role_income', amount: 25, balance_after: 125 },
+    ]);
+  });
+
+  it('serializes role income behind a direct first-wallet credit', async () => {
+    const userId = `${USER_PREFIX}-direct-credit-wins-race`;
+    let pendingCollection!: ReturnType<typeof collect>;
+    let collectionSettled = false;
+    let collectionWasBlocked = false;
+
+    await sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${walletLockKey(STARTING_BALANCE_GUILD_ID, userId)}, 0)
+        )
+      `;
+      await tx`
+        SELECT public.economy_add_balance(
+          ${STARTING_BALANCE_GUILD_ID},
+          ${userId},
+          ${40}
+        )
+      `;
+      pendingCollection = collect(
+        STARTING_BALANCE_GUILD_ID,
+        userId,
+        [ROLE_STARTING_BALANCE],
+        'interaction-direct-credit-wins-race',
+      );
+      void pendingCollection.then(
+        () => { collectionSettled = true; },
+        () => { collectionSettled = true; },
+      );
+      await tx`SELECT pg_catalog.pg_sleep(0.1)`;
+      collectionWasBlocked = !collectionSettled;
+    });
+    const collected = await pendingCollection;
+
+    expect(collectionWasBlocked).toBe(true);
+    expect(collected.error).toBeNull();
+    expect(collected.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 165,
+    });
+
+    const { data: wallet, error: walletError } = await supa
+      .from('economy_wallets')
+      .select('wallet,total_earned')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .single();
+    expect(walletError).toBeNull();
+    expect(wallet).toEqual({ wallet: 165, total_earned: 165 });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .order('type', { ascending: true });
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([
+      { type: 'admin_add', amount: 100, balance_after: 100 },
+      { type: 'role_income', amount: 25, balance_after: 165 },
+    ]);
+  });
+
+  it('serializes role income behind a first-wallet level-bonus credit', async () => {
+    const userId = `${USER_PREFIX}-level-credit-wins-race`;
+    let pendingCollection!: ReturnType<typeof collect>;
+    let collectionSettled = false;
+    let collectionWasBlocked = false;
+
+    await sql.begin(async (tx) => {
+      await tx`
+        SELECT pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended(${walletLockKey(STARTING_BALANCE_GUILD_ID, userId)}, 0)
+        )
+      `;
+      await tx`
+        SELECT public.economy_credit_wallet(
+          ${STARTING_BALANCE_GUILD_ID},
+          ${userId},
+          ${40},
+          ${'Level milestone bonus'}
+        )
+      `;
+      pendingCollection = collect(
+        STARTING_BALANCE_GUILD_ID,
+        userId,
+        [ROLE_STARTING_BALANCE],
+        'interaction-level-credit-wins-race',
+      );
+      void pendingCollection.then(
+        () => { collectionSettled = true; },
+        () => { collectionSettled = true; },
+      );
+      await tx`SELECT pg_catalog.pg_sleep(0.1)`;
+      collectionWasBlocked = !collectionSettled;
+    });
+    const collected = await pendingCollection;
+
+    expect(collectionWasBlocked).toBe(true);
+    expect(collected.error).toBeNull();
+    expect(collected.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 165,
+    });
+
+    const { data: wallet, error: walletError } = await supa
+      .from('economy_wallets')
+      .select('wallet,total_earned')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .single();
+    expect(walletError).toBeNull();
+    expect(wallet).toEqual({ wallet: 165, total_earned: 165 });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after,description')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .order('type', { ascending: true });
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([
+      {
+        type: 'admin_add',
+        amount: 100,
+        balance_after: 100,
+        description: 'Starting balance',
+      },
+      {
+        type: 'level_bonus',
+        amount: 40,
+        balance_after: 140,
+        description: 'Level milestone bonus',
+      },
+      {
+        type: 'role_income',
+        amount: 25,
+        balance_after: 165,
+        description: 'Role income collection',
+      },
+    ]);
+  });
+
+  it('does not apply starting balance to an existing wallet', async () => {
+    const userId = `${USER_PREFIX}-starting-balance-existing`;
+    const { error: seedError } = await supa.from('economy_wallets').insert({
+      guild_id: STARTING_BALANCE_GUILD_ID,
+      user_id: userId,
+      wallet: 40,
+      bank: 5,
+      total_earned: 40,
+      total_spent: 0,
+    });
+    expect(seedError).toBeNull();
+
+    const collected = await collect(
+      STARTING_BALANCE_GUILD_ID,
+      userId,
+      [ROLE_STARTING_BALANCE],
+      'interaction-existing-wallet',
+    );
+    expect(collected.error).toBeNull();
+    expect(collected.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 25,
+      balance_cents: 65,
+    });
+
+    const { data: wallet, error: walletError } = await supa
+      .from('economy_wallets')
+      .select('wallet,bank,total_earned')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId)
+      .single();
+    expect(walletError).toBeNull();
+    expect(wallet).toEqual({ wallet: 65, bank: 5, total_earned: 65 });
+
+    const { data: transactions, error: transactionError } = await supa
+      .from('economy_transactions')
+      .select('type,amount,balance_after')
+      .eq('guild_id', STARTING_BALANCE_GUILD_ID)
+      .eq('user_id', userId);
+    expect(transactionError).toBeNull();
+    expect(transactions).toEqual([{ type: 'role_income', amount: 25, balance_after: 65 }]);
+  });
+
   it('replays one interaction without a second credit', async () => {
     const userId = `${USER_PREFIX}-replay`;
     const first = await collect(GUILD_ID, userId, [ROLE_REPLAY], 'interaction-replay');
@@ -370,6 +790,34 @@ describe('economy_collect_role_income', () => {
     expect(result.data).toMatchObject({
       status: 'no_eligible_roles',
       blocked_role_ids: [ROLE_TEMP],
+    });
+  });
+
+  it('does not treat a removed commerce tombstone as live paid-role evidence', async () => {
+    const userId = `${USER_PREFIX}-reconciled-temp`;
+    const { error } = await supa.from('temp_role_grants').insert({
+      guild_id: GUILD_ID,
+      user_id: userId,
+      role_id: ROLE_TEMP,
+      expires_at: new Date(Date.now() - 60_000).toISOString(),
+      source: 'commerce_reconciled',
+      source_id: inactiveProductId,
+      grant_status: 'removed',
+      remove_on_expiry: true,
+    });
+    expect(error).toBeNull();
+
+    const result = await collect(
+      GUILD_ID,
+      userId,
+      [ROLE_TEMP],
+      'interaction-reconciled-temp',
+    );
+    expect(result.error).toBeNull();
+    expect(result.data).toMatchObject({
+      status: 'credited',
+      amount_cents: 45,
+      blocked_role_ids: [],
     });
   });
 
@@ -673,20 +1121,28 @@ describe('economy_collect_role_income', () => {
     expect(retry.data).toMatchObject({ status: 'credited', amount_cents: 65, balance_cents: 65 });
   });
 
-  it('denies the RPC to anon and authenticated clients', async () => {
-    const args = {
+  it('denies the wallet RPCs to anon and authenticated clients', async () => {
+    const collectionArgs = {
       p_guild_id: GUILD_ID,
       p_user_id: `${USER_PREFIX}-untrusted`,
       p_discord_role_ids: [ROLE_REPLAY],
       p_request_id: 'interaction-untrusted',
     };
-    const [anon, authenticated] = await Promise.all([
-      getAnonTestClient().rpc('economy_collect_role_income', args),
-      getAuthenticatedTestClient().rpc('economy_collect_role_income', args),
+    const initializationArgs = {
+      p_guild_id: GUILD_ID,
+      p_user_id: `${USER_PREFIX}-untrusted`,
+    };
+    const [anonCollection, authenticatedCollection, anonInitialization, authenticatedInitialization] = await Promise.all([
+      getAnonTestClient().rpc('economy_collect_role_income', collectionArgs),
+      getAuthenticatedTestClient().rpc('economy_collect_role_income', collectionArgs),
+      getAnonTestClient().rpc('economy_get_or_create_wallet', initializationArgs),
+      getAuthenticatedTestClient().rpc('economy_get_or_create_wallet', initializationArgs),
     ]);
 
-    expect(anon.error).not.toBeNull();
-    expect(authenticated.error).not.toBeNull();
+    expect(anonCollection.error).not.toBeNull();
+    expect(authenticatedCollection.error).not.toBeNull();
+    expect(anonInitialization.error).not.toBeNull();
+    expect(authenticatedInitialization.error).not.toBeNull();
   });
 
   it('exposes only the authoritative privacy RPC and no bypass helper', async () => {
@@ -709,13 +1165,37 @@ describe('economy_collect_role_income', () => {
           'service_role',
           'public.commerce_enqueue_entitlement_role_revocation()',
           'EXECUTE'
-        ) AS service_can_call_trigger_helper
+        ) AS service_can_call_trigger_helper,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.economy_get_or_create_wallet(text,text)',
+          'EXECUTE'
+        ) AS service_can_initialize_wallet,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.economy_get_or_create_wallet(text,text)',
+          'EXECUTE'
+        ) AS anon_can_initialize_wallet,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.economy_credit_wallet(text,text,bigint,text)',
+          'EXECUTE'
+        ) AS service_can_credit_wallet,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.economy_credit_wallet(text,text,bigint,text)',
+          'EXECUTE'
+        ) AS anon_can_credit_wallet
     `;
     expect(privileges[0]).toMatchObject({
       service_can_purge: true,
       anon_can_purge: false,
       bypass_helper_absent: true,
       service_can_call_trigger_helper: false,
+      service_can_initialize_wallet: true,
+      anon_can_initialize_wallet: false,
+      service_can_credit_wallet: true,
+      anon_can_credit_wallet: false,
     });
   });
 });

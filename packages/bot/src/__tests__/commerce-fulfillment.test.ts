@@ -138,13 +138,15 @@ function makeGuild() {
 function makeTemporaryRoleHarness(opts: {
   initialRoleIds?: string[];
   prepareError?: { message: string };
-  prepareData?: (roleId: string) => unknown;
+  prepareData?: (roleId: string, call: number) => unknown;
   fetchError?: Error;
   addError?: Error;
   removalIntentResults?: Array<{ data: unknown; error: unknown }>;
   acknowledgementResults?: Array<{ data: unknown; error: unknown }>;
+  inspectionResults?: Array<{ data: unknown; error: unknown }>;
   reuseEntitlementOnRetry?: boolean;
   liveTemporaryOwners?: unknown[];
+  liveTemporaryOwnerResults?: Array<{ data: unknown; error: unknown }>;
   liveEntitlementOwners?: unknown[];
   orderPlanId?: string | null;
   orderGrantedRoleIds?: string[];
@@ -154,8 +156,12 @@ function makeTemporaryRoleHarness(opts: {
   const operations: string[] = [];
   const tempUpdates: Array<Record<string, unknown>> = [];
   let acknowledgementCall = 0;
+  let prepareCall = 0;
   let removalIntentCall = 0;
+  let inspectionCall = 0;
   let entitlementLookup = 0;
+  const grantDurations = new Map<string, number>();
+  const removalOwnedGrantIds = new Set<string>();
 
   const member: any = {
     id: 'user-1',
@@ -167,7 +173,11 @@ function makeTemporaryRoleHarness(opts: {
         heldRoleIds.add(roleId);
         return member;
       }),
-      remove: vi.fn(),
+      remove: vi.fn(async (roleId: string) => {
+        operations.push(`discord-remove:${roleId}`);
+        heldRoleIds.delete(roleId);
+        return member;
+      }),
     },
   };
   const guild = makeGuild();
@@ -178,13 +188,72 @@ function makeTemporaryRoleHarness(opts: {
 
   const supabase: any = {
     rpc: vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'commerce_find_live_temp_role_owner') {
+        const scripted = opts.liveTemporaryOwnerResults?.shift();
+        if (scripted) return scripted;
+        const rawOwner = opts.liveTemporaryOwners?.[0] as Record<string, unknown> | undefined;
+        return {
+          data: rawOwner ? {
+            remove_on_expiry: false,
+            order_id: 'order-other',
+            ...rawOwner,
+          } : null,
+          error: null,
+        };
+      }
+      if (name === 'commerce_inspect_temp_role_grant') {
+        const grantId = String(args.p_grant_id ?? '');
+        const configured = opts.inspectionResults?.[inspectionCall++];
+        if (configured) return configured;
+        const roleId = grantId.replace(/^grant-/, '');
+        return {
+          data: {
+            id: grantId,
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: roleId,
+            expires_at: '2999-01-01T00:00:00.000Z',
+            duration_seconds: grantDurations.get(grantId) ?? 60,
+            grant_status: 'pending',
+            remove_on_expiry: removalOwnedGrantIds.has(grantId),
+            applied_at: null,
+            order_id: 'order-1',
+            parent_order_status: 'completed',
+            entitlement_is_live: true,
+          },
+          error: null,
+        };
+      }
+      if (name === 'commerce_acknowledge_temp_role_grant') {
+        const grantId = String(args.p_grant_id ?? '');
+        operations.push(`provenance-ack:${grantId}`);
+        const configured = opts.acknowledgementResults?.[acknowledgementCall++];
+        if (configured) return configured;
+        const appliedAt = '2030-01-01T00:00:00.000Z';
+        const durationSeconds = grantDurations.get(grantId) ?? 60;
+        return {
+          data: {
+            id: grantId,
+            grant_status: 'applied',
+            applied_at: appliedAt,
+            expires_at: new Date(Date.parse(appliedAt) + durationSeconds * 1_000).toISOString(),
+          },
+          error: null,
+        };
+      }
       const roleId = String(args.p_role_id ?? '');
+      const grantId = `grant-${roleId}`;
+      grantDurations.set(grantId, Number(args.p_duration_seconds));
       operations.push(`prepare-committed:${roleId}`);
       if (opts.prepareError) return { data: null, error: opts.prepareError };
+      const configuredPrepare = opts.prepareData?.(roleId, prepareCall++);
       return {
-        data: opts.prepareData?.(roleId) ?? {
-          id: `grant-${roleId}`,
+        data: configuredPrepare && typeof configuredPrepare === 'object'
+          ? { remove_on_expiry: false, ...configuredPrepare }
+          : configuredPrepare ?? {
+          id: grantId,
           grant_status: 'pending',
+          remove_on_expiry: false,
           expires_at: '2999-01-01T00:00:00.000Z',
         },
         error: null,
@@ -263,6 +332,7 @@ function makeTemporaryRoleHarness(opts: {
       chain.neq = vi.fn(() => chain);
       chain.in = vi.fn(() => chain);
       chain.gt = vi.fn(() => chain);
+      chain.or = vi.fn(() => chain);
       chain.order = vi.fn(() => chain);
       chain.limit = vi.fn(async () => ({
         data: opts.liveTemporaryOwners ?? [],
@@ -272,10 +342,14 @@ function makeTemporaryRoleHarness(opts: {
         if (updatePayload.remove_on_expiry === true) {
           operations.push(`removal-intent-ack:${targetId}`);
           const configured = opts.removalIntentResults?.[removalIntentCall++];
-          return configured ?? {
+          const result = configured ?? {
             data: { id: targetId, remove_on_expiry: true },
             error: null,
           };
+          if (!result.error && (result.data as Record<string, unknown> | null)?.remove_on_expiry) {
+            removalOwnedGrantIds.add(targetId);
+          }
+          return result;
         }
         operations.push(`provenance-ack:${targetId}`);
         const configured = opts.acknowledgementResults?.[acknowledgementCall++];
@@ -330,6 +404,36 @@ const subscriptionOrderSnapshot = {
   granted_channel_ids_snapshot: [],
   temporary_role_grants_snapshot: [],
   grant_snapshot_frozen_at: '2026-07-11T00:00:00.000Z',
+};
+
+const LEGACY_SUBSCRIPTION_ROLE_ID = '111111111111111111';
+
+const legacySubscriptionOrder = {
+  ...subscriptionOrderSnapshot,
+  order_number: 'ORD-001',
+  paypal_subscription_id: 'SUB-RECOVERY-1',
+  granted_role_ids_snapshot: [],
+  granted_channel_ids_snapshot: [],
+  grant_snapshot_frozen_at: null,
+};
+
+const legacySubscriptionContract = {
+  order_id: 'order-1',
+  source_queue_id: '00000000-0000-4000-8000-000000000001',
+  guild_id: 'guild-1',
+  customer_id: 'cust-1',
+  discord_id: 'user-1',
+  product_id: 'prod-1',
+  product_name: 'VIP Pass',
+  order_number: 'ORD-001',
+  plan_id: 'plan-monthly',
+  paypal_subscription_id: 'SUB-RECOVERY-1',
+  paypal_plan_id: 'P-MONTHLY-1',
+  amount_cents: 999,
+  currency: 'USD',
+  granted_role_ids_snapshot: [LEGACY_SUBSCRIPTION_ROLE_ID],
+  granted_channel_ids_snapshot: [],
+  persisted_at: '2026-07-11T00:01:00.000Z',
 };
 
 const TEMP_ROLE_ID = '12345678901234567';
@@ -652,12 +756,10 @@ describe('CommerceFulfillmentService', () => {
         remove_on_expiry: true,
         updated_at: expect.any(String),
       }));
-      expect(harness.tempUpdates).toContainEqual(expect.objectContaining({
-        grant_status: 'applied',
-        applied_at: expect.any(String),
-        last_error: null,
-        updated_at: expect.any(String),
-      }));
+      expect(harness.supabase.rpc).toHaveBeenCalledWith(
+        'commerce_acknowledge_temp_role_grant',
+        { p_grant_id: `grant-${TEMP_ROLE_ID}` },
+      );
     });
 
     it('does not mark or later remove a temporary role the member already held', async () => {
@@ -674,9 +776,10 @@ describe('CommerceFulfillmentService', () => {
       expect(harness.tempUpdates).not.toContainEqual(expect.objectContaining({
         remove_on_expiry: true,
       }));
-      expect(harness.tempUpdates).toContainEqual(expect.objectContaining({
-        grant_status: 'applied',
-      }));
+      expect(harness.supabase.rpc).toHaveBeenCalledWith(
+        'commerce_acknowledge_temp_role_grant',
+        { p_grant_id: `grant-${TEMP_ROLE_ID}` },
+      );
     });
 
     it('persists removal ownership for a sequential overlapping temporary purchase', async () => {
@@ -703,9 +806,10 @@ describe('CommerceFulfillmentService', () => {
       expect(harness.tempUpdates).toContainEqual(expect.objectContaining({
         remove_on_expiry: true,
       }));
-      expect(harness.tempUpdates).toContainEqual(expect.objectContaining({
-        grant_status: 'applied',
-      }));
+      expect(harness.supabase.rpc).toHaveBeenCalledWith(
+        'commerce_acknowledge_temp_role_grant',
+        { p_grant_id: `grant-${TEMP_ROLE_ID}` },
+      );
     });
 
     it('persists removal ownership when the permanent and temporary snapshots overlap', async () => {
@@ -770,7 +874,7 @@ describe('CommerceFulfillmentService', () => {
       expect(eventBus.emit).not.toHaveBeenCalledWith('purchase.completed', expect.anything(), expect.anything());
     });
 
-    it('does not deliver a pending temporary role after its first durable expiry has passed', async () => {
+    it('starts the full duration at acknowledgement after a delayed pending retry', async () => {
       const harness = makeTemporaryRoleHarness({
         prepareData: (roleId) => ({
           id: `grant-${roleId}`,
@@ -785,14 +889,15 @@ describe('CommerceFulfillmentService', () => {
         temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
       });
 
-      expect(result.success).toBe(false);
-      expect(result.errors.join(' ')).toContain('expired before Discord delivery');
-      expect(harness.guild.members.fetch).not.toHaveBeenCalled();
-      expect(harness.member.roles.add).not.toHaveBeenCalled();
-      expect(harness.tempUpdates).toEqual([]);
+      expect(result.success).toBe(true);
+      expect(harness.member.roles.add).toHaveBeenCalledTimes(1);
+      expect(harness.supabase.rpc).toHaveBeenCalledWith(
+        'commerce_acknowledge_temp_role_grant',
+        { p_grant_id: `grant-${TEMP_ROLE_ID}` },
+      );
     });
 
-    it('treats an applied provenance row as the retry completion marker', async () => {
+    it('treats an expired applied replay with no removal ownership as stale completion', async () => {
       const harness = makeTemporaryRoleHarness({
         prepareData: (roleId) => ({
           id: `grant-${roleId}`,
@@ -810,6 +915,37 @@ describe('CommerceFulfillmentService', () => {
       expect(result.success).toBe(true);
       expect(harness.guild.members.fetch).not.toHaveBeenCalled();
       expect(harness.member.roles.add).not.toHaveBeenCalled();
+      expect(harness.tempUpdates).toEqual([]);
+    });
+
+    it('removes an expired applied replay role when its provenance owns removal', async () => {
+      const harness = makeTemporaryRoleHarness({
+        initialRoleIds: [TEMP_ROLE_ID],
+        prepareData: (roleId) => ({
+          id: `grant-${roleId}`,
+          grant_status: 'applied',
+          remove_on_expiry: true,
+          expires_at: '2000-01-01T00:00:00.000Z',
+        }),
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(true);
+      expect(harness.member.roles.add).not.toHaveBeenCalled();
+      expect(harness.member.roles.remove).toHaveBeenCalledWith(
+        TEMP_ROLE_ID,
+        expect.stringContaining('no longer live'),
+      );
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(false);
+      expect(harness.supabase.rpc).not.toHaveBeenCalledWith(
+        'commerce_acknowledge_temp_role_grant',
+        expect.anything(),
+      );
       expect(harness.tempUpdates).toEqual([]);
     });
 
@@ -866,7 +1002,15 @@ describe('CommerceFulfillmentService', () => {
         reuseEntitlementOnRetry: true,
         acknowledgementResults: [
           { data: null, error: { message: 'ack write failed' } },
-          { data: { id: `grant-${TEMP_ROLE_ID}` }, error: null },
+          {
+            data: {
+              id: `grant-${TEMP_ROLE_ID}`,
+              grant_status: 'applied',
+              applied_at: '2030-01-01T00:00:00.000Z',
+              expires_at: '2030-01-01T00:01:00.000Z',
+            },
+            error: null,
+          },
         ],
       });
       service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
@@ -880,11 +1024,151 @@ describe('CommerceFulfillmentService', () => {
 
       expect(first.success).toBe(false);
       expect(retry.success).toBe(true);
-      expect(harness.supabase.rpc).toHaveBeenCalledTimes(2);
+      expect(harness.supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name === 'commerce_prepare_temp_role_grant',
+      )).toHaveLength(2);
       expect(mockGrant).toHaveBeenCalledTimes(1);
       expect(harness.member.roles.add).toHaveBeenCalledTimes(1);
       expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(true);
-      expect(harness.tempUpdates.filter((row) => row.grant_status === 'applied')).toHaveLength(2);
+      expect(harness.supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name === 'commerce_acknowledge_temp_role_grant',
+      )).toHaveLength(2);
+    });
+
+    it('treats a lost acknowledgement response as success after exact applied-state inspection', async () => {
+      const grantId = `grant-${TEMP_ROLE_ID}`;
+      const harness = makeTemporaryRoleHarness({
+        acknowledgementResults: [{ data: null, error: { message: 'response lost' } }],
+        inspectionResults: [{
+          data: {
+            id: grantId,
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: TEMP_ROLE_ID,
+            expires_at: '2999-01-01T00:01:00.000Z',
+            duration_seconds: 60,
+            grant_status: 'applied',
+            remove_on_expiry: true,
+            applied_at: '2999-01-01T00:00:00.000Z',
+            order_id: 'order-1',
+            parent_order_status: 'completed',
+            entitlement_is_live: true,
+          },
+          error: null,
+        }],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(true);
+      expect(harness.member.roles.remove).not.toHaveBeenCalled();
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(true);
+    });
+
+    it('removes an unacknowledged owned role when exact inspection proves the order terminal', async () => {
+      const grantId = `grant-${TEMP_ROLE_ID}`;
+      const harness = makeTemporaryRoleHarness({
+        acknowledgementResults: [{ data: null, error: { message: 'order changed' } }],
+        inspectionResults: [{
+          data: {
+            id: grantId,
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: TEMP_ROLE_ID,
+            expires_at: '2999-01-01T00:01:00.000Z',
+            duration_seconds: 60,
+            grant_status: 'pending',
+            remove_on_expiry: true,
+            applied_at: null,
+            order_id: 'order-1',
+            parent_order_status: 'refunded',
+            entitlement_is_live: false,
+          },
+          error: null,
+        }],
+        liveTemporaryOwnerResults: [
+          { data: null, error: null },
+          { data: null, error: null },
+        ],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(false);
+      expect(harness.member.roles.remove).toHaveBeenCalledTimes(1);
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(false);
+    });
+
+    it('repairs a terminal cleanup when another owner appears after Discord removal', async () => {
+      const grantId = `grant-${TEMP_ROLE_ID}`;
+      const successor = {
+        id: 'grant-successor', guild_id: 'guild-1', user_id: 'user-1',
+        role_id: TEMP_ROLE_ID, expires_at: '2999-01-01T00:00:00.000Z',
+        grant_status: 'applied', remove_on_expiry: true, order_id: 'order-2',
+      };
+      const harness = makeTemporaryRoleHarness({
+        acknowledgementResults: [{ data: null, error: { message: 'order changed' } }],
+        inspectionResults: [{
+          data: {
+            id: grantId, guild_id: 'guild-1', user_id: 'user-1', role_id: TEMP_ROLE_ID,
+            expires_at: '2999-01-01T00:01:00.000Z', duration_seconds: 60,
+            grant_status: 'pending', remove_on_expiry: true, applied_at: null,
+            order_id: 'order-1', parent_order_status: 'refunded', entitlement_is_live: false,
+          },
+          error: null,
+        }],
+        liveTemporaryOwnerResults: [
+          { data: null, error: null },
+          { data: successor, error: null },
+        ],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(false);
+      expect(harness.member.roles.remove).toHaveBeenCalledTimes(1);
+      expect(harness.member.roles.add).toHaveBeenCalledTimes(2);
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(true);
+    });
+
+    it('does not extend or re-acknowledge an applied grant on duplicate fulfillment replay', async () => {
+      const harness = makeTemporaryRoleHarness({
+        reuseEntitlementOnRetry: true,
+        prepareData: (roleId, call) => ({
+          id: `grant-${roleId}`,
+          grant_status: call === 0 ? 'pending' : 'applied',
+          expires_at: call === 0
+            ? '2000-01-01T00:00:00.000Z'
+            : '2999-01-01T00:00:00.000Z',
+        }),
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      };
+
+      const first = await service.fulfill(payload);
+      const replay = await service.fulfill(payload);
+
+      expect(first.success).toBe(true);
+      expect(replay.success).toBe(true);
+      expect(harness.member.roles.add).toHaveBeenCalledTimes(1);
+      expect(harness.supabase.rpc.mock.calls.filter(
+        ([name]: [string]) => name === 'commerce_acknowledge_temp_role_grant',
+      )).toHaveLength(1);
     });
 
     it('deduplicates and deterministically orders duplicate temporary-role payload rows', async () => {
@@ -906,7 +1190,9 @@ describe('CommerceFulfillmentService', () => {
       });
 
       expect(result.success).toBe(true);
-      expect(harness.supabase.rpc.mock.calls.map((call: any[]) => [
+      expect(harness.supabase.rpc.mock.calls
+        .filter((call: any[]) => call[0] === 'commerce_prepare_temp_role_grant')
+        .map((call: any[]) => [
         call[1].p_role_id,
         call[1].p_duration_seconds,
       ])).toEqual([
@@ -979,6 +1265,127 @@ describe('CommerceFulfillmentService', () => {
       expect(result.entitlementId).toBe('ent-sub');
       expect(mockGrant).not.toHaveBeenCalled();
       expect(mockEnsureGrantedRoles).toHaveBeenCalledWith('user-1', ['role-1']);
+    });
+
+    it('accepts the exact immutable contract persisted before a dashboard legacy release', async () => {
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        fulfillment_type: 'subscription_activated',
+        plan_id: 'plan-monthly',
+        paypal_subscription_id: 'SUB-RECOVERY-1',
+        paypal_plan_id: 'P-MONTHLY-1',
+        granted_role_ids: [LEGACY_SUBSCRIPTION_ROLE_ID],
+        entitlement_type: 'subscription',
+      };
+      const supabase = makeSupa({
+        orders: legacySubscriptionOrder,
+        commerce_legacy_subscription_grant_contracts: legacySubscriptionContract,
+      });
+      service = new CommerceFulfillmentService(makeGuild(), supabase as any, eventBus);
+
+      const result = await service.fulfill(payload);
+
+      expect(result.success).toBe(true);
+      expect(result.entitlementId).toBe('ent-123');
+      expect(mockGrant).toHaveBeenCalledWith(expect.objectContaining({
+        orderId: 'order-1',
+        planId: 'plan-monthly',
+        grantedRoleIds: [LEGACY_SUBSCRIPTION_ROLE_ID],
+      }));
+    });
+
+    it('rejects a null-snapshot subscription with no immutable legacy marker', async () => {
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        fulfillment_type: 'subscription_activated',
+        plan_id: 'plan-monthly',
+        paypal_subscription_id: 'SUB-RECOVERY-1',
+        paypal_plan_id: 'P-MONTHLY-1',
+        granted_role_ids: [LEGACY_SUBSCRIPTION_ROLE_ID],
+        entitlement_type: 'subscription',
+      };
+      service = new CommerceFulfillmentService(
+        makeGuild(),
+        makeSupa({ orders: legacySubscriptionOrder }) as any,
+        eventBus,
+      );
+
+      const result = await service.fulfill(payload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('exact legacy contract validation');
+      expect(mockGrant).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        label: 'grant snapshot',
+        payload: { granted_role_ids: ['222222222222222222'] },
+      },
+      {
+        label: 'financial identity',
+        payload: { amount_cents: 1_000 },
+      },
+      {
+        label: 'provider plan identity',
+        payload: { paypal_plan_id: 'P-TAMPERED' },
+      },
+    ])('rejects a dashboard legacy payload with tampered $label', async ({ payload: changed }) => {
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        fulfillment_type: 'subscription_activated',
+        plan_id: 'plan-monthly',
+        paypal_subscription_id: 'SUB-RECOVERY-1',
+        paypal_plan_id: 'P-MONTHLY-1',
+        granted_role_ids: [LEGACY_SUBSCRIPTION_ROLE_ID],
+        entitlement_type: 'subscription',
+        ...changed,
+      };
+      service = new CommerceFulfillmentService(
+        makeGuild(),
+        makeSupa({
+          orders: changed.amount_cents === undefined
+            ? legacySubscriptionOrder
+            : { ...legacySubscriptionOrder, amount_cents: changed.amount_cents },
+          commerce_legacy_subscription_grant_contracts: legacySubscriptionContract,
+        }) as any,
+        eventBus,
+      );
+
+      const result = await service.fulfill(payload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('exact legacy contract validation');
+      expect(mockGrant).not.toHaveBeenCalled();
+    });
+
+    it('rejects a legacy contract row without its protected queue marker', async () => {
+      const payload: FulfillmentPayload = {
+        ...basePayload,
+        fulfillment_type: 'subscription_activated',
+        plan_id: 'plan-monthly',
+        paypal_subscription_id: 'SUB-RECOVERY-1',
+        paypal_plan_id: 'P-MONTHLY-1',
+        granted_role_ids: [LEGACY_SUBSCRIPTION_ROLE_ID],
+        entitlement_type: 'subscription',
+      };
+      service = new CommerceFulfillmentService(
+        makeGuild(),
+        makeSupa({
+          orders: legacySubscriptionOrder,
+          commerce_legacy_subscription_grant_contracts: {
+            ...legacySubscriptionContract,
+            source_queue_id: '',
+          },
+        }) as any,
+        eventBus,
+      );
+
+      const result = await service.fulfill(payload);
+
+      expect(result.success).toBe(false);
+      expect(result.errors.join(' ')).toContain('exact legacy contract validation');
+      expect(mockGrant).not.toHaveBeenCalled();
     });
 
     it('rejects a subscription customer/Discord mismatch before grant or repair', async () => {
