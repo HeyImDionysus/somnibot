@@ -452,7 +452,7 @@ function makeCommerceTempRoleSweepClient(opts: {
           ...grant,
           duration_seconds: 60,
           applied_at: grant.grant_status === 'applied'
-            ? '1999-12-31T23:59:00.000Z'
+            ? new Date(Date.parse(grant.expires_at) - 60_000).toISOString()
             : null,
           parent_order_status: opts.parentOrderStatus ?? 'completed',
           entitlement_is_live: opts.entitlementIsLive ?? true,

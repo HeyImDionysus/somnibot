@@ -780,6 +780,18 @@ describe('commerce income wall database invariant', () => {
       entitlement_is_live: true,
     });
 
+    const missingInspection = await supa.rpc('commerce_inspect_temp_role_grant', {
+      p_grant_id: randomUUID(),
+    });
+    expect(missingInspection.error).toBeNull();
+    expect(missingInspection.data).toBeNull();
+
+    const invalidPendingLifecycle = await supa
+      .from('temp_role_grants')
+      .update({ applied_at: new Date().toISOString() })
+      .eq('id', pendingGrantId);
+    expect(invalidPendingLifecycle.error?.code).toBe('23514');
+
     // Model a queue delay longer than the provisional timestamp. The paid
     // duration must begin at the first successful acknowledgement, not at
     // preparation, and replaying that acknowledgement must not extend it.
@@ -807,6 +819,33 @@ describe('commerce income wall database invariant', () => {
     expect(Number.isFinite(appliedAt)).toBe(true);
     expect(expiresAt - appliedAt).toBe(3_600_000);
 
+    const appliedInspection = await supa.rpc('commerce_inspect_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(appliedInspection.error).toBeNull();
+    expect(appliedInspection.data).toMatchObject({
+      id: grantId,
+      order_id: order!.id,
+      duration_seconds: 3_600,
+      grant_status: 'applied',
+      applied_at: (acknowledged.data as Record<string, unknown>).applied_at,
+      expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
+      parent_order_status: 'completed',
+      entitlement_is_live: true,
+    });
+
+    const invalidAppliedNullTimestamp = await supa
+      .from('temp_role_grants')
+      .update({ applied_at: null })
+      .eq('id', grantId);
+    expect(invalidAppliedNullTimestamp.error?.code).toBe('23514');
+
+    const invalidAppliedInterval = await supa
+      .from('temp_role_grants')
+      .update({ expires_at: '2999-01-01T00:00:00.000Z' })
+      .eq('id', grantId);
+    expect(invalidAppliedInterval.error?.code).toBe('23514');
+
     const acknowledgedReplay = await supa.rpc('commerce_acknowledge_temp_role_grant', {
       p_grant_id: grantId,
     });
@@ -815,7 +854,10 @@ describe('commerce income wall database invariant', () => {
 
     const expireAppliedGrant = await supa
       .from('temp_role_grants')
-      .update({ expires_at: '2000-01-01T00:00:00.000Z' })
+      .update({
+        applied_at: '1999-12-31T23:00:00.000Z',
+        expires_at: '2000-01-01T00:00:00.000Z',
+      })
       .eq('id', grantId);
     expect(expireAppliedGrant.error).toBeNull();
     const expiredOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
@@ -830,6 +872,7 @@ describe('commerce income wall database invariant', () => {
     const restoreAppliedExpiry = await supa
       .from('temp_role_grants')
       .update({
+        applied_at: (acknowledged.data as Record<string, unknown>).applied_at,
         expires_at: (acknowledged.data as Record<string, unknown>).expires_at,
       })
       .eq('id', grantId);
@@ -976,18 +1019,17 @@ describe('commerce income wall database invariant', () => {
       .from('temp_role_grants')
       .update({ duration_seconds: 7_200 })
       .eq('id', grantId);
-    expect(corruptFrozenDuration.error).toBeNull();
-    const mismatchedSnapshotInspection = await supa.rpc(
+    expect(corruptFrozenDuration.error?.code).toBe('23514');
+    const inspectionAfterRejectedDuration = await supa.rpc(
       'commerce_inspect_temp_role_grant',
       { p_grant_id: grantId },
     );
-    expect(mismatchedSnapshotInspection.error).toBeNull();
-    expect(mismatchedSnapshotInspection.data).toBeNull();
-    const restoreFrozenDuration = await supa
-      .from('temp_role_grants')
-      .update({ duration_seconds: 3_600 })
-      .eq('id', grantId);
-    expect(restoreFrozenDuration.error).toBeNull();
+    expect(inspectionAfterRejectedDuration.error).toBeNull();
+    expect(inspectionAfterRejectedDuration.data).toMatchObject({
+      id: grantId,
+      duration_seconds: 3_600,
+      grant_status: 'applied',
+    });
 
     const mutableDurationRejected = await supa.rpc('commerce_prepare_temp_role_grant', {
       p_guild_id: GUILD_A,
@@ -1147,6 +1189,11 @@ describe('commerce income wall database invariant', () => {
     });
     expect(removedOwner.error).toBeNull();
     expect(removedOwner.data).toBeNull();
+    const removedInspection = await supa.rpc('commerce_inspect_temp_role_grant', {
+      p_grant_id: grantId,
+    });
+    expect(removedInspection.error).toBeNull();
+    expect(removedInspection.data).toBeNull();
     const { data: tombstone, error: tombstoneError } = await supa
       .from('temp_role_grants')
       .select('id, grant_status, source, remove_on_expiry')

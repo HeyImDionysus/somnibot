@@ -333,6 +333,35 @@ UPDATE public.temp_role_grants
        updated_at = COALESCE(updated_at, created_at)
  WHERE grant_status = 'applied';
 
+ALTER TABLE public.temp_role_grants
+  DROP CONSTRAINT IF EXISTS temp_role_grants_commerce_lifecycle_check;
+ALTER TABLE public.temp_role_grants
+  ADD CONSTRAINT temp_role_grants_commerce_lifecycle_check
+  CHECK (
+    order_id IS NULL
+    OR source NOT IN ('commerce_purchase', 'commerce_reconciled')
+    OR (
+      duration_seconds IS NOT NULL
+      AND (
+        (
+          source = 'commerce_purchase'
+          AND grant_status = 'pending'
+          AND applied_at IS NULL
+        )
+        OR (
+          source = 'commerce_purchase'
+          AND grant_status = 'applied'
+          AND applied_at IS NOT NULL
+          AND expires_at = applied_at + (duration_seconds * interval '1 second')
+        )
+        OR (
+          source = 'commerce_reconciled'
+          AND grant_status = 'removed'
+        )
+      )
+    )
+  );
+
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_temp_role_grants_commerce_order_role
   ON public.temp_role_grants (order_id, role_id)
   WHERE order_id IS NOT NULL;
@@ -2395,16 +2424,14 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_grant public.temp_role_grants%ROWTYPE;
-  v_parent_status TEXT;
-  v_entitlement_is_live BOOLEAN := false;
+  v_inspection RECORD;
 BEGIN
   IF p_grant_id IS NULL THEN
     RAISE EXCEPTION 'commerce_inspect_temp_role_grant: grant is required';
   END IF;
 
-  SELECT grant_row,
-         paid_order.status,
+  SELECT grant_row.*,
+         paid_order.status AS parent_order_status,
          EXISTS (
            SELECT 1
              FROM public.entitlements AS entitlement
@@ -2415,8 +2442,8 @@ BEGIN
               AND entitlement.type = 'one_time'
               AND entitlement.status IN ('active', 'pending', 'grace_period', 'suspended')
               AND (entitlement.source = 'purchase' OR entitlement.source IS NULL)
-         )
-    INTO v_grant, v_parent_status, v_entitlement_is_live
+         ) AS entitlement_is_live
+    INTO v_inspection
     FROM public.temp_role_grants AS grant_row
     JOIN public.orders AS paid_order
       ON paid_order.id = grant_row.order_id
@@ -2430,6 +2457,18 @@ BEGIN
      AND grant_row.duration_seconds IS NOT NULL
      AND grant_row.duration_seconds > 0
      AND grant_row.duration_seconds <= 315360000
+     AND (
+       (
+         grant_row.grant_status = 'pending'
+         AND grant_row.applied_at IS NULL
+       )
+       OR (
+         grant_row.grant_status = 'applied'
+         AND grant_row.applied_at IS NOT NULL
+         AND grant_row.expires_at = grant_row.applied_at
+           + (grant_row.duration_seconds * interval '1 second')
+       )
+     )
      AND paid_order.amount_cents > 0
      AND paid_order.paypal_subscription_id IS NULL
      AND paid_order.product_id::TEXT = grant_row.source_id
@@ -2466,23 +2505,23 @@ BEGIN
             = grant_row.duration_seconds
      );
 
-  IF v_grant.id IS NULL THEN
+  IF NOT FOUND THEN
     RETURN NULL;
   END IF;
 
   RETURN pg_catalog.jsonb_build_object(
-    'id', v_grant.id,
-    'guild_id', v_grant.guild_id,
-    'user_id', v_grant.user_id,
-    'role_id', v_grant.role_id,
-    'expires_at', v_grant.expires_at,
-    'duration_seconds', v_grant.duration_seconds,
-    'grant_status', v_grant.grant_status,
-    'remove_on_expiry', v_grant.remove_on_expiry,
-    'applied_at', v_grant.applied_at,
-    'order_id', v_grant.order_id,
-    'parent_order_status', v_parent_status,
-    'entitlement_is_live', v_entitlement_is_live
+    'id', v_inspection.id,
+    'guild_id', v_inspection.guild_id,
+    'user_id', v_inspection.user_id,
+    'role_id', v_inspection.role_id,
+    'expires_at', v_inspection.expires_at,
+    'duration_seconds', v_inspection.duration_seconds,
+    'grant_status', v_inspection.grant_status,
+    'remove_on_expiry', v_inspection.remove_on_expiry,
+    'applied_at', v_inspection.applied_at,
+    'order_id', v_inspection.order_id,
+    'parent_order_status', v_inspection.parent_order_status,
+    'entitlement_is_live', v_inspection.entitlement_is_live
   );
 END;
 $$;

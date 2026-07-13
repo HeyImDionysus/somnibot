@@ -11,13 +11,17 @@ export type LiveTemporaryRoleOwner = {
   order_id: string | null;
 };
 
-export type TemporaryRoleGrantInspection = LiveTemporaryRoleOwner & {
+type TemporaryRoleGrantInspectionBase = Omit<LiveTemporaryRoleOwner, 'grant_status'> & {
   duration_seconds: number;
-  applied_at: string | null;
   order_id: string;
   parent_order_status: string;
   entitlement_is_live: boolean;
 };
+
+export type TemporaryRoleGrantInspection = TemporaryRoleGrantInspectionBase & (
+  | { grant_status: 'pending'; applied_at: null }
+  | { grant_status: 'applied'; applied_at: string }
+);
 
 function isNonBlankString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.trim() === value;
@@ -95,20 +99,30 @@ export async function inspectTemporaryRoleGrant(
     throw new Error('temporary role lifecycle inspection returned malformed data');
   }
   const grant = data as Partial<TemporaryRoleGrantInspection>;
+  const appliedAt = isNonBlankString(grant.applied_at)
+    ? Date.parse(grant.applied_at)
+    : Number.NaN;
+  const expiresAt = isNonBlankString(grant.expires_at)
+    ? Date.parse(grant.expires_at)
+    : Number.NaN;
   if (
     grant.id !== grantId
     || !isNonBlankString(grant.guild_id)
     || !isNonBlankString(grant.user_id)
     || !isNonBlankString(grant.role_id)
     || !isNonBlankString(grant.expires_at)
-    || !Number.isFinite(Date.parse(grant.expires_at))
+    || !Number.isFinite(expiresAt)
     || !Number.isSafeInteger(grant.duration_seconds)
     || Number(grant.duration_seconds) <= 0
     || Number(grant.duration_seconds) > 315_360_000
     || (grant.grant_status !== 'pending' && grant.grant_status !== 'applied')
     || typeof grant.remove_on_expiry !== 'boolean'
-    || (grant.applied_at !== null && !isNonBlankString(grant.applied_at))
-    || (isNonBlankString(grant.applied_at) && !Number.isFinite(Date.parse(grant.applied_at)))
+    || (
+      grant.grant_status === 'pending'
+        ? grant.applied_at !== null
+        : !Number.isFinite(appliedAt)
+          || expiresAt - appliedAt !== Number(grant.duration_seconds) * 1_000
+    )
     || !isNonBlankString(grant.order_id)
     || !isNonBlankString(grant.parent_order_status)
     || typeof grant.entitlement_is_live !== 'boolean'

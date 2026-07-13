@@ -1069,6 +1069,162 @@ describe('CommerceFulfillmentService', () => {
       expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(true);
     });
 
+    it.each([
+      ['an applied row without applied_at', {
+        data: {
+          id: `grant-${TEMP_ROLE_ID}`,
+          guild_id: 'guild-1',
+          user_id: 'user-1',
+          role_id: TEMP_ROLE_ID,
+          expires_at: '2999-01-01T00:01:00.000Z',
+          duration_seconds: 60,
+          grant_status: 'applied',
+          remove_on_expiry: true,
+          applied_at: null,
+          order_id: 'order-1',
+          parent_order_status: 'completed',
+          entitlement_is_live: true,
+        },
+        error: null,
+      }],
+      ['an applied row with an incoherent expiry interval', {
+        data: {
+          id: `grant-${TEMP_ROLE_ID}`,
+          guild_id: 'guild-1',
+          user_id: 'user-1',
+          role_id: TEMP_ROLE_ID,
+          expires_at: '2999-01-01T00:02:00.000Z',
+          duration_seconds: 60,
+          grant_status: 'applied',
+          remove_on_expiry: true,
+          applied_at: '2999-01-01T00:00:00.000Z',
+          order_id: 'order-1',
+          parent_order_status: 'completed',
+          entitlement_is_live: true,
+        },
+        error: null,
+      }],
+      ['a pending row with applied_at set', {
+        data: {
+          id: `grant-${TEMP_ROLE_ID}`,
+          guild_id: 'guild-1',
+          user_id: 'user-1',
+          role_id: TEMP_ROLE_ID,
+          expires_at: '2999-01-01T00:01:00.000Z',
+          duration_seconds: 60,
+          grant_status: 'pending',
+          remove_on_expiry: true,
+          applied_at: '2999-01-01T00:00:00.000Z',
+          order_id: 'order-1',
+          parent_order_status: 'completed',
+          entitlement_is_live: true,
+        },
+        error: null,
+      }],
+      ['a missing or removed inspection row', { data: null, error: null }],
+      ['an inspection RPC error', { data: null, error: { message: 'inspection unavailable' } }],
+    ])('preserves paid access when ACK ambiguity returns %s', async (_label, inspectionResult) => {
+      const harness = makeTemporaryRoleHarness({
+        acknowledgementResults: [{ data: null, error: { message: 'response ambiguous' } }],
+        inspectionResults: [inspectionResult],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(false);
+      expect(harness.member.roles.remove).not.toHaveBeenCalled();
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(true);
+    });
+
+    it('cleans up an owned role when ACK inspection proves a coherent applied grant expired', async () => {
+      const harness = makeTemporaryRoleHarness({
+        acknowledgementResults: [{ data: null, error: { message: 'response ambiguous' } }],
+        inspectionResults: [{
+          data: {
+            id: `grant-${TEMP_ROLE_ID}`,
+            guild_id: 'guild-1',
+            user_id: 'user-1',
+            role_id: TEMP_ROLE_ID,
+            expires_at: '2000-01-01T00:01:00.000Z',
+            duration_seconds: 60,
+            grant_status: 'applied',
+            remove_on_expiry: true,
+            applied_at: '2000-01-01T00:00:00.000Z',
+            order_id: 'order-1',
+            parent_order_status: 'completed',
+            entitlement_is_live: true,
+          },
+          error: null,
+        }],
+        liveTemporaryOwnerResults: [
+          { data: null, error: null },
+          { data: null, error: null },
+        ],
+      });
+      service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+      const result = await service.fulfill({
+        ...basePayload,
+        temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+      });
+
+      expect(result.success).toBe(false);
+      expect(harness.member.roles.remove).toHaveBeenCalledTimes(1);
+      expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(false);
+    });
+
+    it.each([
+      ['pending', 'refunded', true],
+      ['applied', 'refunded', true],
+      ['pending', 'completed', false],
+      ['applied', 'completed', false],
+    ] as const)(
+      'cleans up an owned %s role when ACK inspection reports order=%s entitlementLive=%s',
+      async (grantStatus, parentOrderStatus, entitlementIsLive) => {
+        const appliedAt = grantStatus === 'applied'
+          ? '2999-01-01T00:00:00.000Z'
+          : null;
+        const harness = makeTemporaryRoleHarness({
+          acknowledgementResults: [{ data: null, error: { message: 'parent changed' } }],
+          inspectionResults: [{
+            data: {
+              id: `grant-${TEMP_ROLE_ID}`,
+              guild_id: 'guild-1',
+              user_id: 'user-1',
+              role_id: TEMP_ROLE_ID,
+              expires_at: '2999-01-01T00:01:00.000Z',
+              duration_seconds: 60,
+              grant_status: grantStatus,
+              remove_on_expiry: true,
+              applied_at: appliedAt,
+              order_id: 'order-1',
+              parent_order_status: parentOrderStatus,
+              entitlement_is_live: entitlementIsLive,
+            },
+            error: null,
+          }],
+          liveTemporaryOwnerResults: [
+            { data: null, error: null },
+            { data: null, error: null },
+          ],
+        });
+        service = new CommerceFulfillmentService(harness.guild, harness.supabase, eventBus);
+
+        const result = await service.fulfill({
+          ...basePayload,
+          temporary_role_grants: [{ role_id: TEMP_ROLE_ID, duration_seconds: 60 }],
+        });
+
+        expect(result.success).toBe(false);
+        expect(harness.member.roles.remove).toHaveBeenCalledTimes(1);
+        expect(harness.heldRoleIds.has(TEMP_ROLE_ID)).toBe(false);
+      },
+    );
+
     it('removes an unacknowledged owned role when exact inspection proves the order terminal', async () => {
       const grantId = `grant-${TEMP_ROLE_ID}`;
       const harness = makeTemporaryRoleHarness({
