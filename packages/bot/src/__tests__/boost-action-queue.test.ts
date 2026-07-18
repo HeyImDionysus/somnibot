@@ -107,12 +107,39 @@ function makeSupa(rpcResult: any = null, tableOverrides: Record<string, any> = {
       const data = tableOverrides[table] ?? null;
       return makeChain({ data, error: null });
     }),
-    rpc: vi.fn(async (fn: string) => {
+    rpc: vi.fn(async (fn: string, params: Record<string, unknown> = {}) => {
       if (fn === 'bot_action_queue_claim') {
-        return { data: rpcResult ?? [{ id: 'a1' }], error: null };
+        if (rpcResult !== null) return { data: rpcResult, error: null };
+        const candidates = Array.isArray(tableOverrides.bot_action_queue)
+          ? tableOverrides.bot_action_queue
+          : [tableOverrides.bot_action_queue].filter(Boolean);
+        const candidate = candidates.find((row: any) => row.id === params.p_action_id);
+        return {
+          data: candidate ? [{
+            ...candidate,
+            guild_id: candidate.guild_id ?? 'guild-1',
+            status: 'processing',
+            retry_count: candidate.retry_count ?? 0,
+            claim_token: '44444444-4444-4444-8444-444444444444',
+            lane: candidate.lane ?? 'game',
+          }] : null,
+          error: null,
+        };
       }
       if (fn === 'bot_action_queue_recover_stale') {
         return { data: rpcResult ?? [], error: null };
+      }
+      if (fn === 'bot_action_queue_retry_claim') {
+        return { data: [{ applied: true, disposition: 'requeued' }], error: null };
+      }
+      if (fn === 'bot_action_queue_finish_claim') {
+        return {
+          data: [{
+            applied: true,
+            disposition: params.p_success === true ? 'completed' : 'failed',
+          }],
+          error: null,
+        };
       }
       return { data: rpcResult, error: null };
     }),

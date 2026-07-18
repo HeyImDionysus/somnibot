@@ -51,6 +51,7 @@ vi.mock('../features/commerce/receipt-builder.js', () => ({
 }));
 
 import { startActionQueueListener } from '../services/action-queue.js';
+import { laneForAction } from '../services/action-queue-lanes.js';
 import { writeAuditLog } from '../services/audit.js';
 
 // ── Mocks ──────────────────────────────────────────────────
@@ -58,9 +59,9 @@ import { writeAuditLog } from '../services/audit.js';
 /**
  * Recording Supabase mock: captures inserts per table and status updates on
  * bot_action_queue. `retryCount` controls what the pre-retry
- * select('retry_count') lookup returns. `staleFailed`/`staleRow` simulate
- * bot_action_queue_recover_stale returning crash-exhausted rows and the
- * follow-up full-row lookup used for DLQ + alert writes. `secondSweep`
+ * select('retry_count') lookup returns. `staleFailed` simulates the
+ * SQL-owned stale-recovery finalization result; DLQ + alert writes are atomic
+ * inside that RPC and must not be duplicated by the bot. `secondSweep`
  * is returned by the SECOND pending-rows query — i.e. rows that appeared
  * between the startup sweep and the Realtime subscription going live —
  * and `laterSweeps` by subsequent queries (e.g. the periodic catch-up
@@ -71,17 +72,29 @@ function makeSupa(
   pendingActions: any[] = [],
   opts: {
     retryCount?: number;
-    staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
+    staleFailed?: Array<{
+      id: string;
+      action: string;
+      disposition: 'completed' | 'requeued' | 'failed' | 'operator_held';
+    }>;
     staleRow?: Record<string, unknown> | null;
     secondSweep?: any[];
     laterSweeps?: any[][];
+    retryResults?: Array<{
+      data: unknown;
+      error: { message: string } | null;
+    }>;
   } = {},
 ) {
   const inserts: Record<string, any[]> = {};
   const queueUpdates: Record<string, unknown>[] = [];
   const sweepOrFilters: string[] = [];
   const sweepBatches: any[][] = [pendingActions, opts.secondSweep ?? [], ...(opts.laterSweeps ?? [])];
+  const claimCandidates = new Map(
+    sweepBatches.flat().map((row) => [row.id as string, row]),
+  );
   let sweepCalls = 0;
+  let retryCall = 0;
 
   const makeChain = () => {
     const chain: any = {};
@@ -144,11 +157,90 @@ function makeSupa(
       }
       return chain;
     }),
-    rpc: vi.fn(async (name: string) => {
+    rpc: vi.fn(async (name: string, args: Record<string, unknown> = {}) => {
       if (name === 'bot_action_queue_recover_stale') {
         return { data: opts.staleFailed ?? [], error: null };
       }
-      if (name === 'bot_action_queue_claim') return { data: [{ id: 'claimed' }], error: null };
+      if (name === 'bot_action_queue_claim') {
+        const candidate = claimCandidates.get(args.p_action_id as string);
+        return {
+          data: candidate ? [{
+            ...candidate,
+            status: 'processing',
+            retry_count: candidate.retry_count ?? opts.retryCount ?? 0,
+            claim_token: '44444444-4444-4444-8444-444444444444',
+            lane: laneForAction(candidate.action),
+          }] : null,
+          error: null,
+        };
+      }
+      if (name === 'bot_action_queue_retry_claim') {
+        const response = opts.retryResults?.[retryCall++]
+          ?? { data: [{ applied: true, disposition: 'requeued' }], error: null };
+        const evidence = Array.isArray(response.data) ? response.data[0] : null;
+        if (
+          evidence
+          && typeof evidence === 'object'
+          && evidence.applied === true
+          && evidence.disposition === 'requeued'
+        ) {
+          const candidate = claimCandidates.get(args.p_action_id as string);
+          if (candidate) {
+            candidate.retry_count = (candidate.retry_count ?? opts.retryCount ?? 0) + 1;
+            candidate.status = 'pending';
+            candidate.next_retry_at = args.p_next_retry_at;
+            queueUpdates.push({
+              status: 'pending',
+              retry_count: candidate.retry_count,
+              next_retry_at: args.p_next_retry_at,
+              error_message: args.p_error ?? null,
+            });
+          }
+        }
+        return response;
+      }
+      if (name === 'bot_action_queue_finish_claim') {
+        const candidate = claimCandidates.get(args.p_action_id as string);
+        const status = args.p_success === true ? 'completed' : 'failed';
+        queueUpdates.push({
+          status,
+          result: args.p_success === true ? args.p_result ?? null : null,
+          error_message: args.p_success === true ? null : args.p_error ?? null,
+        });
+        if (candidate && status === 'failed') {
+          (inserts.action_queue_dlq ??= []).push({
+            guild_id: candidate.guild_id,
+            action: candidate.action,
+            payload: candidate.payload,
+            error_message: args.p_error ?? null,
+            retry_count: candidate.retry_count ?? opts.retryCount ?? 0,
+            max_retries: 5,
+            original_id: candidate.id,
+            lane: laneForAction(candidate.action),
+          });
+          if (candidate.action === 'deliver_receipt') {
+            (inserts.alerts ??= []).push({
+              guild_id: candidate.guild_id,
+              alert_type: 'receipt_delivery_failed',
+              severity: 'critical',
+              title: 'Paid receipt delivery failed',
+              message: 'A paid receipt action exhausted its retry budget. Inspect the dead-letter queue and retry the exact action.',
+              metadata: {
+                action_id: candidate.id,
+                next_step: 'inspect_action_queue_dlq',
+              },
+              resolved: false,
+            });
+          }
+        }
+        return {
+          data: [{
+            applied: true,
+            disposition: status,
+          }],
+          error: null,
+        };
+      }
       return { data: null, error: null };
     }),
     channel: vi.fn(() => ({
@@ -260,6 +352,155 @@ describe('deliver_receipt action', () => {
     vi.useRealTimers();
   });
 
+  it('accepts exact durable completion evidence instead of scheduling a stale retry', async () => {
+    vi.useFakeTimers();
+    try {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
+      const guild = makeGuild();
+      const supa = makeSupa([deliveryAction()], {
+        retryResults: [{
+          data: [{ applied: false, disposition: 'completed' }],
+          error: null,
+        }],
+      });
+
+      await startActionQueueListener(guild, supa);
+
+      expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_finish_claim'),
+      ).toHaveLength(0);
+      const actionAudit = vi.mocked(writeAuditLog).mock.calls.find(
+        ([, entry]) => entry.action === 'bot.deliver_receipt',
+      )?.[1];
+      expect(actionAudit).toMatchObject({
+        success: true,
+        details: { finalDisposition: 'completed_from_evidence' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not schedule or finalize a retry whose exact claim is stale', async () => {
+    vi.useFakeTimers();
+    try {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
+      const guild = makeGuild();
+      const supa = makeSupa([deliveryAction()], {
+        retryResults: [{
+          data: [{ applied: false, disposition: 'stale_claim' }],
+          error: null,
+        }],
+      });
+
+      await startActionQueueListener(guild, supa);
+
+      expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_finish_claim'),
+      ).toHaveLength(0);
+      expect(vi.mocked(writeAuditLog).mock.calls.some(
+        ([, entry]) => entry.action === 'bot.deliver_receipt',
+      )).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a non-string retry disposition even when string coercion looks valid', async () => {
+    vi.useFakeTimers();
+    try {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
+      const guild = makeGuild();
+      const supa = makeSupa([deliveryAction()], {
+        retryResults: [{
+          data: [{
+            applied: true,
+            disposition: { toString: (): string => 'requeued' },
+          }],
+          error: null,
+        }],
+      });
+
+      await startActionQueueListener(guild, supa);
+
+      expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_finish_claim'),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('audits an SQL-owned operator hold without retrying or re-finalizing it', async () => {
+    vi.useFakeTimers();
+    try {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
+      const guild = makeGuild();
+      const supa = makeSupa([deliveryAction()], {
+        retryResults: [{
+          data: [{ applied: false, disposition: 'operator_held' }],
+          error: null,
+        }],
+      });
+
+      await startActionQueueListener(guild, supa);
+
+      expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_finish_claim'),
+      ).toHaveLength(0);
+      const actionAudit = vi.mocked(writeAuditLog).mock.calls.find(
+        ([, entry]) => entry.action === 'bot.deliver_receipt',
+      )?.[1];
+      expect(actionAudit).toMatchObject({
+        success: false,
+        details: { finalDisposition: 'failed' },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reclassifies an intent race before scheduling the sole valid requeue transition', async () => {
+    vi.useFakeTimers();
+    try {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      mockDeliverReceiptDM.mockRejectedValue(new Error('503 Service Unavailable'));
+      const guild = makeGuild();
+      const supa = makeSupa([deliveryAction()], {
+        retryResults: [
+          { data: [{ applied: false, disposition: 'intent_raced' }], error: null },
+          { data: [{ applied: true, disposition: 'requeued' }], error: null },
+        ],
+      });
+
+      await startActionQueueListener(guild, supa);
+
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_retry_claim'),
+      ).toHaveLength(2);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 30_000);
+      expect(
+        supa.rpc.mock.calls.filter(([name]: [string]) =>
+          name === 'bot_action_queue_finish_claim'),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('classifies DMs-disabled as permanent: no retry burn, dead-letter + alert', async () => {
     vi.useFakeTimers();
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
@@ -279,7 +520,7 @@ describe('deliver_receipt action', () => {
       expect.objectContaining({ status: 'failed' }),
     );
 
-    // Dead-lettered for manual handling from the dashboard
+    // The exact finish-claim RPC atomically dead-letters the failed generation.
     expect(supa.__inserts['action_queue_dlq']).toContainEqual(
       expect.objectContaining({
         guild_id: 'guild-1',
@@ -288,9 +529,8 @@ describe('deliver_receipt action', () => {
       }),
     );
 
-    // Operator alert with the actionable alternative (DLQ retry / manual
-    // resend). The portal is NOT a recovery path — it shows only a masked
-    // key — so the guidance must not point there.
+    // The same SQL transition emits the minimal operator alert without copying
+    // receipt PII or the plaintext license key into long-retained metadata.
     const alerts = supa.__inserts['alerts'];
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({
@@ -299,10 +539,9 @@ describe('deliver_receipt action', () => {
       severity: 'critical',
     });
     expect(alerts[0].message).toContain('dead-letter queue');
-    expect(alerts[0].message).not.toContain('remains available through the customer portal');
-    expect(alerts[0].metadata).toMatchObject({
-      kind: 'permanent',
-      orderNumber: 'ORD-001',
+    expect(alerts[0].metadata).toEqual({
+      action_id: 'act-deliver-1',
+      next_step: 'inspect_action_queue_dlq',
     });
 
     setTimeoutSpy.mockRestore();
@@ -330,7 +569,7 @@ describe('deliver_receipt action', () => {
       expect.objectContaining({
         action: 'deliver_receipt',
         original_id: 'act-deliver-1',
-        retry_count: 4,
+        retry_count: 3,
       }),
     );
 
@@ -340,10 +579,9 @@ describe('deliver_receipt action', () => {
       alert_type: 'receipt_delivery_failed',
       severity: 'critical',
     });
-    expect(alerts[0].metadata).toMatchObject({
-      kind: 'transient',
-      attempts: 4,
-      orderNumber: 'ORD-001',
+    expect(alerts[0].metadata).toEqual({
+      action_id: 'act-deliver-1',
+      next_step: 'inspect_action_queue_dlq',
     });
 
     setTimeoutSpy.mockRestore();
@@ -380,14 +618,14 @@ describe('deliver_receipt action', () => {
     });
   });
 
-  it('alerts when a deliver_receipt row exhausts retries via stale crash recovery', async () => {
+  it('does not duplicate SQL-owned receipt DLQ/alert writes after stale recovery', async () => {
     // Exhaustion has a second path: the bot repeatedly crashed mid-delivery,
     // so bot_action_queue_recover_stale (not the in-process retry loop)
     // flipped the row to failed. That path must ALSO dead-letter + alert —
     // a paid customer's license key must never disappear silently.
     const guild = makeGuild();
     const supa = makeSupa([], {
-      staleFailed: [{ id: 'act-stale-1', action: 'deliver_receipt', was_failed: true }],
+      staleFailed: [{ id: 'act-stale-1', action: 'deliver_receipt', disposition: 'failed' }],
       staleRow: {
         action: 'deliver_receipt',
         payload: { discord_id: 'user-1', order_number: 'ORD-001', product_name: 'VIP Pass' },
@@ -398,28 +636,14 @@ describe('deliver_receipt action', () => {
 
     await startActionQueueListener(guild, supa);
 
-    expect(supa.__inserts['action_queue_dlq']).toContainEqual(
-      expect.objectContaining({ action: 'deliver_receipt', original_id: 'act-stale-1' }),
-    );
-
-    const alerts = supa.__inserts['alerts'];
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatchObject({
-      guild_id: 'guild-1',
-      alert_type: 'receipt_delivery_failed',
-      severity: 'critical',
-    });
-    expect(alerts[0].metadata).toMatchObject({
-      orderNumber: 'ORD-001',
-      discordId: 'user-1',
-      attempts: 5,
-    });
+    expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
+    expect(supa.__inserts['alerts']).toBeUndefined();
   });
 
   it('does not alert when a non-receipt action exhausts retries via stale recovery', async () => {
     const guild = makeGuild();
     const supa = makeSupa([], {
-      staleFailed: [{ id: 'act-stale-2', action: 'channel_create', was_failed: true }],
+      staleFailed: [{ id: 'act-stale-2', action: 'channel_create', disposition: 'failed' }],
       staleRow: {
         action: 'channel_create',
         payload: { name: 'general' },
@@ -430,15 +654,12 @@ describe('deliver_receipt action', () => {
 
     await startActionQueueListener(guild, supa);
 
-    // DLQ write is pre-existing behavior for all stale-exhausted actions...
-    expect(supa.__inserts['action_queue_dlq']).toContainEqual(
-      expect.objectContaining({ action: 'channel_create', original_id: 'act-stale-2' }),
-    );
-    // ...but the receipt alert is only for deliver_receipt
+    // The recovery RPC owns all final DLQ writes, including non-receipts.
+    expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
     expect(supa.__inserts['alerts']).toBeUndefined();
   });
 
-  it('does not dead-letter or alert other failing actions', async () => {
+  it('dead-letters other final failures without emitting a receipt alert', async () => {
     const guild = makeGuild();
     const supa = makeSupa([{
       id: 'act-unknown', guild_id: 'guild-1', action: 'totally_unknown', status: 'pending',
@@ -450,7 +671,13 @@ describe('deliver_receipt action', () => {
     expect(supa.__queueUpdates).toContainEqual(
       expect.objectContaining({ status: 'failed' }),
     );
-    expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
+    expect(supa.__inserts['action_queue_dlq']).toContainEqual(
+      expect.objectContaining({
+        action: 'totally_unknown',
+        original_id: 'act-unknown',
+        lane: 'game',
+      }),
+    );
     expect(supa.__inserts['alerts']).toBeUndefined();
   });
 

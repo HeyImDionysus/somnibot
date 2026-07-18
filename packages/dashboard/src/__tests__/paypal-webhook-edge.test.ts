@@ -199,6 +199,48 @@ function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
   const selectCalls: Array<{ table: string; columns: string }> = [];
   const orderCalls: Array<{ table: string; column: string; options: unknown }> = [];
   const tableCallCounts = new Map<string, number>();
+  mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'commerce_record_paypal_refund_event') {
+      const amount = typeof args.p_refund_amount_cents === 'number'
+        ? args.p_refund_amount_cents
+        : 1000;
+      return {
+        data: {
+          payment_id: args.p_payment_id,
+          order_id: args.p_order_id,
+          paypal_refund_id: args.p_paypal_refund_id,
+          event_type: args.p_event_type,
+          refund_amount_cents: amount,
+          currency: args.p_currency ?? 'USD',
+          cumulative_refunded_cents: 1000,
+          full_refund: true,
+          already_recorded: false,
+          terminal_witness: true,
+          terminal_history_consistent: true,
+          terminal_history_replay: false,
+          terminal_payment_status: 'completed',
+          partial_audit_recorded: false,
+          partial_alert_recorded: false,
+        },
+        error: null,
+      };
+    }
+    if (name === 'commerce_finalize_paypal_refund_status') {
+      return {
+        data: {
+          order_id: args.p_order_id,
+          payment_id: args.p_payment_id,
+          order_status: 'refunded',
+          payment_status: args.p_payment_status,
+          already_terminal: false,
+          audit_recorded: true,
+          partial_alerts_resolved: 0,
+        },
+        error: null,
+      };
+    }
+    return { data: null, error: null };
+  });
   mockSb.from.mockImplementation((table: string) => {
     const callCount = tableCallCounts.get(table) ?? 0;
     tableCallCounts.set(table, callCount + 1);
@@ -299,6 +341,40 @@ function createCaptureRecoveryHarness(options: {
   state.orders = [state.order];
 
   const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    if (name === 'bot_action_queue_release_staged') {
+      if (state.failReleaseAttempts > 0) {
+        state.failReleaseAttempts -= 1;
+        return { data: null, error: { message: 'queue release unavailable', code: '08006' } };
+      }
+      if (!state.queue
+        || args.p_action_id !== state.queue.id
+        || args.p_guild_id !== state.queue.guild_id
+        || args.p_idempotency_key !== state.queue.idempotency_key) {
+        return { data: [], error: null };
+      }
+      if (state.queue.status === 'staged') {
+        state.queue.status = 'pending';
+        return {
+          data: [{
+            action_id: state.queue.id,
+            action_status: 'pending',
+            disposition: 'released',
+          }],
+          error: null,
+        };
+      }
+      if (['pending', 'processing', 'completed', 'failed'].includes(state.queue.status)) {
+        return {
+          data: [{
+            action_id: state.queue.id,
+            action_status: state.queue.status,
+            disposition: 'already_released',
+          }],
+          error: null,
+        };
+      }
+      return { data: null, error: { message: 'invalid queue status', code: '23514' } };
+    }
     if (name === 'commerce_freeze_order_grant_snapshot') {
       if (state.order.status !== 'pending' && !state.order.grant_snapshot_frozen_at) {
         return {
@@ -474,10 +550,6 @@ function createCaptureRecoveryHarness(options: {
       }
 
       state.updates.push({ table, payload: structuredClone(payload) });
-      if (table === 'bot_action_queue' && state.failReleaseAttempts > 0) {
-        state.failReleaseAttempts -= 1;
-        return { data: null, error: { message: 'queue release unavailable', code: '08006' } };
-      }
       if (
         table === 'orders' &&
         payload?.status === 'completed' &&
@@ -1034,7 +1106,11 @@ describe('PayPal webhook — edge cases', () => {
               order_id: 'order-1',
               customer_id: 'customer-1',
               guild_id: 'guild-1',
+              paypal_payment_id: 'CAPTURE-1',
+              paypal_resource_type: 'capture',
               status: 'completed',
+              amount_cents: 1000,
+              currency: 'USD',
             },
             error: null,
           },
@@ -1048,6 +1124,7 @@ describe('PayPal webhook — edge cases', () => {
         event_type: 'PAYMENT.CAPTURE.REFUNDED',
         resource: {
           id: 'REFUND-1',
+          amount: { value: '10.00', currency_code: 'USD' },
           supplementary_data: {
             related_ids: { capture_id: 'CAPTURE-1' },
           },
@@ -1085,7 +1162,11 @@ describe('PayPal webhook — edge cases', () => {
               order_id: 'order-2',
               customer_id: 'customer-2',
               guild_id: 'guild-1',
+              paypal_payment_id: 'SALE-1',
+              paypal_resource_type: 'sale',
               status: 'completed',
+              amount_cents: 1000,
+              currency: 'USD',
             },
             error: null,
           },
@@ -1097,7 +1178,11 @@ describe('PayPal webhook — edge cases', () => {
       });
       const req = makeSignedWebhook({
         event_type: 'PAYMENT.SALE.REVERSED',
-        resource: { id: 'SALE-1' },
+        resource: {
+          id: 'SALE-1',
+          state: 'reversed',
+          parent_payment: 'PAY-SALE-1',
+        },
         id: 'EVT-SALE-REVERSAL-GUILD',
       });
 
@@ -1847,7 +1932,7 @@ describe('PayPal webhook — edge cases', () => {
     }
   });
 
-  it('refund event without recoverable capture_id returns 200 (logged, not retried)', async () => {
+  it('refund event without one canonical capture_id returns 500 for provider retry', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const req = makeReplay({
       event_type: 'PAYMENT.CAPTURE.REFUNDED',
@@ -1856,11 +1941,8 @@ describe('PayPal webhook — edge cases', () => {
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[Webhook] PAYMENT.CAPTURE.REFUNDED arrived without a recoverable capture_id — payload:',
-      expect.stringContaining('"REFUND-1"'),
-    );
+    expect(res.status).toBe(500);
+    expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
 
@@ -1872,7 +1954,11 @@ describe('PayPal webhook — edge cases', () => {
           order_id: 'order-subscription-1',
           customer_id: 'customer-1',
           guild_id: 'guild-1',
+          paypal_payment_id: 'SALE-SUBSCRIPTION-1',
+          paypal_resource_type: 'sale',
           status: 'completed',
+          amount_cents: 1000,
+          currency: 'USD',
         },
         error: null,
       },
@@ -1903,7 +1989,11 @@ describe('PayPal webhook — edge cases', () => {
     });
     const req = makeReplay({
       event_type: 'PAYMENT.SALE.REFUNDED',
-      resource: { id: 'REFUND-1', sale_id: 'SALE-SUBSCRIPTION-1' },
+      resource: {
+        id: 'REFUND-1',
+        sale_id: 'SALE-SUBSCRIPTION-1',
+        amount: { total: '-10.00', currency: 'USD' },
+      },
       id: 'EVT-SALE-REFUND',
     });
 
@@ -1930,7 +2020,11 @@ describe('PayPal webhook — edge cases', () => {
           order_id: 'order-subscription-2',
           customer_id: 'customer-2',
           guild_id: 'guild-1',
+          paypal_payment_id: 'SALE-SUBSCRIPTION-2',
+          paypal_resource_type: 'sale',
           status: 'completed',
+          amount_cents: 1000,
+          currency: 'USD',
         },
         error: null,
       },
@@ -1943,7 +2037,11 @@ describe('PayPal webhook — edge cases', () => {
     });
     const req = makeReplay({
       event_type: 'PAYMENT.SALE.REVERSED',
-      resource: { id: 'SALE-SUBSCRIPTION-2' },
+      resource: {
+        id: 'SALE-SUBSCRIPTION-2',
+        state: 'reversed',
+        parent_payment: 'PAY-SUBSCRIPTION-2',
+      },
       id: 'EVT-SALE-REVERSAL',
     });
 
@@ -2223,7 +2321,14 @@ describe('PayPal webhook — edge cases', () => {
       expect(rpc.mock.calls.map(([name]) => name)).toEqual([
         'commerce_freeze_order_grant_snapshot',
         'commerce_finalize_paypal_capture',
+        'bot_action_queue_release_staged',
       ]);
+      expect(rpc).toHaveBeenCalledWith('bot_action_queue_release_staged', {
+        p_action_id: 'queue-1',
+        p_guild_id: 'guild-1',
+        p_idempotency_key: 'paypal:capture:CAPTURE-RECOVERY-1:fulfill_purchase',
+      });
+      expect(state.updates.filter((entry: any) => entry.table === 'bot_action_queue')).toEqual([]);
       expect(rpc).not.toHaveBeenCalledWith('increment_customer_totals', expect.anything());
     });
 

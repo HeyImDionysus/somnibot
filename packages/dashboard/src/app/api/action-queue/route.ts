@@ -16,8 +16,137 @@ import { dbError } from '@/lib/api/response';
 
 const actionQueuePostSchema = z.object({
   action: z.enum(['acknowledge', 'retry']),
-  ids: z.array(z.string().uuid()).min(1, 'At least one id is required'),
+  ids: z.array(z.string().uuid())
+    .min(1, 'At least one id is required')
+    .max(1000, 'At most 1000 ids may be processed at once')
+    .refine(
+      (ids) => new Set(ids).size === ids.length,
+      'Every id must be unique',
+    ),
 });
+
+const exactRoleDeliveryCarrierActions = new Set([
+  'fulfill_purchase',
+  'fulfill_subscription',
+  'reconcile_entitlement_roles',
+]);
+
+type ExactRoleDeliveryRetryDisposition =
+  | 'reopened'
+  | 'already_active'
+  | 'completed_from_evidence'
+  | 'operator_held';
+
+type GenericRetryDisposition =
+  | 'requeued'
+  | 'reopened'
+  | 'already_active'
+  | 'already_completed'
+  | 'already_retried'
+  | 'exact_carrier_required'
+  | 'invalid_carrier';
+
+function parseGenericRetry(value: unknown): {
+  actionId: string | null;
+  actionStatus: 'pending' | 'processing' | 'completed' | null;
+  disposition: GenericRetryDisposition;
+} | null {
+  if (!Array.isArray(value) || value.length !== 1) return null;
+  const row = value[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const evidence = row as Record<string, unknown>;
+  if (
+    typeof evidence.disposition !== 'string'
+    || ![
+      'requeued',
+      'reopened',
+      'already_active',
+      'already_completed',
+      'already_retried',
+      'exact_carrier_required',
+      'invalid_carrier',
+    ].includes(evidence.disposition)
+  ) {
+    return null;
+  }
+  const disposition = evidence.disposition as GenericRetryDisposition;
+  if (
+    disposition === 'requeued'
+    || disposition === 'reopened'
+    || disposition === 'already_active'
+    || disposition === 'already_completed'
+  ) {
+    if (
+      typeof evidence.action_id !== 'string'
+      || !z.string().uuid().safeParse(evidence.action_id).success
+    ) {
+      return null;
+    }
+    const combinationMatches =
+      ((disposition === 'requeued' || disposition === 'reopened')
+        && evidence.action_status === 'pending')
+      || (disposition === 'already_active'
+        && (evidence.action_status === 'pending' || evidence.action_status === 'processing'))
+      || (disposition === 'already_completed' && evidence.action_status === 'completed');
+    if (!combinationMatches) return null;
+    return {
+      actionId: evidence.action_id,
+      actionStatus: evidence.action_status as 'pending' | 'processing' | 'completed',
+      disposition,
+    };
+  }
+  if (evidence.action_id !== null || evidence.action_status !== null) return null;
+  return { actionId: null, actionStatus: null, disposition };
+}
+
+function parseExactRoleDeliveryRetry(
+  value: unknown,
+  expectedActionId: string,
+): {
+  actionId: string;
+  actionStatus: 'staged' | 'pending' | 'processing' | 'completed' | 'failed';
+  disposition: ExactRoleDeliveryRetryDisposition;
+} | null {
+  if (!Array.isArray(value) || value.length !== 1) return null;
+  const row = value[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const evidence = row as Record<string, unknown>;
+  if (
+    typeof evidence.action_id !== 'string'
+    || evidence.action_id !== expectedActionId
+    || !z.string().uuid().safeParse(evidence.action_id).success
+    || typeof evidence.action_status !== 'string'
+    || !['staged', 'pending', 'processing', 'completed', 'failed'].includes(
+      evidence.action_status,
+    )
+    || typeof evidence.disposition !== 'string'
+    || ![
+      'reopened',
+      'already_active',
+      'completed_from_evidence',
+      'operator_held',
+    ].includes(evidence.disposition)
+  ) {
+    return null;
+  }
+  const disposition = evidence.disposition as ExactRoleDeliveryRetryDisposition;
+  const combinationMatches =
+    (disposition === 'reopened' && evidence.action_status === 'pending')
+    || (disposition === 'already_active'
+      && (evidence.action_status === 'pending' || evidence.action_status === 'processing'))
+    || (disposition === 'completed_from_evidence'
+      && evidence.action_status === 'completed')
+    || (disposition === 'operator_held'
+      && ['staged', 'pending', 'processing', 'failed'].includes(evidence.action_status));
+  if (!combinationMatches) return null;
+  return {
+    actionId: evidence.action_id,
+    actionStatus: evidence.action_status as (
+      'staged' | 'pending' | 'processing' | 'completed' | 'failed'
+    ),
+    disposition,
+  };
+}
 
 export async function GET(request: NextRequest) {
   const auth = await requireGuildOwner();
@@ -102,46 +231,118 @@ export async function POST(request: NextRequest) {
   }
 
   if (action === 'retry') {
-    // For each DLQ entry, re-insert into bot_action_queue as 'pending'
+    // Fetch tenant-scoped metadata only to select the correct atomic retry
+    // protocol. The RPCs below remain the mutation authority.
     const { data: dlqItems, error: fetchErr } = await supabase
       .from('action_queue_dlq')
-      .select('*')
+      .select('id, guild_id, action, original_id')
       .eq('guild_id', guildId)
       .in('id', ids)
-      .eq('retried', false)
+      .or('retried.eq.false,retried.is.null')
       .limit(1000);
 
     if (fetchErr) {
       return dbError(fetchErr, 'action-queue');
     }
 
-    let retried = 0;
+    const requestedIds = new Set(ids);
+    const dlqItemsById = new Map<string, NonNullable<typeof dlqItems>[number]>();
     for (const item of dlqItems ?? []) {
-      // Re-insert into action queue
-      const { error: insertErr } = await supabase
-        .from('bot_action_queue')
-        .insert({
-          guild_id: guildId,
-          action: item.action,
-          payload: item.payload,
-          status: 'pending',
-          retry_count: 0,
-        });
-
-      if (!insertErr) {
-        // Mark DLQ entry as retried
-        await supabase
-          .from('action_queue_dlq')
-          .update({
-            retried: true,
-            retried_at: new Date().toISOString(),
-          })
-          .eq('id', item.id);
-        retried++;
+      if (
+        typeof item.id === 'string'
+        && requestedIds.has(item.id)
+        && item.guild_id === guildId
+        && !dlqItemsById.has(item.id)
+      ) {
+        dlqItemsById.set(item.id, item);
       }
     }
 
-    return NextResponse.json({ success: true, retried });
+    let retried = 0;
+    let operatorHeld = 0;
+    // Missing rows include wrong-guild, already-retried, and otherwise
+    // unavailable ids. Deliberately do not distinguish them in the response.
+    let failed = ids.length - dlqItemsById.size;
+    for (const item of dlqItemsById.values()) {
+      if (typeof item.action !== 'string' || item.action.length === 0) {
+        failed++;
+        continue;
+      }
+      if (exactRoleDeliveryCarrierActions.has(item.action)) {
+        // Exact paid-role actions embed and/or bind their queue id as durable
+        // protocol identity. A cloned row would corrupt the carrier and can
+        // never resume cleanup/reconciliation safely. The SQL RPC reopens (or
+        // converges) that same row and atomically retires its prior DLQ entry.
+        const expectedActionId = typeof item.original_id === 'string'
+          ? item.original_id
+          : '';
+        if (!z.string().uuid().safeParse(expectedActionId).success) {
+          failed++;
+          continue;
+        }
+        const { data: recoveryData, error: recoveryError } = await (
+          supabase.rpc as (
+            fn: string,
+            params: Record<string, unknown>,
+          ) => ReturnType<typeof supabase.rpc>
+        )('commerce_retry_role_delivery_dlq', {
+          p_dlq_id: item.id,
+          p_guild_id: guildId,
+        });
+        if (recoveryError) {
+          failed++;
+          continue;
+        }
+        const recovery = parseExactRoleDeliveryRetry(
+          recoveryData,
+          expectedActionId,
+        );
+        if (!recovery) {
+          failed++;
+          continue;
+        }
+        if (recovery.disposition === 'operator_held') {
+          operatorHeld++;
+        } else {
+          retried++;
+        }
+        continue;
+      }
+
+      // Generic retries are also one atomic server-side transaction. The RPC
+      // locks and rechecks the DLQ row, inserts one replacement, and marks the
+      // source retried; concurrent/replayed callers receive an opaque no-op.
+      const { data: retryData, error: retryError } = await (
+        supabase.rpc as (
+          fn: string,
+          params: Record<string, unknown>,
+        ) => ReturnType<typeof supabase.rpc>
+      )('bot_action_queue_retry_dlq', {
+        p_dlq_id: item.id,
+        p_guild_id: guildId,
+      });
+      const retry = retryError ? null : parseGenericRetry(retryData);
+      if (
+        retry
+        && [
+          'requeued',
+          'reopened',
+          'already_active',
+          'already_completed',
+        ].includes(retry.disposition)
+      ) {
+        retried++;
+      } else {
+        failed++;
+      }
+    }
+
+    return NextResponse.json({
+      success: failed === 0 && operatorHeld === 0,
+      retried,
+      operatorHeld,
+      failed,
+    }, { status: failed === 0 && operatorHeld === 0 ? 200 : 409 });
   }
 
   return NextResponse.json(

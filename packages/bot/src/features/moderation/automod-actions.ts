@@ -103,6 +103,11 @@ export async function executeAutoModAction(
         expiresAt: calculateExpiryDate(modConfig.infractionExpiryDays),
       });
 
+      if (!infraction) {
+        log.error('Failed to persist auto-mod warning; suppressing follow-on event and escalation');
+        break;
+      }
+
       const activeWarnings = await getActiveWarningCount(
         client.supabase,
         message.guild!.id,
@@ -111,6 +116,7 @@ export async function executeAutoModAction(
 
       // Emit infraction event
       client.eventBus.emit('infraction.created', message.guild!.id, {
+        infractionId: infraction.id,
         userId: member.id,
         moderatorId: 'system',
         type: 'warn',

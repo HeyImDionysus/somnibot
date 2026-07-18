@@ -32,6 +32,15 @@ const ENTITLEMENT_ID = '30000000-0000-4000-8000-000000000001';
 const TERMINAL_ENTITLEMENT_ID = '30000000-0000-4000-8000-000000000002';
 const ORDER_ID = '40000000-0000-4000-8000-000000000001';
 const TERMINAL_ORDER_ID = '40000000-0000-4000-8000-000000000002';
+const LEGACY_SALE_PLAN_ID = '40000000-0000-4000-8000-000000000003';
+const LEGACY_SALE_ORDER_ID = '40000000-0000-4000-8000-000000000004';
+const LEGACY_INVALID_PAYMENT_ID = '41000000-0000-4000-8000-000000000001';
+const LEGACY_INVALID_SALE_PAYMENT_ID = '41000000-0000-4000-8000-000000000002';
+const LEGACY_INVALID_REFUND_ID = '42000000-0000-4000-8000-000000000001';
+const LEGACY_REVOKE_PENDING_ID = '50000000-0000-4000-8000-000000000001';
+const LEGACY_REVOKE_PROCESSING_ID = '50000000-0000-4000-8000-000000000002';
+const LEGACY_REVOKE_FAILED_ID = '50000000-0000-4000-8000-000000000003';
+const LEGACY_REVOKE_DLQ_ID = '50000000-0000-4000-8000-000000000004';
 
 const ROLE_EXISTING = '100000000000000001';
 const ROLE_PERMANENT = '100000000000000002';
@@ -134,10 +143,47 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     customer_id UUID REFERENCES ${FIXTURE_SCHEMA}.customers(id),
     guild_id TEXT REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     paypal_payment_id TEXT UNIQUE,
+    paypal_event_id TEXT UNIQUE,
     amount_cents INTEGER NOT NULL,
     currency TEXT NOT NULL DEFAULT 'USD',
     status TEXT NOT NULL,
-    provider TEXT
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    provider TEXT DEFAULT 'paypal'
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.license_keys (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID REFERENCES ${FIXTURE_SCHEMA}.orders(id),
+    customer_id UUID REFERENCES ${FIXTURE_SCHEMA}.customers(id),
+    product_id UUID REFERENCES ${FIXTURE_SCHEMA}.products(id),
+    guild_id TEXT REFERENCES ${FIXTURE_SCHEMA}.guild(id),
+    key_hash TEXT,
+    key_prefix TEXT,
+    key_suffix TEXT,
+    bound_discord_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending_activation',
+    activated_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    revocation_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    last_failed_at TIMESTAMPTZ
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.license_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    license_key_id UUID NOT NULL REFERENCES ${FIXTURE_SCHEMA}.license_keys(id),
+    device_fingerprint TEXT,
+    device_name TEXT,
+    app_version TEXT,
+    ip_address TEXT,
+    active BOOLEAN NOT NULL DEFAULT true,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deactivated_at TIMESTAMPTZ,
+    deactivation_reason TEXT
   );
 
   CREATE TABLE ${FIXTURE_SCHEMA}.entitlements (
@@ -145,11 +191,14 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     customer_id UUID REFERENCES ${FIXTURE_SCHEMA}.customers(id),
     guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     product_id UUID REFERENCES ${FIXTURE_SCHEMA}.products(id),
+    plan_id UUID REFERENCES ${FIXTURE_SCHEMA}.plans(id),
+    license_key_id UUID REFERENCES ${FIXTURE_SCHEMA}.license_keys(id),
     order_id UUID REFERENCES ${FIXTURE_SCHEMA}.orders(id),
     type TEXT NOT NULL,
     status TEXT NOT NULL,
     source TEXT,
-    granted_role_ids TEXT[] DEFAULT '{}'::TEXT[]
+    granted_role_ids TEXT[] DEFAULT '{}'::TEXT[],
+    granted_channel_ids TEXT[] DEFAULT '{}'::TEXT[]
   );
 
   CREATE TABLE ${FIXTURE_SCHEMA}.temp_role_grants (
@@ -168,7 +217,35 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     action TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    result JSONB,
+    error_message TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    next_retry_at TIMESTAMPTZ
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.action_queue_dlq (
+    id UUID PRIMARY KEY,
+    guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
+    action TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+    error_message TEXT,
+    retried BOOLEAN NOT NULL DEFAULT false,
+    retried_at TIMESTAMPTZ
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.payment_refunds (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    payment_id UUID NOT NULL REFERENCES ${FIXTURE_SCHEMA}.payments(id),
+    order_id UUID REFERENCES ${FIXTURE_SCHEMA}.orders(id),
+    guild_id TEXT REFERENCES ${FIXTURE_SCHEMA}.guild(id),
+    paypal_refund_id TEXT NOT NULL UNIQUE,
+    event_type TEXT NOT NULL,
+    amount_cents INTEGER,
+    currency TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE ${FIXTURE_SCHEMA}.economy_role_income (
@@ -184,7 +261,14 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     guild_id TEXT, active BOOLEAN, expires_at TIMESTAMPTZ
   );
   CREATE TABLE ${FIXTURE_SCHEMA}.audit_logs (
-    guild_id TEXT, timestamp TIMESTAMPTZ
+    guild_id TEXT,
+    actor_type TEXT,
+    actor_id TEXT,
+    action TEXT,
+    target_type TEXT,
+    target_id TEXT,
+    details JSONB,
+    timestamp TIMESTAMPTZ
   );
   CREATE TABLE ${FIXTURE_SCHEMA}.webhook_events (
     guild_id TEXT, processed_at TIMESTAMPTZ
@@ -277,6 +361,13 @@ const LEGACY_FIXTURE_SQL = `
   INSERT INTO ${FIXTURE_SCHEMA}.customers (id, guild_id, discord_id)
   VALUES ('${CUSTOMER_ID}', '${GUILD_ID}', 'migration-fixture-user');
 
+  INSERT INTO ${FIXTURE_SCHEMA}.plans (
+    id, product_id, guild_id, name, paypal_plan_id, price_cents, currency
+  ) VALUES (
+    '${LEGACY_SALE_PLAN_ID}', '${PRODUCT_UNSUPPORTED_DURATION}', '${GUILD_ID}',
+    'Legacy sale plan', 'PLAN-LEGACY-SALE', 1000, 'USD'
+  );
+
   INSERT INTO ${FIXTURE_SCHEMA}.entitlements (
     id, customer_id, guild_id, product_id, type, status, source, granted_role_ids
   ) VALUES (
@@ -290,12 +381,40 @@ const LEGACY_FIXTURE_SQL = `
   ) VALUES
     (
       '${ORDER_ID}', '${CUSTOMER_ID}', '${GUILD_ID}', '${PRODUCT_AMBIGUOUS_ORDER}',
-      'PAYPAL-MIGRATION-FIXTURE', 1000, 'USD', 'purchase', 'completed'
+      'bad:legacy-order', 1000, 'USD', 'purchase', 'completed'
     ),
     (
       '${TERMINAL_ORDER_ID}', '${CUSTOMER_ID}', '${GUILD_ID}', '${PRODUCT_TERMINAL}',
       'PAYPAL-TERMINAL-FIXTURE', 1000, 'USD', 'purchase', 'completed'
+    ),
+    (
+      '${LEGACY_SALE_ORDER_ID}', '${CUSTOMER_ID}', '${GUILD_ID}',
+      '${PRODUCT_UNSUPPORTED_DURATION}', NULL, 1000, 'USD', 'purchase', 'completed'
     );
+
+  UPDATE ${FIXTURE_SCHEMA}.orders
+     SET plan_id = '${LEGACY_SALE_PLAN_ID}',
+         paypal_subscription_id = 'SUB-LEGACY-SALE'
+   WHERE id = '${LEGACY_SALE_ORDER_ID}';
+
+  INSERT INTO ${FIXTURE_SCHEMA}.payments (
+    id, order_id, customer_id, guild_id, paypal_payment_id,
+    amount_cents, currency, status, provider
+  ) VALUES (
+    '${LEGACY_INVALID_PAYMENT_ID}', '${ORDER_ID}', '${CUSTOMER_ID}', '${GUILD_ID}',
+    'bad:legacy-capture', 1000, 'USD', 'completed', 'paypal'
+  ), (
+    '${LEGACY_INVALID_SALE_PAYMENT_ID}', '${LEGACY_SALE_ORDER_ID}', '${CUSTOMER_ID}',
+    '${GUILD_ID}', 'bad:legacy-sale', 1000, 'USD', 'completed', 'paypal'
+  );
+
+  INSERT INTO ${FIXTURE_SCHEMA}.payment_refunds (
+    id, payment_id, order_id, guild_id, paypal_refund_id,
+    event_type, amount_cents, currency
+  ) VALUES (
+    '${LEGACY_INVALID_REFUND_ID}', '${LEGACY_INVALID_PAYMENT_ID}', '${ORDER_ID}',
+    '${GUILD_ID}', 'bad/legacy-refund', 'PAYMENT.CAPTURE.REFUNDED', 1000, 'USD'
+  );
 
   INSERT INTO ${FIXTURE_SCHEMA}.entitlements (
     id, customer_id, guild_id, product_id, order_id,
@@ -304,6 +423,33 @@ const LEGACY_FIXTURE_SQL = `
     '${TERMINAL_ENTITLEMENT_ID}', '${CUSTOMER_ID}', '${GUILD_ID}',
     '${PRODUCT_TERMINAL}', '${TERMINAL_ORDER_ID}',
     'one_time', 'expired', 'purchase', ARRAY['${ROLE_TERMINAL}']
+  );
+
+  INSERT INTO ${FIXTURE_SCHEMA}.bot_action_queue (
+    id, guild_id, action, payload, status, started_at, next_retry_at
+  ) VALUES
+    (
+      '${LEGACY_REVOKE_PENDING_ID}', '${GUILD_ID}', 'revoke_roles',
+      '{"discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}"],"reason":"refund","order_id":"${TERMINAL_ORDER_ID}"}',
+      'pending', NULL, now()
+    ),
+    (
+      '${LEGACY_REVOKE_PROCESSING_ID}', '${GUILD_ID}', 'revoke_roles',
+      '{"discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}"],"reason":"subscription_expired","order_id":"${TERMINAL_ORDER_ID}","product_id":"${PRODUCT_TERMINAL}"}',
+      'processing', now(), NULL
+    ),
+    (
+      '${LEGACY_REVOKE_FAILED_ID}', '${GUILD_ID}', 'revoke_roles',
+      '{"discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}"],"reason":"refunded","order_id":"${TERMINAL_ORDER_ID}"}',
+      'failed', NULL, NULL
+    );
+
+  INSERT INTO ${FIXTURE_SCHEMA}.action_queue_dlq (
+    id, guild_id, action, payload, error_message, retried
+  ) VALUES (
+    '${LEGACY_REVOKE_DLQ_ID}', '${GUILD_ID}', 'revoke_roles',
+    '{"discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}"],"reason":"refund","order_id":"${TERMINAL_ORDER_ID}"}',
+    'legacy handler failed', false
   );
 `;
 
@@ -351,14 +497,26 @@ describe('20260711030000 legacy metadata migration', () => {
     const metadataLock = metadata.indexOf(
       'LOCK TABLE public.products IN SHARE ROW EXCLUSIVE MODE',
     );
+    const queueLock = metadata.indexOf(
+      'LOCK TABLE public.bot_action_queue IN SHARE ROW EXCLUSIVE MODE',
+    );
+    const dlqLock = metadata.indexOf(
+      'LOCK TABLE public.action_queue_dlq IN SHARE ROW EXCLUSIVE MODE',
+    );
     const classification = metadata.indexOf('-- Invalid grant_role_id values');
+    const legacyQueueClassification = metadata.indexOf(
+      '-- Predeployment workers accepted order-wide revoke payloads that lacked the',
+    );
     const strip = metadata.indexOf('-- Remove every reserved side-channel key');
     const constraint = metadata.indexOf('ADD CONSTRAINT products_no_legacy_role_metadata');
 
     expect(metadataLock).toBeGreaterThan(-1);
+    expect(queueLock).toBeGreaterThan(metadataLock);
+    expect(dlqLock).toBeGreaterThan(queueLock);
     expect(classification).toBeGreaterThan(metadataLock);
     expect(strip).toBeGreaterThan(classification);
     expect(constraint).toBeGreaterThan(strip);
+    expect(legacyQueueClassification).toBeGreaterThan(dlqLock);
   });
 
   it('canonicalizes permanent config and moves temporary config to the typed table', async () => {
@@ -411,6 +569,102 @@ describe('20260711030000 legacy metadata migration', () => {
        WHERE product_id = '${PRODUCT_TEMPORARY}'
     `);
     expect(falseCanonicalIssue[0]!.count).toBe(0);
+  });
+
+  it('preserves noncanonical legacy PayPal ids for inspection without authorizing them', async () => {
+    const [legacy] = await sql.unsafe<Array<{
+      paypal_order_id: string;
+      paypal_payment_id: string;
+      paypal_refund_id: string;
+      terminal_witness: boolean;
+    }>>(`
+      SELECT paid_order.paypal_order_id,
+             payment.paypal_payment_id,
+             refund.paypal_refund_id,
+             refund.is_terminal_event_witness AS terminal_witness
+        FROM ${FIXTURE_SCHEMA}.orders AS paid_order
+        JOIN ${FIXTURE_SCHEMA}.payments AS payment
+          ON payment.order_id = paid_order.id
+        JOIN ${FIXTURE_SCHEMA}.payment_refunds AS refund
+          ON refund.payment_id = payment.id
+       WHERE paid_order.id = '${ORDER_ID}'
+    `);
+    expect(legacy).toEqual({
+      paypal_order_id: 'bad:legacy-order',
+      paypal_payment_id: 'bad:legacy-capture',
+      paypal_refund_id: 'bad/legacy-refund',
+      terminal_witness: false,
+    });
+
+    const [legacySale] = await sql.unsafe<Array<{
+      paypal_payment_id: string;
+      paypal_resource_type: string;
+    }>>(`
+      SELECT payment.paypal_payment_id,
+             payment.paypal_resource_type
+        FROM ${FIXTURE_SCHEMA}.payments AS payment
+       WHERE payment.id = '${LEGACY_INVALID_SALE_PAYMENT_ID}'
+    `);
+    expect(legacySale).toEqual({
+      paypal_payment_id: 'bad:legacy-sale',
+      paypal_resource_type: 'sale',
+    });
+
+    const constraints = await sql.unsafe<Array<{
+      conname: string;
+      convalidated: boolean;
+    }>>(`
+      SELECT constraint_row.conname, constraint_row.convalidated
+        FROM pg_catalog.pg_constraint AS constraint_row
+        JOIN pg_catalog.pg_class AS relation
+          ON relation.oid = constraint_row.conrelid
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = '${FIXTURE_SCHEMA}'
+         AND constraint_row.conname IN (
+           'orders_paypal_order_id_canonical',
+           'payments_paypal_payment_id_canonical',
+           'payment_refunds_provider_id_canonical'
+         )
+       ORDER BY constraint_row.conname
+    `);
+    expect(constraints).toEqual([
+      { conname: 'orders_paypal_order_id_canonical', convalidated: false },
+      { conname: 'payment_refunds_provider_id_canonical', convalidated: false },
+      { conname: 'payments_paypal_payment_id_canonical', convalidated: false },
+    ]);
+
+    await expect(sql.unsafe(`
+      SELECT ${FIXTURE_SCHEMA}.commerce_prepare_admin_refund(
+        '${ORDER_ID}'::UUID,
+        '${GUILD_ID}',
+        '100000000000000999',
+        'legacy malformed provider identity'
+      )
+    `)).rejects.toMatchObject({
+      code: '23514',
+      message: expect.stringContaining('payment capture set requires operator remediation'),
+    });
+
+    const invalidOrderIds = [
+      '',
+      '-bad-first',
+      'bad:colon',
+      'bad/slash',
+      'bad space',
+      ' bad-leading',
+      'bad-trailing ',
+      `bad${String.fromCharCode(1)}control`,
+      'bäd-unicode',
+      'A'.repeat(256),
+    ];
+    for (const invalidOrderId of invalidOrderIds) {
+      await expect(sql`
+        UPDATE ${sql(FIXTURE_SCHEMA)}.orders
+           SET paypal_order_id = ${invalidOrderId}
+         WHERE id = ${TERMINAL_ORDER_ID}::UUID
+      `).rejects.toMatchObject({ code: '23514' });
+    }
   });
 
   it('preserves raw invalid role and duration JSON in quarantine', async () => {
@@ -630,6 +884,7 @@ describe('20260711030000 legacy metadata migration', () => {
           guild_id: GUILD_ID,
           discord_id: 'migration-fixture-user',
           role_ids: [ROLE_TERMINAL],
+          temporary_role_grant_ids: [],
           reason: 'entitlement_expired',
           entitlement_id: TERMINAL_ENTITLEMENT_ID,
           customer_id: CUSTOMER_ID,
@@ -640,4 +895,141 @@ describe('20260711030000 legacy metadata migration', () => {
       },
     ]);
   });
+
+  it('supersedes every actionable legacy revoke row with the canonical exact intent', async () => {
+    const legacyRows = await sql.unsafe<Array<{
+      id: string;
+      status: string;
+      result: Record<string, unknown>;
+      started_at: string | null;
+      next_retry_at: string | null;
+    }>>(`
+      SELECT id::TEXT, status, result, started_at::TEXT, next_retry_at::TEXT
+        FROM ${FIXTURE_SCHEMA}.bot_action_queue
+       WHERE id IN (
+         '${LEGACY_REVOKE_PENDING_ID}',
+         '${LEGACY_REVOKE_PROCESSING_ID}',
+         '${LEGACY_REVOKE_FAILED_ID}'
+       )
+       ORDER BY id
+    `);
+
+    expect(legacyRows).toHaveLength(3);
+    for (const row of legacyRows) {
+      expect(row).toMatchObject({
+        status: 'completed',
+        started_at: null,
+        next_retry_at: null,
+        result: {
+          migration_disposition: 'superseded_by_canonical_revoke',
+        },
+      });
+      expect(row.result.canonical_action_ids).toEqual([expect.any(String)]);
+    }
+
+    const dlq = await sql.unsafe<Array<{
+      retried: boolean;
+      retried_at: string | null;
+      error_message: string;
+    }>>(`
+      SELECT retried, retried_at::TEXT, error_message
+        FROM ${FIXTURE_SCHEMA}.action_queue_dlq
+       WHERE id = '${LEGACY_REVOKE_DLQ_ID}'
+    `);
+    expect(dlq).toEqual([
+      expect.objectContaining({
+        retried: true,
+        retried_at: expect.any(String),
+        error_message: expect.stringContaining('Superseded by canonical'),
+      }),
+    ]);
+
+    const actionableNoncanonical = await sql.unsafe<Array<{ count: number }>>(`
+      SELECT (
+        SELECT count(*)
+          FROM ${FIXTURE_SCHEMA}.bot_action_queue AS queue
+         WHERE queue.action = 'revoke_roles'
+           AND queue.status IN ('pending', 'processing', 'failed')
+           AND NOT (queue.payload ?& ARRAY[
+             'discord_id', 'role_ids', 'temporary_role_grant_ids',
+             'entitlement_id', 'customer_id', 'order_id', 'product_id',
+             'reason', 'source'
+           ])
+      ) + (
+        SELECT count(*)
+          FROM ${FIXTURE_SCHEMA}.action_queue_dlq AS dlq
+         WHERE dlq.action = 'revoke_roles'
+           AND dlq.retried = false
+           AND NOT (dlq.payload ?& ARRAY[
+             'discord_id', 'role_ids', 'temporary_role_grant_ids',
+             'entitlement_id', 'customer_id', 'order_id', 'product_id',
+             'reason', 'source'
+           ])
+      ) AS count
+    `);
+    expect(actionableNoncanonical[0]!.count).toBe(0);
+  });
+
+  it('aborts deployment for a full-key legacy revoke whose roles lack exact replacement', async () => {
+    const unprovableSchema = 'commerce_metadata_unprovable_fixture';
+    const unprovableQueueId = '50000000-0000-4000-8000-000000000099';
+    const preMigration = PRE_MIGRATION_SCHEMA_SQL.replaceAll(
+      FIXTURE_SCHEMA,
+      unprovableSchema,
+    );
+    const legacyFixture = LEGACY_FIXTURE_SQL.replaceAll(
+      FIXTURE_SCHEMA,
+      unprovableSchema,
+    );
+    const source = migrationSource(
+      '20260711030000_canonicalize_commerce_role_metadata.sql',
+    ).replaceAll('public.', `${unprovableSchema}.`);
+
+    await sql.unsafe(`DROP SCHEMA IF EXISTS ${unprovableSchema} CASCADE`);
+    let failingSql: Sql | null = null;
+    try {
+      await sql.unsafe(preMigration);
+      await sql.unsafe(legacyFixture);
+      await sql.unsafe(`
+        INSERT INTO ${unprovableSchema}.bot_action_queue (
+          id, guild_id, action, payload, status, next_retry_at
+        ) VALUES (
+          '${unprovableQueueId}',
+          '${GUILD_ID}',
+          'revoke_roles',
+          '{"guild_id":"${GUILD_ID}","discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}","199999999999999999"],"temporary_role_grant_ids":[],"entitlement_id":"${TERMINAL_ENTITLEMENT_ID}","customer_id":"${CUSTOMER_ID}","order_id":"${TERMINAL_ORDER_ID}","product_id":"${PRODUCT_TERMINAL}","reason":"entitlement_expired","source":"entitlement_status_trigger"}',
+          'pending',
+          now()
+        )
+      `);
+
+      // The migration owns an explicit transaction. Run the expected failure
+      // on a disposable connection so its aborted transaction cannot poison
+      // this suite's shared fixture connection or its cleanup query.
+      failingSql = postgres(getTestDbUrl(), { max: 1 });
+      await expect(failingSql.unsafe(source)).rejects.toMatchObject({
+        code: '23514',
+        message: 'legacy revoke_roles queue migration requires operator remediation',
+        detail: `queue_id=${unprovableQueueId}`,
+      });
+    } finally {
+      if (failingSql) {
+        try {
+          await failingSql.unsafe('ROLLBACK');
+        } catch (error) {
+          if (
+            !error ||
+            typeof error !== 'object' ||
+            !('code' in error) ||
+            error.code !== '25P01'
+          ) {
+            throw error;
+          }
+        } finally {
+          await failingSql.end();
+        }
+      }
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${unprovableSchema} CASCADE`);
+    }
+  }, 60_000);
 });

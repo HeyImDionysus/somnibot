@@ -1,12 +1,11 @@
 /**
  * Tests for the entitlement-grant `source` enum alignment.
  *
- * The entitlements table CHECK (initial schema, entitlements.source) only
- * allows ('purchase', 'giveaway', 'manual', 'automation') — the same union
- * as EntitlementService.grant's `source` type. The dashboard's
- * schemas.entitlement.grant zod enum previously allowed 'gift' and
- * 'promotion' (which the DB rejects at insert with a raw CHECK violation)
- * and was missing 'giveaway' (which the DB allows).
+ * The table also supports `purchase`, but this owner-only route does not run a
+ * payment finalizer or create paid role-delivery provenance. It must therefore
+ * accept only the explicit non-purchase grant sources. Otherwise it can return
+ * success for a zero-dollar pseudo-purchase that the paid classifier refuses
+ * to grant or repair.
  *
  * COMPLIANCE: do NOT add new source values here — the atomic role-income RPC
  * classifies ('giveaway', 'manual', 'automation') as non-purchase sources;
@@ -37,17 +36,18 @@ import {
 
 const CUSTOMER_ID = '00000000-0000-4000-a000-000000000001';
 const PRODUCT_ID = '00000000-0000-4000-a000-000000000002';
+const REQUEST_ID = '00000000-0000-4000-a000-000000000003';
+const ENTITLEMENT_ID = '00000000-0000-4000-a000-000000000004';
 
-// The exact set the DB CHECK accepts — keep in lockstep with
-// entitlements.source in the initial schema and EntitlementService.grant.
-const DB_ALLOWED_SOURCES = ['purchase', 'giveaway', 'manual', 'automation'] as const;
-const DB_REJECTED_SOURCES = ['gift', 'promotion'] as const;
+const ADMIN_GRANT_SOURCES = ['giveaway', 'manual', 'automation'] as const;
+const ROUTE_REJECTED_SOURCES = ['purchase', 'gift', 'promotion'] as const;
 
-describe('schemas.entitlement.grant — source enum matches the DB CHECK', () => {
-  it.each(DB_ALLOWED_SOURCES)(
-    "accepts and round-trips source '%s' (DB CHECK allows it)",
+describe('schemas.entitlement.grant — source enum preserves manual-grant provenance', () => {
+  it.each(ADMIN_GRANT_SOURCES)(
+    "accepts and round-trips admin-grant source '%s'",
     (source) => {
       const result = schemas.entitlement.grant.safeParse({
+        request_id: REQUEST_ID,
         product_id: PRODUCT_ID,
         source,
       });
@@ -58,10 +58,11 @@ describe('schemas.entitlement.grant — source enum matches the DB CHECK', () =>
     },
   );
 
-  it.each(DB_REJECTED_SOURCES)(
-    "rejects source '%s' (DB CHECK would refuse the insert)",
+  it.each(ROUTE_REJECTED_SOURCES)(
+    "rejects source '%s' because this route cannot prove paid delivery",
     (source) => {
       const result = schemas.entitlement.grant.safeParse({
+        request_id: REQUEST_ID,
         product_id: PRODUCT_ID,
         source,
       });
@@ -73,7 +74,10 @@ describe('schemas.entitlement.grant — source enum matches the DB CHECK', () =>
   );
 
   it("defaults source to 'manual' when omitted (an admin grant is manual by nature)", () => {
-    const result = schemas.entitlement.grant.safeParse({ product_id: PRODUCT_ID });
+    const result = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+    });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.source).toBe('manual');
@@ -105,15 +109,15 @@ describe('POST /api/customers/[id]/entitlements — source handling at the route
     productsQuery.maybeSingle.mockResolvedValue({ data: { id: PRODUCT_ID } });
 
     const ordersQuery = registerTable(mock, 'orders');
-    ordersQuery.insert.mockReturnValue(ordersQuery);
-    ordersQuery.single.mockResolvedValue({ data: { id: 'ord-1' }, error: null });
-
     const entitlementsQuery = registerTable(mock, 'entitlements');
-    entitlementsQuery.insert.mockReturnValue(entitlementsQuery);
-    entitlementsQuery.single.mockResolvedValue({
-      data: { id: 'ent-1', source: 'manual' },
+    mock.rpc.mockImplementation(async (_name: string, params: Record<string, unknown>) => ({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        order_id: params.p_request_id,
+        request_id: params.p_request_id,
+      }],
       error: null,
-    });
+    }));
 
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
     return { mock, ordersQuery, entitlementsQuery };
@@ -125,12 +129,12 @@ describe('POST /api/customers/[id]/entitlements — source handling at the route
     mockRateLimitPass(checkAdminRateLimit as ReturnType<typeof vi.fn>);
   });
 
-  it.each(DB_REJECTED_SOURCES)(
-    "returns a clean 400 (not a raw DB CHECK violation) for source '%s' and never touches the DB",
+  it.each(ROUTE_REJECTED_SOURCES)(
+    "returns a clean 400 for unsupported source '%s' and never touches the DB",
     async (source) => {
-      const { ordersQuery, entitlementsQuery } = setup();
+      const { mock, ordersQuery, entitlementsQuery } = setup();
 
-      const res = await invoke({ product_id: PRODUCT_ID, source });
+      const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID, source });
       expect(res.status).toBe(400);
 
       const json = await res.json();
@@ -142,25 +146,162 @@ describe('POST /api/customers/[id]/entitlements — source handling at the route
       // so the CHECK constraint can no longer be the first line of defense.
       expect(ordersQuery.insert).not.toHaveBeenCalled();
       expect(entitlementsQuery.insert).not.toHaveBeenCalled();
+      expect(mock.rpc).not.toHaveBeenCalled();
     },
   );
 
-  it.each(DB_ALLOWED_SOURCES)(
-    "passes source '%s' through to both the order and entitlement inserts",
+  it.each(ADMIN_GRANT_SOURCES)(
+    "passes source '%s' through the atomic, replay-safe grant RPC",
     async (source) => {
-      const { ordersQuery, entitlementsQuery } = setup();
+      const { mock, ordersQuery, entitlementsQuery } = setup();
 
-      const res = await invoke({ product_id: PRODUCT_ID, source });
+      const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID, source });
       expect(res.status).toBe(200);
 
-      // Both inserts share the same source column CHECK set in the schema —
-      // the validated value must reach each of them unchanged.
-      expect(ordersQuery.insert).toHaveBeenCalledWith(
-        expect.objectContaining({ source }),
+      expect(mock.rpc).toHaveBeenCalledTimes(1);
+      expect(mock.rpc).toHaveBeenCalledWith(
+        'commerce_create_noncommerce_entitlement',
+        expect.objectContaining({
+          p_request_id: REQUEST_ID,
+          p_guild_id: 'guild-1',
+          p_customer_id: CUSTOMER_ID,
+          p_product_id: PRODUCT_ID,
+          p_source: source,
+        }),
       );
-      expect(entitlementsQuery.insert).toHaveBeenCalledWith(
-        expect.objectContaining({ source }),
-      );
+      // The route cannot reintroduce the original two-commit orphan window.
+      expect(ordersQuery.insert).not.toHaveBeenCalled();
+      expect(entitlementsQuery.insert).not.toHaveBeenCalled();
+      expect(await res.json()).toEqual({
+        success: true,
+        data: {
+          id: ENTITLEMENT_ID,
+          order_id: REQUEST_ID,
+          request_id: REQUEST_ID,
+        },
+      });
     },
   );
+
+  it('replays the same request UUID through the same atomic database identity', async () => {
+    const { mock } = setup();
+    const body = { request_id: REQUEST_ID, product_id: PRODUCT_ID, source: 'manual' };
+
+    const first = await invoke(body);
+    const second = await invoke(body);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledTimes(2);
+    expect(mock.rpc.mock.calls[0][1]).toEqual(mock.rpc.mock.calls[1][1]);
+    expect((await first.json()).data).toEqual((await second.json()).data);
+  });
+
+  it('requires a caller-held request UUID before any database work', async () => {
+    const { mock } = setup();
+
+    const res = await invoke({ product_id: PRODUCT_ID, source: 'manual' });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.success).toBe(false);
+    expect(json.details.some((d: { path: string }) => d.path === 'request_id')).toBe(true);
+    expect(mock.rpc).not.toHaveBeenCalled();
+  });
+
+  it('canonicalizes an uppercase request UUID before the atomic replay comparison', async () => {
+    const { mock } = setup();
+
+    const res = await invoke({
+      request_id: REQUEST_ID.toUpperCase(),
+      product_id: PRODUCT_ID,
+      source: 'manual',
+    });
+
+    expect(res.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_create_noncommerce_entitlement',
+      expect.objectContaining({ p_request_id: REQUEST_ID }),
+    );
+    expect((await res.json()).data.request_id).toBe(REQUEST_ID);
+  });
+
+  it('returns 500 without attempting direct writes when the atomic RPC fails', async () => {
+    const { mock, ordersQuery, entitlementsQuery } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'atomic grant rejected' },
+    });
+
+    const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID });
+    expect(res.status).toBe(500);
+    expect(ordersQuery.insert).not.toHaveBeenCalled();
+    expect(entitlementsQuery.insert).not.toHaveBeenCalled();
+  });
+
+  it.each(['granted_role_ids', 'granted_channel_ids'] as const)(
+    'rejects duplicate IDs in %s before invoking the atomic RPC',
+    async (field) => {
+      const { mock } = setup();
+      const duplicate = '12345678901234567';
+
+      const res = await invoke({
+        request_id: REQUEST_ID,
+        product_id: PRODUCT_ID,
+        [field]: [duplicate, duplicate],
+      });
+
+      expect(res.status).toBe(400);
+      expect(mock.rpc).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails closed when the atomic RPC returns a different request identity', async () => {
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        order_id: REQUEST_ID,
+        request_id: '00000000-0000-4000-a000-000000000099',
+      }],
+      error: null,
+    });
+
+    const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID });
+    expect(res.status).toBe(500);
+  });
+
+  it.each([
+    ['a different order identity', {
+      entitlement_id: ENTITLEMENT_ID,
+      order_id: '00000000-0000-4000-a000-000000000098',
+      request_id: REQUEST_ID,
+    }],
+    ['a malformed entitlement identity', {
+      entitlement_id: 'not-a-uuid',
+      order_id: REQUEST_ID,
+      request_id: REQUEST_ID,
+    }],
+  ])('fails closed when the atomic RPC returns %s', async (_label, row) => {
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({ data: [row], error: null });
+
+    const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID });
+
+    expect(res.status).toBe(500);
+  });
+
+  it.each([
+    ['no rows', []],
+    ['multiple rows', [
+      { entitlement_id: ENTITLEMENT_ID, order_id: REQUEST_ID, request_id: REQUEST_ID },
+      { entitlement_id: ENTITLEMENT_ID, order_id: REQUEST_ID, request_id: REQUEST_ID },
+    ]],
+  ])('fails closed when the atomic RPC returns %s', async (_label, data) => {
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({ data, error: null });
+
+    const res = await invoke({ request_id: REQUEST_ID, product_id: PRODUCT_ID });
+
+    expect(res.status).toBe(500);
+  });
 });

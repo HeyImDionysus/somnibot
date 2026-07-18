@@ -5,6 +5,7 @@
  * Listens to platform events → matches triggers → evaluates scope/conditions → executes actions.
  */
 import type { Guild, GuildMember, Message } from 'discord.js';
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type Valkey from 'iovalkey';
 import type { PlatformEvent } from '@somnibot/shared';
@@ -29,6 +30,8 @@ export interface AutomationEventContext {
   message: Message | null;
   /** Template variables resolved from the trigger event data */
   variables: Record<string, string>;
+  /** Stable for every action spawned by this one in-memory event occurrence. */
+  occurrenceId: string;
   /**
    * PR #269 review (P2): Shared regex-evaluation budget for this event.
    * One instance per platform event (created in buildEventContext) so the
@@ -54,6 +57,14 @@ export class AutomationEngine {
    */
   private _activeDepths = new Map<string, number>();
   private _execCounter = 0;
+  /**
+   * Reaction handlers need the full Message object, so they enter through
+   * processReactionEvent before publishing the same data object on eventBus.
+   * Remember that exact object once so the generic onAny route does not run the
+   * same Discord occurrence a second time. A remove-then-readd uses a new data
+   * object and remains a legitimate new occurrence.
+   */
+  private _specializedEventData = new WeakSet<object>();
 
   constructor(
     private guild: Guild,
@@ -89,6 +100,13 @@ export class AutomationEngine {
     // that round-trip through Discord and lose async context.
     this.eventBus.onAny(async (event: PlatformEvent) => {
       if (event.guildId !== this.guild.id) return;
+      if (
+        event.data !== null
+        && typeof event.data === 'object'
+        && this._specializedEventData.delete(event.data as object)
+      ) {
+        return;
+      }
       if (event._chainDepth === undefined && this._activeDepths.size > 0) {
         let maxDepth = 0;
         for (const d of this._activeDepths.values()) {
@@ -220,6 +238,7 @@ export class AutomationEngine {
       guildId: this.guild.id,
       rateLimiter: this.rateLimiter,
       automationId: automation.id,
+      occurrenceId: ctx.occurrenceId,
       variables: ctx.variables,
     };
 
@@ -318,8 +337,15 @@ export class AutomationEngine {
     let channelId: string | null = null;
     let messageId: string | null = null;
 
-    // Resolve member from discordId
-    const discordId = data.discordId as string | undefined;
+    // Canonical event payloads do not all use the same member field. Resolve
+    // only the documented field for each exceptional trigger; accepting a
+    // synthetic `discordId` here previously let tests hide broken production
+    // ticket and infraction context.
+    const discordId = event.type === 'ticket.opened' || event.type === 'ticket.closed'
+      ? data.userDiscordId as string | undefined
+      : event.type === 'infraction.created'
+        ? data.userId as string | undefined
+        : data.discordId as string | undefined;
     if (discordId) {
       member = this.guild.members.cache.get(discordId) ?? null;
       variables['user'] = member ? `<@${discordId}>` : discordId;
@@ -409,6 +435,7 @@ export class AutomationEngine {
       messageId,
       message: null, // Message object needs to be attached separately for message-based triggers
       variables,
+      occurrenceId: randomUUID(),
       // One budget per event: buildEventContext is called exactly once per
       // event (handleEvent / processMessageEvent / processReactionEvent), so
       // every automation processed for this event draws from the same budget.
@@ -439,6 +466,9 @@ export class AutomationEngine {
    * Process a reaction event with message reference.
    */
   async processReactionEvent(event: PlatformEvent, message: Message): Promise<void> {
+    if (event.data !== null && typeof event.data === 'object') {
+      this._specializedEventData.add(event.data as object);
+    }
     const automations = this.loader.getForTrigger('reaction.added');
     if (automations.length === 0) return;
 

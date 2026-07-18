@@ -237,6 +237,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       // Emit button.clicked event for automations
       if (interaction.isButton()) {
         client.eventBus.emit('button.clicked', interaction.guild!.id, {
+          interactionId: interaction.id,
           discordId: interaction.user.id,
           username: interaction.user.username,
           buttonId: interaction.customId,

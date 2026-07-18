@@ -30,7 +30,9 @@ function makeSupabase(tableData: Record<string, any> = {}) {
       return chain;
     });
     const data = tableData[table]
-      ?? (table === 'entitlements' || table === 'license_sessions'
+      ?? (table === 'entitlements'
+        || table === 'license_sessions'
+        || table === 'commerce_role_delivery_intents'
         ? []
         : table === 'customers'
           ? [{ id: 'c1', guild_id: 'g1', discord_id: 'u1' }]
@@ -46,7 +48,12 @@ function makeSupabase(tableData: Record<string, any> = {}) {
     (chain as any)[Symbol.toStringTag] = 'Promise';
     return chain;
   });
-  return { from: fromMock };
+  const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    const configured = tableData.__rpc?.[name];
+    if (typeof configured === 'function') return configured(args);
+    return configured ?? { data: null, error: null };
+  });
+  return { from: fromMock, rpc };
 }
 
 function makeGuild(overrides: Record<string, any> = {}) {
@@ -112,6 +119,107 @@ describe('runReconciliation', () => {
     expect(findings.entitlements_checked).toBe(1);
     expect(findings.roles_missing).toBe(1);
     expect(findings.roles_regranted).toBe(1);
+  });
+
+  it('routes a missing paid role through the deterministic SQL carrier', async () => {
+    supabase = makeSupabase({
+      reconciliation_runs: { id: 'run1' },
+      entitlements: [{
+        id: 'e-paid',
+        customer_id: 'c1',
+        granted_role_ids: ['r1'],
+        product_id: 'p1',
+        plan_id: null,
+        order_id: 'o1',
+        type: 'one_time',
+        status: 'active',
+        source: 'purchase',
+        customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' },
+      }],
+      __rpc: {
+        commerce_ensure_live_role_delivery_action: {
+          data: [{ action_id: 'carrier-1', action_status: 'pending' }],
+          error: null,
+        },
+      },
+    });
+    guild = makeGuild({ missingRoles: true });
+
+    const findings = await runReconciliation(guild as any, supabase as any);
+
+    expect(findings.roles_missing).toBe(1);
+    expect(findings.roles_regranted).toBe(0);
+    expect(findings.role_repairs_queued).toBe(1);
+    expect(supabase.rpc).toHaveBeenCalledWith(
+      'commerce_ensure_live_role_delivery_action',
+      { p_entitlement_id: 'e-paid' },
+    );
+    expect(supabase.from).not.toHaveBeenCalledWith('bot_action_queue');
+  });
+
+  it('re-enqueues both unresolved paid cleanup states through exact SQL carriers', async () => {
+    supabase = makeSupabase({
+      reconciliation_runs: { id: 'run1' },
+      commerce_role_delivery_intents: [
+        { id: 'intent-1', guild_id: 'g1', state: 'cleanup_required' },
+        { id: 'intent-2', guild_id: 'g1', state: 'operator_required' },
+      ],
+      __rpc: {
+        commerce_ensure_role_delivery_cleanup_action: (
+          args: Record<string, unknown>,
+        ) => ({
+          data: [{
+            action_id: `cleanup-${String(args.p_intent_id)}`,
+            action_status: 'pending',
+          }],
+          error: null,
+        }),
+      },
+    });
+    guild = makeGuild();
+
+    const findings = await runReconciliation(guild as any, supabase as any);
+
+    expect(findings.role_cleanups_queued).toBe(2);
+    expect(supabase.rpc).toHaveBeenNthCalledWith(
+      1,
+      'commerce_ensure_role_delivery_cleanup_action',
+      { p_intent_id: 'intent-1' },
+    );
+    expect(supabase.rpc).toHaveBeenNthCalledWith(
+      2,
+      'commerce_ensure_role_delivery_cleanup_action',
+      { p_intent_id: 'intent-2' },
+    );
+  });
+
+  it('does not presume a source-null missing role is paid when SQL authorizes no carrier', async () => {
+    supabase = makeSupabase({
+      reconciliation_runs: { id: 'run1' },
+      entitlements: [{
+        id: 'e-legacy',
+        customer_id: 'c1',
+        granted_role_ids: ['r1'],
+        product_id: 'p1',
+        plan_id: null,
+        order_id: 'o1',
+        type: 'one_time',
+        status: 'active',
+        source: null,
+        customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' },
+      }],
+      __rpc: {
+        commerce_ensure_live_role_delivery_action: { data: null, error: null },
+      },
+    });
+    guild = makeGuild({ missingRoles: true });
+
+    const findings = await runReconciliation(guild as any, supabase as any);
+
+    expect(findings.roles_regranted).toBe(0);
+    expect(findings.role_repairs_queued).toBe(0);
+    expect(findings.errors.some((error) => error.includes('no exact paid repair carrier')))
+      .toBe(true);
   });
 
   it('does not count a Discord add that a forced refetch cannot confirm', async () => {
@@ -242,13 +350,14 @@ describe('runReconciliation', () => {
     expect(findings.sessions_timed_out).toBeGreaterThanOrEqual(0);
   });
 
-  it('handles no run id gracefully', async () => {
+  it('fails closed when the reconciliation run has no durable id', async () => {
     supabase = makeSupabase({
       reconciliation_runs: null,
     });
     guild = makeGuild();
-    const findings = await runReconciliation(guild as any, supabase as any);
-    expect(findings).toBeDefined();
+    await expect(runReconciliation(guild as any, supabase as any)).rejects.toThrow(
+      'Failed to create reconciliation run: missing run id',
+    );
   });
 
   it('handles no active entitlements', async () => {

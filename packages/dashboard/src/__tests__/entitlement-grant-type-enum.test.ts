@@ -37,6 +37,8 @@ import {
 } from './helpers';
 
 const PRODUCT_ID = '00000000-0000-4000-a000-0000000000aa';
+const REQUEST_ID = '00000000-0000-4000-a000-0000000000ab';
+const PLAN_ID = '00000000-0000-4000-a000-0000000000ac';
 
 // The exact set the entitlements table CHECK accepts — must stay in lockstep
 // with `CHECK (type IN (...))` in initial_schema.sql and DbEntitlement.type.
@@ -44,13 +46,22 @@ const DB_ACCEPTED_TYPES = ['one_time', 'subscription'] as const;
 
 describe('schemas.entitlement.grant — type enum aligned with DB CHECK', () => {
   it.each(DB_ACCEPTED_TYPES)('accepts DB-valid type %s and round-trips it', (type) => {
-    const parsed = schemas.entitlement.grant.safeParse({ product_id: PRODUCT_ID, type });
+    const parsed = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+      type,
+      ...(type === 'subscription' ? { plan_id: PLAN_ID } : {}),
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.type).toBe(type);
   });
 
   it("rejects type 'free' (ungrantable — no such value in the DB CHECK)", () => {
-    const parsed = schemas.entitlement.grant.safeParse({ product_id: PRODUCT_ID, type: 'free' });
+    const parsed = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+      type: 'free',
+    });
     expect(parsed.success).toBe(false);
     if (!parsed.success) {
       // The rejection must be attributed to the `type` field specifically.
@@ -59,9 +70,37 @@ describe('schemas.entitlement.grant — type enum aligned with DB CHECK', () => 
   });
 
   it("defaults an omitted type to 'one_time'", () => {
-    const parsed = schemas.entitlement.grant.safeParse({ product_id: PRODUCT_ID });
+    const parsed = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+    });
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.type).toBe('one_time');
+  });
+
+  it('requires an exact plan for subscription grants', () => {
+    const parsed = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+      type: 'subscription',
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.path.join('.') === 'plan_id')).toBe(true);
+    }
+  });
+
+  it('rejects a plan on one-time grants', () => {
+    const parsed = schemas.entitlement.grant.safeParse({
+      request_id: REQUEST_ID,
+      product_id: PRODUCT_ID,
+      type: 'one_time',
+      plan_id: PLAN_ID,
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.path.join('.') === 'plan_id')).toBe(true);
+    }
   });
 });
 
@@ -83,7 +122,7 @@ describe("POST /api/customers/[id]/entitlements — type 'free' rejected cleanly
     (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
 
     const res = await POST(
-      postReq({ product_id: PRODUCT_ID, type: 'free' }) as never,
+      postReq({ request_id: REQUEST_ID, product_id: PRODUCT_ID, type: 'free' }) as never,
       { params: Promise.resolve({ id: 'cust-1' }) } as never,
     );
 
@@ -93,5 +132,6 @@ describe("POST /api/customers/[id]/entitlements — type 'free' rejected cleanly
     // The route must bail at zod, before manufacturing an order or entitlement.
     expect(ordersQuery.insert).not.toHaveBeenCalled();
     expect(entitlementsQuery.insert).not.toHaveBeenCalled();
+    expect(mock.rpc).not.toHaveBeenCalled();
   });
 });

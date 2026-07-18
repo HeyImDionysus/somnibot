@@ -115,6 +115,7 @@ describe('Commerce fulfillment lifecycle', () => {
         customer_id: customerId,
         guild_id: GUILD_ID,
         paypal_payment_id: captureId,
+        paypal_resource_type: 'capture',
         amount_cents: 999,
         currency: 'USD',
         status: 'completed',

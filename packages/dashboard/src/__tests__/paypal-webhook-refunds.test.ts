@@ -40,6 +40,7 @@ vi.mock('@/lib/api/rate-limit', () => ({
 }));
 
 import { POST } from '@/app/api/paypal/webhook/route';
+import { resolveRefundPaymentId } from '@/app/api/paypal/webhook/handlers';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalTokenResult } from '@/lib/paypal';
 
@@ -69,6 +70,128 @@ function makeSignedWebhook(body: unknown) {
     body: JSON.stringify(body),
   });
 }
+
+describe('PayPal refund parent identity', () => {
+  it('accepts every agreeing canonical v1 sale-refund identity witness', () => {
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-1',
+      sale_id: 'SALE-1',
+      capture_id: 'SALE-1',
+      links: [{
+        rel: 'sale',
+        href: 'https://api-m.paypal.com/v1/payments/sale/SALE-1',
+      }],
+    }, 'PAYMENT.SALE.REFUNDED')).toBe('SALE-1');
+  });
+
+  it.each([
+    {
+      label: 'sale and capture fields conflict',
+      resource: { id: 'REFUND-1', sale_id: 'SALE-1', capture_id: 'SALE-2' },
+    },
+    {
+      label: 'sale field and rel=sale link conflict',
+      resource: {
+        id: 'REFUND-1',
+        sale_id: 'SALE-1',
+        links: [{
+          rel: 'sale',
+          href: 'https://api-m.paypal.com/v1/payments/sale/SALE-2',
+        }],
+      },
+    },
+    {
+      label: 'sale id has surrounding whitespace',
+      resource: { id: 'REFUND-1', sale_id: ' SALE-1 ' },
+    },
+    {
+      label: 'sale id has an embedded whitespace character',
+      resource: { id: 'REFUND-1', sale_id: 'SALE 1' },
+    },
+    {
+      label: 'schema rejects a non-string sale id',
+      resource: { id: 'REFUND-1', sale_id: 123 },
+    },
+    {
+      label: 'an arbitrary sale-looking link is not an identity witness',
+      resource: {
+        id: 'REFUND-1',
+        links: [{
+          rel: 'up',
+          href: 'https://api-m.paypal.com/v1/payments/sale/SALE-1',
+        }],
+      },
+    },
+  ])('rejects malformed or ambiguous sale parent identity: $label', ({ resource }) => {
+    expect(resolveRefundPaymentId(
+      resource as Record<string, unknown>,
+      'PAYMENT.SALE.REFUNDED',
+    )).toBeNull();
+  });
+
+  it('uses resource.id only for the documented direct reversed-sale shape', () => {
+    expect(resolveRefundPaymentId({
+      id: 'SALE-REVERSED-1',
+      state: 'reversed',
+      parent_payment: 'PAY-1',
+      links: [
+        {
+          rel: 'self',
+          href: 'https://api-m.paypal.com/v1/payments/sale/SALE-REVERSED-1',
+        },
+        {
+          rel: 'refund',
+          href: 'https://api-m.paypal.com/v1/payments/sale/SALE-REVERSED-1/refund',
+        },
+      ],
+    }, 'PAYMENT.SALE.REVERSED')).toBe('SALE-REVERSED-1');
+
+    expect(resolveRefundPaymentId({
+      id: 'SALE-REVERSED-1',
+      state: 'reversed',
+    }, 'PAYMENT.SALE.REVERSED')).toBeNull();
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-1',
+      state: 'reversed',
+      parent_payment: 'PAY-1',
+    }, 'PAYMENT.SALE.REFUNDED')).toBeNull();
+  });
+
+  it('rejects a direct reversed-sale link that contradicts resource.id', () => {
+    expect(resolveRefundPaymentId({
+      id: 'SALE-REVERSED-1',
+      status: 'REVERSED',
+      parent_payment: 'PAY-1',
+      links: [{
+        rel: 'self',
+        href: 'https://api-m.paypal.com/v1/payments/sale/SALE-OTHER',
+      }],
+    }, 'PAYMENT.SALE.REVERSED')).toBeNull();
+  });
+
+  it('accepts v1 capture_id and exact rel=capture witnesses', () => {
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-CAPTURE-1',
+      capture_id: 'CAPTURE-1',
+      links: [{
+        rel: 'capture',
+        href: 'https://api-m.paypal.com/v1/payments/capture/CAPTURE-1',
+      }],
+    }, 'PAYMENT.CAPTURE.REFUNDED')).toBe('CAPTURE-1');
+  });
+
+  it('rejects conflicting or noncanonical capture witnesses', () => {
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-CAPTURE-1',
+      capture_id: 'CAPTURE-1',
+      supplementary_data: { related_ids: { capture_id: 'CAPTURE-2' } },
+    }, 'PAYMENT.CAPTURE.REFUNDED')).toBeNull();
+    expect(resolveRefundPaymentId({
+      id: 'REFUND-CAPTURE-1',
+      capture_id: ' CAPTURE-1 ',
+    }, 'PAYMENT.CAPTURE.REFUNDED')).toBeNull();
+  });
+});
 
 function makeMockSupabase() {
   const fromFn = vi.fn();
@@ -149,13 +272,105 @@ function makeResolvedChain(
 
 type MockRowResult = { data: unknown; error: unknown };
 
-function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
+interface WebhookRpcOptions {
+  record?: Record<string, unknown> | null;
+  recordSequence?: Array<Record<string, unknown> | null>;
+  recordError?: unknown;
+  finalize?: Record<string, unknown> | null;
+  finalizeError?: unknown;
+  release?: Record<string, unknown> | null;
+  releaseError?: unknown;
+}
+
+function useWebhookRows(
+  rows: Record<string, MockRowResult | MockRowResult[]>,
+  rpcOptions: WebhookRpcOptions = {},
+) {
   const inserts: Array<{ table: string; payload: unknown }> = [];
   const upserts: Array<{ table: string; payload: unknown }> = [];
   const eqCalls: Array<{ table: string; column: string; value: unknown }> = [];
   const updates: Array<{ table: string; payload: unknown }> = [];
   const inCalls: Array<{ table: string; column: string; values: unknown[] }> = [];
+  const rpcCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const tableCallCounts = new Map<string, number>();
+  let recordCallCount = 0;
+  mockSb.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+    rpcCalls.push({ name, args });
+    if (name === 'bot_action_queue_release_staged') {
+      if (rpcOptions.releaseError) return { data: null, error: rpcOptions.releaseError };
+      return {
+        data: rpcOptions.release === null
+          ? null
+          : [{
+              action_id: args.p_action_id,
+              action_status: 'pending',
+              disposition: 'released',
+              ...rpcOptions.release,
+            }],
+        error: null,
+      };
+    }
+    if (name === 'commerce_record_paypal_refund_event') {
+      if (rpcOptions.recordError) return { data: null, error: rpcOptions.recordError };
+      const recordOverride = rpcOptions.recordSequence
+        ? rpcOptions.recordSequence[
+            Math.min(recordCallCount, rpcOptions.recordSequence.length - 1)
+          ]
+        : rpcOptions.record;
+      recordCallCount += 1;
+      const requestedAmount = typeof args.p_refund_amount_cents === 'number'
+        ? args.p_refund_amount_cents
+        : 1000;
+      const amount = typeof recordOverride?.refund_amount_cents === 'number'
+        ? recordOverride.refund_amount_cents
+        : requestedAmount;
+      const cumulative = typeof recordOverride?.cumulative_refunded_cents === 'number'
+        ? recordOverride.cumulative_refunded_cents
+        : amount;
+      return {
+        data: recordOverride === null
+          ? null
+          : {
+              payment_id: args.p_payment_id,
+              order_id: args.p_order_id,
+              paypal_refund_id: args.p_paypal_refund_id,
+              event_type: args.p_event_type,
+              refund_amount_cents: amount,
+              currency: 'USD',
+              cumulative_refunded_cents: cumulative,
+              full_refund: cumulative === 1000,
+              already_recorded: false,
+              terminal_witness: cumulative === 1000,
+              terminal_history_consistent: true,
+              terminal_history_replay: false,
+              terminal_payment_status: 'completed',
+              partial_audit_recorded: cumulative < 1000,
+              partial_alert_recorded: cumulative < 1000,
+              ...recordOverride,
+            },
+        error: null,
+      };
+    }
+    if (name === 'commerce_finalize_paypal_refund_status') {
+      if (rpcOptions.finalizeError) return { data: null, error: rpcOptions.finalizeError };
+      return {
+        data: rpcOptions.finalize === null
+          ? null
+          : {
+              order_id: args.p_order_id,
+              payment_id: args.p_payment_id,
+              order_status: 'refunded',
+              payment_status: args.p_payment_status,
+              already_terminal: false,
+              audit_recorded: true,
+              partial_alerts_resolved: 0,
+              ...rpcOptions.finalize,
+            },
+        error: null,
+      };
+    }
+    return { data: null, error: null };
+  });
   mockSb.from.mockImplementation((table: string) => {
     const callCount = tableCallCounts.get(table) ?? 0;
     tableCallCounts.set(table, callCount + 1);
@@ -193,7 +408,7 @@ function useWebhookRows(rows: Record<string, MockRowResult | MockRowResult[]>) {
     );
   });
 
-  return { inserts, upserts, eqCalls, updates, inCalls };
+  return { inserts, upserts, eqCalls, updates, inCalls, rpcCalls };
 }
 
 let mockSb: ReturnType<typeof makeMockSupabase>;
@@ -210,14 +425,174 @@ const basePayment = {
   order_id: 'order-1',
   customer_id: 'customer-1',
   guild_id: 'guild-1',
+  paypal_payment_id: 'CAPTURE-1',
+  paypal_resource_type: 'capture',
   status: 'completed',
   amount_cents: 1000,
   currency: 'USD',
 };
 
+const baseSalePayment = {
+  ...basePayment,
+  paypal_payment_id: 'SALE-1',
+  paypal_resource_type: 'sale',
+};
+
+function expectAtomicRefundFinalization(
+  rpcCalls: Array<{ name: string; args: Record<string, unknown> }>,
+  input: {
+    status: 'refunded' | 'reversed';
+    providerPaymentId?: string;
+    resourceType?: 'capture' | 'sale';
+  },
+) {
+  expect(rpcCalls).toContainEqual({
+    name: 'commerce_finalize_paypal_refund_status',
+    args: expect.objectContaining({
+      p_payment_id: 'payment-row-1',
+      p_order_id: 'order-1',
+      p_guild_id: 'guild-1',
+      p_customer_id: 'customer-1',
+      p_paypal_payment_id: input.providerPaymentId ?? 'CAPTURE-1',
+      p_resource_type: input.resourceType ?? 'capture',
+      p_payment_status: input.status,
+      p_paypal_refund_id: expect.any(String),
+      p_event_type: expect.any(String),
+      p_audit_details: expect.any(Object),
+    }),
+  });
+}
+
+function expectAtomicRefundRecord(
+  rpcCalls: Array<{ name: string; args: Record<string, unknown> }>,
+  input: {
+    refundId: string;
+    eventType: string;
+    amountCents: number | null;
+    currency: string | null;
+    providerPaymentId?: string;
+    resourceType?: 'capture' | 'sale';
+  },
+) {
+  expect(rpcCalls).toContainEqual({
+    name: 'commerce_record_paypal_refund_event',
+    args: {
+      p_payment_id: 'payment-row-1',
+      p_order_id: 'order-1',
+      p_guild_id: 'guild-1',
+      p_customer_id: 'customer-1',
+      p_paypal_payment_id: input.providerPaymentId ?? 'CAPTURE-1',
+      p_resource_type: input.resourceType ?? 'capture',
+      p_paypal_refund_id: input.refundId,
+      p_event_type: input.eventType,
+      p_refund_amount_cents: input.amountCents,
+      p_currency: input.currency,
+      p_audit_details: expect.any(Object),
+    },
+  });
+}
+
+function completedSaleRenewalContext(input: {
+  orderId: string;
+  subscriptionId: string;
+  saleId: string;
+  customerId?: string;
+  guildId?: string;
+  status?: string;
+}) {
+  const customerId = input.customerId ?? 'customer-1';
+  const guildId = input.guildId ?? 'guild-1';
+  const productId = `product-${input.orderId}`;
+  const planId = `plan-${input.orderId}`;
+  const entitlementId = `entitlement-${input.orderId}`;
+  const queueId = `queue-${input.orderId}`;
+  const order = {
+    id: input.orderId,
+    order_number: `ORD-${input.orderId}`,
+    customer_id: customerId,
+    guild_id: guildId,
+    product_id: productId,
+    plan_id: planId,
+    amount_cents: 999,
+    currency: 'EUR',
+    status: input.status ?? 'completed',
+    source: 'purchase',
+    paypal_subscription_id: input.subscriptionId,
+    granted_role_ids_snapshot: ['role-1'],
+    granted_channel_ids_snapshot: [],
+    temporary_role_grants_snapshot: [],
+    grant_snapshot_frozen_at: '2026-07-12T00:00:00.000Z',
+  };
+  const payload = {
+    fulfillment_type: 'subscription_renewed',
+    guild_id: guildId,
+    customer_id: customerId,
+    discord_id: 'discord-1',
+    product_id: productId,
+    product_name: 'Subscription Product',
+    order_id: input.orderId,
+    order_number: order.order_number,
+    plan_id: planId,
+    paypal_subscription_id: input.subscriptionId,
+    amount_cents: 999,
+    currency: 'EUR',
+    granted_role_ids: ['role-1'],
+    granted_channel_ids: [],
+    entitlement_type: 'subscription',
+    existing_entitlement_id: entitlementId,
+  };
+  const idempotencyKey = `paypal:sale:${input.saleId}:fulfill_subscription_renewal`;
+  return {
+    order,
+    payload,
+    rows: {
+      orders: { data: order, error: null },
+      customers: {
+        data: { id: customerId, guild_id: guildId, discord_id: 'discord-1' },
+        error: null,
+      },
+      products: {
+        data: { id: productId, name: 'Subscription Product' },
+        error: null,
+      },
+      entitlements: {
+        data: {
+          id: entitlementId,
+          guild_id: guildId,
+          customer_id: customerId,
+          order_id: input.orderId,
+          product_id: productId,
+          plan_id: planId,
+          type: 'subscription',
+          status: 'grace_period',
+          source: 'purchase',
+          granted_role_ids: ['role-1'],
+          granted_channel_ids: [],
+        },
+        error: null,
+      },
+      bot_action_queue: [
+        { data: null, error: null },
+        {
+          data: {
+            id: queueId,
+            guild_id: guildId,
+            action: 'fulfill_subscription',
+            payload,
+            status: 'staged',
+            idempotency_key: idempotencyKey,
+          },
+          error: null,
+        },
+        { data: { id: queueId }, error: null },
+      ],
+    },
+  };
+}
+
 describe('PayPal webhook — full refund semantics', () => {
   it('full capture refund revokes durable access and delegates roles to the atomic trigger', async () => {
-    const { inserts, updates, inCalls } = useWebhookRows({
+    const { inserts, updates, inCalls, rpcCalls, eqCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
@@ -265,18 +640,11 @@ describe('PayPal webhook — full refund semantics', () => {
     const res = await POST(req as never);
     expect(res.status).toBe(200);
 
-    // Refund recorded for idempotency + cumulative tracking
-    expect(inserts).toContainEqual({
-      table: 'payment_refunds',
-      payload: expect.objectContaining({
-        payment_id: 'payment-row-1',
-        order_id: 'order-1',
-        guild_id: 'guild-1',
-        paypal_refund_id: 'REFUND-FULL-1',
-        event_type: 'PAYMENT.CAPTURE.REFUNDED',
-        amount_cents: 1000,
-        currency: 'USD',
-      }),
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-FULL-1',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      amountCents: 1000,
+      currency: 'USD',
     });
 
     // Entitlements + license keys revoked, sessions deactivated
@@ -300,21 +668,27 @@ describe('PayPal webhook — full refund semantics', () => {
             deactivation_reason: 'entitlement_revoked',
           }),
         },
-        {
-          table: 'orders',
-          payload: expect.objectContaining({ status: 'refunded' }),
-        },
-        {
-          table: 'payments',
-          payload: expect.objectContaining({ status: 'refunded' }),
-        },
       ]),
     );
+    expectAtomicRefundFinalization(rpcCalls, { status: 'refunded' });
+    expect(updates.filter(({ table }) => table === 'orders' || table === 'payments')).toEqual([]);
     expect(inCalls).toContainEqual({
       table: 'license_sessions',
       column: 'license_key_id',
       values: ['license-1', 'license-2'],
     });
+    for (const table of ['entitlements', 'license_keys']) {
+      expect(eqCalls).toContainEqual({
+        table,
+        column: 'guild_id',
+        value: 'guild-1',
+      });
+      expect(eqCalls).toContainEqual({
+        table,
+        column: 'customer_id',
+        value: 'customer-1',
+      });
+    }
 
     expect(inserts).not.toContainEqual(
       expect.objectContaining({
@@ -323,20 +697,14 @@ describe('PayPal webhook — full refund semantics', () => {
       }),
     );
 
-    // Audit trail with refund details
-    expect(inserts).toContainEqual({
-      table: 'audit_logs',
-      payload: expect.objectContaining({
-        guild_id: 'guild-1',
-        actor_type: 'system',
-        actor_id: 'paypal_webhook',
-        action: 'order.refunded_external',
-        target_type: 'order',
-        target_id: 'order-1',
-        details: expect.objectContaining({
-          event_type: 'PAYMENT.CAPTURE.REFUNDED',
-          paypal_refund_id: 'REFUND-FULL-1',
-          refund_scope: 'full',
+    // The exact audit is committed inside the same RPC as the parent/child
+    // status transition, so a crash cannot duplicate it.
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_finalize_paypal_refund_status',
+      args: expect.objectContaining({
+        p_paypal_refund_id: 'REFUND-FULL-1',
+        p_event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        p_audit_details: expect.objectContaining({
           refund_amount_cents: 1000,
           payment_amount_cents: 1000,
           entitlement_ids: ['entitlement-1'],
@@ -345,21 +713,20 @@ describe('PayPal webhook — full refund semantics', () => {
         }),
       }),
     });
+    expect(inserts.filter(({ table }) => table === 'audit_logs')).toEqual([]);
   });
 
-  it('keyset-paginates every recorded refund before classifying cumulative scope', async () => {
-    const firstPage = Array.from({ length: 500 }, () => ({ amount_cents: 1 }));
-    const { updates } = useWebhookRows({
+  it('uses the serialized ledger result as the sole cumulative full-refund proof', async () => {
+    const { rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
-      payment_refunds: [
-        { data: null, error: null },
-        { data: firstPage, error: null },
-        { data: [{ amount_cents: 500 }], error: null },
-      ],
       entitlements: [{ data: [], error: null }, { data: null, error: null }],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
-      audit_logs: { data: null, error: null },
-      orders: { data: null, error: null },
+    }, {
+      record: {
+        refund_amount_cents: 1,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+      },
     });
     const req = makeReplay({
       event_type: 'PAYMENT.CAPTURE.REFUNDED',
@@ -374,11 +741,203 @@ describe('PayPal webhook — full refund semantics', () => {
     const res = await POST(req as never);
 
     expect(res.status).toBe(200);
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
+    expectAtomicRefundFinalization(rpcCalls, { status: 'refunded' });
   });
+
+  it.each([
+    ['database error', { recordError: { message: 'ledger unavailable' } }],
+    ['missing proof', { record: null }],
+    ['mismatched proof', { record: { payment_id: 'wrong-payment' } }],
+  ] as const)('fails before access mutation when atomic refund recording returns %s', async (
+    _label,
+    rpcOptions,
+  ) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { updates, inserts, rpcCalls } = useWebhookRows({
+        payments: { data: basePayment, error: null },
+      }, rpcOptions);
+      const req = makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: `REFUND-RECORD-${_label.replaceAll(' ', '-').toUpperCase()}`,
+          amount: { value: '10.00', currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: `EVT-RECORD-${_label.replaceAll(' ', '-').toUpperCase()}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+      expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+      expect(inserts).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: 'full refund',
+      amount: '10.00',
+      record: {
+        refund_amount_cents: 1000,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: true,
+        terminal_history_consistent: false,
+      },
+    },
+    {
+      label: 'partial refund',
+      amount: '2.50',
+      record: {
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 250,
+        full_refund: false,
+        terminal_witness: false,
+        terminal_history_consistent: false,
+      },
+    },
+  ] as const)(
+    'fails before access or finalizer effects when $label history proof is false',
+    async ({ label, amount, record }) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const { updates, inserts, rpcCalls } = useWebhookRows({
+          payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+          entitlements: [{ data: [], error: null }, { data: null, error: null }],
+          license_keys: [{ data: [], error: null }, { data: null, error: null }],
+        }, { record });
+        const suffix = label.replaceAll(' ', '-').toUpperCase();
+        const res = await POST(makeReplay({
+          event_type: 'PAYMENT.CAPTURE.REFUNDED',
+          resource: {
+            id: `REFUND-FALSE-HISTORY-${suffix}`,
+            amount: { value: amount, currency_code: 'USD' },
+            supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+          },
+          id: `EVT-FALSE-HISTORY-${suffix}`,
+        }) as never);
+
+        expect(res.status).toBe(500);
+        expect(rpcCalls.map(({ name }) => name)).toEqual([
+          'commerce_record_paypal_refund_event',
+        ]);
+        expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+        expect(inserts).toEqual([]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    {
+      label: 'new refund with a zero returned event amount',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-ZERO-RETURNED-AMOUNT',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      record: {
+        refund_amount_cents: 0,
+        cumulative_refunded_cents: 0,
+        full_refund: false,
+        terminal_witness: false,
+      },
+    },
+    {
+      label: 'replayed refund with a smaller returned event amount',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-REPLAY-SMALLER-RETURNED-AMOUNT',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 100,
+        cumulative_refunded_cents: 100,
+        full_refund: false,
+        terminal_witness: false,
+      },
+    },
+    {
+      label: 'new supplied reversal with a smaller returned event amount',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      resource: {
+        id: 'REVERSAL-SMALLER-RETURNED-AMOUNT',
+        amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      record: {
+        refund_amount_cents: 500,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: true,
+      },
+    },
+    {
+      label: 'replayed supplied reversal with a zero returned event amount',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      resource: {
+        id: 'REVERSAL-REPLAY-ZERO-RETURNED-AMOUNT',
+        amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 0,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: true,
+      },
+    },
+    {
+      label: 'cumulative total below the returned event amount',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-CUMULATIVE-BELOW-EVENT',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      record: {
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 100,
+        full_refund: false,
+        terminal_witness: false,
+      },
+    },
+  ] as const)(
+    'rejects malformed atomic event money proof: $label',
+    async ({ eventType, resource, record }) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const { updates, inserts, rpcCalls } = useWebhookRows({
+          payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+          entitlements: [{ data: [], error: null }, { data: null, error: null }],
+          license_keys: [{ data: [], error: null }, { data: null, error: null }],
+        }, { record });
+        const res = await POST(makeReplay({
+          event_type: eventType,
+          resource,
+          id: `EVT-${resource.id}`,
+        }) as never);
+
+        expect(res.status).toBe(500);
+        expect(rpcCalls.map(({ name }) => name)).toEqual([
+          'commerce_record_paypal_refund_event',
+        ]);
+        expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+        expect(inserts).toEqual([]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 
   it('full refund emits no legacy partial queue for shared or suspended role owners', async () => {
     const { inserts } = useWebhookRows({
@@ -432,30 +991,23 @@ describe('PayPal webhook — full refund semantics', () => {
     );
   });
 
-  it('capture reversal (chargeback) always revokes in full even with a partial amount', async () => {
-    const { updates } = useWebhookRows({
+  it('capture reversal with omitted money uses the atomic ledger canonical amount', async () => {
+    const { updates, rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
-      payment_refunds: [
-        { data: null, error: null },
-        { data: [{ amount_cents: 250 }], error: null },
-      ],
       entitlements: [
         { data: [], error: null },
         { data: null, error: null },
       ],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
-      audit_logs: { data: null, error: null },
-      orders: { data: null, error: null },
     });
 
     const req = makeReplay({
       event_type: 'PAYMENT.CAPTURE.REVERSED',
       resource: {
         id: 'REVERSAL-1',
-        amount: { value: '2.50', currency_code: 'USD' },
         supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
       },
-      id: 'EVT-REVERSAL-PARTIAL-AMOUNT',
+      id: 'EVT-REVERSAL-MISSING-AMOUNT',
     });
 
     const res = await POST(req as never);
@@ -469,28 +1021,48 @@ describe('PayPal webhook — full refund semantics', () => {
             revocation_reason: 'reversed',
           }),
         },
-        {
-          table: 'payments',
-          payload: expect.objectContaining({ status: 'reversed' }),
-        },
       ]),
     );
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REVERSAL-1',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      amountCents: null,
+      currency: null,
+    });
+    expectAtomicRefundFinalization(rpcCalls, { status: 'reversed' });
   });
 
-  it('refund in a different currency is treated as full (comparison impossible, fail safe)', async () => {
-    const { updates, inserts } = useWebhookRows({
+  it('accepts an omitted-money reversal whose canonical remaining amount is zero', async () => {
+    const { rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
-      payment_refunds: [
-        { data: null, error: null },
-        { data: [{ amount_cents: 250 }], error: null },
-      ],
-      entitlements: [
-        { data: [], error: null },
-        { data: null, error: null },
-      ],
+      entitlements: [{ data: [], error: null }, { data: null, error: null }],
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
-      audit_logs: { data: null, error: null },
-      orders: { data: null, error: null },
+    }, {
+      record: {
+        refund_amount_cents: 0,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: true,
+      },
+    });
+
+    const res = await POST(makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REVERSED',
+      resource: {
+        id: 'REVERSAL-ZERO-REMAINING',
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-REVERSAL-ZERO-REMAINING',
+    }) as never);
+
+    expect(res.status).toBe(200);
+    expectAtomicRefundFinalization(rpcCalls, { status: 'reversed' });
+  });
+
+  it('refund in a different currency fails before ledger or access mutation', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      payments: { data: basePayment, error: null },
     });
 
     const req = makeReplay({
@@ -504,18 +1076,14 @@ describe('PayPal webhook — full refund semantics', () => {
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
-    expect(inserts).not.toContainEqual(
-      expect.objectContaining({ table: 'alerts' }),
-    );
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
   });
 
   it('partial refund becomes full once PayPal cumulative total covers the payment', async () => {
-    const { updates } = useWebhookRows({
+    const { rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
@@ -528,6 +1096,12 @@ describe('PayPal webhook — full refund semantics', () => {
       license_keys: [{ data: [], error: null }, { data: null, error: null }],
       audit_logs: { data: null, error: null },
       orders: { data: null, error: null },
+    }, {
+      record: {
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+      },
     });
 
     const req = makeReplay({
@@ -545,15 +1119,12 @@ describe('PayPal webhook — full refund semantics', () => {
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
+    expectAtomicRefundFinalization(rpcCalls, { status: 'refunded' });
   });
 
   it('full refund does not mark the payment refunded when entitlement revocation fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { updates } = useWebhookRows({
+    const { rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
@@ -590,16 +1161,15 @@ describe('PayPal webhook — full refund semantics', () => {
     expect(res.status).toBe(500);
     // The commit marker must not flip while revocation is incomplete —
     // otherwise the replay guard would skip the retry forever.
-    expect(updates).not.toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
+    expect(rpcCalls.map(({ name }) => name)).toEqual([
+      'commerce_record_paypal_refund_event',
+    ]);
     errorSpy.mockRestore();
   });
 
   it('full refund no longer performs a second legacy role queue insert', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const { updates } = useWebhookRows({
+    const { rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
@@ -637,17 +1207,235 @@ describe('PayPal webhook — full refund semantics', () => {
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
+    expectAtomicRefundFinalization(rpcCalls, { status: 'refunded' });
     errorSpy.mockRestore();
   });
+
+  it('returns 500 when the atomic refund finalizer fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      useWebhookRows({
+        payments: { data: basePayment, error: null },
+        payment_refunds: [
+          { data: null, error: null },
+          { data: [{ amount_cents: 1000 }], error: null },
+        ],
+        entitlements: [{ data: [], error: null }, { data: null, error: null }],
+        license_keys: [{ data: [], error: null }, { data: null, error: null }],
+        audit_logs: { data: null, error: null },
+      }, {
+        finalizeError: { message: 'atomic finalizer unavailable' },
+      });
+
+      const res = await POST(makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: 'REFUND-ATOMIC-ERROR',
+          amount: { value: '10.00', currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: 'EVT-REFUND-ATOMIC-ERROR',
+      }) as never);
+
+      expect(res.status).toBe(500);
+      expect(mockSb.rpc).toHaveBeenCalledWith(
+        'commerce_finalize_paypal_refund_status',
+        expect.objectContaining({
+          p_payment_id: 'payment-row-1',
+          p_order_id: 'order-1',
+          p_payment_status: 'refunded',
+        }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing proof', null],
+    [
+      'mismatched proof',
+      {
+        order_id: 'wrong-order',
+        payment_id: 'payment-row-1',
+        order_status: 'refunded',
+        payment_status: 'refunded',
+        already_terminal: false,
+      },
+    ],
+  ])('returns 500 when the atomic refund finalizer returns %s', async (_label, proof) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      useWebhookRows({
+        payments: { data: basePayment, error: null },
+        payment_refunds: [
+          { data: null, error: null },
+          { data: [{ amount_cents: 1000 }], error: null },
+        ],
+        entitlements: [{ data: [], error: null }, { data: null, error: null }],
+        license_keys: [{ data: [], error: null }, { data: null, error: null }],
+        audit_logs: { data: null, error: null },
+      }, { finalize: proof });
+
+      const res = await POST(makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: `REFUND-ATOMIC-${String(_label).toUpperCase().replaceAll(' ', '-')}`,
+          amount: { value: '10.00', currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: `EVT-REFUND-ATOMIC-${String(_label).toUpperCase().replaceAll(' ', '-')}`,
+      }) as never);
+
+      expect(res.status).toBe(500);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: 'refunded target as reversed',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      targetStatus: 'refunded',
+      returnedStatus: 'reversed',
+      resource: {
+        id: 'REFUND-FINALIZER-RETURNED-REVERSED',
+        amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+    {
+      label: 'reversed target as refunded',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      targetStatus: 'reversed',
+      returnedStatus: 'refunded',
+      resource: {
+        id: 'REVERSAL-FINALIZER-RETURNED-REFUNDED',
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+  ] as const)(
+    'rejects an atomic finalizer that reports $label',
+    async ({ eventType, targetStatus, returnedStatus, resource }) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const { rpcCalls } = useWebhookRows({
+          payments: { data: basePayment, error: null },
+          entitlements: [{ data: [], error: null }, { data: null, error: null }],
+          license_keys: [{ data: [], error: null }, { data: null, error: null }],
+        }, {
+          finalize: { payment_status: returnedStatus },
+        });
+
+        const res = await POST(makeReplay({
+          event_type: eventType,
+          resource,
+          id: `EVT-${resource.id}`,
+        }) as never);
+
+        expect(res.status).toBe(500);
+        expectAtomicRefundFinalization(rpcCalls, { status: targetStatus });
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 });
 
 describe('PayPal webhook — partial refund semantics', () => {
+  it.each([
+    '10oops',
+    '1e1',
+    '10.001',
+    '90071992547409.92',
+    '010.00',
+    '-10.00',
+    ' 10.00',
+  ])('rejects noncanonical capture refund money %j before the atomic ledger', async (value) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { rpcCalls, inserts, updates } = useWebhookRows({
+        payments: { data: basePayment, error: null },
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: 'REFUND-INVALID-MONEY',
+          amount: { value, currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: `EVT-REFUND-INVALID-MONEY-${value}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls).toEqual([]);
+      expect(inserts).toEqual([]);
+      expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('lets the signed atomic ledger adopt a legacy null capture resource type', async () => {
+    const { rpcCalls } = useWebhookRows({
+      payments: {
+        data: { ...basePayment, paypal_resource_type: null },
+        error: null,
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-LEGACY-NULL-CAPTURE',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-LEGACY-NULL-CAPTURE',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-LEGACY-NULL-CAPTURE',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      amountCents: 250,
+      currency: 'USD',
+    });
+  });
+
+  it('canonicalizes a legacy lowercase stored payment currency under the ledger lock', async () => {
+    const { rpcCalls } = useWebhookRows({
+      payments: {
+        data: { ...basePayment, currency: 'usd' },
+        error: null,
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-LEGACY-LOWERCASE-CURRENCY',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-LEGACY-LOWERCASE-CURRENCY',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-LEGACY-LOWERCASE-CURRENCY',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      amountCents: 250,
+      currency: 'USD',
+    });
+  });
+
   it('partial capture refund keeps access and raises an operator-review alert', async () => {
-    const { inserts, updates } = useWebhookRows({
+    const { inserts, updates, rpcCalls } = useWebhookRows({
       payments: { data: basePayment, error: null },
       payment_refunds: [
         { data: null, error: null },
@@ -679,50 +1467,25 @@ describe('PayPal webhook — partial refund semantics', () => {
       expect.objectContaining({ table: 'bot_action_queue' }),
     );
 
-    // Refund recorded
-    expect(inserts).toContainEqual({
-      table: 'payment_refunds',
-      payload: expect.objectContaining({
-        paypal_refund_id: 'REFUND-PARTIAL-1',
-        amount_cents: 250,
-      }),
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-PARTIAL-1',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      amountCents: 250,
+      currency: 'USD',
     });
 
-    // Operator-review alert
-    expect(inserts).toContainEqual({
-      table: 'alerts',
-      payload: expect.objectContaining({
-        guild_id: 'guild-1',
-        alert_type: 'partial_refund_review',
-        severity: 'warning',
-        metadata: expect.objectContaining({
-          paypal_refund_id: 'REFUND-PARTIAL-1',
-          order_id: 'order-1',
-          refund_amount_cents: 250,
-          payment_amount_cents: 1000,
-        }),
+    expect(rpcCalls).toContainEqual({
+      name: 'commerce_record_paypal_refund_event',
+      args: expect.objectContaining({
+        p_audit_details: expect.objectContaining({ source: 'paypal_webhook' }),
       }),
     });
-
-    // Audit trail records the retained-access decision
-    expect(inserts).toContainEqual({
-      table: 'audit_logs',
-      payload: expect.objectContaining({
-        action: 'order.refund_partial',
-        target_id: 'order-1',
-        details: expect.objectContaining({
-          paypal_refund_id: 'REFUND-PARTIAL-1',
-          refund_amount_cents: 250,
-          payment_amount_cents: 1000,
-          decision: 'access_retained_pending_review',
-        }),
-      }),
-    });
+    expect(inserts.filter(({ table }) => table === 'alerts' || table === 'audit_logs')).toEqual([]);
   });
 
   it('sale refund with negative amount is treated as partial by absolute value', async () => {
-    const { inserts, updates } = useWebhookRows({
-      payments: { data: basePayment, error: null },
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: { data: baseSalePayment, error: null },
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 500 }], error: null },
@@ -744,31 +1507,32 @@ describe('PayPal webhook — partial refund semantics', () => {
     const res = await POST(req as never);
     expect(res.status).toBe(200);
     expect(updates.filter((u) => u.table !== 'webhook_events')).toEqual([]);
-    expect(inserts).toContainEqual({
-      table: 'payment_refunds',
-      payload: expect.objectContaining({
-        paypal_refund_id: 'REFUND-SALE-NEG',
-        amount_cents: 500,
-      }),
+    expectAtomicRefundRecord(rpcCalls, {
+      refundId: 'REFUND-SALE-NEG',
+      eventType: 'PAYMENT.SALE.REFUNDED',
+      amountCents: 500,
+      currency: 'USD',
+      providerPaymentId: 'SALE-1',
+      resourceType: 'sale',
     });
-    expect(inserts).toContainEqual({
-      table: 'alerts',
-      payload: expect.objectContaining({ alert_type: 'partial_refund_review' }),
-    });
+    expect(inserts.filter(({ table }) => table === 'alerts' || table === 'audit_logs')).toEqual([]);
   });
 
-  it('duplicate partial-refund alert (23505) is tolerated as dedupe success', async () => {
-    const { inserts } = useWebhookRows({
+  it('atomic partial replay treats existing audit and alert as dedupe success', async () => {
+    const { inserts, rpcCalls } = useWebhookRows({
       payments: { data: basePayment, error: null },
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
       ],
-      alerts: {
-        data: null,
-        error: { code: '23505', message: 'duplicate key value violates unique constraint' },
-      },
+      alerts: { data: null, error: null },
       audit_logs: { data: null, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        partial_audit_recorded: false,
+        partial_alert_recorded: false,
+      },
     });
 
     const req = makeReplay({
@@ -783,33 +1547,433 @@ describe('PayPal webhook — partial refund semantics', () => {
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
-    expect(inserts).toContainEqual({
-      table: 'audit_logs',
-      payload: expect.objectContaining({ action: 'order.refund_partial' }),
-    });
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+    expect(inserts.filter(({ table }) => table === 'alerts' || table === 'audit_logs')).toEqual([]);
   });
 });
 
 describe('PayPal webhook — refund idempotency', () => {
-  it('replayed refund for an already-refunded payment is skipped entirely', async () => {
-    const { inserts, updates } = useWebhookRows({
-      payments: { data: { ...basePayment, status: 'refunded' }, error: null },
-    });
-
-    const req = makeReplay({
-      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+  it.each([
+    {
+      paymentStatus: 'refunded',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
       resource: {
         id: 'REFUND-REPLAY',
         amount: { value: '10.00', currency_code: 'USD' },
         supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
       },
-      id: 'EVT-REFUND-ALREADY-DONE',
+    },
+    {
+      paymentStatus: 'reversed',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      resource: {
+        id: 'REVERSAL-REPLAY',
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+  ] as const)('terminal $paymentStatus replay requires its exact existing ledger witness', async ({
+    paymentStatus,
+    eventType,
+    resource,
+  }) => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: { data: { ...basePayment, status: paymentStatus }, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        terminal_history_replay: true,
+        terminal_payment_status: paymentStatus,
+      },
+    });
+
+    const req = makeReplay({
+      event_type: eventType,
+      resource,
+      id: `EVT-${paymentStatus.toUpperCase()}-ALREADY-DONE`,
     });
 
     const res = await POST(req as never);
     expect(res.status).toBe(200);
     expect(inserts).toEqual([]);
     expect(updates.filter((u) => u.table !== 'webhook_events')).toEqual([]);
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+  });
+
+  it('lets the losing same-refund handler accept a concurrent completed-to-refunded successor', async () => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: [
+        { data: basePayment, error: null },
+        { data: basePayment, error: null },
+      ],
+      entitlements: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+      license_keys: [
+        { data: [], error: null },
+        { data: null, error: null },
+      ],
+    }, {
+      recordSequence: [
+        {},
+        {
+          already_recorded: true,
+          terminal_witness: true,
+          terminal_history_consistent: true,
+          terminal_history_replay: true,
+          terminal_payment_status: 'refunded',
+        },
+      ],
+    });
+    const resource = {
+      id: 'REFUND-CONCURRENT-SAME',
+      amount: { value: '10.00', currency_code: 'USD' },
+      supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+    };
+
+    const results = await Promise.all([
+      POST(makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource,
+        id: 'EVT-CONCURRENT-SAME-A',
+      }) as never),
+      POST(makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource,
+        id: 'EVT-CONCURRENT-SAME-B',
+      }) as never),
+    ]);
+
+    expect(results.map((result) => result.status)).toEqual([200, 200]);
+    expect(rpcCalls.filter(({ name }) => name === 'commerce_record_paypal_refund_event'))
+      .toHaveLength(2);
+    expect(rpcCalls.filter(({ name }) => name === 'commerce_finalize_paypal_refund_status'))
+      .toHaveLength(1);
+    expect(updates.filter(({ table }) => table === 'entitlements')).toHaveLength(1);
+    expect(updates.filter(({ table }) => table === 'license_keys')).toHaveLength(1);
+    expect(inserts.filter(({ table }) => table === 'alerts' || table === 'audit_logs'))
+      .toEqual([]);
+  });
+
+  it('does not turn an old partial refund replay into a new full witness after reversal', async () => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: { data: { ...basePayment, status: 'reversed' }, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: false,
+        terminal_history_replay: true,
+        terminal_payment_status: 'reversed',
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-OLD-PARTIAL',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-OLD-PARTIAL-AFTER-REVERSAL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+    expect(inserts).toEqual([]);
+    expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+  });
+
+  it('accepts a delayed full refund replay after a zero-remaining reversal witness', async () => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: { data: { ...basePayment, status: 'reversed' }, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 1000,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: false,
+        terminal_history_consistent: true,
+        terminal_history_replay: true,
+        terminal_payment_status: 'reversed',
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-FULL-BEFORE-ZERO-REVERSAL',
+        amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-FULL-REFUND-AFTER-ZERO-REVERSAL',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+    expect(inserts).toEqual([]);
+    expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+  });
+
+  it('rejects a reversed payment whose locked ledger has no reversal witness', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts, updates, rpcCalls } = useWebhookRows({
+        payments: { data: { ...basePayment, status: 'reversed' }, error: null },
+      }, {
+        record: {
+          already_recorded: true,
+          terminal_history_consistent: false,
+          terminal_history_replay: true,
+          terminal_payment_status: 'reversed',
+        },
+      });
+
+      const req = makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: 'REFUND-EXISTS-BUT-REVERSAL-MISSING',
+          amount: { value: '10.00', currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: 'EVT-CORRUPTED-REVERSED-HISTORY',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+      expect(inserts).toEqual([]);
+      expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('does not let an old partial replay own a later full transition before finalization', async () => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      payments: { data: basePayment, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: false,
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-OLD-PARTIAL-BEFORE-FINALIZE',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-OLD-PARTIAL-BEFORE-FINALIZE',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+    expect(inserts).toEqual([]);
+    expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+  });
+
+  it('accepts an old partial replay when a concurrent handler already finalized the later full refund', async () => {
+    const { inserts, updates, rpcCalls } = useWebhookRows({
+      // This is the stale pre-RPC read. The locked proof below is newer.
+      payments: { data: basePayment, error: null },
+    }, {
+      record: {
+        already_recorded: true,
+        refund_amount_cents: 250,
+        cumulative_refunded_cents: 1000,
+        full_refund: true,
+        terminal_witness: false,
+        terminal_history_consistent: true,
+        terminal_history_replay: true,
+        terminal_payment_status: 'refunded',
+      },
+    });
+
+    const req = makeReplay({
+      event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      resource: {
+        id: 'REFUND-OLD-PARTIAL-CONCURRENT-FINALIZE',
+        amount: { value: '2.50', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+      id: 'EVT-OLD-PARTIAL-CONCURRENT-FINALIZE',
+    });
+
+    const res = await POST(req as never);
+    expect(res.status).toBe(200);
+    expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+    expect(inserts).toEqual([]);
+    expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+  });
+
+  it.each([
+    ['refunded', 'completed'],
+    ['refunded', 'reversed'],
+    ['reversed', 'completed'],
+    ['reversed', 'refunded'],
+  ] as const)(
+    'rejects a non-monotonic locked payment proof from %s to %s',
+    async (loadedStatus, lockedStatus) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const { updates, rpcCalls } = useWebhookRows({
+          payments: { data: { ...basePayment, status: loadedStatus }, error: null },
+        }, {
+          record: {
+            already_recorded: true,
+            terminal_history_replay: lockedStatus !== 'completed',
+            terminal_payment_status: lockedStatus,
+          },
+        });
+        const req = makeReplay({
+          event_type: 'PAYMENT.CAPTURE.REFUNDED',
+          resource: {
+            id: `REFUND-NON-MONOTONIC-${loadedStatus}-${lockedStatus}`,
+            amount: { value: '10.00', currency_code: 'USD' },
+            supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+          },
+          id: `EVT-NON-MONOTONIC-${loadedStatus}-${lockedStatus}`,
+        });
+
+        const res = await POST(req as never);
+        expect(res.status).toBe(500);
+        expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+        expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
+
+  it('rejects an opposite terminal event even when an RPC claims its witness exists', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts, updates, rpcCalls } = useWebhookRows({
+        payments: { data: { ...basePayment, status: 'refunded' }, error: null },
+      }, {
+        record: {
+          already_recorded: true,
+          terminal_history_replay: true,
+          terminal_payment_status: 'refunded',
+        },
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REVERSED',
+        resource: {
+          id: 'REVERSAL-CONFLICTING-TERMINAL',
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: 'EVT-REVERSAL-CONFLICTING-TERMINAL',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+      expect(inserts).toEqual([]);
+      expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('rejects an unknown refund id for a terminal payment', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts, updates, rpcCalls } = useWebhookRows({
+        payments: { data: { ...basePayment, status: 'refunded' }, error: null },
+      }, {
+        record: {
+          terminal_history_replay: true,
+          terminal_payment_status: 'refunded',
+        },
+      });
+      const req = makeReplay({
+        event_type: 'PAYMENT.CAPTURE.REFUNDED',
+        resource: {
+          id: 'REFUND-UNKNOWN-AFTER-TERMINAL',
+          amount: { value: '10.00', currency_code: 'USD' },
+          supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+        },
+        id: 'EVT-REFUND-UNKNOWN-AFTER-TERMINAL',
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls.map(({ name }) => name)).toEqual(['commerce_record_paypal_refund_event']);
+      expect(inserts).toEqual([]);
+      expect(updates.filter((update) => update.table !== 'webhook_events')).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      label: 'malformed refund id',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      status: 'refunded',
+      resource: {
+        id: 'REFUND BAD ID',
+        amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+    {
+      label: 'malformed refund money',
+      eventType: 'PAYMENT.CAPTURE.REFUNDED',
+      status: 'refunded',
+      resource: {
+        id: 'REFUND-BAD-MONEY-TERMINAL',
+        amount: { value: '10oops', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+    {
+      label: 'malformed supplied reversal money',
+      eventType: 'PAYMENT.CAPTURE.REVERSED',
+      status: 'reversed',
+      resource: {
+        id: 'REVERSAL-BAD-MONEY-TERMINAL',
+        amount: { value: '1e1', currency_code: 'USD' },
+        supplementary_data: { related_ids: { capture_id: 'CAPTURE-1' } },
+      },
+    },
+  ] as const)('rejects $label before terminal ledger validation', async ({
+    eventType,
+    status,
+    resource,
+  }) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { rpcCalls } = useWebhookRows({
+        payments: { data: { ...basePayment, status }, error: null },
+      }, {
+        record: { already_recorded: true },
+      });
+      const req = makeReplay({
+        event_type: eventType,
+        resource,
+        id: `EVT-${resource.id}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(rpcCalls).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('replayed partial refund with an already-recorded refund id does not double-process', async () => {
@@ -822,6 +1986,8 @@ describe('PayPal webhook — refund idempotency', () => {
         },
         { data: [{ amount_cents: 250 }], error: null },
       ],
+    }, {
+      record: { already_recorded: true },
     });
 
     const req = makeReplay({
@@ -1019,17 +2185,81 @@ describe('PayPal webhook — refund ordering (out-of-order webhooks)', () => {
 });
 
 describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale payments)', () => {
-  it('PAYMENT.SALE.COMPLETED persists the sale currency instead of hardcoded USD', async () => {
-    const { inserts } = useWebhookRows({
-      orders: {
-        data: {
-          id: 'order-sub-eur',
-          customer_id: 'customer-1',
-          guild_id: 'guild-1',
-          paypal_subscription_id: 'SUB-EUR-1',
+  it.each([
+    ['underpayment', '9.98', 'EUR'],
+    ['overpayment', '10.00', 'EUR'],
+    ['currency mismatch', '9.99', 'USD'],
+  ])('PAYMENT.SALE.COMPLETED rejects renewal %s before payment or fulfillment', async (
+    _label,
+    total,
+    currency,
+  ) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const context = completedSaleRenewalContext({
+        orderId: `order-renewal-${_label.replaceAll(' ', '-')}`,
+        subscriptionId: `SUB-RENEWAL-${_label.replaceAll(' ', '-').toUpperCase()}`,
+        saleId: `SALE-RENEWAL-${_label.replaceAll(' ', '-').toUpperCase()}`,
+      });
+      const { inserts } = useWebhookRows(context.rows);
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: context.payload.order_id.replace('order-', 'SALE-').toUpperCase(),
+          billing_agreement_id: context.order.paypal_subscription_id,
+          amount: { total, currency },
         },
-        error: null,
-      },
+        id: `EVT-RENEWAL-${_label.replaceAll(' ', '-').toUpperCase()}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'payments' }));
+      expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'bot_action_queue' }));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    '10oops',
+    '1e1',
+    '9.999',
+    '90071992547409.92',
+    '09.99',
+    '-9.99',
+    ' 9.99',
+  ])('PAYMENT.SALE.COMPLETED rejects noncanonical money %j before persistence', async (total) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { inserts } = useWebhookRows({});
+      const req = makeReplay({
+        event_type: 'PAYMENT.SALE.COMPLETED',
+        resource: {
+          id: 'SALE-INVALID-MONEY',
+          billing_agreement_id: 'SUB-INVALID-MONEY',
+          amount: { total, currency: 'EUR' },
+        },
+        id: `EVT-SALE-INVALID-MONEY-${total}`,
+      });
+
+      const res = await POST(req as never);
+      expect(res.status).toBe(500);
+      expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'payments' }));
+      expect(inserts).not.toContainEqual(expect.objectContaining({ table: 'bot_action_queue' }));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('PAYMENT.SALE.COMPLETED persists the sale currency instead of hardcoded USD', async () => {
+    const context = completedSaleRenewalContext({
+      orderId: 'order-sub-eur',
+      subscriptionId: 'SUB-EUR-1',
+      saleId: 'SALE-EUR-1',
+    });
+    const { inserts } = useWebhookRows({
+      ...context.rows,
       payments: {
         data: {
           id: 'payment-sale-eur-1',
@@ -1040,6 +2270,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
           amount_cents: 999,
           currency: 'EUR',
           status: 'completed',
+          paypal_resource_type: 'sale',
         },
         error: null,
       },
@@ -1064,6 +2295,20 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
         amount_cents: 999,
         currency: 'EUR',
         status: 'completed',
+        paypal_resource_type: 'sale',
+      }),
+    });
+    expect(inserts).toContainEqual({
+      table: 'bot_action_queue',
+      payload: expect.objectContaining({
+        idempotency_key: 'paypal:sale:SALE-EUR-1:fulfill_subscription_renewal',
+        action: 'fulfill_subscription',
+        payload: expect.objectContaining({
+          fulfillment_type: 'subscription_renewed',
+          existing_entitlement_id: 'entitlement-order-sub-eur',
+          plan_id: 'plan-order-sub-eur',
+          discord_id: 'discord-1',
+        }),
       }),
     });
   });
@@ -1125,16 +2370,13 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
   });
 
   it('PAYMENT.SALE.COMPLETED accepts a 23505 replay only when the persisted row is exact', async () => {
+    const context = completedSaleRenewalContext({
+      orderId: 'order-exact-replay',
+      subscriptionId: 'SUB-EXACT-REPLAY',
+      saleId: 'SALE-EXACT-REPLAY',
+    });
     const { inserts } = useWebhookRows({
-      orders: {
-        data: {
-          id: 'order-exact-replay',
-          customer_id: 'customer-1',
-          guild_id: 'guild-1',
-          paypal_subscription_id: 'SUB-EXACT-REPLAY',
-        },
-        error: null,
-      },
+      ...context.rows,
       payments: [
         { data: null, error: { code: '23505', message: 'duplicate payment' } },
         {
@@ -1147,6 +2389,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
             amount_cents: 999,
             currency: 'EUR',
             status: 'completed',
+            paypal_resource_type: 'sale',
           },
           error: null,
         },
@@ -1181,6 +2424,8 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
             customer_id: 'customer-1',
             guild_id: 'guild-1',
             paypal_subscription_id: 'SUB-SUCCESSOR-REPLAY',
+            amount_cents: 999,
+            currency: 'EUR',
             status: successorOrderStatus,
           },
           error: null,
@@ -1194,6 +2439,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
               customer_id: 'customer-1',
               guild_id: 'guild-1',
               paypal_payment_id: 'SALE-SUCCESSOR-REPLAY',
+              paypal_resource_type: 'sale',
               amount_cents: 999,
               currency: 'EUR',
               status: successorStatus,
@@ -1236,6 +2482,8 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
               customer_id: 'customer-1',
               guild_id: 'guild-1',
               paypal_subscription_id: 'SUB-SUCCESSOR-STATE-MISMATCH',
+              amount_cents: 999,
+              currency: 'EUR',
               status: orderStatus,
             },
             error: null,
@@ -1249,6 +2497,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
                 customer_id: 'customer-1',
                 guild_id: 'guild-1',
                 paypal_payment_id: 'SALE-SUCCESSOR-STATE-MISMATCH',
+                paypal_resource_type: 'sale',
                 amount_cents: 999,
                 currency: 'EUR',
                 status: successorStatus,
@@ -1280,6 +2529,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     ['order', { order_id: 'order-different' }],
     ['amount', { amount_cents: 1 }],
     ['currency', { currency: 'USD' }],
+    ['resource type', { paypal_resource_type: 'capture' }],
   ])(
     'PAYMENT.SALE.COMPLETED rejects a successor-state replay with a different %s identity',
     async (_identity, persistedOverride) => {
@@ -1305,6 +2555,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
                 customer_id: 'customer-1',
                 guild_id: 'guild-1',
                 paypal_payment_id: 'SALE-SUCCESSOR-MISMATCH',
+                paypal_resource_type: 'sale',
                 amount_cents: 999,
                 currency: 'EUR',
                 status: 'refunded',
@@ -1338,7 +2589,13 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
       new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 }),
     );
     try {
+      const context = completedSaleRenewalContext({
+        orderId: 'order-resumed-sale',
+        subscriptionId: 'SUB-RESUMED-SALE',
+        saleId: 'SALE-RESUMED',
+      });
       const { inserts, updates } = useWebhookRows({
+        ...context.rows,
         orders: [
           {
             data: [
@@ -1351,12 +2608,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
             error: null,
           },
           {
-            data: {
-              id: 'order-resumed-sale',
-              customer_id: 'customer-1',
-              guild_id: 'guild-1',
-              paypal_subscription_id: 'SUB-RESUMED-SALE',
-            },
+            data: context.order,
             error: null,
           },
         ],
@@ -1375,6 +2627,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
               customer_id: 'customer-1',
               guild_id: 'guild-1',
               paypal_payment_id: 'SALE-RESUMED',
+              paypal_resource_type: 'sale',
               amount_cents: 999,
               currency: 'EUR',
               status: 'completed',
@@ -1431,6 +2684,7 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
               customer_id: 'customer-1',
               guild_id: 'guild-1',
               paypal_payment_id: 'SALE-MISMATCHED-REPLAY',
+              paypal_resource_type: 'sale',
               amount_cents: 1,
               currency: 'EUR',
               status: 'completed',
@@ -1456,11 +2710,12 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     }
   });
 
-  it('partial sale refund on a legacy USD-labeled payment stays partial when the payload confirms the sale currency', async () => {
-    const { inserts, updates } = useWebhookRows({
+  it('legacy sale-currency mismatch fails before poisoning the exact refund ledger', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, updates, rpcCalls } = useWebhookRows({
       // Legacy row: amount_cents parsed from the EUR sale payload, but the
       // currency label was persisted as hardcoded 'USD'.
-      payments: { data: basePayment, error: null },
+      payments: { data: baseSalePayment, error: null },
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
@@ -1481,30 +2736,17 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    // Access retained: no revocations, operator review raised instead
+    expect(res.status).toBe(500);
     expect(updates.filter((u) => u.table !== 'webhook_events')).toEqual([]);
-    expect(inserts).not.toContainEqual(
-      expect.objectContaining({ table: 'bot_action_queue' }),
-    );
-    expect(inserts).toContainEqual({
-      table: 'alerts',
-      payload: expect.objectContaining({ alert_type: 'partial_refund_review' }),
-    });
-    expect(inserts).toContainEqual({
-      table: 'audit_logs',
-      payload: expect.objectContaining({
-        action: 'order.refund_partial',
-        details: expect.objectContaining({
-          decision: 'access_retained_pending_review',
-        }),
-      }),
-    });
+    expect(inserts).toEqual([]);
+    expect(rpcCalls).toEqual([]);
+    errorSpy.mockRestore();
   });
 
-  it('sale refund in a different currency WITHOUT payload confirmation is still treated as full', async () => {
-    const { updates, inserts } = useWebhookRows({
-      payments: [{ data: basePayment, error: null }, { data: null, error: null }],
+  it('sale refund currency mismatch fails before ledger or access mutation', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
+      payments: [{ data: baseSalePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
         { data: [{ amount_cents: 250 }], error: null },
@@ -1531,18 +2773,15 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
-    expect(inserts).not.toContainEqual(
-      expect.objectContaining({ table: 'alerts' }),
-    );
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
   });
 
-  it('capture refund keeps the strict currency fail-safe even when the payload self-confirms its currency', async () => {
-    const { updates, inserts } = useWebhookRows({
+  it('capture refund currency mismatch fails even when the payload self-confirms it', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { inserts, rpcCalls } = useWebhookRows({
       payments: [{ data: basePayment, error: null }, { data: null, error: null }],
       payment_refunds: [
         { data: null, error: null },
@@ -1571,16 +2810,10 @@ describe('PayPal webhook — refund currency semantics (legacy USD-labeled sale 
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    // Capture payments always persisted the checkout currency — the legacy
-    // tolerance is sale-only, so this stays a full revocation.
-    expect(updates).toContainEqual({
-      table: 'payments',
-      payload: expect.objectContaining({ status: 'refunded' }),
-    });
-    expect(inserts).not.toContainEqual(
-      expect.objectContaining({ table: 'alerts' }),
-    );
+    expect(res.status).toBe(500);
+    expect(rpcCalls).toEqual([]);
+    expect(inserts).toEqual([]);
+    errorSpy.mockRestore();
   });
 });
 

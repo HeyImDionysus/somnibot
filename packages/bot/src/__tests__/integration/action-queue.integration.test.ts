@@ -4,9 +4,11 @@
  * The bot_action_queue is the backbone of async task processing.
  * Columns: id, guild_id, action (TEXT), payload (JSONB), status, retry_count,
  *          created_at, started_at, completed_at, result, error_message.
- * bot_action_queue_claim(p_action_id UUID) atomically claims a single action.
+ * bot_action_queue_claim(p_action_id UUID, p_protocol_version INTEGER)
+ * atomically claims a single action.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
 import {
@@ -37,6 +39,7 @@ afterAll(async () => {
 
 describe('Action queue', () => {
   let actionId: string;
+  let claimToken: string;
 
   it('enqueues an action', async () => {
     const { data, error } = await supa
@@ -57,9 +60,10 @@ describe('Action queue', () => {
   });
 
   it('claims a pending action via bot_action_queue_claim RPC', async () => {
-    // RPC takes a single UUID, atomically moves pending → processing
+    // RPC binds the worker to the current protocol before moving pending → processing.
     const { data, error } = await supa.rpc('bot_action_queue_claim', {
       p_action_id: actionId,
+      p_protocol_version: 2,
     });
 
     expect(error).toBeNull();
@@ -70,12 +74,14 @@ describe('Action queue', () => {
     expect(claimed[0].id).toBe(actionId);
     expect(claimed[0].status).toBe('processing');
     expect(claimed[0].action).toBe('SEND_WELCOME_DM');
+    claimToken = claimed[0].claim_token;
   });
 
   it('does not re-claim an already processing action', async () => {
     // Try claiming the same action again — should return empty
     const { data, error } = await supa.rpc('bot_action_queue_claim', {
       p_action_id: actionId,
+      p_protocol_version: 2,
     });
 
     expect(error).toBeNull();
@@ -84,18 +90,23 @@ describe('Action queue', () => {
   });
 
   it('marks an action as completed', async () => {
-    const { data, error } = await supa
-      .from('bot_action_queue')
-      .update({
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        result: { delivered: true },
-      })
-      .eq('id', actionId)
-      .select()
-      .single();
+    const { error } = await supa.rpc('bot_action_queue_finish_claim', {
+      p_action_id: actionId,
+      p_claim_token: claimToken,
+      p_success: true,
+      p_result: { delivered: true },
+      p_error: null,
+    });
 
     expect(error).toBeNull();
+
+    const { data, error: readError } = await supa
+      .from('bot_action_queue')
+      .select('status, result')
+      .eq('id', actionId)
+      .single();
+
+    expect(readError).toBeNull();
     expect(data!.status).toBe('completed');
     expect(data!.result).toEqual({ delivered: true });
   });
@@ -155,6 +166,142 @@ describe('Dead-letter queue', () => {
     expect(dlqEntry!.action).toBe('SEND_NOTIFICATION');
     expect(dlqEntry!.error_message).toContain('Missing Permissions');
     expect(dlqEntry!.retry_count).toBe(3);
+  });
+
+  it('atomically retries a generic DLQ row once across concurrent calls and stays opaque', async () => {
+    const marker = `generic-retry-${randomUUID()}`;
+    const originalId = randomUUID();
+    const { data: dlq, error: dlqError } = await supa
+      .from('action_queue_dlq')
+      .insert({
+        guild_id: GUILD_ID,
+        original_id: originalId,
+        action: 'SEND_NOTIFICATION',
+        payload: { marker },
+        error_message: 'first failure',
+        retry_count: 5,
+      })
+      .select('id')
+      .single();
+    expect(dlqError).toBeNull();
+
+    const attempts = await Promise.all([
+      supa.rpc('bot_action_queue_retry_dlq', {
+        p_dlq_id: dlq!.id,
+        p_guild_id: GUILD_ID,
+      }),
+      supa.rpc('bot_action_queue_retry_dlq', {
+        p_dlq_id: dlq!.id,
+        p_guild_id: GUILD_ID,
+      }),
+    ]);
+    expect(attempts.every(({ error }) => error === null)).toBe(true);
+    const outcomes = attempts.map(({ data }) => {
+      const rows = Array.isArray(data) ? data : [];
+      expect(rows).toHaveLength(1);
+      return rows[0] as {
+        action_id: string | null;
+        action_status: string | null;
+        disposition: string;
+      };
+    });
+    expect(outcomes.map(({ disposition }) => disposition).sort()).toEqual([
+      'already_retried',
+      'requeued',
+    ]);
+    expect(outcomes.find(({ disposition }) => disposition === 'requeued')).toMatchObject({
+      action_id: expect.any(String),
+      action_status: 'pending',
+    });
+    expect(outcomes.find(({ disposition }) => disposition === 'already_retried')).toEqual({
+      action_id: null,
+      action_status: null,
+      disposition: 'already_retried',
+    });
+
+    const { data: replacements, error: replacementsError } = await supa
+      .from('bot_action_queue')
+      .select('id,status,payload')
+      .eq('guild_id', GUILD_ID)
+      .eq('action', 'SEND_NOTIFICATION')
+      .contains('payload', { marker });
+    expect(replacementsError).toBeNull();
+    expect(replacements).toHaveLength(1);
+    expect(replacements![0]).toMatchObject({ status: 'pending', payload: { marker } });
+
+    const replay = await supa.rpc('bot_action_queue_retry_dlq', {
+      p_dlq_id: dlq!.id,
+      p_guild_id: GUILD_ID,
+    });
+    expect(replay.error).toBeNull();
+    expect(replay.data).toEqual([{
+      action_id: null,
+      action_status: null,
+      disposition: 'already_retried',
+    }]);
+
+    const wrongGuildMarker = `wrong-guild-${randomUUID()}`;
+    const { data: wrongGuildDlq, error: wrongGuildDlqError } = await supa
+      .from('action_queue_dlq')
+      .insert({
+        guild_id: GUILD_ID,
+        original_id: randomUUID(),
+        action: 'SEND_NOTIFICATION',
+        payload: { marker: wrongGuildMarker },
+      })
+      .select('id')
+      .single();
+    expect(wrongGuildDlqError).toBeNull();
+    const wrongGuild = await supa.rpc('bot_action_queue_retry_dlq', {
+      p_dlq_id: wrongGuildDlq!.id,
+      p_guild_id: `${GUILD_ID}-wrong`,
+    });
+    expect(wrongGuild.error).toBeNull();
+    expect(wrongGuild.data).toEqual([{
+      action_id: null,
+      action_status: null,
+      disposition: 'already_retried',
+    }]);
+    const { data: wrongGuildAfter } = await supa
+      .from('action_queue_dlq')
+      .select('retried')
+      .eq('id', wrongGuildDlq!.id)
+      .single();
+    expect(wrongGuildAfter?.retried).toBe(false);
+    const { count: wrongGuildClones } = await supa
+      .from('bot_action_queue')
+      .select('*', { count: 'exact', head: true })
+      .contains('payload', { marker: wrongGuildMarker });
+    expect(wrongGuildClones).toBe(0);
+
+    const exactMarker = `exact-carrier-${randomUUID()}`;
+    const { data: exactDlq, error: exactDlqError } = await supa
+      .from('action_queue_dlq')
+      .insert({
+        guild_id: GUILD_ID,
+        original_id: randomUUID(),
+        action: 'fulfill_purchase',
+        payload: { guild_id: GUILD_ID, marker: exactMarker },
+      })
+      .select('id')
+      .single();
+    expect(exactDlqError).toBeNull();
+    const exactAttempt = await supa.rpc('bot_action_queue_retry_dlq', {
+      p_dlq_id: exactDlq!.id,
+      p_guild_id: GUILD_ID,
+    });
+    expect(exactAttempt.error).toBeNull();
+    expect(exactAttempt.data).toEqual([{
+      action_id: null,
+      action_status: null,
+      disposition: 'exact_carrier_required',
+    }]);
+    const { data: exactAfter } = await supa
+      .from('action_queue_dlq')
+      .select('retried')
+      .eq('id', exactDlq!.id)
+      .single();
+    expect(exactAfter?.retried).toBe(false);
   });
 });
 

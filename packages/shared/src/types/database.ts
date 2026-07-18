@@ -16,6 +16,19 @@
 // Generic JSON type for JSONB columns
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
+// Two-phase privacy RPC results. Both purge functions return JSONB so callers
+// must inspect purge_status instead of treating a successful RPC as completion.
+export type PrivacyPurgeStatus = 'pending_role_cleanup' | 'completed';
+
+export interface PrivacyPurgeRpcResult {
+  [key: string]: Json;
+  purge_status: PrivacyPurgeStatus;
+  pending_role_cleanup_count: number;
+}
+
+export type PurgeMemberDataRpcResult = PrivacyPurgeRpcResult;
+export type PurgeGuildDataRpcResult = PrivacyPurgeRpcResult;
+
 // Auto-Mod Rule Config Types
 export type AutoModRuleType =
   | 'word_filter'
@@ -1040,6 +1053,7 @@ export interface DbLicenseKey {
   updated_at: string;
   failed_attempts: number;
   last_failed_at: string | null;
+  commerce_required_order_status: 'completed' | null;
 }
 
 export interface DbEntitlement {
@@ -1061,6 +1075,7 @@ export interface DbEntitlement {
   cancelled_at: string | null;
   created_at: string;
   updated_at: string;
+  commerce_required_order_status: 'completed' | null;
 }
 
 export interface DbProductLicenseConfig {
@@ -1091,6 +1106,7 @@ export interface DbLicenseSession {
   last_seen_at: string;
   deactivated_at: string | null;
   deactivation_reason: 'user_deactivated' | 'admin_revoked' | 'device_limit' | 'heartbeat_timeout' | 'entitlement_revoked' | null;
+  commerce_required_license_status: 'active' | null;
 }
 
 export interface DbLicenseValidation {
@@ -1119,6 +1135,9 @@ export interface DbPayment {
   created_at: string;
   // V19 Audit: added missing schema fields
   provider: string | null;
+  paypal_resource_type: 'capture' | 'sale' | null;
+  commerce_required_order_status: 'completed' | 'refunded' | null;
+  commerce_settled_capture_order_id: string | null;
 }
 
 // — Commerce — Giveaways —
@@ -2285,4 +2304,48 @@ export interface DbPaymentRefund {
   amount_cents: number | null;
   currency: string | null;
   created_at: string;
+  paypal_resource_type: 'capture' | 'sale' | null;
+  is_terminal_event_witness: boolean;
+}
+
+// ── Admin Refund Attempts (commerce_admin_refund_operations) ─
+// Append-only PayPal request attempts. Terminal failures remain as durable
+// history; request_id is always the same UUID as attempt_id.
+
+export type CommerceAdminRefundAttemptStatus =
+  | 'prepared'
+  | 'pending'
+  | 'provider_completed'
+  | 'failed'
+  | 'cancelled'
+  | 'completed';
+
+export interface DbCommerceAdminRefundOperation {
+  attempt_id: string;
+  request_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string | null;
+  actor_id: string;
+  paypal_order_id: string | null;
+  payment_id: string | null;
+  paypal_payment_id: string | null;
+  resource_type: 'capture' | null;
+  order_amount_cents: number;
+  existing_refunded_cents: number;
+  refund_amount_cents: number;
+  currency: string;
+  reason: string;
+  provider_required: boolean;
+  status: CommerceAdminRefundAttemptStatus;
+  provider_status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
+  paypal_refund_id: string | null;
+  provider_reported_amount_cents: number | null;
+  provider_reported_currency: string | null;
+  created_at: string;
+  updated_at: string;
+  provider_outcome_at: string | null;
+  completed_at: string | null;
 }

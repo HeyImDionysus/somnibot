@@ -48,12 +48,13 @@ export const ACTION_QUEUE_LANES: readonly ActionQueueLane[] = ['commerce', 'game
  * classification in public.bot_action_queue_lane_for_action() — keep in sync.
  *
  * - fulfill_*: entitlement grant/revoke pipeline for paid orders and
- *   subscriptions (fulfill_giveaway_prize also grants real product
- *   entitlements via EntitlementService, so it rides the commerce lane).
+ *   subscriptions (giveaway fulfillment and winner notification also grant
+ *   or report delivery of real product entitlements, so they ride commerce).
  * - deliver_receipt: persistent re-delivery of a paid customer's
  *   receipt/license-key DM.
  * - revoke_roles: entitlement revocation after refunds/cancellations —
  *   only ever queued by the commerce refund/webhook paths.
+ * - reconcile_entitlement_roles: tokenized repair/cleanup of paid roles.
  */
 export const COMMERCE_LANE_ACTIONS: ReadonlySet<string> = new Set([
   'fulfill_purchase',
@@ -61,8 +62,10 @@ export const COMMERCE_LANE_ACTIONS: ReadonlySet<string> = new Set([
   'fulfill_cancellation',
   'fulfill_suspension',
   'fulfill_giveaway_prize',
+  'notify_giveaway_winner',
   'deliver_receipt',
   'revoke_roles',
+  'reconcile_entitlement_roles',
 ]);
 
 /** Classify an action type into its processing lane. */

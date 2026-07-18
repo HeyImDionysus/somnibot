@@ -704,6 +704,19 @@ HELPER_TYPES = '''// ===========================================================
 // Generic JSON type for JSONB columns
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
+// Two-phase privacy RPC results. Both purge functions return JSONB so callers
+// must inspect purge_status instead of treating a successful RPC as completion.
+export type PrivacyPurgeStatus = 'pending_role_cleanup' | 'completed';
+
+export interface PrivacyPurgeRpcResult {
+  [key: string]: Json;
+  purge_status: PrivacyPurgeStatus;
+  pending_role_cleanup_count: number;
+}
+
+export type PurgeMemberDataRpcResult = PrivacyPurgeRpcResult;
+export type PurgeGuildDataRpcResult = PrivacyPurgeRpcResult;
+
 // Auto-Mod Rule Config Types
 export type AutoModRuleType =
   | 'word_filter'

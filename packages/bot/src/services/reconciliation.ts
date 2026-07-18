@@ -144,6 +144,8 @@ interface ReconciliationFindings {
   entitlements_checked: number;
   roles_missing: number;
   roles_regranted: number;
+  role_repairs_queued: number;
+  role_cleanups_queued: number;
   grace_periods_expired: number;
   sessions_timed_out: number;
   errors: string[];
@@ -161,13 +163,15 @@ export async function runReconciliation(
     entitlements_checked: 0,
     roles_missing: 0,
     roles_regranted: 0,
+    role_repairs_queued: 0,
+    role_cleanups_queued: 0,
     grace_periods_expired: 0,
     sessions_timed_out: 0,
     errors: [],
   };
 
   // Create a reconciliation run record
-  const { data: run } = await supabase
+  const { data: run, error: runError } = await supabase
     .from('reconciliation_runs')
     .insert({
       guild_id: guild.id,
@@ -178,10 +182,75 @@ export async function runReconciliation(
     .single();
 
   const runId = run?.id;
+  if (runError || !isNonBlankString(runId)) {
+    throw new Error(`Failed to create reconciliation run: ${runError?.message ?? 'missing run id'}`);
+  }
   log.info(`Starting ${trigger} run ${runId ?? 'unknown'}`);
 
   try {
-    // ── 1. Check active entitlements → Discord roles ──
+    // Re-enqueue only unresolved durable delivery intents. Settled tombstones
+    // are historical evidence, not perpetual Discord removal authority.
+    try {
+      let intentCursor: string | null = null;
+      while (true) {
+        let intentQuery = supabase
+          .from('commerce_role_delivery_intents')
+          .select('id, guild_id, state')
+          .eq('guild_id', guild.id)
+          .in('state', ['cleanup_required', 'operator_required']);
+        if (intentCursor !== null) intentQuery = intentQuery.gt('id', intentCursor);
+
+        const { data: intentPage, error: intentPageError } = await intentQuery
+          .order('id', { ascending: true })
+          .limit(PAGE_SIZE);
+        if (intentPageError) throw new Error(intentPageError.message);
+        const intents: Array<{
+          id: string;
+          guild_id: string;
+          state: string;
+        }> = requireStrictKeysetPage(intentPage, intentCursor, 'Unresolved paid-role intent query');
+
+        for (const intent of intents) {
+          if (
+            intent.guild_id !== guild.id
+            || (intent.state !== 'cleanup_required' && intent.state !== 'operator_required')
+          ) {
+            throw new Error('Unresolved paid-role intent query returned mismatched evidence');
+          }
+          const { data: carrierValue, error: carrierError } = await (
+            supabase.rpc as (
+              fn: string,
+              params: Record<string, unknown>,
+            ) => ReturnType<typeof supabase.rpc>
+          )('commerce_ensure_role_delivery_cleanup_action', {
+            p_intent_id: intent.id,
+          });
+          if (carrierError) {
+            throw new Error(`unresolved paid-role cleanup enqueue failed: ${carrierError.message}`);
+          }
+          const carrier = Array.isArray(carrierValue) ? carrierValue[0] : carrierValue;
+          if (
+            !carrier
+            || typeof carrier !== 'object'
+            || Array.isArray(carrier)
+            || !isNonBlankString(carrier.action_id)
+            || !['pending', 'processing'].includes(String(carrier.action_status))
+          ) {
+            throw new Error('unresolved paid-role cleanup carrier returned malformed evidence');
+          }
+          findings.role_cleanups_queued++;
+        }
+
+        if (intents.length < PAGE_SIZE) break;
+        intentCursor = intents[intents.length - 1].id;
+      }
+    } catch (err) {
+      findings.errors.push(
+        `Unresolved paid-role intent sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // ── 1. Check every access-retaining entitlement → Discord roles ──
     // V5 audit 5.1/14.1 — JOIN instead of N+1 per-entitlement customer lookup
     // V11 Audit H-2: Cursor-based pagination to avoid silently skipping rows.
     // W2: isolated in its own try/catch — a failure sweeping active
@@ -192,9 +261,9 @@ export async function runReconciliation(
       while (true) {
         let query = supabase
           .from('entitlements')
-          .select('id, customer_id, granted_role_ids, product_id, customers(id, guild_id, discord_id)')
+          .select('id, customer_id, granted_role_ids, product_id, plan_id, order_id, type, status, source, customers(id, guild_id, discord_id)')
           .eq('guild_id', guild.id)
-          .eq('status', 'active');
+          .in('status', ['active', 'pending', 'grace_period', 'suspended']);
         if (cursor !== null) query = query.gt('id', cursor);
 
         const { data: page, error: pageError } = await query
@@ -207,6 +276,11 @@ export async function runReconciliation(
           customer_id: string;
           granted_role_ids: string[] | null;
           product_id: string | null;
+          plan_id: string | null;
+          order_id: string | null;
+          type: string;
+          status: string;
+          source: string | null;
           customers: { id: string; guild_id: string; discord_id: string }
             | Array<{ id: string; guild_id: string; discord_id: string }>
             | null;
@@ -247,28 +321,65 @@ export async function runReconciliation(
 
           try {
             let member = await guild.members.fetch({ user: discordId, force: true });
+            const missingRoleIds = roleIds.filter((roleId) => !member.roles.cache.has(roleId));
+            findings.roles_missing += missingRoleIds.length;
+            if (missingRoleIds.length === 0) continue;
 
-            for (const roleId of roleIds) {
-              if (!member.roles.cache.has(roleId)) {
-                // Role is missing — re-grant
-                findings.roles_missing++;
-                const role = guild.roles.cache.get(roleId);
-                if (!role) {
-                  findings.errors.push(
-                    `Entitlement ${ent.id}: configured guild role ${roleId} is unavailable`,
-                  );
-                  continue;
-                }
-                await member.roles.add(roleId, 'Reconciliation: re-granting missing role');
-                member = await guild.members.fetch({ user: discordId, force: true });
-                if (!member.roles.cache.has(roleId)) {
-                  findings.errors.push(
-                    `Entitlement ${ent.id}: Discord did not confirm re-granted role ${roleId}`,
-                  );
-                  continue;
-                }
-                findings.roles_regranted++;
+            for (const roleId of missingRoleIds) {
+              if (!guild.roles.cache.get(roleId)) {
+                findings.errors.push(
+                  `Entitlement ${ent.id}: configured guild role ${roleId} is unavailable`,
+                );
               }
+            }
+
+            const isPaidOrUnclassified = ent.source === 'purchase' || ent.source === null;
+            if (isPaidOrUnclassified) {
+              // Source-null rows are not presumed paid. This security-definer
+              // classifier re-proves the exact order/payment/snapshot/customer
+              // contract and converges on one deterministic queue carrier.
+              // No row means no current paid repair authority, so Discord is
+              // intentionally left untouched.
+              const { data: carrierValue, error: carrierError } = await (
+                supabase.rpc as (
+                  fn: string,
+                  params: Record<string, unknown>,
+                ) => ReturnType<typeof supabase.rpc>
+              )('commerce_ensure_live_role_delivery_action', {
+                p_entitlement_id: ent.id,
+              });
+              if (carrierError) {
+                throw new Error(`paid role repair classifier failed: ${carrierError.message}`);
+              }
+              const carrier = Array.isArray(carrierValue) ? carrierValue[0] : carrierValue;
+              if (carrier === null || carrier === undefined) {
+                findings.errors.push(
+                  `Entitlement ${ent.id}: missing role preserved because no exact paid repair carrier was authorized`,
+                );
+                continue;
+              }
+              if (
+                typeof carrier !== 'object'
+                || Array.isArray(carrier)
+                || !isNonBlankString(carrier.action_id)
+                || !['pending', 'processing'].includes(String(carrier.action_status))
+              ) {
+                throw new Error('paid role repair carrier returned malformed evidence');
+              }
+              findings.role_repairs_queued++;
+              continue;
+            }
+
+            for (const roleId of missingRoleIds) {
+              await member.roles.add(roleId, 'Reconciliation: re-granting missing role');
+              member = await guild.members.fetch({ user: discordId, force: true });
+              if (!member.roles.cache.has(roleId)) {
+                findings.errors.push(
+                  `Entitlement ${ent.id}: Discord did not confirm re-granted role ${roleId}`,
+                );
+                continue;
+              }
+              findings.roles_regranted++;
             }
           } catch (err) {
             // Member not in guild — that's okay, roles will be granted when they rejoin

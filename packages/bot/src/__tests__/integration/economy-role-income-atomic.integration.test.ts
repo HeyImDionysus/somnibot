@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
+import { randomUUID } from 'node:crypto';
 import {
   getAnonTestClient,
   getAuthenticatedTestClient,
@@ -21,7 +22,13 @@ let sql!: ReturnType<typeof postgres>;
 const GUILD_ID = `test-role-income-${Date.now()}`;
 const OTHER_GUILD_ID = `${GUILD_ID}-other`;
 const STARTING_BALANCE_GUILD_ID = `${GUILD_ID}-starting-balance`;
-const TEST_GUILD_IDS = [GUILD_ID, OTHER_GUILD_ID, STARTING_BALANCE_GUILD_ID];
+const GUILD_PURGE_ID = `${GUILD_ID}-privacy-purge`;
+const TEST_GUILD_IDS = [
+  GUILD_ID,
+  OTHER_GUILD_ID,
+  STARTING_BALANCE_GUILD_ID,
+  GUILD_PURGE_ID,
+];
 const USER_PREFIX = `role-income-user-${Date.now()}`;
 
 const ROLE_REPLAY = 'role-income-replay';
@@ -171,6 +178,11 @@ beforeAll(async () => {
       id: STARTING_BALANCE_GUILD_ID,
       name: 'Atomic Role Income Starting Balance Guild',
       owner_discord_id: '100000000000000003',
+    },
+    {
+      id: GUILD_PURGE_ID,
+      name: 'Atomic Guild Privacy Purge Test Guild',
+      owner_discord_id: '100000000000000004',
     },
   ]);
   if (guildError) throw new Error(`Guild seed failed: ${guildError.message}`);
@@ -1035,6 +1047,7 @@ describe('economy_collect_role_income', () => {
     });
     expect(purgeError).toBeNull();
     expect(purged).toMatchObject({
+      purge_status: 'completed',
       economy_role_income_requests: 1,
       economy_role_income_claims: 1,
     });
@@ -1072,6 +1085,246 @@ describe('economy_collect_role_income', () => {
         details: { existing: 'kept', anonymized: true },
       },
     ]);
+  });
+
+  it('keeps exact commerce identity on the first purge call and deletes settled controller and relink tombstones on retry', async () => {
+    const userId = `${USER_PREFIX}-two-phase-purge`;
+    const newDiscordId = `${userId}-relinked`;
+    const customerId = randomUUID();
+    const intentId = randomUUID();
+    const originActionId = randomUUID();
+    const cleanupActionId = randomUUID();
+    const relinkActionId = randomUUID();
+    const historicalRelinkActionId = randomUUID();
+    const historicalRelinkCustomerId = randomUUID();
+    const entitlementId = randomUUID();
+    const orderId = randomUUID();
+    const productId = randomUUID();
+    const roleId = '199999999999999999';
+
+    await sql`
+      INSERT INTO public.customers (
+        id, guild_id, discord_id, discord_username
+      ) VALUES (
+        ${customerId}, ${GUILD_ID}, ${newDiscordId}, 'two-phase-purge'
+      )
+    `;
+    await sql`
+      INSERT INTO public.bot_action_queue (
+        id, guild_id, action, payload, status, lane, idempotency_key
+      ) VALUES
+      (
+        ${originActionId}, ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'ensure_live',
+          action_id: originActionId,
+          guild_id: GUILD_ID,
+          entitlement_id: entitlementId,
+          customer_id: customerId,
+          discord_id: newDiscordId,
+        })},
+        'completed', 'commerce', ${`test-origin:${intentId}`}
+      ),
+      (
+        ${cleanupActionId}, ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'cleanup',
+          action_id: cleanupActionId,
+          guild_id: GUILD_ID,
+          target_delivery_intent_id: intentId,
+        })},
+        'completed', 'commerce', ${`test-cleanup:${intentId}`}
+      ),
+      (
+        ${relinkActionId}, ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'ensure_live_request',
+          action_id: relinkActionId,
+          guild_id: GUILD_ID,
+          entitlement_id: entitlementId,
+          customer_id: customerId,
+          old_discord_id: userId,
+          discord_id: newDiscordId,
+        })},
+        'completed', 'commerce',
+        ${`commerce-role-delivery-relink:${customerId}:${userId}:${newDiscordId}:${entitlementId}`}
+      ),
+      (
+        ${historicalRelinkActionId}, ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'ensure_live_request',
+          action_id: historicalRelinkActionId,
+          guild_id: GUILD_ID,
+          entitlement_id: randomUUID(),
+          customer_id: historicalRelinkCustomerId,
+          old_discord_id: newDiscordId,
+          discord_id: `${newDiscordId}-later`,
+        })},
+        'completed', 'commerce',
+        ${`test-historical-relink:${historicalRelinkActionId}:${newDiscordId}`}
+      )
+    `;
+    await sql`
+      INSERT INTO public.commerce_role_delivery_intents (
+        id, action_id, origin_claim_token, delivery_claim_token,
+        guild_id, entitlement_id, customer_id, discord_id,
+        order_id, product_id, entitlement_type, permanent_role_ids,
+        owned_role_ids, state, cleanup_action_id, cleanup_claim_token
+      ) VALUES (
+        ${intentId}, ${originActionId}, ${randomUUID()}, ${randomUUID()},
+        ${GUILD_ID}, ${entitlementId}, ${customerId}, ${newDiscordId},
+        ${orderId}, ${productId}, 'one_time', ARRAY[${roleId}]::TEXT[],
+        ARRAY[${roleId}]::TEXT[], 'operator_required',
+        ${cleanupActionId}, ${randomUUID()}
+      )
+    `;
+    await sql`
+      INSERT INTO public.action_queue_dlq (
+        guild_id, action, payload, original_id, retried, lane
+      ) VALUES (
+        ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'cleanup',
+          action_id: cleanupActionId,
+          target_delivery_intent_id: intentId,
+        })},
+        ${cleanupActionId}, false, 'commerce'
+      ),
+      (
+        ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'ensure_live_request',
+          action_id: historicalRelinkActionId,
+          customer_id: historicalRelinkCustomerId,
+          old_discord_id: newDiscordId,
+          discord_id: `${newDiscordId}-later`,
+        })},
+        ${historicalRelinkActionId}, false, 'commerce'
+      )
+    `;
+
+    const first = await supa.rpc('purge_member_data', {
+      p_guild_id: GUILD_ID,
+      p_user_id: newDiscordId,
+    });
+    expect(first.error).toBeNull();
+    expect(first.data).toMatchObject({
+      purge_status: 'pending_role_cleanup',
+      unresolved_role_delivery_intents: 1,
+      active_commerce_dlq_actions: 1,
+    });
+    expect(await sql<{ discord_id: string }[]>`
+      SELECT discord_id FROM public.customers WHERE id = ${customerId}
+    `).toEqual([{ discord_id: newDiscordId }]);
+
+    await sql`
+      UPDATE public.commerce_role_delivery_intents
+         SET state = 'settled',
+             reserved_role_ids = '{}'::TEXT[],
+             owned_role_ids = '{}'::TEXT[],
+             reserved_temp_role_grant_ids = '{}'::UUID[],
+             temporary_role_grant_ids = '{}'::UUID[],
+             settled_at = pg_catalog.clock_timestamp(),
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE id = ${intentId}
+    `;
+
+    const second = await supa.rpc('purge_member_data', {
+      p_guild_id: GUILD_ID,
+      p_user_id: newDiscordId,
+    });
+    expect(second.error).toBeNull();
+    expect(second.data).toMatchObject({
+      purge_status: 'completed',
+      pending_role_cleanup_count: 0,
+      commerce_role_delivery_intents: 1,
+      commerce_queue_tombstones: 4,
+      commerce_dlq_tombstones: 2,
+      commerce_customers_anonymized: 1,
+    });
+    expect(await sql<{ discord_id: string }[]>`
+      SELECT discord_id FROM public.customers WHERE id = ${customerId}
+    `).toEqual([{ discord_id: `deleted-${customerId}` }]);
+    expect(await sql<{ count: number }[]>`
+      SELECT (
+        SELECT pg_catalog.count(*)::INTEGER
+          FROM public.commerce_role_delivery_intents
+         WHERE id = ${intentId}
+      ) + (
+        SELECT pg_catalog.count(*)::INTEGER
+          FROM public.bot_action_queue
+         WHERE id IN (
+           ${originActionId}, ${cleanupActionId}, ${relinkActionId},
+           ${historicalRelinkActionId}
+         )
+      ) + (
+        SELECT pg_catalog.count(*)::INTEGER
+          FROM public.action_queue_dlq
+         WHERE original_id IN (
+           ${cleanupActionId}::TEXT,
+           ${historicalRelinkActionId}::TEXT
+         )
+      ) AS count
+    `).toEqual([{ count: 0 }]);
+  });
+
+  it('waits for and erases a relink carrier when the caller survives only as old_discord_id', async () => {
+    const oldDiscordId = `${USER_PREFIX}-historical-relink-only`;
+    const actionId = randomUUID();
+    await sql`
+      INSERT INTO public.bot_action_queue (
+        id, guild_id, action, payload, status, lane, idempotency_key
+      ) VALUES (
+        ${actionId}, ${GUILD_ID}, 'reconcile_entitlement_roles',
+        ${sql.json({
+          mode: 'ensure_live_request',
+          action_id: actionId,
+          guild_id: GUILD_ID,
+          entitlement_id: randomUUID(),
+          customer_id: randomUUID(),
+          old_discord_id: oldDiscordId,
+          discord_id: `${oldDiscordId}-current`,
+        })},
+        'pending', 'commerce', ${`test-old-only-relink:${actionId}:${oldDiscordId}`}
+      )
+    `;
+
+    const first = await supa.rpc('purge_member_data', {
+      p_guild_id: GUILD_ID,
+      p_user_id: oldDiscordId,
+    });
+    expect(first.error).toBeNull();
+    expect(first.data).toMatchObject({
+      purge_status: 'pending_role_cleanup',
+      active_commerce_queue_actions: 1,
+    });
+    expect(await sql<{ count: number }[]>`
+      SELECT pg_catalog.count(*)::INTEGER AS count
+        FROM public.bot_action_queue
+       WHERE id = ${actionId}
+    `).toEqual([{ count: 1 }]);
+
+    await sql`
+      UPDATE public.bot_action_queue
+         SET status = 'completed',
+             completed_at = pg_catalog.clock_timestamp()
+       WHERE id = ${actionId}
+         AND status = 'pending'
+    `;
+    const second = await supa.rpc('purge_member_data', {
+      p_guild_id: GUILD_ID,
+      p_user_id: oldDiscordId,
+    });
+    expect(second.error).toBeNull();
+    expect(second.data).toMatchObject({
+      purge_status: 'completed',
+      commerce_queue_tombstones: 1,
+    });
+    expect(await sql<{ count: number }[]>`
+      SELECT pg_catalog.count(*)::INTEGER AS count
+        FROM public.bot_action_queue
+       WHERE id = ${actionId}
+    `).toEqual([{ count: 0 }]);
   });
 
   it('keeps commerce evidence isolated by guild', async () => {
@@ -1145,22 +1398,61 @@ describe('economy_collect_role_income', () => {
     expect(authenticatedInitialization.error).not.toBeNull();
   });
 
-  it('exposes only the authoritative privacy RPC and no bypass helper', async () => {
+  it('preserves the authoritative privacy RPC ABIs without exposing bypass helpers', async () => {
     const privileges = await sql`
       SELECT
+        pg_catalog.pg_get_function_result(
+          'public.purge_member_data(text,text)'::pg_catalog.regprocedure
+        ) = 'jsonb' AS member_result_is_jsonb,
+        pg_catalog.pg_get_function_result(
+          'public.purge_guild_data(text)'::pg_catalog.regprocedure
+        ) = 'jsonb' AS guild_result_is_jsonb,
         pg_catalog.has_function_privilege(
           'service_role',
           'public.purge_member_data(text,text)',
           'EXECUTE'
-        ) AS service_can_purge,
+        ) AS service_can_purge_member,
         pg_catalog.has_function_privilege(
           'anon',
           'public.purge_member_data(text,text)',
           'EXECUTE'
-        ) AS anon_can_purge,
+        ) AS anon_can_purge_member,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.purge_member_data(text,text)',
+          'EXECUTE'
+        ) AS authenticated_can_purge_member,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.purge_guild_data(text)',
+          'EXECUTE'
+        ) AS service_can_purge_guild,
+        pg_catalog.has_function_privilege(
+          'anon',
+          'public.purge_guild_data(text)',
+          'EXECUTE'
+        ) AS anon_can_purge_guild,
+        pg_catalog.has_function_privilege(
+          'authenticated',
+          'public.purge_guild_data(text)',
+          'EXECUTE'
+        ) AS authenticated_can_purge_guild,
+        pg_catalog.has_function_privilege(
+          'service_role',
+          'public.commerce_purge_member_data_base(text,text)',
+          'EXECUTE'
+        ) AS service_can_call_member_base,
         pg_catalog.to_regprocedure(
           'public.purge_member_data_before_role_income_atomic(text,text)'
         ) IS NULL AS bypass_helper_absent,
+        NOT EXISTS (
+          SELECT 1
+            FROM pg_catalog.pg_depend AS dependency
+           WHERE dependency.refclassid = 'pg_catalog.pg_proc'::pg_catalog.regclass
+             AND dependency.refobjid =
+               'public.purge_guild_data(text)'::pg_catalog.regprocedure
+             AND dependency.deptype = 'n'
+        ) AS guild_rpc_has_no_normal_dependents,
         pg_catalog.has_function_privilege(
           'service_role',
           'public.commerce_enqueue_entitlement_role_revocation()',
@@ -1188,14 +1480,133 @@ describe('economy_collect_role_income', () => {
         ) AS anon_can_credit_wallet
     `;
     expect(privileges[0]).toMatchObject({
-      service_can_purge: true,
-      anon_can_purge: false,
+      member_result_is_jsonb: true,
+      guild_result_is_jsonb: true,
+      service_can_purge_member: true,
+      anon_can_purge_member: false,
+      authenticated_can_purge_member: false,
+      service_can_purge_guild: true,
+      anon_can_purge_guild: false,
+      authenticated_can_purge_guild: false,
+      service_can_call_member_base: false,
       bypass_helper_absent: true,
+      guild_rpc_has_no_normal_dependents: true,
       service_can_call_trigger_helper: false,
       service_can_initialize_wallet: true,
       anon_can_initialize_wallet: false,
       service_can_credit_wallet: true,
       anon_can_credit_wallet: false,
+    });
+  });
+
+  it('purges guild commerce children before their referenced parent rows', async () => {
+    await sql`
+      WITH product AS (
+        INSERT INTO public.products (
+          guild_id,
+          name,
+          type,
+          delivery_type,
+          price_cents,
+          currency,
+          granted_role_ids,
+          granted_channel_ids,
+          active
+        ) VALUES (
+          ${GUILD_PURGE_ID},
+          'Guild purge dependency fixture',
+          'one_time',
+          'access_pass',
+          500,
+          'USD',
+          '{}'::TEXT[],
+          '{}'::TEXT[],
+          false
+        )
+        RETURNING id
+      ), customer AS (
+        INSERT INTO public.customers (
+          guild_id,
+          discord_id,
+          discord_username
+        ) VALUES (
+          ${GUILD_PURGE_ID},
+          '100000000000000104',
+          'guild-purge-customer'
+        )
+        RETURNING id
+      ), paid_order AS (
+        INSERT INTO public.orders (
+          order_number,
+          customer_id,
+          guild_id,
+          product_id,
+          amount_cents,
+          currency,
+          source,
+          status
+        )
+        SELECT
+          ${`guild-purge-${Date.now()}`},
+          customer.id,
+          ${GUILD_PURGE_ID},
+          product.id,
+          500,
+          'USD',
+          'purchase',
+          'pending'
+        FROM customer, product
+        RETURNING id, customer_id
+      )
+      INSERT INTO public.fraud_signals (
+        guild_id,
+        order_id,
+        customer_id,
+        discord_id,
+        signal_type,
+        severity,
+        details
+      )
+      SELECT
+        ${GUILD_PURGE_ID},
+        paid_order.id,
+        paid_order.customer_id,
+        '100000000000000104',
+        'velocity',
+        'medium',
+        '{"fixture":true}'::JSONB
+      FROM paid_order
+    `;
+
+    const { data, error } = await supa.rpc('purge_guild_data', {
+      p_guild_id: GUILD_PURGE_ID,
+    });
+    expect(error).toBeNull();
+    expect(data).toMatchObject({
+      purge_status: 'completed',
+      pending_role_cleanup_count: 0,
+      guild_deleted: 1,
+    });
+
+    const residue = await sql`
+      SELECT
+        (SELECT pg_catalog.count(*) FROM public.guild
+          WHERE id = ${GUILD_PURGE_ID})::INTEGER AS guild_count,
+        (SELECT pg_catalog.count(*) FROM public.products
+          WHERE guild_id = ${GUILD_PURGE_ID})::INTEGER AS product_count,
+        (SELECT pg_catalog.count(*) FROM public.customers
+          WHERE guild_id = ${GUILD_PURGE_ID})::INTEGER AS customer_count,
+        (SELECT pg_catalog.count(*) FROM public.orders
+          WHERE guild_id = ${GUILD_PURGE_ID})::INTEGER AS order_count,
+        (SELECT pg_catalog.count(*) FROM public.fraud_signals
+          WHERE guild_id = ${GUILD_PURGE_ID})::INTEGER AS fraud_signal_count
+    `;
+    expect(residue[0]).toEqual({
+      guild_count: 0,
+      product_count: 0,
+      customer_count: 0,
+      order_count: 0,
+      fraud_signal_count: 0,
     });
   });
 });

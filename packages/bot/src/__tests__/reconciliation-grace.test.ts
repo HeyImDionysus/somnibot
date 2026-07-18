@@ -122,9 +122,16 @@ function makeResponder(overrides: {
     if (ctx.table === 'reconciliation_runs') {
       return ctx.op === 'insert' ? { data: { id: 'run1' }, error: null } : { data: null, error: null };
     }
+    if (ctx.table === 'commerce_role_delivery_intents') {
+      return { data: [], error: null };
+    }
     if (ctx.table === 'entitlements' && ctx.op === 'select') {
       const statusFilter = ctx.filters.find(([m, col]) => m === 'eq' && col === 'status');
-      if (statusFilter?.[2] === 'active') {
+      const statusSet = ctx.filters.find(([m, col]) => m === 'in' && col === 'status')?.[2];
+      if (
+        statusFilter?.[2] === 'active'
+        || (Array.isArray(statusSet) && statusSet.includes('active'))
+      ) {
         if (overrides.activeSweepError) throw overrides.activeSweepError;
         return { data: [], error: null };
       }
@@ -412,10 +419,16 @@ describe('runReconciliation — grace-period expiry', () => {
       if (ctx.table === 'reconciliation_runs') {
         return ctx.op === 'insert' ? { data: { id: 'run-keyset' }, error: null } : { data: null, error: null };
       }
+      if (ctx.table === 'commerce_role_delivery_intents') {
+        return { data: [], error: null };
+      }
       if (ctx.table === 'entitlements' && ctx.op === 'select') {
         const status = ctx.filters.find(([method, column]) => method === 'eq' && column === 'status')?.[2];
+        const statuses = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'status',
+        )?.[2];
         const cursor = ctx.filters.find(([method, column]) => method === 'gt' && column === 'id')?.[2];
-        if (status === 'active') {
+        if (status === 'active' || (Array.isArray(statuses) && statuses.includes('active'))) {
           return { data: cursor === undefined ? activeFirst : [activeLast], error: null };
         }
         if (status === 'grace_period') {
@@ -464,7 +477,12 @@ describe('runReconciliation — grace-period expiry', () => {
     const activeQueries = supabase.calls.filter((ctx) =>
       ctx.table === 'entitlements'
       && ctx.op === 'select'
-      && ctx.filters.some(([method, column, value]) => method === 'eq' && column === 'status' && value === 'active'));
+      && ctx.filters.some(
+        ([method, column, value]) => method === 'in'
+          && column === 'status'
+          && Array.isArray(value)
+          && value.includes('active'),
+      ));
     const graceQueries = supabase.calls.filter((ctx) =>
       ctx.table === 'entitlements'
       && ctx.op === 'select'
@@ -501,9 +519,17 @@ describe('runReconciliation — grace-period expiry', () => {
       if (ctx.table === 'reconciliation_runs') {
         return ctx.op === 'insert' ? { data: { id: 'run-malformed' }, error: null } : { data: null, error: null };
       }
+      if (ctx.table === 'commerce_role_delivery_intents') {
+        return { data: [], error: null };
+      }
       if (ctx.table === 'entitlements' && ctx.op === 'select') {
         const status = ctx.filters.find(([method, column]) => method === 'eq' && column === 'status')?.[2];
-        if (status === 'active') return { data: null, error: null };
+        const statuses = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'status',
+        )?.[2];
+        if (status === 'active' || (Array.isArray(statuses) && statuses.includes('active'))) {
+          return { data: null, error: null };
+        }
         if (status === 'grace_period') {
           return {
             data: [

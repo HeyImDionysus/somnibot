@@ -6,6 +6,7 @@
  * processMessageEvent, processReactionEvent.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PlatformEventMap } from '@somnibot/shared';
 
 vi.mock('discord.js', () => ({
   EmbedBuilder: class {
@@ -372,13 +373,20 @@ describe('AutomationEngine', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       // Capture the ActionContext passed to executeActions
-      return mockExecuteActions.mock.calls[0]?.[1] as { variables: Record<string, string> } | undefined;
+      return mockExecuteActions.mock.calls[0]?.[1] as {
+        variables: Record<string, string>;
+        occurrenceId: string;
+        member: { id: string } | null;
+      } | undefined;
     }
 
     it('resolves member.joined variables', async () => {
       const ctx = await fireAndCapture('member.joined', { discordId: 'u1', isReturning: true });
       expect(ctx?.variables.memberCount).toBe('42');
       expect(ctx?.variables.returning).toBe('true');
+      expect(ctx?.occurrenceId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
     });
 
     it('resolves member.left variables', async () => {
@@ -387,7 +395,11 @@ describe('AutomationEngine', () => {
     });
 
     it('resolves member.verified variables', async () => {
-      const ctx = await fireAndCapture('member.verified', { discordId: 'u1', memberNumber: 42 });
+      const ctx = await fireAndCapture('member.verified', {
+        discordId: 'u1',
+        username: 'TestUser',
+        memberNumber: 42,
+      } satisfies PlatformEventMap['member.verified']);
       expect(ctx?.variables.memberNumber).toBe('42');
     });
 
@@ -438,13 +450,27 @@ describe('AutomationEngine', () => {
     });
 
     it('resolves ticket.opened variables', async () => {
-      const ctx = await fireAndCapture('ticket.opened', { discordId: 'u1', ticketNumber: 42 });
+      const ctx = await fireAndCapture('ticket.opened', {
+        ticketId: 'ticket-1',
+        ticketNumber: 42,
+        channelId: 'ch1',
+        userDiscordId: 'u1',
+        panelId: 'panel-1',
+      } satisfies PlatformEventMap['ticket.opened']);
       expect(ctx?.variables.ticket).toBe('#42');
+      expect(ctx?.member?.id).toBe('u1');
     });
 
     it('resolves ticket.closed variables', async () => {
-      const ctx = await fireAndCapture('ticket.closed', { discordId: 'u1', ticketNumber: 42 });
+      const ctx = await fireAndCapture('ticket.closed', {
+        ticketId: 'ticket-1',
+        ticketNumber: 42,
+        channelId: 'ch1',
+        userDiscordId: 'u1',
+        panelId: 'panel-1',
+      } satisfies PlatformEventMap['ticket.closed']);
       expect(ctx?.variables.ticket).toBe('#42');
+      expect(ctx?.member?.id).toBe('u1');
     });
 
     it('resolves giveaway.ended variables', async () => {
@@ -454,7 +480,14 @@ describe('AutomationEngine', () => {
     });
 
     it('resolves button.clicked variables', async () => {
-      const ctx = await fireAndCapture('button.clicked', { discordId: 'u1', buttonId: 'btn_verify' });
+      const ctx = await fireAndCapture('button.clicked', {
+        interactionId: 'interaction-1',
+        discordId: 'u1',
+        username: 'TestUser',
+        buttonId: 'btn_verify',
+        channelId: 'ch1',
+        messageId: 'message-1',
+      } satisfies PlatformEventMap['button.clicked']);
       expect(ctx?.variables.buttonId).toBe('btn_verify');
     });
 
@@ -474,10 +507,18 @@ describe('AutomationEngine', () => {
     });
 
     it('resolves infraction.created variables', async () => {
-      const ctx = await fireAndCapture('infraction.created', { discordId: 'u1', type: 'warn', reason: 'spam', totalInfractions: 3 });
+      const ctx = await fireAndCapture('infraction.created', {
+        infractionId: 'infraction-1',
+        userId: 'u1',
+        moderatorId: 'moderator-1',
+        type: 'warn',
+        reason: 'spam',
+        totalInfractions: 3,
+      } satisfies PlatformEventMap['infraction.created']);
       expect(ctx?.variables.type).toBe('warn');
       expect(ctx?.variables.reason).toBe('spam');
       expect(ctx?.variables.count).toBe('3');
+      expect(ctx?.member?.id).toBe('u1');
     });
 
     it('resolves unknown discordId gracefully', async () => {
@@ -537,6 +578,44 @@ describe('AutomationEngine', () => {
         {} as any,
       );
       expect(mockExecuteActions).not.toHaveBeenCalled();
+    });
+
+    it('suppresses only the generic replay of the same specialized reaction object', async () => {
+      const auto = makeAutomation();
+      mockGetForTrigger.mockReturnValue([auto]);
+      await engine.start();
+      const message = { id: 'msg1', content: '', channel: { id: 'ch1' } };
+
+      const firstData = {
+        discordId: 'u1', emoji: '👍', channelId: 'ch1', messageId: 'msg1',
+      };
+      await engine.processReactionEvent(
+        { type: 'reaction.added', guildId: 'g1', data: firstData } as any,
+        message as any,
+      );
+      eventBus.fire({ type: 'reaction.added', guildId: 'g1', data: firstData });
+
+      await vi.waitFor(() => expect(mockExecuteActions).toHaveBeenCalledTimes(1));
+      const firstOccurrence = (
+        mockExecuteActions.mock.calls[0]?.[1] as { occurrenceId: string }
+      ).occurrenceId;
+
+      // A real remove-then-readd has the same visible tuple but arrives as a
+      // new event data object. It must remain a distinct automation occurrence.
+      const readdData = {
+        discordId: 'u1', emoji: '👍', channelId: 'ch1', messageId: 'msg1',
+      };
+      await engine.processReactionEvent(
+        { type: 'reaction.added', guildId: 'g1', data: readdData } as any,
+        message as any,
+      );
+      eventBus.fire({ type: 'reaction.added', guildId: 'g1', data: readdData });
+
+      await vi.waitFor(() => expect(mockExecuteActions).toHaveBeenCalledTimes(2));
+      const secondOccurrence = (
+        mockExecuteActions.mock.calls[1]?.[1] as { occurrenceId: string }
+      ).occurrenceId;
+      expect(secondOccurrence).not.toBe(firstOccurrence);
     });
   });
 

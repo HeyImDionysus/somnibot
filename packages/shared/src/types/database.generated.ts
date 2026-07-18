@@ -1,7 +1,7 @@
 /**
  * AUTO-GENERATED SNAPSHOT of the DB schema derived from SQL migrations.
  * DO NOT EDIT BY HAND — run `python scripts/generate-db-types.py` to refresh.
- * Source: 126 migration files in packages/supabase/migrations/
+ * Source: 127 migration files in packages/supabase/migrations/
  *
  * This snapshot is a DRIFT TRIPWIRE, not the app's type source of truth.
  * Application code imports the hand-maintained packages/shared/src/types/
@@ -18,6 +18,19 @@
 
 // Generic JSON type for JSONB columns
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+
+// Two-phase privacy RPC results. Both purge functions return JSONB so callers
+// must inspect purge_status instead of treating a successful RPC as completion.
+export type PrivacyPurgeStatus = 'pending_role_cleanup' | 'completed';
+
+export interface PrivacyPurgeRpcResult {
+  [key: string]: Json;
+  purge_status: PrivacyPurgeStatus;
+  pending_role_cleanup_count: number;
+}
+
+export type PurgeMemberDataRpcResult = PrivacyPurgeRpcResult;
+export type PurgeGuildDataRpcResult = PrivacyPurgeRpcResult;
 
 // Auto-Mod Rule Config Types
 export type AutoModRuleType =
@@ -926,6 +939,7 @@ export interface DbLicenseKey {
   updated_at: string;
   failed_attempts: number;
   last_failed_at: string | null;
+  commerce_required_order_status: string | null;
 }
 
 export interface DbEntitlement {
@@ -947,6 +961,7 @@ export interface DbEntitlement {
   cancelled_at: string | null;
   created_at: string;
   updated_at: string;
+  commerce_required_order_status: string | null;
 }
 
 export interface DbProductLicenseConfig {
@@ -976,6 +991,7 @@ export interface DbLicenseSession {
   last_seen_at: string;
   deactivated_at: string | null;
   deactivation_reason: 'user_deactivated' | 'admin_revoked' | 'device_limit' | 'heartbeat_timeout' | 'entitlement_revoked' | null;
+  commerce_required_license_status: string | null;
 }
 
 export interface DbLicenseValidation {
@@ -1003,6 +1019,9 @@ export interface DbPayment {
   status: 'completed' | 'refunded' | 'reversed' | 'pending' | 'failed';
   created_at: string;
   provider: string;
+  paypal_resource_type: string | null;
+  commerce_required_order_status: string | null;
+  commerce_settled_capture_order_id: string | null;
 }
 
 // — Commerce — Giveaways —
@@ -1097,6 +1116,7 @@ export interface DbBotActionQueue {
   next_retry_at: string | null;
   retry_count: number;
   lane: 'commerce' | 'game';
+  claim_token: string | null;
   idempotency_key: string | null;
 }
 
@@ -1372,6 +1392,36 @@ export interface DbButtonRoles {
   updated_at: string;
 }
 
+export interface DbCommerceAdminRefundOperations {
+  attempt_id: string;
+  request_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string | null;
+  actor_id: string;
+  paypal_order_id: string | null;
+  payment_id: string | null;
+  paypal_payment_id: string | null;
+  resource_type: 'capture' | null;
+  order_amount_cents: number;
+  existing_refunded_cents: number;
+  refund_amount_cents: number;
+  currency: string;
+  reason: string;
+  provider_required: boolean;
+  status: 'prepared' | 'pending' | 'provider_completed' | 'failed' | 'cancelled' | 'completed';
+  provider_status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
+  paypal_refund_id: string | null;
+  provider_reported_amount_cents: number | null;
+  provider_reported_currency: string | null;
+  created_at: string;
+  updated_at: string;
+  provider_outcome_at: string | null;
+  completed_at: string | null;
+}
+
 export interface DbCommerceLegacySubscriptionGrantContracts {
   order_id: string;
   source_queue_id: string;
@@ -1391,6 +1441,30 @@ export interface DbCommerceLegacySubscriptionGrantContracts {
   persisted_at: string;
 }
 
+export interface DbCommerceNoncommerceActionOutcomes {
+  action_id: string;
+  claim_token: string;
+  outcome: 'superseded' | 'unproven' | 'settled_noop';
+  recorded_at: string;
+}
+
+export interface DbCommerceNoncommerceActivationHeads {
+  entitlement_id: string;
+  guild_id: string;
+  customer_id: string;
+  discord_id: string;
+  order_id: string | null;
+  product_id: string;
+  entitlement_source: string;
+  entitlement_type: string;
+  plan_id: string | null;
+  activation_generation: string;
+  action_id: string;
+  role_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DbCommerceProductTempRoleConfig {
   id: string;
   product_id: string;
@@ -1399,6 +1473,47 @@ export interface DbCommerceProductTempRoleConfig {
   duration_seconds: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface DbCommerceRoleDeliveryIntents {
+  id: string;
+  contract_kind: 'paid' | 'noncommerce';
+  entitlement_source: string | null;
+  activation_generation: string | null;
+  action_id: string;
+  origin_claim_token: string;
+  delivery_claim_token: string;
+  guild_id: string;
+  entitlement_id: string;
+  customer_id: string;
+  discord_id: string;
+  order_id: string;
+  product_id: string;
+  plan_id: string | null;
+  entitlement_type: 'one_time' | 'subscription';
+  permanent_role_ids: string[];
+  completed_role_ids: string[];
+  reserved_role_ids: string[];
+  owned_role_ids: string[];
+  reserved_temp_role_grant_ids: string[];
+  temporary_role_grant_ids: string[];
+  state: 'open' | 'cleanup_required' | 'operator_required' | 'settled';
+  mutation_token: string | null;
+  last_delivery_mutation_token: string | null;
+  last_delivery_outcome: string | null;
+  cleanup_action_id: string | null;
+  cleanup_claim_token: string | null;
+  cleanup_mutation_token: string | null;
+  last_cleanup_mutation_token: string | null;
+  last_cleanup_outcome: string | null;
+  recovery_generation: number;
+  created_at: string;
+  updated_at: string;
+  settled_at: string | null;
+  delivery_confirmed_at: string | null;
+  mutation_started_at: string | null;
+  cleanup_mutation_started_at: string | null;
+  last_error: string | null;
 }
 
 export interface DbCommerceRoleMetadataMigrationIssues {
@@ -1897,6 +2012,8 @@ export interface DbPaymentRefunds {
   amount_cents: number | null;
   currency: string | null;
   created_at: string;
+  is_terminal_event_witness: boolean;
+  paypal_resource_type: string | null;
 }
 
 export interface DbPollOptions {

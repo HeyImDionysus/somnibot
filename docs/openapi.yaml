@@ -227,6 +227,26 @@ paths:
           description: Success
     post:
       summary: 'POST /api/customers/{id}/entitlements'
+      description: 'Create an atomic zero-dollar non-commerce order and entitlement. Reuse request_id for every retry of the same grant.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, product_id]
+              properties:
+                request_id:
+                  type: string
+                  format: uuid
+                  description: 'Caller-generated replay identity; reuse after a lost response.'
+                product_id:
+                  type: string
+                  format: uuid
+                source:
+                  type: string
+                  enum: [manual, giveaway, automation]
+                  default: manual
       responses:
         '200':
           description: Success

@@ -26,12 +26,15 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { requireSupabase } from './helpers.js';
+import postgres from 'postgres';
+import { getTestDbUrl, requireSupabase } from './helpers.js';
 import { createHash, randomBytes } from 'node:crypto';
 
 let supa!: SupabaseClient;
 const GUILD_ID = `test-e2e-${Date.now()}`;
 const BUYER_DISCORD_ID = '111222333444555666';
+const GRANTED_ROLE_ID = '111222333444555667';
+const GRANTED_CHANNEL_ID = '111222333444555668';
 
 // DB-generated UUIDs
 let customerId: string;
@@ -42,6 +45,8 @@ let entitlementId: string;
 let licenseKeyId: string;
 let keyHash: string;
 const captureId = `PAYPAL-CAP-${randomBytes(8).toString('hex')}`;
+const paypalOrderId = `PAYPAL-ORDER-${randomBytes(8).toString('hex')}`;
+const refundId = `PAYPAL-REFUND-${randomBytes(8).toString('hex')}`;
 const orderNumber = `ORD-E2E-${Date.now().toString(36).toUpperCase()}`;
 
 beforeAll(async () => {
@@ -74,8 +79,8 @@ beforeAll(async () => {
     price_cents: 1499,
     currency: 'USD',
     active: true,
-    granted_role_ids: ['role-e2e-premium'],
-    granted_channel_ids: ['chan-e2e-vip'],
+    granted_role_ids: [GRANTED_ROLE_ID],
+    granted_channel_ids: [GRANTED_CHANNEL_ID],
   }).select('id').single();
   if (prodErr) throw new Error(`Product seed failed: ${prodErr.message}`);
   productId = product!.id;
@@ -84,8 +89,17 @@ beforeAll(async () => {
 afterAll(async () => {
   // Clean up in reverse-dependency order
   await supa.from('bot_action_queue').delete().eq('guild_id', GUILD_ID);
+  await supa.from('audit_logs').delete().eq('guild_id', GUILD_ID);
   await supa.from('entitlements').delete().eq('guild_id', GUILD_ID);
   await supa.from('license_keys').delete().eq('guild_id', GUILD_ID);
+  const retentionOwner = postgres(getTestDbUrl(), { max: 1 });
+  try {
+    await retentionOwner`
+      DELETE FROM public.payment_refunds WHERE guild_id = ${GUILD_ID}
+    `;
+  } finally {
+    await retentionOwner.end({ timeout: 5 });
+  }
   await supa.from('payments').delete().eq('guild_id', GUILD_ID);
   await supa.from('orders').delete().eq('guild_id', GUILD_ID);
   await supa.from('products').delete().eq('id', productId);
@@ -104,6 +118,7 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
       customer_id: customerId,
       guild_id: GUILD_ID,
       product_id: productId,
+      paypal_order_id: paypalOrderId,
       amount_cents: 1499,
       currency: 'USD',
       status: 'pending',
@@ -116,40 +131,43 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
   });
 
   it('Step 2: records the PayPal payment capture', async () => {
-    const { data, error } = await supa.from('payments').insert({
-      order_id: orderId,
-      customer_id: customerId,
-      guild_id: GUILD_ID,
-      paypal_payment_id: captureId,
-      amount_cents: 1499,
-      currency: 'USD',
-      status: 'completed',
-    }).select().single();
+    const freeze = await supa.rpc('commerce_freeze_order_grant_snapshot', {
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_product_id: productId,
+    });
+    expect(freeze.error).toBeNull();
+    const capture = await supa.rpc('commerce_finalize_paypal_capture', {
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_product_id: productId,
+      p_paypal_order_id: paypalOrderId,
+      p_paypal_capture_id: captureId,
+      p_amount_cents: 1499,
+      p_currency: 'USD',
+    });
+    expect(capture.error).toBeNull();
+    const { data: payment, error } = await supa.from('payments')
+      .select('id,status,paypal_resource_type')
+      .eq('paypal_payment_id', captureId)
+      .single();
+    expect(error).toBeNull();
+    expect(payment).toMatchObject({ status: 'completed', paypal_resource_type: 'capture' });
+    paymentId = payment!.id;
+  });
 
+  it('Step 3: verifies the capture atomically completed its order', async () => {
+    const { data, error } = await supa.from('orders')
+      .select('status')
+      .eq('id', orderId)
+      .single();
     expect(error).toBeNull();
     expect(data!.status).toBe('completed');
-    paymentId = data!.id;
   });
 
-  it('Step 3: marks the order as completed', async () => {
-    const { error } = await supa.from('orders')
-      .update({ status: 'completed', updated_at: new Date().toISOString() })
-      .eq('id', orderId);
-
-    expect(error).toBeNull();
-  });
-
-  it('Step 4: increments customer totals via RPC', async () => {
-    // Call the actual increment_customer_totals RPC — no shortcuts.
-    // The RPC takes (p_customer_id UUID, p_amount NUMERIC).
-    const { error: rpcErr } = await supa.rpc('increment_customer_totals', {
-      p_customer_id: customerId,
-      p_amount: 1499,
-    });
-
-    expect(rpcErr).toBeNull();
-
-    // Verify both counters were updated atomically
+  it('Step 4: verifies capture finalization updated customer totals once', async () => {
     const { data: customer } = await supa.from('customers')
       .select('total_spent_cents, total_orders, first_purchase_at')
       .eq('id', customerId).single();
@@ -258,7 +276,7 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     expect(ent!.order_id).toBe(orderId);
     expect(ent!.license_key_id).toBe(licenseKeyId);
     expect(ent!.product_id).toBe(productId);
-    expect(ent!.granted_role_ids).toEqual(['role-e2e-premium']);
+    expect(ent!.granted_role_ids).toEqual([GRANTED_ROLE_ID]);
 
     // License key active
     const { data: key } = await supa.from('license_keys').select('*').eq('id', licenseKeyId).single();
@@ -279,18 +297,27 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
   // Phase 2: Refund
   // ────────────────────────────────────────────────────────────
 
-  it('Step 9: processes a refund — payment + order marked refunded', async () => {
-    // Mark payment refunded
-    const { error: payErr } = await supa.from('payments')
-      .update({ status: 'refunded' })
-      .eq('id', paymentId);
-    expect(payErr).toBeNull();
-
-    // Mark order refunded
-    const { error: ordErr } = await supa.from('orders')
-      .update({ status: 'refunded', updated_at: new Date().toISOString() })
-      .eq('id', orderId);
-    expect(ordErr).toBeNull();
+  it('Step 9: durably records the full PayPal refund', async () => {
+    const recorded = await supa.rpc('commerce_record_paypal_refund_event', {
+      p_payment_id: paymentId,
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_paypal_payment_id: captureId,
+      p_resource_type: 'capture',
+      p_paypal_refund_id: refundId,
+      p_event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      p_refund_amount_cents: 1499,
+      p_currency: 'USD',
+      p_audit_details: { test_flow: 'commerce-e2e' },
+    });
+    expect(recorded.error).toBeNull();
+    expect(recorded.data).toMatchObject({
+      refund_amount_cents: 1499,
+      cumulative_refunded_cents: 1499,
+      full_refund: true,
+      already_recorded: false,
+    });
   });
 
   it('Step 10: expires the entitlement', async () => {
@@ -320,7 +347,7 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
       action: 'revoke_roles',
       payload: {
         discord_id: BUYER_DISCORD_ID,
-        role_ids: ['role-e2e-premium'],
+        role_ids: [GRANTED_ROLE_ID],
         reason: 'refunded',
         order_id: orderId,
       },
@@ -331,7 +358,32 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     expect(data!.action).toBe('revoke_roles');
   });
 
-  it('Step 13: verifies full refund chain consistency', async () => {
+  it('Step 13: atomically commits the refund audit and payment/order terminal marker', async () => {
+    const finalized = await supa.rpc('commerce_finalize_paypal_refund_status', {
+      p_payment_id: paymentId,
+      p_order_id: orderId,
+      p_guild_id: GUILD_ID,
+      p_customer_id: customerId,
+      p_paypal_payment_id: captureId,
+      p_resource_type: 'capture',
+      p_payment_status: 'refunded',
+      p_paypal_refund_id: refundId,
+      p_event_type: 'PAYMENT.CAPTURE.REFUNDED',
+      p_audit_details: {
+        refund_amount_cents: 1499,
+        cumulative_refunded_cents: 1499,
+      },
+    });
+    expect(finalized.error).toBeNull();
+    expect(finalized.data).toMatchObject({
+      order_status: 'refunded',
+      payment_status: 'refunded',
+      already_terminal: false,
+      audit_recorded: true,
+    });
+  });
+
+  it('Step 14: verifies full refund chain consistency', async () => {
     // Order refunded
     const { data: order } = await supa.from('orders').select('*').eq('id', orderId).single();
     expect(order!.status).toBe('refunded');
@@ -356,7 +408,7 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
     expect(revokeActions!.length).toBeGreaterThanOrEqual(1);
     const payload = revokeActions![0]!.payload as Record<string, unknown>;
     expect(payload.discord_id).toBe(BUYER_DISCORD_ID);
-    expect(payload.role_ids).toEqual(['role-e2e-premium']);
+    expect(payload.role_ids).toEqual([GRANTED_ROLE_ID]);
 
     // No active entitlements remain
     const { data: activeEnts } = await supa.from('entitlements').select('id')

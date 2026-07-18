@@ -8,6 +8,7 @@
 import { createHash } from 'crypto';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getPayPalRuntimeConfig, getPayPalToken, getSubscriptionAmount } from '@/lib/paypal';
+import { isCanonicalPayPalResourceId } from '@/lib/paypal-resource-id';
 import {
   paypalCaptureResourceSchema,
   paypalSaleResourceSchema,
@@ -109,11 +110,6 @@ interface EntitlementLifecycleRow {
 
 interface LicenseKeyLifecycleRow {
   id: string;
-}
-
-interface RefundAmountRow {
-  id: string;
-  amount_cents: number | null;
 }
 
 interface CustomerIdentityRow {
@@ -316,6 +312,22 @@ function parseStringArray(value: unknown, label: string): string[] {
   return [...new Set(value)];
 }
 
+function parseExactStringVector(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value)
+    || value.some((entry) =>
+      !isNonEmptyString(entry)
+      || entry.trim() !== entry)
+  ) {
+    throw new Error(`${label} is malformed`);
+  }
+  const normalized = [...new Set(value as string[])];
+  if (normalized.length !== value.length) {
+    throw new Error(`${label} contains duplicates`);
+  }
+  return normalized.sort((left, right) => left.localeCompare(right));
+}
+
 function parseTemporaryRoleSnapshot(
   value: unknown,
 ): Array<{ role_id: string; duration_seconds: number }> {
@@ -498,12 +510,25 @@ function parseFinancialAmount(
   return { amountCents: Number(amountCents), currency };
 }
 
-function parseCapturedAmountToCents(value: unknown): number | null {
-  if (typeof value !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(value)) {
+/** Parse a canonical PayPal decimal into exact, non-negative safe cents. */
+function parsePayPalAmountToCents(value: unknown, allowNegative = false): number | null {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > 32
+    || value !== value.trim()
+  ) {
     return null;
   }
-  const cents = Math.round(Number(value) * 100);
-  return Number.isSafeInteger(cents) ? cents : null;
+  const pattern = allowNegative
+    ? /^-?((?:0|[1-9]\d*))(?:\.([0-9]{1,2}))?$/
+    : /^((?:0|[1-9]\d*))(?:\.([0-9]{1,2}))?$/;
+  const match = pattern.exec(value);
+  if (!match?.[1]) return null;
+  const cents = (BigInt(match[1]) * BigInt(100))
+    + BigInt((match[2] ?? '').padEnd(2, '0') || '0');
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(cents);
 }
 
 async function requireAuthoritativeSubscriptionAmount(
@@ -643,25 +668,25 @@ async function releaseStagedFulfillment(
   row: FulfillmentQueueRow,
 ): Promise<void> {
   if (row.status !== 'staged') return;
-  const { data, error } = await supabase
-    .from('bot_action_queue')
-    .update({ status: 'pending', error: null, next_retry_at: null })
-    .eq('id', row.id)
-    .eq('status', 'staged')
-    .select('id')
-    .maybeSingle();
+  const { data, error } = await supabase.rpc('bot_action_queue_release_staged', {
+    p_action_id: row.id,
+    p_guild_id: row.guild_id,
+    p_idempotency_key: row.idempotency_key,
+  });
   requireSupabaseSuccess(error, 'Failed to release staged fulfillment');
-  if (!data) {
-    const current = await loadFulfillmentByIdempotencyKey(supabase, {
-      idempotencyKey: row.idempotency_key,
-      action: row.action,
-      guildId: row.guild_id,
-      orderId: String(row.payload.order_id ?? ''),
-      fulfillmentType: String(row.payload.fulfillment_type ?? ''),
-    });
-    if (!current || current.status === 'staged') {
-      throw new Error('Failed to release staged fulfillment');
-    }
+  const result = Array.isArray(data) ? data[0] : data;
+  const validStatus = result?.action_status === 'pending'
+    || result?.action_status === 'processing'
+    || result?.action_status === 'completed'
+    || result?.action_status === 'failed';
+  const validDisposition = result?.disposition === 'released'
+    || result?.disposition === 'already_released';
+  if (!result
+    || result.action_id !== row.id
+    || !validStatus
+    || !validDisposition
+    || (result.disposition === 'released' && result.action_status !== 'pending')) {
+    throw new Error('Failed to release staged fulfillment');
   }
 }
 
@@ -854,25 +879,38 @@ async function hasQueuedSubscriptionExpiredAuditEvent(
   return data.length > 0;
 }
 
+function addCanonicalPayPalCandidate(candidates: string[], candidate: unknown): boolean {
+  if (candidate === undefined) return true;
+  if (!isCanonicalPayPalResourceId(candidate)) return false;
+  candidates.push(candidate);
+  return true;
+}
+
 function resolveCaptureRefundPaymentId(resource: Record<string, unknown>): string | null {
   const parsed = paypalCaptureResourceSchema.safeParse(resource);
-  const capture: PayPalCaptureResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
+  if (!parsed.success) return null;
+  const capture: PayPalCaptureResource = parsed.data;
 
-  const supp = capture.supplementary_data;
-  if (supp?.related_ids?.capture_id) {
-    return supp.related_ids.capture_id;
+  const candidates: string[] = [];
+  if (
+    !addCanonicalPayPalCandidate(candidates, capture.capture_id)
+    || !addCanonicalPayPalCandidate(
+      candidates,
+      capture.supplementary_data?.related_ids?.capture_id,
+    )
+  ) {
+    return null;
   }
 
-  const links = capture.links ?? [];
-  const up = links.find((l) => l.rel === 'up');
-  if (up?.href) {
-    const m = up.href.match(/\/captures\/([^/?#]+)/);
-    if (m?.[1]) return m[1];
+  for (const link of capture.links ?? []) {
+    if (link.rel?.toLowerCase() !== 'capture') continue;
+    if (typeof link.href !== 'string') return null;
+    const match = link.href.match(/\/payments\/captures?\/([^/?#]+)\/?(?:[?#]|$)/i);
+    if (!match?.[1] || !addCanonicalPayPalCandidate(candidates, match[1])) return null;
   }
 
-  return null;
+  const unique = [...new Set(candidates)];
+  return unique.length === 1 ? unique[0]! : null;
 }
 
 function resolveSaleRefundPaymentId(
@@ -880,25 +918,53 @@ function resolveSaleRefundPaymentId(
   eventType: string,
 ): string | null {
   const parsed = paypalSaleResourceSchema.safeParse(resource);
-  const sale: PayPalSaleResource = parsed.success
-    ? parsed.data
-    : { id: String(resource.id ?? '') };
+  if (!parsed.success) return null;
+  const sale: PayPalSaleResource = parsed.data;
+  const candidates: string[] = [];
 
-  if (sale.sale_id) return sale.sale_id;
-  if (sale.capture_id) return sale.capture_id;
-
-  const links = sale.links ?? [];
-  const saleLink = links.find((l) => /\/sales?\//.test(l.href ?? ''));
-  if (saleLink?.href) {
-    const m = saleLink.href.match(/\/sales?\/([^/?#]+)/);
-    if (m?.[1]) return m[1];
+  if (
+    !addCanonicalPayPalCandidate(candidates, sale.sale_id)
+    || !addCanonicalPayPalCandidate(candidates, sale.capture_id)
+  ) {
+    return null;
   }
 
-  if (eventType === 'PAYMENT.SALE.REVERSED' && sale.id) {
-    return sale.id;
+  const declaredStates = [sale.state, sale.status]
+    .filter((value): value is string => value !== undefined)
+    .map((value) => value.toUpperCase());
+  const isDirectReversedSale = eventType === 'PAYMENT.SALE.REVERSED'
+    && declaredStates.length > 0
+    && declaredStates.every((value) => value === 'REVERSED')
+    && isCanonicalPayPalResourceId(sale.parent_payment)
+    && sale.sale_id === undefined
+    && sale.capture_id === undefined;
+
+  // PayPal v1 refund resources identify their parent via sale_id/capture_id
+  // or a rel=sale link. A reversed event can instead carry the Sale itself;
+  // only that documented state+parent_payment shape makes resource.id a
+  // parent sale identity rather than an unrelated refund transaction id.
+  if (
+    isDirectReversedSale
+    && !addCanonicalPayPalCandidate(candidates, sale.id)
+  ) {
+    return null;
   }
 
-  return null;
+  for (const link of sale.links ?? []) {
+    const rel = link.rel?.toLowerCase();
+    const relevant = rel === 'sale'
+      || (isDirectReversedSale && (rel === 'self' || rel === 'refund'));
+    if (!relevant) continue;
+    if (typeof link.href !== 'string') return null;
+    const suffix = rel === 'refund' ? '\\/refund' : '';
+    const match = link.href.match(
+      new RegExp(`\\/payments\\/sales?\\/([^/?#]+)${suffix}\\/?(?:[?#]|$)`, 'i'),
+    );
+    if (!match?.[1] || !addCanonicalPayPalCandidate(candidates, match[1])) return null;
+  }
+
+  const unique = [...new Set(candidates)];
+  return unique.length === 1 ? unique[0]! : null;
 }
 
 export function resolveRefundPaymentId(
@@ -1073,7 +1139,7 @@ export async function handlePaymentCaptured(
     throw new Error(`Captured payment ${paypalCaptureId} has no matching order identity`);
   }
 
-  const amountCents = parseCapturedAmountToCents(capture.amount?.value);
+  const amountCents = parsePayPalAmountToCents(capture.amount?.value);
   if (amountCents == null) {
     throw new Error(`Payment capture ${paypalCaptureId} has an invalid amount`);
   }
@@ -1822,6 +1888,7 @@ export async function handleSubscriptionExpired(
       const queued = await queueFulfillment(supabase, 'emit_audit_event', order.guild_id, {
         event_type: 'subscription.expired',
         event_data: {
+          lifecycleId: order.id,
           discordId: customer.discord_id,
           orderId: order.id,
           productId: order.product_id,
@@ -1940,7 +2007,7 @@ export async function handleSubscriptionPayment(
   const sale: PayPalSaleResource = parsed.data;
   const providerPaymentId = sale.id;
   const billingAgreementId = sale.billing_agreement_id;
-  const amountCents = parseCapturedAmountToCents(sale.amount?.total);
+  const amountCents = parsePayPalAmountToCents(sale.amount?.total);
   const rawCurrency = sale.amount?.currency;
   if (
     !isNonEmptyString(providerPaymentId) ||
@@ -1955,7 +2022,7 @@ export async function handleSubscriptionPayment(
 
   const { data: order, error: orderError } = await supabase
     .from('orders')
-    .select('id, customer_id, guild_id, status, paypal_subscription_id')
+    .select('id, order_number, customer_id, guild_id, product_id, plan_id, amount_cents, currency, status, source, paypal_subscription_id, granted_role_ids_snapshot, granted_channel_ids_snapshot, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
     .eq('paypal_subscription_id', billingAgreementId)
     .maybeSingle();
   requireSupabaseSuccess(orderError, 'Failed to load subscription payment order');
@@ -1964,9 +2031,21 @@ export async function handleSubscriptionPayment(
     !isNonEmptyString(order.id) ||
     !isNonEmptyString(order.customer_id) ||
     !isNonEmptyString(order.guild_id) ||
-    order.paypal_subscription_id !== billingAgreementId
+    order.paypal_subscription_id !== billingAgreementId ||
+    !['pending', 'completed', 'refunded', 'disputed', 'cancelled', 'pending_review'].includes(order.status)
   ) {
     throw new Error('Subscription payment order identity mismatch');
+  }
+  const orderFinancial = parseFinancialAmount(
+    order.amount_cents,
+    order.currency,
+    'Subscription renewal order financial identity',
+  );
+  if (
+    amountCents !== orderFinancial.amountCents
+    || currency !== orderFinancial.currency
+  ) {
+    throw new Error('Subscription payment amount or currency does not match the renewal contract');
   }
 
   const expectedPayment = {
@@ -1977,6 +2056,7 @@ export async function handleSubscriptionPayment(
     amount_cents: amountCents,
     currency,
     status: 'completed',
+    paypal_resource_type: 'sale',
   };
   const validatePayment = (
     data: unknown,
@@ -1996,6 +2076,7 @@ export async function handleSubscriptionPayment(
       row.paypal_payment_id !== expectedPayment.paypal_payment_id ||
       row.amount_cents !== expectedPayment.amount_cents ||
       row.currency !== expectedPayment.currency ||
+      row.paypal_resource_type !== expectedPayment.paypal_resource_type ||
       !validStatus
     ) {
       throw new Error('Subscription payment persistence identity mismatch');
@@ -2006,7 +2087,7 @@ export async function handleSubscriptionPayment(
   const { data: insertedPayment, error: insertError } = await supabase
     .from('payments')
     .insert(expectedPayment)
-    .select('id, order_id, customer_id, guild_id, paypal_payment_id, amount_cents, currency, status')
+    .select('id, order_id, customer_id, guild_id, paypal_payment_id, paypal_resource_type, amount_cents, currency, status')
     .single();
   if (insertError) {
     if (!isUniqueViolation(insertError)) {
@@ -2014,7 +2095,7 @@ export async function handleSubscriptionPayment(
     }
     const { data: existingPayment, error: existingError } = await supabase
       .from('payments')
-      .select('id, order_id, customer_id, guild_id, paypal_payment_id, amount_cents, currency, status')
+      .select('id, order_id, customer_id, guild_id, paypal_payment_id, paypal_resource_type, amount_cents, currency, status')
       .eq('paypal_payment_id', providerPaymentId)
       .maybeSingle();
     requireSupabaseSuccess(existingError, 'Failed to inspect replayed subscription payment');
@@ -2036,7 +2117,168 @@ export async function handleSubscriptionPayment(
     validatePayment(insertedPayment);
   }
 
-  console.log(`[Webhook] Subscription payment recorded: ${providerPaymentId}`);
+  if (
+    order.status !== 'completed'
+    || !isNonEmptyString(order.order_number)
+    || !isNonEmptyString(order.product_id)
+    || !isNonEmptyString(order.plan_id)
+    || (order.source !== 'purchase' && order.source !== null)
+  ) {
+    throw new Error('Subscription renewal order is not an exact completed purchase');
+  }
+  const customer = await requireExactCustomerIdentity(supabase, {
+    customerId: order.customer_id,
+    guildId: order.guild_id,
+    operation: 'Failed to load subscription renewal customer identity',
+  });
+
+  let grantedRoleIds: string[];
+  let grantedChannelIds: string[];
+  let productName: string;
+  let paypalPlanId: string | undefined;
+  if (isNonEmptyString(order.grant_snapshot_frozen_at)) {
+    if (!Number.isFinite(Date.parse(order.grant_snapshot_frozen_at))) {
+      throw new Error('Subscription renewal order has malformed frozen grant identity');
+    }
+    grantedRoleIds = parseExactStringVector(
+      order.granted_role_ids_snapshot,
+      'Subscription renewal permanent role snapshot',
+    );
+    grantedChannelIds = parseExactStringVector(
+      order.granted_channel_ids_snapshot,
+      'Subscription renewal channel snapshot',
+    );
+    if (
+      !Array.isArray(order.temporary_role_grants_snapshot)
+      || order.temporary_role_grants_snapshot.length !== 0
+    ) {
+      throw new Error('Subscription renewal order has unexpected temporary-role grants');
+    }
+    productName = await requireProductDisplayName(
+      supabase,
+      order.product_id,
+      'Failed to load subscription renewal product identity',
+    );
+  } else if (order.grant_snapshot_frozen_at === null) {
+    const { data: legacy, error: legacyError } = await supabase
+      .from('commerce_legacy_subscription_grant_contracts')
+      .select('order_id, source_queue_id, guild_id, customer_id, discord_id, product_id, product_name, order_number, plan_id, paypal_subscription_id, paypal_plan_id, amount_cents, currency, granted_role_ids_snapshot, granted_channel_ids_snapshot, persisted_at')
+      .eq('order_id', order.id)
+      .maybeSingle();
+    requireSupabaseSuccess(legacyError, 'Failed to load subscription renewal legacy contract');
+    if (
+      !legacy
+      || legacy.order_id !== order.id
+      || !isNonEmptyString(legacy.source_queue_id)
+      || legacy.guild_id !== order.guild_id
+      || legacy.customer_id !== order.customer_id
+      || legacy.discord_id !== customer.discord_id
+      || legacy.product_id !== order.product_id
+      || !isNonEmptyString(legacy.product_name)
+      || legacy.order_number !== order.order_number
+      || legacy.plan_id !== order.plan_id
+      || legacy.paypal_subscription_id !== billingAgreementId
+      || !isNonEmptyString(legacy.paypal_plan_id)
+      || legacy.amount_cents !== orderFinancial.amountCents
+      || legacy.currency !== orderFinancial.currency
+      || !isNonEmptyString(legacy.persisted_at)
+      || !Number.isFinite(Date.parse(legacy.persisted_at))
+    ) {
+      throw new Error('Subscription renewal legacy contract identity mismatch');
+    }
+    grantedRoleIds = parseExactStringVector(
+      legacy.granted_role_ids_snapshot,
+      'Subscription renewal legacy role snapshot',
+    );
+    grantedChannelIds = parseExactStringVector(
+      legacy.granted_channel_ids_snapshot,
+      'Subscription renewal legacy channel snapshot',
+    );
+    productName = legacy.product_name;
+    paypalPlanId = legacy.paypal_plan_id;
+  } else {
+    throw new Error('Subscription renewal order has no durable grant contract');
+  }
+
+  const { data: entitlement, error: entitlementError } = await supabase
+    .from('entitlements')
+    .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids, granted_channel_ids')
+    .eq('guild_id', order.guild_id)
+    .eq('customer_id', order.customer_id)
+    .eq('order_id', order.id)
+    .eq('product_id', order.product_id)
+    .eq('plan_id', order.plan_id)
+    .maybeSingle();
+  requireSupabaseSuccess(entitlementError, 'Failed to load subscription renewal entitlement');
+  const knownEntitlementStatuses = [
+    'active',
+    'pending',
+    'grace_period',
+    'suspended',
+    'cancelled',
+    'expired',
+    'revoked',
+  ];
+  if (
+    !entitlement
+    || !isNonEmptyString(entitlement.id)
+    || entitlement.guild_id !== order.guild_id
+    || entitlement.customer_id !== order.customer_id
+    || entitlement.order_id !== order.id
+    || entitlement.product_id !== order.product_id
+    || entitlement.plan_id !== order.plan_id
+    || entitlement.type !== 'subscription'
+    || !knownEntitlementStatuses.includes(entitlement.status)
+    || (entitlement.source !== 'purchase' && entitlement.source !== null)
+    || !payloadValuesEqual(
+      parseExactStringVector(
+        entitlement.granted_role_ids,
+        'Subscription renewal entitlement role vector',
+      ),
+      grantedRoleIds,
+    )
+    || !payloadValuesEqual(
+      parseExactStringVector(
+        entitlement.granted_channel_ids,
+        'Subscription renewal entitlement channel vector',
+      ),
+      grantedChannelIds,
+    )
+  ) {
+    throw new Error('Subscription renewal entitlement identity mismatch');
+  }
+
+  const fulfillmentPayload: Record<string, unknown> = {
+    fulfillment_type: 'subscription_renewed',
+    guild_id: order.guild_id,
+    customer_id: order.customer_id,
+    discord_id: customer.discord_id,
+    product_id: order.product_id,
+    product_name: productName,
+    order_id: order.id,
+    order_number: order.order_number,
+    plan_id: order.plan_id,
+    paypal_subscription_id: billingAgreementId,
+    amount_cents: orderFinancial.amountCents,
+    currency: orderFinancial.currency,
+    granted_role_ids: grantedRoleIds,
+    granted_channel_ids: grantedChannelIds,
+    entitlement_type: 'subscription',
+    existing_entitlement_id: entitlement.id,
+    ...(paypalPlanId ? { paypal_plan_id: paypalPlanId } : {}),
+  };
+  const expectation: FulfillmentExpectation = {
+    idempotencyKey: `paypal:sale:${providerPaymentId}:fulfill_subscription_renewal`,
+    action: 'fulfill_subscription',
+    guildId: order.guild_id,
+    orderId: order.id,
+    fulfillmentType: 'subscription_renewed',
+    payload: fulfillmentPayload,
+  };
+  const staged = await stageFulfillment(supabase, expectation, fulfillmentPayload);
+  await releaseStagedFulfillment(supabase, staged);
+
+  console.log(`[Webhook] Subscription payment recorded + renewal queued: ${providerPaymentId}`);
 }
 
 // ── Capture Refunded / Reversed ─────────────────────
@@ -2054,11 +2296,9 @@ export async function handleCaptureRefunded(
   const captureId = resolveCaptureRefundPaymentId(resource);
 
   if (!captureId) {
-    console.error(
-      `[Webhook] ${eventType} arrived without a recoverable capture_id — payload:`,
-      JSON.stringify(resource).slice(0, 500),
+    throw new Error(
+      `${eventType} arrived without one unambiguous canonical capture_id`,
     );
-    return;
   }
 
   await handleExternalPaymentRefunded(
@@ -2082,11 +2322,9 @@ export async function handleSaleRefunded(
   const saleId = resolveSaleRefundPaymentId(resource, eventType);
 
   if (!saleId) {
-    console.error(
-      `[Webhook] ${eventType} arrived without a recoverable sale_id — payload:`,
-      JSON.stringify(resource).slice(0, 500),
+    throw new Error(
+      `${eventType} arrived without one unambiguous canonical sale_id`,
     );
-    return;
   }
 
   await handleExternalPaymentRefunded(
@@ -2110,21 +2348,12 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
-/**
- * Parse a PayPal money string ("10.00", or "-5.00" — v1 sale refund events
- * report the refund amount as a negative delta) into non-negative cents.
- */
-function parseAmountToCents(value: unknown): number | null {
-  if (typeof value !== 'string' || value.trim() === '') return null;
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed)) return null;
-  return Math.abs(Math.round(parsed * 100));
-}
-
 interface RefundAmountInfo {
   /** Amount of THIS refund event, in cents (null = missing/unparseable). */
   refundAmountCents: number | null;
   refundCurrency: string | null;
+  refundAmountProvided: boolean;
+  refundCurrencyProvided: boolean;
   /** PayPal's cumulative refunded total for the parent capture/sale. */
   paypalTotalRefundedCents: number | null;
   /**
@@ -2146,18 +2375,28 @@ function resolveRefundAmounts(
       return {
         refundAmountCents: null,
         refundCurrency: null,
+        refundAmountProvided: false,
+        refundCurrencyProvided: false,
         paypalTotalRefundedCents: null,
         paypalTotalRefundedCurrency: null,
       };
     }
+    const rawRefundAmount = parsed.data.amount?.value ?? parsed.data.amount?.total;
+    const rawRefundCurrency = parsed.data.amount?.currency_code
+      ?? parsed.data.amount?.currency;
     return {
-      refundAmountCents: parseAmountToCents(parsed.data.amount?.value),
-      refundCurrency: parsed.data.amount?.currency_code ?? null,
-      paypalTotalRefundedCents: parseAmountToCents(
-        parsed.data.seller_payable_breakdown?.total_refunded_amount?.value,
+      refundAmountCents: parsePayPalAmountToCents(rawRefundAmount),
+      refundCurrency: rawRefundCurrency ?? null,
+      refundAmountProvided: rawRefundAmount !== undefined,
+      refundCurrencyProvided: rawRefundCurrency !== undefined,
+      paypalTotalRefundedCents: parsePayPalAmountToCents(
+        parsed.data.seller_payable_breakdown?.total_refunded_amount?.value
+          ?? parsed.data.total_refunded_amount?.value,
       ),
       paypalTotalRefundedCurrency:
-        parsed.data.seller_payable_breakdown?.total_refunded_amount?.currency_code ?? null,
+        parsed.data.seller_payable_breakdown?.total_refunded_amount?.currency_code
+          ?? parsed.data.total_refunded_amount?.currency
+          ?? null,
     };
   }
 
@@ -2166,94 +2405,29 @@ function resolveRefundAmounts(
     return {
       refundAmountCents: null,
       refundCurrency: null,
+      refundAmountProvided: false,
+      refundCurrencyProvided: false,
       paypalTotalRefundedCents: null,
       paypalTotalRefundedCurrency: null,
     };
   }
+  const rawRefundAmount = parsed.data.amount?.total;
+  const rawRefundCurrency = parsed.data.amount?.currency;
   return {
-    refundAmountCents: parseAmountToCents(parsed.data.amount?.total),
-    refundCurrency: parsed.data.amount?.currency ?? null,
-    paypalTotalRefundedCents: parseAmountToCents(parsed.data.total_refunded_amount?.value),
+    // Legacy v1 sale refund events express the event amount as a negative
+    // decimal delta. No other numeric syntax is accepted.
+    refundAmountCents: parsePayPalAmountToCents(rawRefundAmount, true),
+    refundCurrency: rawRefundCurrency ?? null,
+    refundAmountProvided: rawRefundAmount !== undefined,
+    refundCurrencyProvided: rawRefundCurrency !== undefined,
+    paypalTotalRefundedCents: parsePayPalAmountToCents(parsed.data.total_refunded_amount?.value),
     paypalTotalRefundedCurrency: parsed.data.total_refunded_amount?.currency ?? null,
   };
 }
 
-type FullRefundReason =
-  | 'reversal'
-  | 'unparseable_amount'
-  | 'currency_mismatch'
-  | 'no_payment_baseline'
-  | 'cumulative_total';
-
-type RefundScope = { kind: 'full'; reason: FullRefundReason } | { kind: 'partial' };
-
-/**
- * Decide whether a refund event revokes access (full) or is flagged for
- * operator review (partial). Every ambiguous case resolves to FULL — the
- * merchant-safe default (money left, so access goes) that also matches the
- * pre-W2 behavior:
- *   - .REVERSED events are chargebacks/reversals — always full.
- *   - Unparseable/missing amounts can't be compared — full.
- *   - A refund in a different currency can't be compared — full, EXCEPT for
- *     legacy mislabeled subscription payments (see below).
- *   - A payment recorded with amount_cents <= 0 (e.g. a subscription sale
- *     whose amount lookup failed) has no baseline — full.
- * Otherwise the cumulative refunded total (max of PayPal's authoritative
- * total and the locally recorded payment_refunds sum) decides.
- *
- * Legacy tolerance (W2 codex round 2): handleSubscriptionPayment used to
- * persist a hardcoded 'USD' currency label while amount_cents was parsed
- * from the sale payload in the plan's actual currency — the recorded CENTS
- * are right, only the label is wrong. PayPal always issues refunds in the
- * parent sale's currency, so when a PAYMENT.SALE.* refund against a
- * USD-labeled payment carries a signature-verified payload whose cumulative
- * refunded total is in the refund's own currency, the payload — not our
- * label — is authoritative and the cents comparison remains valid. Capture
- * refunds keep the strict fail-safe: their payments rows were always
- * persisted with the checkout currency.
- */
-function classifyRefundScope(input: {
-  eventType: string;
-  paymentAmountCents: number | null;
-  paymentCurrency: string | null;
-  refundAmountCents: number | null;
-  refundCurrency: string | null;
-  paypalTotalRefundedCurrency: string | null;
-  cumulativeRefundedCents: number;
-}): RefundScope {
-  if (input.eventType.endsWith('.REVERSED')) {
-    return { kind: 'full', reason: 'reversal' };
-  }
-  if (input.refundAmountCents == null) {
-    return { kind: 'full', reason: 'unparseable_amount' };
-  }
-  if (
-    input.refundCurrency &&
-    input.paymentCurrency &&
-    input.refundCurrency.toUpperCase() !== input.paymentCurrency.toUpperCase()
-  ) {
-    const legacyMislabeledSalePayment =
-      input.eventType.startsWith('PAYMENT.SALE.') &&
-      input.paymentCurrency.toUpperCase() === 'USD' &&
-      input.paypalTotalRefundedCurrency != null &&
-      input.paypalTotalRefundedCurrency.toUpperCase() === input.refundCurrency.toUpperCase();
-    if (!legacyMislabeledSalePayment) {
-      return { kind: 'full', reason: 'currency_mismatch' };
-    }
-  }
-  if (typeof input.paymentAmountCents !== 'number' || input.paymentAmountCents <= 0) {
-    return { kind: 'full', reason: 'no_payment_baseline' };
-  }
-  if (input.cumulativeRefundedCents >= input.paymentAmountCents) {
-    return { kind: 'full', reason: 'cumulative_total' };
-  }
-  return { kind: 'partial' };
-}
-
-function formatCents(cents: number | null, currency: string | null): string {
-  if (cents == null) return 'an unknown amount';
-  return `${(cents / 100).toFixed(2)} ${currency ?? ''}`.trim();
-}
+type RefundScope =
+  | { kind: 'full'; reason: 'reversal' | 'cumulative_total' }
+  | { kind: 'partial' };
 
 /**
  * PAYMENT.CAPTURE.REFUNDED / .REVERSED and PAYMENT.SALE.REFUNDED / .REVERSED.
@@ -2287,10 +2461,11 @@ async function handleExternalPaymentRefunded(
   options: RefundHandlerOptions = {},
 ) {
   const identifierName = identifierField === 'capture_id' ? 'capture' : 'sale';
+  const resourceType = identifierField === 'capture_id' ? 'capture' : 'sale';
 
   const { data: payment, error: paymentError } = await supabase
     .from('payments')
-    .select('id, order_id, customer_id, guild_id, status, amount_cents, currency')
+    .select('id, order_id, customer_id, guild_id, paypal_payment_id, paypal_resource_type, status, amount_cents, currency')
     .eq('paypal_payment_id', paymentId)
     .maybeSingle();
   requireSupabaseSuccess(paymentError, 'Failed to load payment for refund');
@@ -2307,147 +2482,251 @@ async function handleExternalPaymentRefunded(
         'deferring for webhook retry (out-of-order delivery or unknown payment)',
     );
   }
+  if (
+    !isNonEmptyString(payment.id)
+    || !isNonEmptyString(payment.order_id)
+    || !isNonEmptyString(payment.customer_id)
+    || !isNonEmptyString(payment.guild_id)
+    || payment.paypal_payment_id !== paymentId
+    // Legacy one-time capture rows intentionally remain null until a signed
+    // provider event proves their resource type. The serialized ledger RPC
+    // adopts that null under the same exact payment/order lock. A conflicting
+    // non-null type remains a hard identity failure.
+    || (payment.paypal_resource_type !== null
+      && payment.paypal_resource_type !== resourceType)
+    || !['completed', 'refunded', 'reversed'].includes(payment.status)
+    || !Number.isSafeInteger(payment.amount_cents)
+    || payment.amount_cents <= 0
+    || typeof payment.currency !== 'string'
+    || !/^[A-Za-z]{3}$/.test(payment.currency)
+  ) {
+    throw new Error(
+      `${eventType} for ${identifierName} ${paymentId} matched a malformed or wrong-resource payment`,
+    );
+  }
+  const paymentCurrency = payment.currency.toUpperCase();
 
-  // Idempotency guard: only set after every revocation effect has succeeded.
-  if (payment.status === 'refunded' || payment.status === 'reversed') {
+  const orderId = payment.order_id;
+  const isReversal = eventType.endsWith('.REVERSED');
+  const refundStatus = isReversal ? 'reversed' : 'refunded';
+  const resolvedAmounts = resolveRefundAmounts(resource, eventType);
+  const refundId = isCanonicalPayPalResourceId(resource.id) ? resource.id : null;
+  if (!refundId) {
+    throw new Error(`${eventType} for ${identifierName} ${paymentId} has no canonical refund id`);
+  }
+  if (
+    !isReversal
+    && (
+      resolvedAmounts.refundAmountCents == null
+      || resolvedAmounts.refundAmountCents <= 0
+      || typeof resolvedAmounts.refundCurrency !== 'string'
+      || !/^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
+      || resolvedAmounts.refundCurrency !== paymentCurrency
+    )
+  ) {
+    throw new Error(
+      `${eventType} for ${identifierName} ${paymentId} has ambiguous refund amount or currency`,
+    );
+  }
+  if (
+    isReversal
+    && (
+      resolvedAmounts.refundAmountProvided !== resolvedAmounts.refundCurrencyProvided
+      || (
+        resolvedAmounts.refundAmountProvided
+        && (
+          resolvedAmounts.refundAmountCents == null
+          || resolvedAmounts.refundAmountCents <= 0
+          || typeof resolvedAmounts.refundCurrency !== 'string'
+          || !/^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
+          || resolvedAmounts.refundCurrency !== paymentCurrency
+        )
+      )
+    )
+  ) {
+    throw new Error(
+      `${eventType} for ${identifierName} ${paymentId} has malformed reversal amount or currency`,
+    );
+  }
+
+  const reversalCurrency = typeof resolvedAmounts.refundCurrency === 'string'
+    && /^[A-Z]{3}$/.test(resolvedAmounts.refundCurrency)
+    ? resolvedAmounts.refundCurrency
+    : null;
+  const { data: recordedValue, error: recordError } = await supabase.rpc(
+    'commerce_record_paypal_refund_event',
+    {
+      p_payment_id: payment.id,
+      p_order_id: orderId,
+      p_guild_id: payment.guild_id,
+      p_customer_id: payment.customer_id,
+      p_paypal_payment_id: paymentId,
+      p_resource_type: resourceType,
+      p_paypal_refund_id: refundId,
+      p_event_type: eventType,
+      p_refund_amount_cents: resolvedAmounts.refundAmountCents,
+      p_currency: isReversal ? reversalCurrency : resolvedAmounts.refundCurrency,
+      p_audit_details: {
+        source: 'paypal_webhook',
+        provider_total_refunded_cents: resolvedAmounts.paypalTotalRefundedCents,
+        provider_total_refunded_currency: resolvedAmounts.paypalTotalRefundedCurrency,
+      },
+    },
+  );
+  requireSupabaseSuccess(recordError, 'Failed to atomically record refund event');
+  const recorded = recordedValue as Record<string, unknown> | null;
+  if (
+    !recorded
+    || recorded.payment_id !== payment.id
+    || recorded.order_id !== orderId
+    || recorded.paypal_refund_id !== refundId
+    || recorded.event_type !== eventType
+    || !Number.isSafeInteger(recorded.refund_amount_cents)
+    || (recorded.refund_amount_cents as number) < 0
+    || (
+      resolvedAmounts.refundAmountProvided
+      && recorded.refund_amount_cents !== resolvedAmounts.refundAmountCents
+    )
+    || recorded.currency !== paymentCurrency
+    || !Number.isSafeInteger(recorded.cumulative_refunded_cents)
+    || (recorded.cumulative_refunded_cents as number) < 0
+    || (
+      (recorded.cumulative_refunded_cents as number)
+      < (recorded.refund_amount_cents as number)
+    )
+    || (recorded.cumulative_refunded_cents as number) > payment.amount_cents
+    || typeof recorded.full_refund !== 'boolean'
+    || recorded.full_refund !== (recorded.cumulative_refunded_cents === payment.amount_cents)
+    || typeof recorded.already_recorded !== 'boolean'
+    || typeof recorded.terminal_witness !== 'boolean'
+    || recorded.terminal_history_consistent !== true
+    || typeof recorded.terminal_history_replay !== 'boolean'
+    || !['completed', 'refunded', 'reversed'].includes(
+      recorded.terminal_payment_status as string,
+    )
+    // The locked RPC view may have advanced after this handler read the row.
+    // Only completed -> terminal is monotonic; an initially terminal payment
+    // must remain exactly the same status.
+    || (
+      payment.status !== 'completed'
+      && recorded.terminal_payment_status !== payment.status
+    )
+    || recorded.terminal_history_replay
+      !== (recorded.terminal_payment_status !== 'completed')
+    || (recorded.terminal_witness === true && recorded.full_refund !== true)
+    || (
+      recorded.already_recorded === false
+      && recorded.full_refund === true
+      && recorded.terminal_witness !== true
+    )
+    || typeof recorded.partial_audit_recorded !== 'boolean'
+    || typeof recorded.partial_alert_recorded !== 'boolean'
+  ) {
+    throw new Error('Atomic refund event recording returned mismatched proof');
+  }
+  const amounts: RefundAmountInfo = {
+    ...resolvedAmounts,
+    refundAmountCents: recorded.refund_amount_cents as number,
+    refundCurrency: recorded.currency as string,
+  };
+  const cumulativeRefundedCents = recorded.cumulative_refunded_cents as number;
+  const alreadyRecorded = recorded.already_recorded as boolean;
+  const terminalWitness = recorded.terminal_witness as boolean;
+  const terminalHistoryConsistent = recorded.terminal_history_consistent as boolean;
+  const terminalHistoryReplay = recorded.terminal_history_replay as boolean;
+  const terminalPaymentStatus = recorded.terminal_payment_status as
+    | 'completed'
+    | 'refunded'
+    | 'reversed';
+
+  // A terminal payment can only acknowledge an exact, immutable ledger
+  // witness. The record RPC rejects unknown terminal ids before insert; this
+  // independent proof check prevents a malformed RPC response from turning a
+  // new signed payload into success. A REFUNDED witness may legitimately be
+  // replayed after a later REVERSED witness, but only when the locked ledger
+  // proves that later REVERSED transition. Do not infer chronology from refund
+  // amounts: both an old partial and an old full REFUNDED row are valid before
+  // a later zero-remaining REVERSED witness.
+  if (terminalPaymentStatus === 'refunded' || terminalPaymentStatus === 'reversed') {
+    const targetMatchesTerminalStatus = refundStatus === terminalPaymentStatus
+      || (terminalPaymentStatus === 'reversed' && refundStatus === 'refunded');
+    if (
+      !alreadyRecorded
+      || !terminalHistoryReplay
+      || !terminalHistoryConsistent
+      || !targetMatchesTerminalStatus
+    ) {
+      throw new Error('Terminal payment refund replay does not match durable terminal history');
+    }
     console.info(
-      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — payment already ${payment.status}, skipping`,
+      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — ` +
+        `validated existing terminal ledger witness ${refundId}, no effects replayed`,
     );
     return;
   }
 
-  const orderId = payment.order_id;
-  const refundStatus = eventType.endsWith('.REVERSED') ? 'reversed' : 'refunded';
-  const amounts = resolveRefundAmounts(resource, eventType);
-  const refundId =
-    typeof resource.id === 'string' && resource.id.length > 0 ? resource.id : null;
-
-  // Record this refund id — the unique index on payment_refunds
-  // (paypal_refund_id) is the atomic dedupe across replays, resumed retries
-  // and concurrent instances; a 23505 means "already recorded", not an error.
-  let alreadyRecorded = false;
-  if (refundId) {
-    const { error: refundInsertError } = await supabase.from('payment_refunds').insert({
-      payment_id: payment.id,
-      order_id: orderId,
-      guild_id: payment.guild_id,
-      paypal_refund_id: refundId,
-      event_type: eventType,
-      amount_cents: amounts.refundAmountCents,
-      currency: amounts.refundCurrency,
-    });
-    if (refundInsertError) {
-      if (isUniqueViolation(refundInsertError)) {
-        alreadyRecorded = true;
-      } else {
-        throw new Error(
-          `Failed to record refund ${refundId}: ${formatSupabaseError(refundInsertError)}`,
-        );
-      }
-    }
+  // A replayed historical row observes today's cumulative ledger total, but
+  // it does not thereby acquire ownership of the full-refund transition. If a
+  // later event filled the ledger before its own webhook finalized the payment
+  // marker, only that later row may resume the access effects.
+  if (alreadyRecorded && recorded.full_refund && !terminalWitness) {
+    console.info(
+      `[Webhook] ${eventType} for ${identifierName} ${paymentId} — ` +
+        `validated historical ledger witness ${refundId}, no effects replayed`,
+    );
+    return;
   }
 
-  // Locally recorded cumulative total (includes this refund's row).
-  const recordedRefunds = await fetchAllLifecycleRowsById<RefundAmountRow>(
-    async (afterId) => {
-      let query = supabase
-        .from('payment_refunds')
-        .select('id, amount_cents')
-        .eq('payment_id', payment.id)
-        .order('id', { ascending: true })
-        .limit(LIFECYCLE_SCAN_PAGE_SIZE);
-      if (afterId !== null) query = query.gt('id', afterId);
-      return await query as {
-        data: RefundAmountRow[] | null;
-        error: unknown;
-      };
-    },
-    'Failed to load recorded refunds for payment',
-  );
-  const locallyRecordedCents = recordedRefunds.reduce(
-    (sum, row) =>
-      sum + (typeof row?.amount_cents === 'number' ? row.amount_cents : 0),
-    0,
-  );
-  // Two concurrent partial refunds can each miss the other's row locally;
-  // PayPal's cumulative total (present on capture refunds and sale refunds)
-  // is authoritative and closes that window on whichever event carries it.
-  const cumulativeRefundedCents = Math.max(
-    locallyRecordedCents,
-    amounts.paypalTotalRefundedCents ?? 0,
-    amounts.refundAmountCents ?? 0,
-  );
+  const scope: RefundScope = terminalWitness
+    ? { kind: 'full', reason: isReversal ? 'reversal' : 'cumulative_total' }
+    : { kind: 'partial' };
 
-  const scope = classifyRefundScope({
-    eventType,
-    paymentAmountCents: typeof payment.amount_cents === 'number' ? payment.amount_cents : null,
-    paymentCurrency: typeof payment.currency === 'string' ? payment.currency : null,
-    refundAmountCents: amounts.refundAmountCents,
-    refundCurrency: amounts.refundCurrency,
-    paypalTotalRefundedCurrency: amounts.paypalTotalRefundedCurrency,
-    cumulativeRefundedCents,
-  });
+  const finalizeRefundStatus = async (
+    targetStatus: 'refunded' | 'reversed',
+    auditDetails: Record<string, unknown>,
+  ) => {
+    const { data: finalizedValue, error: finalizeError } = await supabase.rpc(
+      'commerce_finalize_paypal_refund_status',
+      {
+        p_payment_id: payment.id,
+        p_order_id: orderId,
+        p_guild_id: payment.guild_id,
+        p_customer_id: payment.customer_id,
+        p_paypal_payment_id: paymentId,
+        p_resource_type: resourceType,
+        p_payment_status: targetStatus,
+        p_paypal_refund_id: refundId,
+        p_event_type: eventType,
+        p_audit_details: auditDetails,
+      },
+    );
+    requireSupabaseSuccess(finalizeError, 'Failed to atomically finalize refund status');
+    const finalized = finalizedValue as Record<string, unknown> | null;
+    if (
+      !finalized
+      || finalized.order_id !== orderId
+      || finalized.payment_id !== payment.id
+      || finalized.order_status !== 'refunded'
+      || finalized.payment_status !== targetStatus
+      || typeof finalized.already_terminal !== 'boolean'
+      || typeof finalized.audit_recorded !== 'boolean'
+      || !Number.isSafeInteger(finalized.partial_alerts_resolved)
+      || (finalized.partial_alerts_resolved as number) < 0
+    ) {
+      throw new Error('Atomic refund status finalization returned mismatched proof');
+    }
+    return finalized;
+  };
 
   if (scope.kind === 'partial') {
-    // A replayed, already-recorded partial refund has nothing left to do —
-    // unless this is the resumption of a previously FAILED attempt, where
-    // the alert/audit writes may not have happened (both are idempotent:
-    // the alert is deduped per refund id by a partial unique index).
+    // Ledger, audit and alert commit under the same order/payment/refund
+    // locks. A replay therefore has no separate crash window to repair here.
     if (alreadyRecorded && !options.retryingFailedEvent) {
       console.info(
         `[Webhook] ${eventType} for ${identifierName} ${paymentId} — partial refund ${refundId} already processed, skipping`,
       );
       return;
     }
-
-    const { error: alertError } = await supabase.from('alerts').insert({
-      guild_id: payment.guild_id,
-      alert_type: 'partial_refund_review',
-      severity: 'warning',
-      title: 'Partial PayPal refund — review required',
-      message:
-        `PayPal reported a partial refund of ${formatCents(amounts.refundAmountCents, amounts.refundCurrency)} ` +
-        `against a payment of ${formatCents(payment.amount_cents, payment.currency)} (order ${orderId}). ` +
-        'Access was NOT revoked automatically — review the order and revoke manually if warranted.',
-      metadata: {
-        source: 'paypal_webhook',
-        event_type: eventType,
-        paypal_refund_id: refundId,
-        [identifierField]: paymentId,
-        order_id: orderId,
-        payment_id: payment.id,
-        refund_amount_cents: amounts.refundAmountCents,
-        payment_amount_cents: payment.amount_cents ?? null,
-        cumulative_refunded_cents: cumulativeRefundedCents,
-        currency: amounts.refundCurrency ?? payment.currency ?? null,
-      },
-    });
-    if (alertError && !isUniqueViolation(alertError)) {
-      throw new Error(
-        `Failed to raise partial refund review alert: ${formatSupabaseError(alertError)}`,
-      );
-    }
-
-    const { error: auditError } = await supabase.from('audit_logs').insert({
-      guild_id: payment.guild_id,
-      actor_type: 'system',
-      actor_id: 'paypal_webhook',
-      action: 'order.refund_partial',
-      target_type: 'order',
-      target_id: orderId,
-      details: {
-        event_type: eventType,
-        [identifierField]: paymentId,
-        paypal_refund_id: refundId,
-        refund_scope: 'partial',
-        refund_amount_cents: amounts.refundAmountCents,
-        payment_amount_cents: payment.amount_cents ?? null,
-        cumulative_refunded_cents: cumulativeRefundedCents,
-        currency: amounts.refundCurrency ?? payment.currency ?? null,
-        decision: 'access_retained_pending_review',
-      },
-    });
-    requireSupabaseSuccess(auditError, 'Failed to write partial refund audit log');
 
     console.log(
       `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — ` +
@@ -2471,6 +2750,7 @@ async function handleExternalPaymentRefunded(
         .select('id, license_key_id')
         .eq('order_id', orderId)
         .eq('guild_id', payment.guild_id)
+        .eq('customer_id', payment.customer_id)
         .in('status', entitlementLookupStatuses)
         .order('id', { ascending: true })
         .limit(LIFECYCLE_SCAN_PAGE_SIZE);
@@ -2492,6 +2772,7 @@ async function handleExternalPaymentRefunded(
         .select('id')
         .eq('order_id', orderId)
         .eq('guild_id', payment.guild_id)
+        .eq('customer_id', payment.customer_id)
         .order('id', { ascending: true })
         .limit(LIFECYCLE_SCAN_PAGE_SIZE);
       if (afterId !== null) query = query.gt('id', afterId);
@@ -2527,6 +2808,8 @@ async function handleExternalPaymentRefunded(
       updated_at: nowIso,
     })
     .eq('order_id', orderId)
+    .eq('guild_id', payment.guild_id)
+    .eq('customer_id', payment.customer_id)
     .in('status', EXPIRABLE_ENTITLEMENT_STATUSES);
   requireSupabaseSuccess(expireEntitlementsError, 'Failed to revoke entitlements for refund');
 
@@ -2563,6 +2846,8 @@ async function handleExternalPaymentRefunded(
       updated_at: nowIso,
     })
     .eq('order_id', orderId)
+    .eq('guild_id', payment.guild_id)
+    .eq('customer_id', payment.customer_id)
     .neq('status', 'revoked');
   requireSupabaseSuccess(revokeKeysError, 'Failed to revoke license keys for refund');
 
@@ -2582,47 +2867,22 @@ async function handleExternalPaymentRefunded(
     );
   }
 
-  const { error: auditError } = await supabase.from('audit_logs').insert({
-    guild_id: payment.guild_id,
-    actor_type: 'system',
-    actor_id: 'paypal_webhook',
-    action:
-      eventType.endsWith('.REVERSED')
-        ? 'order.reversed'
-        : 'order.refunded_external',
-    target_type: 'order',
-    target_id: orderId,
-    details: {
-      event_type: eventType,
-      [identifierField]: paymentId,
-      paypal_refund_id: refundId,
-      refund_scope: 'full',
-      full_refund_reason: scope.reason,
-      refund_amount_cents: amounts.refundAmountCents,
-      payment_amount_cents: payment.amount_cents ?? null,
-      cumulative_refunded_cents: cumulativeRefundedCents,
-      entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
-      license_key_ids: licenseKeyIds,
-      role_revocation_source: 'entitlement_status_trigger',
-    },
+  // Commit marker LAST. The deferred payment-parent status guard spans both
+  // rows, so this must be one database transaction rather than separate
+  // PostgREST updates. The RPC also records the exact full-refund audit under
+  // the same ledger locks, preventing crash/concurrent-replay duplicates.
+  const finalized = await finalizeRefundStatus(refundStatus, {
+    full_refund_reason: scope.reason,
+    refund_amount_cents: amounts.refundAmountCents,
+    payment_amount_cents: payment.amount_cents,
+    cumulative_refunded_cents: cumulativeRefundedCents,
+    entitlement_ids: (activeEntitlements ?? []).map((ent) => ent.id),
+    license_key_ids: licenseKeyIds,
+    role_revocation_source: 'entitlement_status_trigger',
   });
-  requireSupabaseSuccess(auditError, 'Failed to write refund audit log');
-
-  const { error: orderUpdateError } = await supabase
-    .from('orders')
-    .update({ status: 'refunded', updated_at: nowIso })
-    .eq('id', orderId);
-  requireSupabaseSuccess(orderUpdateError, 'Failed to mark order refunded');
-
-  // Commit marker LAST — the replay guard at the top keys off this status,
-  // so it must only flip once every revocation effect has been applied.
-  const { error: paymentUpdateError } = await supabase
-    .from('payments')
-    .update({ status: refundStatus })
-    .eq('id', payment.id);
-  requireSupabaseSuccess(paymentUpdateError, `Failed to mark payment ${refundStatus}`);
 
   console.log(
-    `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — full refund, access revoked`,
+    `[Webhook] ${eventType} processed for order ${orderId} (${identifierName} ${paymentId}) — ` +
+      `full refund, access revoked, payment ${finalized.payment_status}`,
   );
 }

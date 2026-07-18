@@ -38,14 +38,29 @@ export async function findLiveTemporaryRoleOwner(
     userId: string;
     roleId: string;
     excludeGrantId?: string | null;
+    excludeGrantIds?: string[];
     excludeOrderId?: string | null;
   },
 ): Promise<LiveTemporaryRoleOwner | null> {
+  if (
+    input.excludeGrantIds !== undefined
+    && (
+      !Array.isArray(input.excludeGrantIds)
+      || input.excludeGrantIds.some((grantId) => !isNonBlankString(grantId))
+      || new Set(input.excludeGrantIds).size !== input.excludeGrantIds.length
+      || input.excludeGrantId !== undefined
+    )
+  ) {
+    throw new Error('temporary role ownership exclusion vector is malformed');
+  }
+  const exclusionParams = input.excludeGrantIds === undefined
+    ? { p_exclude_grant_id: input.excludeGrantId ?? null }
+    : { p_exclude_grant_ids: input.excludeGrantIds };
   const { data, error } = await supabase.rpc('commerce_find_live_temp_role_owner', {
     p_guild_id: input.guildId,
     p_user_id: input.userId,
     p_role_id: input.roleId,
-    p_exclude_grant_id: input.excludeGrantId ?? null,
+    ...exclusionParams,
     p_exclude_order_id: input.excludeOrderId ?? null,
   });
   if (error) {
@@ -69,6 +84,7 @@ export async function findLiveTemporaryRoleOwner(
     || (owner.order_id !== null && !isNonBlankString(owner.order_id))
     || (owner.grant_status === 'pending' && !isNonBlankString(owner.order_id))
     || (input.excludeGrantId != null && owner.id === input.excludeGrantId)
+    || (input.excludeGrantIds?.includes(owner.id ?? '') ?? false)
     || (input.excludeOrderId != null && owner.order_id === input.excludeOrderId)
   ) {
     throw new Error('temporary role ownership lookup returned a mismatched grant');

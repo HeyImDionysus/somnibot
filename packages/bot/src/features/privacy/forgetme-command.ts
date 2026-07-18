@@ -28,9 +28,23 @@ import {
 } from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeAuditLog } from '../../services/audit.js';
-import { createLogger } from '@somnibot/shared';
+import { createLogger, type PurgeMemberDataRpcResult } from '@somnibot/shared';
 
 const log = createLogger('ForgetMe');
+
+type PurgeSummary = PurgeMemberDataRpcResult;
+
+function isPurgeSummary(value: unknown): value is PurgeSummary {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const status = (value as Record<string, unknown>).purge_status;
+  return status === 'pending_role_cleanup' || status === 'completed';
+}
+
+function numericPurgeEntries(summary: PurgeSummary): Array<[string, number]> {
+  return Object.entries(summary).filter(
+    (entry): entry is [string, number] => typeof entry[1] === 'number' && entry[1] > 0,
+  );
+}
 
 export function buildForgetMeCommand() {
   return new SlashCommandBuilder()
@@ -133,10 +147,48 @@ export async function handleForgetMeCommand(
       return;
     }
 
-    // Build summary of what was deleted
-    const summary = result as Record<string, number>;
-    const deletedItems = Object.entries(summary)
-      .filter(([, count]) => count > 0)
+    if (!isPurgeSummary(result)) {
+      log.error(`purge_member_data returned a malformed result for ${userId}`);
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription('❌ The deletion request returned an invalid result. Please contact a server administrator.')
+            .setColor(0xff0000),
+        ],
+        components: [],
+      });
+      return;
+    }
+
+    if (result.purge_status === 'pending_role_cleanup') {
+      const pendingCount = typeof result.pending_role_cleanup_count === 'number'
+        ? result.pending_role_cleanup_count
+        : 0;
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('⏳ Role Cleanup In Progress')
+            .setDescription(
+              'Your deletion request is active. Data that could be removed immediately has been deleted, ' +
+              'but Somnibot is still removing Discord roles it can prove it added. The minimum commerce ' +
+              'identity evidence needed for that cleanup is being retained until it settles.\n\n' +
+              `**Pending cleanup work:** ${pendingCount}\n\n` +
+              'Run `/forgetme` again after the cleanup finishes to erase the retained commerce identity and tombstones.',
+            )
+            .setColor(0xffaa00)
+            .setFooter({ text: 'No completed-deletion audit was recorded yet' }),
+        ],
+        components: [],
+      });
+      log.info(`Data purge is waiting for role cleanup in guild ${guildId}`);
+      return;
+    }
+
+    // Build the completed summary from numeric counters only. The RPC also
+    // carries a string lifecycle status, which must never participate in count
+    // comparisons or arithmetic.
+    const numericEntries = numericPurgeEntries(result);
+    const deletedItems = numericEntries
       .map(([table, count]) => `• ${formatTableName(table)}: ${count} record(s)`)
       .join('\n');
 
@@ -165,8 +217,8 @@ export async function handleForgetMeCommand(
       targetType: 'member',
       targetId: 'purged_user',
       details: {
-        tables_affected: Object.keys(summary).filter((k) => summary[k]! > 0),
-        total_records: Object.values(summary).reduce((a, b) => a + b, 0),
+        tables_affected: numericEntries.map(([table]) => table),
+        total_records: numericEntries.reduce((sum, [, count]) => sum + count, 0),
       },
     });
 
