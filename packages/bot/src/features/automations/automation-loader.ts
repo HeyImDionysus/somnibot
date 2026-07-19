@@ -2,8 +2,19 @@
  * Automation loader — loads automations from Supabase and subscribes to Realtime.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { DbAutomation } from '@somnibot/shared';
-import { createLogger } from '@somnibot/shared';
+import type {
+  ActionType,
+  ConditionType,
+  DbAutomation,
+  TriggerType,
+} from '@somnibot/shared';
+import {
+  AUTOMATION_LIMITS,
+  createLogger,
+  isActionType,
+  isConditionType,
+  isTriggerType,
+} from '@somnibot/shared';
 
 const log = createLogger('AutomationLoader');
 
@@ -11,10 +22,10 @@ export interface LoadedAutomation {
   id: string;
   name: string;
   enabled: boolean;
-  triggerType: string;
+  triggerType: TriggerType;
   triggerConfig: Record<string, unknown>;
-  conditions: { type: string; config: Record<string, unknown> }[];
-  actions: { type: string; config: Record<string, unknown> }[];
+  conditions: { type: ConditionType; config: Record<string, unknown> }[];
+  actions: { type: ActionType; config: Record<string, unknown> }[];
   scopeTargetUserIds: string[];
   scopeTargetChannelIds: string[];
   scopeExcludeUserIds: string[];
@@ -23,15 +34,73 @@ export interface LoadedAutomation {
   rateLimitWindowSeconds: number | null;
 }
 
-function toLoaded(row: DbAutomation): LoadedAutomation {
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseConditions(
+  value: unknown,
+): LoadedAutomation['conditions'] | null {
+  if (
+    !Array.isArray(value)
+    || value.length > AUTOMATION_LIMITS.MAX_CONDITIONS_PER_AUTOMATION
+  ) {
+    return null;
+  }
+  const parsed: LoadedAutomation['conditions'] = [];
+  for (const entry of value) {
+    if (
+      !isPlainRecord(entry)
+      || !isConditionType(entry.type)
+      || !isPlainRecord(entry.config)
+    ) {
+      return null;
+    }
+    parsed.push({ type: entry.type, config: entry.config });
+  }
+  return parsed;
+}
+
+function parseActions(value: unknown): LoadedAutomation['actions'] | null {
+  if (
+    !Array.isArray(value)
+    || value.length > AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION
+  ) {
+    return null;
+  }
+  const parsed: LoadedAutomation['actions'] = [];
+  for (const entry of value) {
+    if (
+      !isPlainRecord(entry)
+      || !isActionType(entry.type)
+      || !isPlainRecord(entry.config)
+    ) {
+      return null;
+    }
+    parsed.push({ type: entry.type, config: entry.config });
+  }
+  return parsed;
+}
+
+function toLoaded(row: DbAutomation): LoadedAutomation | null {
+  const conditions = parseConditions(row.conditions);
+  const actions = parseActions(row.actions);
+  if (
+    !isTriggerType(row.trigger_type)
+    || !isPlainRecord(row.trigger_config)
+    || conditions === null
+    || actions === null
+  ) {
+    return null;
+  }
   return {
     id: row.id,
     name: row.name,
     enabled: row.enabled,
     triggerType: row.trigger_type,
     triggerConfig: row.trigger_config,
-    conditions: row.conditions as { type: string; config: Record<string, unknown> }[],
-    actions: row.actions as { type: string; config: Record<string, unknown> }[],
+    conditions,
+    actions,
     scopeTargetUserIds: row.target_user_ids ?? [],
     scopeTargetChannelIds: row.target_channel_ids ?? [],
     scopeExcludeUserIds: row.exclude_user_ids ?? [],
@@ -67,7 +136,12 @@ export class AutomationLoader {
 
     this.automations.clear();
     for (const row of (data ?? []) as DbAutomation[]) {
-      this.automations.set(row.id, toLoaded(row));
+      const loaded = toLoaded(row);
+      if (!loaded) {
+        log.warn(`Rejected malformed automation contract: ${row.id}`);
+        continue;
+      }
+      this.automations.set(row.id, loaded);
     }
 
     log.info(`Loaded ${this.automations.size} automations`);
@@ -98,8 +172,14 @@ export class AutomationLoader {
           } else {
             // INSERT or UPDATE
             const newRow = payload.new as DbAutomation;
-            this.automations.set(newRow.id, toLoaded(newRow));
-            log.info(`Automation ${eventType === 'INSERT' ? 'created' : 'updated'}: ${newRow.name}`);
+            const loaded = toLoaded(newRow);
+            if (!loaded) {
+              this.automations.delete(newRow.id);
+              log.warn(`Rejected malformed automation contract: ${newRow.id}`);
+            } else {
+              this.automations.set(newRow.id, loaded);
+              log.info(`Automation ${eventType === 'INSERT' ? 'created' : 'updated'}: ${newRow.name}`);
+            }
           }
           this.onChange?.();
         },
@@ -111,6 +191,7 @@ export class AutomationLoader {
    * Get all enabled automations for a specific trigger type.
    */
   getForTrigger(triggerType: string): LoadedAutomation[] {
+    if (!isTriggerType(triggerType)) return [];
     const results: LoadedAutomation[] = [];
     for (const auto of this.automations.values()) {
       if (auto.enabled && auto.triggerType === triggerType) {

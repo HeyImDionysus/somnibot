@@ -20,17 +20,212 @@ export interface EntitlementGrantOptions {
   planId?: string;
   discordId: string;
   type: 'one_time' | 'subscription';
-  source: 'purchase' | 'giveaway' | 'manual' | 'automation';
+  source: 'purchase';
   grantedRoleIds: string[];
   grantedChannelIds: string[];
   expiresAt?: string | null;
+  roleDeliveryClaim?: RoleDeliveryActionClaim;
+}
+
+export interface PurchaseRoleDeliveryContract {
+  customerId: string;
+  productId: string;
+  orderId: string;
+  planId: string | null;
+  discordId: string;
+  grantedRoleIds: string[];
+  entitlementType: 'one_time' | 'subscription';
+}
+
+export interface NonCommerceRoleDeliveryContract {
+  customerId: string;
+  productId: string;
+  orderId: string | null;
+  planId: string | null;
+  discordId: string;
+  grantedRoleIds: string[];
+  entitlementType: 'one_time' | 'subscription';
+  entitlementSource: 'manual' | 'giveaway' | 'automation';
+  activationGeneration: string;
+}
+
+export interface SubscriptionReactivationContract extends PurchaseRoleDeliveryContract {
+  planId: string;
+  entitlementType: 'subscription';
+}
+
+export type PurchaseRoleReconciliationOutcome = 'live' | 'terminal';
+
+export interface RoleDeliveryActionClaim {
+  actionId: string;
+  claimToken: string;
+}
+
+export type EntitlementLifecycleStatus =
+  | 'active'
+  | 'pending'
+  | 'grace_period'
+  | 'suspended'
+  | 'expired'
+  | 'cancelled';
+
+export type EntitlementRevokeResult =
+  | { disposition: 'applied'; transitionId: string; status: 'expired' | 'cancelled' }
+  | { disposition: 'noop'; transitionId: null; status: 'expired' | 'cancelled' }
+  | {
+    disposition: 'stale';
+    transitionId: null;
+    status: 'active' | 'pending' | 'grace_period' | 'suspended';
+  }
+  | { disposition: 'not_found' | 'failed'; transitionId: null; status: null };
+
+export interface PurchaseRoleDeliveryAttempt extends RoleDeliveryActionClaim {
+  intentId: string;
+  mutationToken: string;
+}
+
+type RoleDeliveryAttachmentDisposition =
+  | 'reserve_add'
+  | 'reserve_inherited'
+  | 'reserved_replay'
+  | 'owned_replay'
+  | 'manual_baseline'
+  | 'dependency_pending'
+  | 'terminal'
+  | 'operator_held';
+
+type RoleDeliveryAttachment = {
+  intentState: 'open' | 'cleanup_required' | 'operator_required';
+  mayMutate: boolean;
+  ownsRemoval: boolean;
+  claimNewlyAcquired: boolean;
+  disposition: RoleDeliveryAttachmentDisposition;
+};
+
+type RoleDeliveryPromotion = {
+  intentState: 'open' | 'operator_required';
+  promoted: boolean;
+  ownsRemoval: boolean;
+};
+
+type RoleDeliveryBaselineConfirmation = {
+  intentState: 'open';
+  confirmed: boolean;
+  disposition:
+    | 'manual_baseline'
+    | 'baseline_replay'
+    | 'contract_changed'
+    | 'dependency_pending'
+    | 'owner_changed';
+};
+
+export interface PurchaseRoleCleanupContract {
+  intentId: string;
+  entitlementId: string;
+  customerId: string;
+  discordId: string;
+  ownedRoleIds: string[];
+  temporaryRoleGrantIds: string[];
+}
+
+type RoleOwnerExclusions = {
+  intentId?: string | null;
+  entitlementId?: string | null;
+  temporaryRoleGrantIds?: string[];
+};
+
+type LiveRoleOwnerState = 'confirmed' | 'pending' | 'none';
+
+export type PurchaseRoleDeliveryDisposition =
+  | 'confirmed_open'
+  | 'settled'
+  | 'safe_retry'
+  | 'safe_retry_owned'
+  | 'run_origin_cleanup'
+  | 'operator_held';
+
+export type PurchaseRoleDeliveryBeginResult =
+  | { state: 'live'; attempt: PurchaseRoleDeliveryAttempt }
+  | { state: 'confirmed_live'; intentId: string }
+  | { state: 'terminal'; intentId: string; cleanupNeeded: boolean };
+
+export type NonCommerceRoleDeliveryBeginResult =
+  | { state: 'live'; attempt: PurchaseRoleDeliveryAttempt }
+  | { state: 'confirmed_live'; intentId: string }
+  | { state: 'terminal'; intentId: string; cleanupNeeded: boolean }
+  | { state: 'superseded' }
+  | { state: 'unproven' }
+  | { state: 'operator_held'; intentId: string };
+
+class PurchaseDeliveryTerminalFenceError extends Error {
+  constructor(readonly cleanupHandled = false) {
+    super('Purchase role delivery lost its exact live mutation fence');
+  }
+}
+
+class PurchaseDeliveryMutationUncertainError extends Error {
+  constructor(roleId: string, detail: unknown) {
+    super(
+      `Purchased role ${roleId} add result is uncertain; durable ownership requires operator recovery: ${
+        detail instanceof Error ? detail.message : String(detail)
+      }`,
+    );
+  }
+}
+
+export class PurchaseRoleDeliveryTerminalNoopError extends Error {
+  constructor(readonly entitlementId: string | null) {
+    super(
+      entitlementId
+        ? `Purchase entitlement ${entitlementId} is terminal; delivery was safely skipped`
+        : 'Purchase order is terminal before entitlement delivery; delivery was safely skipped',
+    );
+  }
+}
+
+function normalizeExactRoleVector(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value)
+    || value.some((roleId) =>
+      typeof roleId !== 'string'
+      || roleId.length === 0
+      || roleId.trim() !== roleId)
+  ) {
+    throw new Error(`${label} is malformed`);
+  }
+  const unique = new Set(value as string[]);
+  if (unique.size !== value.length) {
+    throw new Error(`${label} contains duplicate roles`);
+  }
+  return [...unique].sort((left, right) => left.localeCompare(right));
+}
+
+function exactRoleVectorsMatch(left: unknown, right: string[]): boolean {
+  try {
+    const normalized = normalizeExactRoleVector(left, 'Stored granted role vector');
+    return normalized.length === right.length
+      && normalized.every((roleId, index) => roleId === right[index]);
+  } catch {
+    return false;
+  }
+}
+
+function firstRpcRow(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value) && value.length !== 1) return null;
+  const candidate = Array.isArray(value) ? value[0] : value;
+  return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : null;
 }
 
 export class EntitlementService {
+  private activePurchaseRoleDeliveryAttempt: PurchaseRoleDeliveryAttempt | null = null;
+  private confirmedPurchaseRoleDeliveryReplay = false;
+
   constructor(
     private guild: Guild,
     private supabase: SupabaseClient,
-    private eventBus: PlatformEventBus,
+    _eventBus: PlatformEventBus,
   ) {}
 
   /**
@@ -38,6 +233,16 @@ export class EntitlementService {
    */
   async grant(opts: EntitlementGrantOptions): Promise<string | null> {
     const guildId = this.guild.id;
+
+    // Non-purchase producers must use commerce_create_noncommerce_entitlement.
+    // That RPC creates the $0 provenance order, entitlement, and activation
+    // carrier atomically; this paid worker path cannot safely synthesize them.
+    if ((opts as { source?: unknown }).source !== 'purchase') {
+      throw new Error('Non-purchase entitlement grant requires the atomic non-commerce RPC');
+    }
+    if (!opts.roleDeliveryClaim) {
+      throw new Error('Paid entitlement grant requires an exact action claim');
+    }
 
     // Create entitlement record
     const { data: entitlement, error } = await this.supabase
@@ -65,19 +270,58 @@ export class EntitlementService {
       return null;
     }
 
-    // Grant Discord roles
-    await this.grantRoles(opts.discordId, opts.grantedRoleIds);
-
-    // Fire event
-    this.eventBus.emit('entitlement.granted', guildId, {
-      discordId: opts.discordId,
-      entitlementId: entitlement.id,
+    const contract: PurchaseRoleDeliveryContract = {
+      customerId: opts.customerId,
       productId: opts.productId,
-      productName: opts.productName,
-      roleIds: opts.grantedRoleIds,
-    });
+      orderId: opts.orderId,
+      planId: opts.planId ?? null,
+      discordId: opts.discordId,
+      grantedRoleIds: opts.grantedRoleIds,
+      entitlementType: opts.type,
+    };
+    let attempt: PurchaseRoleDeliveryAttempt | undefined;
+    const begun = await this.beginPurchaseRoleDeliveryAttempt(
+      entitlement.id,
+      contract,
+      opts.roleDeliveryClaim,
+    );
+    if (begun.state === 'terminal') {
+      if (begun.cleanupNeeded) {
+        await this.executeOwnedPurchaseRoleCleanup(
+          begun.intentId,
+          opts.roleDeliveryClaim,
+        );
+      }
+      throw new PurchaseRoleDeliveryTerminalNoopError(entitlement.id);
+    }
+    if (begun.state === 'confirmed_live') {
+      attempt = undefined;
+    } else {
+      attempt = begun.attempt;
+    }
+    if (attempt) {
+      const outcome = await this.reconcilePurchaseGrantedRoles(
+        entitlement.id,
+        contract,
+        attempt,
+      );
+      if (outcome === 'terminal') {
+        if (this.activePurchaseRoleDeliveryAttempt?.intentId === attempt.intentId) {
+          const finalized = await this.finishPurchaseRoleDeliveryAttempt(
+            attempt,
+            'compensated',
+          );
+          if (!finalized.settled || !finalized.authorityEmpty) {
+            throw new Error('Terminal paid role grant compensation did not settle');
+          }
+        }
+        throw new PurchaseRoleDeliveryTerminalNoopError(entitlement.id);
+      }
+    }
 
-    // Audit log
+    // This transition writes its authoritative audit directly below. Do not
+    // also emit entitlement.granted: AuditService consumes that event into a
+    // second audit row, while no supported automation consumes it.
     await this.supabase.from('audit_logs').insert({
       guild_id: guildId,
       actor_type: 'system',
@@ -102,128 +346,136 @@ export class EntitlementService {
    */
   async revoke(
     entitlementId: string,
-    reason: 'expired' | 'cancelled' | 'suspended' | 'revoked' | 'refund',
-  ): Promise<boolean> {
+    reason: 'expired' | 'cancelled' | 'revoked' | 'refund',
+  ): Promise<EntitlementRevokeResult> {
     const guildId = this.guild.id;
 
-    // Fetch entitlement — scoped to guild_id to prevent cross-guild access
-    const { data: ent } = await this.supabase
+    // Observe the exact optimistic-concurrency token. The database RPC locks
+    // this guild-scoped row and accepts the transition only while both fields
+    // still match; updated_at is maintained by the table trigger.
+    const { data: ent, error: entitlementError } = await this.supabase
       .from('entitlements')
-      .select('*, products(name)')
+      .select('id, guild_id, status, updated_at')
       .eq('id', entitlementId)
       .eq('guild_id', guildId)
-      .single();
+      .maybeSingle();
 
+    if (entitlementError) {
+      log.error('Failed to load entitlement for revocation:', entitlementError.message);
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
     if (!ent) {
       log.error('Entitlement not found:', entitlementId);
-      return false;
+      return { disposition: 'not_found', transitionId: null, status: null };
     }
 
-    // Determine new status
-    const statusMap: Record<string, string> = {
-      expired: 'expired',
-      cancelled: 'cancelled',
-      suspended: 'suspended',
-      revoked: 'expired', // forced revoke → expired
-      refund: 'expired',
-    };
-    const newStatus = statusMap[reason] ?? 'expired';
+    const statuses: EntitlementLifecycleStatus[] = [
+      'active', 'pending', 'grace_period', 'suspended', 'expired', 'cancelled',
+    ];
+    if (
+      ent.id !== entitlementId
+      || ent.guild_id !== guildId
+      || typeof ent.status !== 'string'
+      || !statuses.includes(ent.status as EntitlementLifecycleStatus)
+      || (ent.updated_at !== null && typeof ent.updated_at !== 'string')
+    ) {
+      log.error('Entitlement revocation observation was malformed:', entitlementId);
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
 
-    // Update DB — scoped to guild_id
-    const { error } = await this.supabase
-      .from('entitlements')
-      .update({
-        status: newStatus,
-        cancelled_at: reason === 'cancelled' ? new Date().toISOString() : undefined,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', entitlementId)
-      .eq('guild_id', guildId);
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_revoke_entitlement_exact', {
+      p_entitlement_id: entitlementId,
+      p_guild_id: guildId,
+      p_expected_status: ent.status,
+      p_expected_updated_at: ent.updated_at,
+      p_reason: reason,
+    });
 
     if (error) {
       log.error('Failed to revoke entitlement:', error.message);
-      return false;
+      return { disposition: 'failed', transitionId: null, status: null };
     }
 
-    // W2 review: revoke() is a terminal transition for grace_period rows
-    // (subscription cancellation and refunds select them), and every target
-    // status above is non-grace — so an unresolved 'entitlement_grace_period'
-    // operator alert raised by suspend() is now stale. Resolve it with the
-    // same entitlement-scoped filters as reactivate() and the reconciliation
-    // sweep (a no-op when none exists). Non-fatal: the revocation committed.
-    const { error: graceAlertError } = await this.supabase
-      .from('alerts')
-      .update({
-        resolved: true,
-        resolved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('guild_id', guildId)
-      .eq('alert_type', 'entitlement_grace_period')
-      .eq('metadata->>entitlement_id', entitlementId)
-      .eq('resolved', false);
-    if (graceAlertError) {
-      log.error('Failed to resolve grace-period alert on revoke:', graceAlertError.message);
+    const row = firstRpcRow(data);
+    if (!row || typeof row.disposition !== 'string') {
+      log.error('Entitlement revocation returned malformed transition evidence');
+      return { disposition: 'failed', transitionId: null, status: null };
     }
 
-    // Get customer discord_id — scoped to guild_id
-    const { data: customer } = await this.supabase
-      .from('customers')
-      .select('discord_id')
-      .eq('id', ent.customer_id)
-      .eq('guild_id', guildId)
-      .single();
-
-    const discordId = customer?.discord_id;
-    if (discordId) {
-      // Revoke Discord roles
-      await this.revokeRoles(discordId, ent.granted_role_ids ?? []);
-
-      // Fire event
-      this.eventBus.emit('entitlement.revoked', guildId, {
-        discordId,
-        entitlementId,
-        productId: ent.product_id,
-        productName: ent.products?.name ?? 'Unknown',
-        reason,
-      });
-    }
-
-    // Also revoke associated license sessions. NOTE: license_sessions has no
-    // guild_id column — the key id (from the guild-scoped entitlement fetched
-    // above) is the scope. The previous `.eq('guild_id', ...)` filter made
-    // PostgREST reject this whole update, and the unchecked error meant every
-    // session of a revoked entitlement silently stayed active.
-    if (ent.license_key_id) {
-      const { error: sessionError } = await this.supabase
-        .from('license_sessions')
-        .update({
-          active: false,
-          deactivated_at: new Date().toISOString(),
-          deactivation_reason: 'entitlement_revoked',
-        })
-        .eq('license_key_id', ent.license_key_id)
-        .eq('active', true);
-      if (sessionError) {
-        // Non-fatal: the entitlement status + roles are already revoked and
-        // validation/heartbeat reject on entitlement status.
-        log.error('Failed to deactivate license sessions:', sessionError.message);
+    if (row.disposition === 'not_found') {
+      if (row.transition_id !== null || row.entitlement_id !== null || row.status !== null) {
+        log.error('Entitlement revocation returned mismatched not-found evidence');
+        return { disposition: 'failed', transitionId: null, status: null };
       }
+      return { disposition: 'not_found', transitionId: null, status: null };
     }
 
-    // Audit log
-    await this.supabase.from('audit_logs').insert({
-      guild_id: guildId,
-      actor_type: 'system',
-      actor_id: 'commerce',
-      action: 'entitlement.revoked',
-      target_type: 'entitlement',
-      target_id: entitlementId,
-      details: { discordId, reason, productId: ent.product_id },
-    });
+    const exactIdentity = row.entitlement_id === entitlementId && row.guild_id === guildId;
+    if (row.disposition === 'noop') {
+      if (
+        !exactIdentity
+        || row.transition_id !== null
+        || (row.status !== 'expired' && row.status !== 'cancelled')
+      ) {
+        log.error('Entitlement revocation returned mismatched no-op evidence');
+        return { disposition: 'failed', transitionId: null, status: null };
+      }
+      return { disposition: 'noop', transitionId: null, status: row.status };
+    }
+
+    if (row.disposition === 'stale') {
+      if (
+        !exactIdentity
+        || row.transition_id !== null
+        || !['active', 'pending', 'grace_period', 'suspended'].includes(String(row.status))
+      ) {
+        log.error('Entitlement revocation returned mismatched stale-state evidence');
+        return { disposition: 'failed', transitionId: null, status: null };
+      }
+      return {
+        disposition: 'stale',
+        transitionId: null,
+        status: row.status as 'active' | 'pending' | 'grace_period' | 'suspended',
+      };
+    }
+
+    const expectedStatus = reason === 'cancelled' ? 'cancelled' : 'expired';
+    if (
+      row.disposition !== 'applied'
+      || !exactIdentity
+      || typeof row.transition_id !== 'string'
+      || row.transition_id.length === 0
+      || row.status !== expectedStatus
+      || typeof row.discord_id !== 'string'
+      || row.discord_id.length === 0
+      || typeof row.product_id !== 'string'
+      || row.product_id.length === 0
+      || typeof row.product_name !== 'string'
+      || !Array.isArray(row.role_ids)
+      || row.role_ids.some((roleId) => typeof roleId !== 'string' || roleId.length === 0)
+      || typeof row.updated_at !== 'string'
+    ) {
+      log.error('Entitlement revocation returned mismatched applied evidence');
+      return { disposition: 'failed', transitionId: null, status: null };
+    }
+
+    // The RPC has already committed the status transition, durable role
+    // cleanup carrier, license-session shutdown, grace-alert resolution, and
+    // lifecycle audit under this transition UUID. Do not emit the legacy
+    // entitlement.revoked audit event as well: AuditService would persist a
+    // second row and there is no supported non-audit consumer for that event.
 
     log.info(`Entitlement revoked: ${entitlementId} (${reason})`);
-    return true;
+    return {
+      disposition: 'applied',
+      transitionId: row.transition_id,
+      status: expectedStatus,
+    };
   }
 
   /**
@@ -340,40 +592,185 @@ export class EntitlementService {
   }
 
   /**
-   * Reactivate a suspended/grace entitlement.
+   * Recover a paid subscription from grace/suspension, or repair an exact
+   * already-active replay. Every identity field is re-proved from storage;
+   * terminal or unsupported states are never reactivated.
    */
-  async reactivate(entitlementId: string): Promise<boolean> {
+  async reactivate(
+    entitlementId: string,
+    contract: SubscriptionReactivationContract,
+    roleDeliveryClaim?: RoleDeliveryActionClaim,
+  ): Promise<boolean> {
     const guildId = this.guild.id;
 
-    const { data: ent } = await this.supabase
-      .from('entitlements')
-      .select('*')
-      .eq('id', entitlementId)
-      .eq('guild_id', guildId)
-      .single();
-
-    if (!ent) return false;
-
-    const { error } = await this.supabase
-      .from('entitlements')
-      .update({
-        status: 'active',
-        grace_period_ends_at: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', entitlementId)
-      .eq('guild_id', guildId);
-
-    if (error) {
-      log.error('Failed to reactivate entitlement:', error.message);
-      return false;
+    const expectedRoleIds = normalizeExactRoleVector(
+      contract.grantedRoleIds,
+      'Subscription reactivation role vector',
+    );
+    if (
+      !roleDeliveryClaim
+      ||
+      entitlementId.length === 0
+      || entitlementId.trim() !== entitlementId
+      || contract.entitlementType !== 'subscription'
+      || ![
+        contract.customerId,
+        contract.productId,
+        contract.orderId,
+        contract.planId,
+        contract.discordId,
+      ].every((value) => value.length > 0 && value.trim() === value)
+    ) {
+      throw new Error('Subscription reactivation contract is malformed');
     }
 
-    // Payment recovered — resolve the outstanding grace-period operator
-    // alert so it does not linger as stale churn noise. Non-fatal.
+    const loadExactEntitlement = async () => {
+      const { data, error } = await this.supabase
+        .from('entitlements')
+        .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids, grace_period_ends_at')
+        .eq('id', entitlementId)
+        .eq('guild_id', guildId)
+        .eq('customer_id', contract.customerId)
+        .eq('product_id', contract.productId)
+        .eq('plan_id', contract.planId)
+        .eq('order_id', contract.orderId)
+        .eq('type', 'subscription')
+        .maybeSingle();
+      if (error) {
+        throw new Error(`Failed to load entitlement for reactivation: ${error.message}`);
+      }
+      if (!data) return null;
+      if (
+        data.id !== entitlementId
+        || data.guild_id !== guildId
+        || data.customer_id !== contract.customerId
+        || data.product_id !== contract.productId
+        || data.plan_id !== contract.planId
+        || data.order_id !== contract.orderId
+        || data.type !== 'subscription'
+        || typeof data.status !== 'string'
+        || ![
+          'active',
+          'pending',
+          'grace_period',
+          'suspended',
+          'expired',
+          'cancelled',
+          'revoked',
+        ].includes(data.status)
+        || (data.source !== 'purchase' && data.source !== null)
+        || !exactRoleVectorsMatch(data.granted_role_ids, expectedRoleIds)
+      ) {
+        throw new Error('Subscription reactivation entitlement identity mismatch');
+      }
+      return data;
+    };
+
+    let entitlement = await loadExactEntitlement();
+    if (!entitlement) return false;
+
+    const begun = await this.beginPurchaseRoleDeliveryAttempt(
+      entitlementId,
+      {
+        ...contract,
+        grantedRoleIds: expectedRoleIds,
+      },
+      roleDeliveryClaim,
+    );
+    if (begun.state === 'terminal') {
+      if (begun.cleanupNeeded) {
+        await this.executeOwnedPurchaseRoleCleanup(begun.intentId, roleDeliveryClaim);
+      }
+      throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
+    }
+    const deliveryAttempt = begun.state === 'live' ? begun.attempt : undefined;
+
+    const { data: customer, error: customerError } = await this.supabase
+      .from('customers')
+      .select('id, guild_id, discord_id')
+      .eq('id', contract.customerId)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (
+      customerError
+      || !customer
+      || customer.id !== contract.customerId
+      || customer.guild_id !== guildId
+      || customer.discord_id !== contract.discordId
+    ) {
+      throw new Error(
+        `Failed to verify customer identity for entitlement reactivation: ${customerError?.message ?? 'missing or mismatched customer'}`,
+      );
+    }
+
+    if (entitlement.status !== 'active') {
+      if (!['grace_period', 'suspended'].includes(entitlement.status)) return false;
+
+      const updatedAt = new Date().toISOString();
+      const { data: updated, error: updateError } = await this.supabase
+        .from('entitlements')
+        .update({
+          status: 'active',
+          grace_period_ends_at: null,
+          updated_at: updatedAt,
+        })
+        .eq('id', entitlementId)
+        .eq('guild_id', guildId)
+        .eq('customer_id', contract.customerId)
+        .eq('product_id', contract.productId)
+        .eq('plan_id', contract.planId)
+        .eq('order_id', contract.orderId)
+        .eq('type', 'subscription')
+        .in('status', ['grace_period', 'suspended'])
+        .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids, grace_period_ends_at')
+        .maybeSingle();
+      if (updateError) {
+        log.error('Failed to reactivate entitlement:', updateError.message);
+        return false;
+      }
+
+      // A competing worker may have won the transition. Re-read the exact row
+      // and accept only an active replay; a terminal race remains rejected.
+      if (!updated) {
+        entitlement = await loadExactEntitlement();
+        if (!entitlement || entitlement.status !== 'active') return false;
+      } else {
+        if (
+          updated.id !== entitlementId
+          || updated.guild_id !== guildId
+          || updated.customer_id !== contract.customerId
+          || updated.product_id !== contract.productId
+          || updated.plan_id !== contract.planId
+          || updated.order_id !== contract.orderId
+          || updated.type !== 'subscription'
+          || updated.status !== 'active'
+          || updated.grace_period_ends_at !== null
+          || (updated.source !== 'purchase' && updated.source !== null)
+          || !exactRoleVectorsMatch(updated.granted_role_ids, expectedRoleIds)
+        ) {
+          throw new Error('Subscription reactivation update returned mismatched proof');
+        }
+        entitlement = updated;
+      }
+    }
+
+    if (deliveryAttempt) {
+      await this.ensurePurchaseGrantedRoles(
+        entitlementId,
+        {
+          ...contract,
+          grantedRoleIds: expectedRoleIds,
+        },
+        deliveryAttempt,
+      );
+    }
+
+    // Resolve the grace alert only after exact DB identity and Discord role
+    // delivery have both been confirmed. Failure is non-fatal but visible.
+    const resolvedAt = new Date().toISOString();
     const { error: alertError } = await this.supabase
       .from('alerts')
-      .update({ resolved: true, resolved_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({ resolved: true, resolved_at: resolvedAt, updated_at: resolvedAt })
       .eq('guild_id', guildId)
       .eq('alert_type', 'entitlement_grace_period')
       .eq('metadata->>entitlement_id', entitlementId)
@@ -382,48 +779,1571 @@ export class EntitlementService {
       log.error('Failed to resolve grace-period alert:', alertError.message);
     }
 
-    // Re-grant roles
-    const { data: customer } = await this.supabase
-      .from('customers')
-      .select('discord_id')
-      .eq('id', ent.customer_id)
-      .single();
-
-    if (customer?.discord_id) {
-      await this.grantRoles(customer.discord_id, ent.granted_role_ids ?? []);
-    }
-
     log.info(`Entitlement reactivated: ${entitlementId}`);
     return true;
   }
 
   // ── Role helpers ──────────────────────────────────
 
-  private async grantRoles(discordId: string, roleIds: string[]): Promise<void> {
-    if (!roleIds.length) return;
-    try {
-      const member = await this.guild.members.fetch(discordId);
-      for (const roleId of roleIds) {
-        if (!member.roles.cache.has(roleId)) {
-          await member.roles.add(roleId, 'Commerce: entitlement granted');
-        }
+  async beginPurchaseRoleDeliveryAttempt(
+    entitlementId: string,
+    contract: PurchaseRoleDeliveryContract,
+    claim: RoleDeliveryActionClaim,
+  ): Promise<PurchaseRoleDeliveryBeginResult> {
+    this.confirmedPurchaseRoleDeliveryReplay = false;
+    const normalizedRoleIds = normalizeExactRoleVector(
+      contract.grantedRoleIds,
+      'Purchase granted role vector',
+    );
+    if (
+      ![entitlementId, claim.actionId, claim.claimToken].every((value) =>
+        typeof value === 'string' && value.length > 0 && value.trim() === value)
+    ) {
+      throw new Error('Purchase role delivery claim is malformed');
+    }
+
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_begin_role_delivery_attempt', {
+      p_action_id: claim.actionId,
+      p_claim_token: claim.claimToken,
+      p_entitlement_id: entitlementId,
+      p_guild_id: this.guild.id,
+      p_customer_id: contract.customerId,
+      p_discord_id: contract.discordId,
+      p_order_id: contract.orderId,
+      p_product_id: contract.productId,
+      p_plan_id: contract.planId,
+      p_entitlement_type: contract.entitlementType,
+      p_permanent_role_ids: normalizedRoleIds,
+    });
+    if (error) throw new Error(`Failed to begin paid role delivery intent: ${error.message}`);
+
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_id !== 'string'
+      || row.intent_id.length === 0
+      || typeof row.intent_state !== 'string'
+      || !['open', 'cleanup_required', 'operator_required', 'settled'].includes(
+        row.intent_state,
+      )
+      || typeof row.may_mutate !== 'boolean'
+      || typeof row.contract_live !== 'boolean'
+      || typeof row.delivery_confirmed !== 'boolean'
+      || typeof row.cleanup_needed !== 'boolean'
+    ) {
+      throw new Error('Paid role delivery intent returned malformed evidence');
+    }
+
+    if (row.contract_live && row.delivery_confirmed && !row.may_mutate) {
+      if (row.mutation_token !== null) {
+        throw new Error('Confirmed paid role replay returned an active mutation token');
       }
-    } catch (err) {
-      log.error(`Failed to grant roles to ${discordId}:`, err);
+      this.confirmedPurchaseRoleDeliveryReplay = true;
+      return { state: 'confirmed_live', intentId: row.intent_id };
+    }
+    if (!row.contract_live) {
+      if (row.may_mutate) {
+        throw new Error('Terminal paid role delivery intent returned mutation authority');
+      }
+      return {
+        state: 'terminal',
+        intentId: row.intent_id,
+        cleanupNeeded: row.cleanup_needed,
+      };
+    }
+    if (!row.may_mutate || row.delivery_confirmed) {
+      throw new Error('Live paid role delivery intent is unresolved and requires operator recovery');
+    }
+    if (
+      row.intent_state !== 'open'
+      || typeof row.mutation_token !== 'string'
+      || row.mutation_token.length === 0
+    ) {
+      throw new Error('Live paid role delivery intent returned mismatched evidence');
+    }
+    const attempt: PurchaseRoleDeliveryAttempt = {
+      ...claim,
+      intentId: row.intent_id,
+      mutationToken: row.mutation_token,
+    };
+    this.activePurchaseRoleDeliveryAttempt = attempt;
+    return {
+      state: 'live',
+      attempt,
+    };
+  }
+
+  async beginNonCommerceRoleDeliveryAttempt(
+    entitlementId: string,
+    contract: NonCommerceRoleDeliveryContract,
+    claim: RoleDeliveryActionClaim,
+  ): Promise<NonCommerceRoleDeliveryBeginResult> {
+    const normalizedRoleIds = normalizeExactRoleVector(
+      contract.grantedRoleIds,
+      'Non-commerce granted role vector',
+    );
+    const requiredStrings = [
+      entitlementId,
+      claim.actionId,
+      claim.claimToken,
+      contract.customerId,
+      contract.productId,
+      contract.discordId,
+      contract.activationGeneration,
+    ];
+    if (
+      requiredStrings.some((value) =>
+        typeof value !== 'string' || value.length === 0 || value.trim() !== value)
+      || (contract.orderId !== null
+        && (contract.orderId.length === 0 || contract.orderId.trim() !== contract.orderId))
+      || (contract.planId !== null
+        && (contract.planId.length === 0 || contract.planId.trim() !== contract.planId))
+      || !['one_time', 'subscription'].includes(contract.entitlementType)
+      || !['manual', 'giveaway', 'automation'].includes(contract.entitlementSource)
+    ) {
+      throw new Error('Non-commerce role delivery claim is malformed');
+    }
+
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_begin_noncommerce_role_delivery_attempt', {
+      p_action_id: claim.actionId,
+      p_claim_token: claim.claimToken,
+      p_entitlement_id: entitlementId,
+      p_guild_id: this.guild.id,
+      p_customer_id: contract.customerId,
+      p_discord_id: contract.discordId,
+      p_order_id: contract.orderId,
+      p_product_id: contract.productId,
+      p_plan_id: contract.planId,
+      p_entitlement_type: contract.entitlementType,
+      p_entitlement_source: contract.entitlementSource,
+      p_activation_generation: contract.activationGeneration,
+      p_permanent_role_ids: normalizedRoleIds,
+    });
+    if (error) {
+      throw new Error(`Failed to begin non-commerce role delivery intent: ${error.message}`);
+    }
+
+    const row = firstRpcRow(data);
+    const dispositions = [
+      'superseded',
+      'unproven',
+      'confirmed_replay',
+      'operator_held',
+      'terminal',
+      'live_mutation',
+    ];
+    if (
+      !row
+      || typeof row.may_mutate !== 'boolean'
+      || typeof row.contract_live !== 'boolean'
+      || typeof row.delivery_confirmed !== 'boolean'
+      || typeof row.cleanup_needed !== 'boolean'
+      || typeof row.disposition !== 'string'
+      || !dispositions.includes(row.disposition)
+    ) {
+      throw new Error('Non-commerce role delivery intent returned malformed evidence');
+    }
+
+    const disposition = row.disposition;
+    const hasIntent = typeof row.intent_id === 'string' && row.intent_id.length > 0;
+    if (disposition === 'unproven') {
+      if (
+        row.intent_id !== null
+        || row.mutation_token !== null
+        || row.intent_state !== null
+        || row.may_mutate
+        || row.contract_live
+        || row.delivery_confirmed
+        || row.cleanup_needed
+      ) {
+        throw new Error('Unproven non-commerce role delivery returned mismatched evidence');
+      }
+      return { state: 'unproven' };
+    }
+    if (disposition === 'superseded') {
+      const noIntent = row.intent_id === null
+        && row.mutation_token === null
+        && row.intent_state === null
+        && !row.may_mutate
+        && !row.contract_live
+        && !row.delivery_confirmed
+        && !row.cleanup_needed;
+      const settledIntent = hasIntent
+        && row.mutation_token === null
+        && row.intent_state === 'settled'
+        && !row.may_mutate
+        && !row.contract_live
+        && !row.delivery_confirmed
+        && !row.cleanup_needed;
+      if (!noIntent && !settledIntent) {
+        throw new Error('Superseded non-commerce role delivery returned mismatched evidence');
+      }
+      return { state: 'superseded' };
+    }
+    if (!hasIntent) {
+      throw new Error('Non-commerce role delivery intent identity is missing');
+    }
+    if (disposition === 'confirmed_replay') {
+      if (
+        row.mutation_token !== null
+        || row.intent_state !== 'open'
+        || row.may_mutate
+        || !row.contract_live
+        || !row.delivery_confirmed
+        || row.cleanup_needed
+      ) {
+        throw new Error('Confirmed non-commerce role replay returned mismatched evidence');
+      }
+      return { state: 'confirmed_live', intentId: row.intent_id as string };
+    }
+    if (disposition === 'terminal') {
+      if (
+        row.mutation_token !== null
+        || !['cleanup_required', 'settled'].includes(String(row.intent_state))
+        || row.may_mutate
+        || row.contract_live
+        || row.delivery_confirmed
+        || row.cleanup_needed !== (row.intent_state === 'cleanup_required')
+      ) {
+        throw new Error('Terminal non-commerce role delivery returned mismatched evidence');
+      }
+      return {
+        state: 'terminal',
+        intentId: row.intent_id as string,
+        cleanupNeeded: row.cleanup_needed,
+      };
+    }
+    if (disposition === 'operator_held') {
+      if (
+        row.may_mutate
+        || row.contract_live
+        || !row.cleanup_needed
+        || !['open', 'cleanup_required', 'operator_required'].includes(String(row.intent_state))
+      ) {
+        throw new Error('Held non-commerce role delivery returned mismatched evidence');
+      }
+      return { state: 'operator_held', intentId: row.intent_id as string };
+    }
+    if (
+      disposition !== 'live_mutation'
+      || row.intent_state !== 'open'
+      || typeof row.mutation_token !== 'string'
+      || row.mutation_token.length === 0
+      || !row.may_mutate
+      || !row.contract_live
+      || row.delivery_confirmed
+      || row.cleanup_needed
+    ) {
+      throw new Error('Live non-commerce role delivery returned mismatched evidence');
+    }
+    const attempt: PurchaseRoleDeliveryAttempt = {
+      ...claim,
+      intentId: row.intent_id as string,
+      mutationToken: row.mutation_token,
+    };
+    this.activePurchaseRoleDeliveryAttempt = attempt;
+    return { state: 'live', attempt };
+  }
+
+  getActivePurchaseRoleDeliveryAttempt(): PurchaseRoleDeliveryAttempt | null {
+    return this.activePurchaseRoleDeliveryAttempt;
+  }
+
+  wasPurchaseRoleDeliveryConfirmedReplay(): boolean {
+    return this.confirmedPurchaseRoleDeliveryReplay;
+  }
+
+  private async assertRoleDeliveryAttemptLive(
+    attempt: PurchaseRoleDeliveryAttempt,
+  ): Promise<boolean> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_assert_role_delivery_attempt_live', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+    });
+    if (error) throw new Error(`Paid role delivery fence failed: ${error.message}`);
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_state !== 'string'
+      || typeof row.may_mutate !== 'boolean'
+    ) {
+      throw new Error('Paid role delivery fence returned malformed evidence');
+    }
+    if (row.may_mutate && row.intent_state !== 'open') {
+      throw new Error('Paid role delivery fence returned mismatched live evidence');
+    }
+    return row.may_mutate;
+  }
+
+  private async attachPermanentRoleDelivery(
+    attempt: PurchaseRoleDeliveryAttempt,
+    roleId: string,
+    roleWasPresent: boolean,
+  ): Promise<RoleDeliveryAttachment> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_attach_permanent_role_delivery', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+      p_role_id: roleId,
+      p_role_was_present: roleWasPresent,
+    });
+    if (error) throw new Error(`Failed to attach paid role delivery: ${error.message}`);
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_state !== 'string'
+      || !['open', 'cleanup_required', 'operator_required'].includes(
+        row.intent_state,
+      )
+      || typeof row.may_mutate !== 'boolean'
+      || typeof row.owns_removal !== 'boolean'
+      || typeof row.claim_newly_acquired !== 'boolean'
+      || typeof row.disposition !== 'string'
+      || ![
+        'reserve_add',
+        'reserve_inherited',
+        'reserved_replay',
+        'owned_replay',
+        'manual_baseline',
+        'dependency_pending',
+        'terminal',
+        'operator_held',
+      ].includes(row.disposition)
+    ) {
+      throw new Error('Paid role delivery attachment returned malformed evidence');
+    }
+
+    const disposition = row.disposition as RoleDeliveryAttachmentDisposition;
+    const liveOwned = row.intent_state === 'open'
+      && row.may_mutate === true
+      && row.owns_removal === true
+      && row.claim_newly_acquired === false;
+    const dispositionMatches =
+      (disposition === 'reserve_add'
+        && row.intent_state === 'open'
+        && row.may_mutate === true
+        && row.owns_removal === false
+        && row.claim_newly_acquired === true)
+      || (disposition === 'owned_replay' && liveOwned)
+      || ((
+        disposition === 'reserve_inherited'
+        || disposition === 'reserved_replay'
+        || disposition === 'manual_baseline'
+        || disposition === 'dependency_pending'
+      )
+        && row.intent_state === 'open'
+        && row.may_mutate === true
+        && row.owns_removal === false
+        && row.claim_newly_acquired === false)
+      || (disposition === 'terminal'
+        && row.intent_state === 'cleanup_required'
+        && row.may_mutate === false
+        && row.owns_removal === false
+        && row.claim_newly_acquired === false)
+      || (disposition === 'operator_held'
+        && row.intent_state === 'operator_required'
+        && row.may_mutate === false
+        && row.owns_removal === false
+        && row.claim_newly_acquired === false);
+    if (!dispositionMatches) {
+      throw new Error('Paid role delivery attachment returned mismatched evidence');
+    }
+    if (
+      (disposition === 'reserve_add' && roleWasPresent)
+      || (disposition === 'reserve_inherited' && !roleWasPresent)
+      || ((disposition === 'manual_baseline' || disposition === 'dependency_pending')
+        && !roleWasPresent)
+    ) {
+      throw new Error('Paid role delivery attachment contradicted the Discord observation');
+    }
+
+    return {
+      intentState: row.intent_state as RoleDeliveryAttachment['intentState'],
+      mayMutate: row.may_mutate,
+      ownsRemoval: row.owns_removal,
+      claimNewlyAcquired: row.claim_newly_acquired,
+      disposition,
+    };
+  }
+
+  private async confirmPermanentRoleDelivery(
+    attempt: PurchaseRoleDeliveryAttempt,
+    roleId: string,
+  ): Promise<RoleDeliveryPromotion> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_confirm_permanent_role_delivery', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+      p_role_id: roleId,
+    });
+    if (error) {
+      throw new PurchaseDeliveryMutationUncertainError(
+        roleId,
+        `durable ownership promotion failed: ${error.message}`,
+      );
+    }
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_state !== 'string'
+      || !['open', 'operator_required'].includes(row.intent_state)
+      || typeof row.promoted !== 'boolean'
+      || typeof row.owns_removal !== 'boolean'
+    ) {
+      throw new PurchaseDeliveryMutationUncertainError(
+        roleId,
+        'durable ownership promotion returned malformed evidence',
+      );
+    }
+    const matches = row.intent_state === 'open'
+      ? row.owns_removal === true
+      : row.promoted === false && row.owns_removal === false;
+    if (!matches) {
+      throw new PurchaseDeliveryMutationUncertainError(
+        roleId,
+        'durable ownership promotion returned mismatched evidence',
+      );
+    }
+    return {
+      intentState: row.intent_state as RoleDeliveryPromotion['intentState'],
+      promoted: row.promoted,
+      ownsRemoval: row.owns_removal,
+    };
+  }
+
+  private async confirmPermanentRoleBaseline(
+    attempt: PurchaseRoleDeliveryAttempt,
+    roleId: string,
+  ): Promise<RoleDeliveryBaselineConfirmation> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_confirm_permanent_role_baseline', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+      p_role_id: roleId,
+    });
+    if (error) {
+      throw new Error(`Failed to confirm manual paid role baseline: ${error.message}`);
+    }
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || row.intent_state !== 'open'
+      || typeof row.confirmed !== 'boolean'
+      || typeof row.disposition !== 'string'
+      || ![
+        'manual_baseline',
+        'baseline_replay',
+        'contract_changed',
+        'dependency_pending',
+        'owner_changed',
+      ].includes(row.disposition)
+    ) {
+      throw new Error('Manual paid role baseline returned malformed evidence');
+    }
+    const disposition = row.disposition as RoleDeliveryBaselineConfirmation['disposition'];
+    const matches = row.confirmed
+      ? disposition === 'manual_baseline' || disposition === 'baseline_replay'
+      : disposition === 'contract_changed'
+        || disposition === 'dependency_pending'
+        || disposition === 'owner_changed';
+    if (!matches) {
+      throw new Error('Manual paid role baseline returned mismatched evidence');
+    }
+    return {
+      intentState: 'open',
+      confirmed: row.confirmed,
+      disposition,
+    };
+  }
+
+  private async releaseUnconsumedPermanentRoleClaim(
+    attempt: PurchaseRoleDeliveryAttempt,
+    roleId: string,
+  ): Promise<void> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_release_unconsumed_permanent_role_claim', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+      p_role_id: roleId,
+    });
+    if (error) {
+      throw new Error(`Failed to release unconsumed paid role reservation: ${error.message}`);
+    }
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_state !== 'string'
+      || !['open', 'cleanup_required', 'operator_required', 'settled'].includes(
+        row.intent_state,
+      )
+      || row.released !== true
+      || typeof row.may_mutate !== 'boolean'
+      || typeof row.cleanup_needed !== 'boolean'
+      || typeof row.settled !== 'boolean'
+    ) {
+      throw new Error('Paid role reservation release returned malformed evidence');
+    }
+    if (row.may_mutate) {
+      if (row.intent_state !== 'open' || row.cleanup_needed || row.settled) {
+        throw new Error('Paid role reservation release returned mismatched live evidence');
+      }
+      return;
+    }
+
+    if (!row.cleanup_needed && !row.settled) {
+      throw new Error('Terminal paid role reservation release has no cleanup carrier');
+    }
+    // A terminal fence after releasing a provisional reservation must enter
+    // the exact-intent cleanup path; the release itself never grants removal
+    // authority and is not a whole-attempt compensation marker.
+    throw new PurchaseDeliveryTerminalFenceError(false);
+  }
+
+  async finishPurchaseRoleDeliveryAttempt(
+    attempt: PurchaseRoleDeliveryAttempt,
+    outcome: 'live' | 'compensated' | 'retry',
+    errorDetail: string | null = null,
+  ): Promise<{
+    state: string;
+    settled: boolean;
+    authorityEmpty: boolean;
+    disposition: PurchaseRoleDeliveryDisposition;
+  }> {
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_finish_role_delivery_attempt', {
+      p_intent_id: attempt.intentId,
+      p_mutation_token: attempt.mutationToken,
+      p_outcome: outcome,
+      p_error: errorDetail,
+    });
+    if (error) throw new Error(`Failed to finish paid role delivery intent: ${error.message}`);
+    const row = firstRpcRow(data);
+    if (
+      !row
+      || typeof row.intent_state !== 'string'
+      || typeof row.settled !== 'boolean'
+      || typeof row.authority_empty !== 'boolean'
+      || typeof row.disposition !== 'string'
+      || ![
+        'confirmed_open',
+        'settled',
+        'safe_retry',
+        'safe_retry_owned',
+        'run_origin_cleanup',
+        'operator_held',
+      ].includes(row.disposition)
+    ) {
+      throw new Error('Paid role delivery finalization returned malformed evidence');
+    }
+    if (row.settled !== (row.intent_state === 'settled')) {
+      throw new Error('Paid role delivery finalization returned mismatched evidence');
+    }
+    const disposition = row.disposition as PurchaseRoleDeliveryDisposition;
+    const dispositionMatches =
+      (disposition === 'confirmed_open'
+        && row.intent_state === 'open' && !row.settled && !row.authority_empty)
+      || (disposition === 'settled'
+        && row.intent_state === 'settled' && row.settled && row.authority_empty)
+      || (disposition === 'safe_retry'
+        && row.intent_state === 'open' && !row.settled && row.authority_empty)
+      || (disposition === 'safe_retry_owned'
+        && row.intent_state === 'open' && !row.settled && !row.authority_empty)
+      || (disposition === 'run_origin_cleanup'
+        && row.intent_state === 'operator_required' && !row.settled && !row.authority_empty)
+      || (disposition === 'operator_held'
+        && row.intent_state === 'operator_required' && !row.settled);
+    if (!dispositionMatches) {
+      throw new Error('Paid role delivery finalization returned mismatched disposition');
+    }
+    if (disposition !== 'run_origin_cleanup') {
+      this.activePurchaseRoleDeliveryAttempt = null;
+    }
+    return {
+      state: row.intent_state,
+      settled: row.settled,
+      authorityEmpty: row.authority_empty,
+      disposition,
+    };
+  }
+
+  async reconcileOwnedPurchaseRoleCleanup(
+    contract: PurchaseRoleCleanupContract,
+  ): Promise<{ removed: string[]; absent: string[]; retained: string[] }> {
+    if (
+      ![
+        contract.intentId,
+        contract.entitlementId,
+        contract.customerId,
+        contract.discordId,
+      ].every((value) => value.length > 0 && value.trim() === value)
+    ) {
+      throw new Error('Paid role cleanup contract is malformed');
+    }
+    const ownedRoleIds = normalizeExactRoleVector(
+      contract.ownedRoleIds,
+      'Paid role cleanup ownership vector',
+    );
+    if (
+      !Array.isArray(contract.temporaryRoleGrantIds)
+      || contract.temporaryRoleGrantIds.some((grantId) =>
+        typeof grantId !== 'string' || grantId.length === 0 || grantId.trim() !== grantId)
+      || new Set(contract.temporaryRoleGrantIds).size !== contract.temporaryRoleGrantIds.length
+    ) {
+      throw new Error('Paid role cleanup temporary ownership vector is malformed');
+    }
+    return this.revokeRolesSafely(
+      contract.discordId,
+      ownedRoleIds,
+      {
+        intentId: contract.intentId,
+        entitlementId: contract.entitlementId,
+        temporaryRoleGrantIds: [...contract.temporaryRoleGrantIds],
+      },
+      `Commerce: unresolved delivery intent ${contract.intentId} cleanup`,
+    );
+  }
+
+  async executeOwnedPurchaseRoleCleanup(
+    intentId: string,
+    cleanupClaim: RoleDeliveryActionClaim,
+  ): Promise<{ state: string; settled: boolean }> {
+    if (
+      ![intentId, cleanupClaim.actionId, cleanupClaim.claimToken].every((value) =>
+        value.length > 0 && value.trim() === value)
+    ) {
+      throw new Error('Paid role cleanup claim is malformed');
+    }
+    const rpc = this.supabase.rpc as (
+      fn: string,
+      params: Record<string, unknown>,
+    ) => ReturnType<typeof this.supabase.rpc>;
+    const { data: begunData, error: begunError } = await rpc(
+      'commerce_begin_role_delivery_cleanup',
+      {
+        p_intent_id: intentId,
+        p_cleanup_action_id: cleanupClaim.actionId,
+        p_cleanup_claim_token: cleanupClaim.claimToken,
+      },
+    );
+    if (begunError) throw new Error(`Paid role cleanup claim failed: ${begunError.message}`);
+    const begun = firstRpcRow(begunData);
+    if (
+      begun?.intent_state === 'settled'
+      && begun.may_mutate === false
+      && begun.cleanup_mutation_token === null
+    ) {
+      if (this.activePurchaseRoleDeliveryAttempt?.intentId === intentId) {
+        this.activePurchaseRoleDeliveryAttempt = null;
+      }
+      return { state: 'settled', settled: true };
+    }
+    if (
+      (begun?.intent_state === 'cleanup_required' || begun?.intent_state === 'operator_required')
+      && begun.may_mutate === false
+      && begun.cleanup_mutation_token === null
+    ) {
+      throw new Error('Paid role cleanup is held by another or uncertain controller');
+    }
+    if (
+      !begun
+      || typeof begun.cleanup_mutation_token !== 'string'
+      || begun.cleanup_mutation_token.length === 0
+      || begun.may_mutate !== true
+      || (begun.intent_state !== 'cleanup_required' && begun.intent_state !== 'operator_required')
+    ) {
+      throw new Error('Paid role cleanup claim returned malformed evidence');
+    }
+
+    const cleanupToken = begun.cleanup_mutation_token;
+    const { data: contractData, error: contractError } = await rpc(
+      'commerce_get_role_delivery_cleanup',
+      {
+        p_intent_id: intentId,
+        p_cleanup_action_id: cleanupClaim.actionId,
+        p_cleanup_claim_token: cleanupClaim.claimToken,
+        p_cleanup_mutation_token: cleanupToken,
+      },
+    );
+    if (contractError) {
+      throw new Error(`Paid role cleanup contract failed: ${contractError.message}`);
+    }
+    const contract = firstRpcRow(contractData);
+    if (
+      !contract
+      || contract.intent_id !== intentId
+      || contract.guild_id !== this.guild.id
+      || typeof contract.entitlement_id !== 'string'
+      || typeof contract.customer_id !== 'string'
+      || typeof contract.discord_id !== 'string'
+      || !Array.isArray(contract.owned_role_ids)
+      || !Array.isArray(contract.temporary_role_grant_ids)
+    ) {
+      throw new Error('Paid role cleanup contract returned malformed evidence');
+    }
+
+    const outcome = await this.reconcileOwnedPurchaseRoleCleanup({
+      intentId,
+      entitlementId: contract.entitlement_id,
+      customerId: contract.customer_id,
+      discordId: contract.discord_id,
+      ownedRoleIds: contract.owned_role_ids as string[],
+      temporaryRoleGrantIds: contract.temporary_role_grant_ids as string[],
+    });
+
+    const { data: finishedData, error: finishedError } = await rpc(
+      'commerce_finish_role_delivery_cleanup',
+      {
+        p_intent_id: intentId,
+        p_cleanup_action_id: cleanupClaim.actionId,
+        p_cleanup_claim_token: cleanupClaim.claimToken,
+        p_cleanup_mutation_token: cleanupToken,
+        p_outcome: 'cleaned',
+        p_error: null,
+        p_removed_role_ids: outcome.removed,
+        p_absent_role_ids: outcome.absent,
+        p_retained_role_ids: outcome.retained,
+      },
+    );
+    if (finishedError) {
+      throw new Error(`Paid role cleanup finalization failed: ${finishedError.message}`);
+    }
+    const finished = firstRpcRow(finishedData);
+    if (
+      !finished
+      || typeof finished.intent_state !== 'string'
+      || typeof finished.settled !== 'boolean'
+    ) {
+      throw new Error('Paid role cleanup finalization returned malformed evidence');
+    }
+    const isCurrentDeliveryCleanup =
+      this.activePurchaseRoleDeliveryAttempt?.intentId === intentId;
+    if (
+      !finished.settled
+      && !(isCurrentDeliveryCleanup && finished.intent_state === 'cleanup_required')
+    ) {
+      throw new Error('Paid role cleanup remains unresolved after confirmed mutation');
+    }
+    if (finished.settled && isCurrentDeliveryCleanup) {
+      this.activePurchaseRoleDeliveryAttempt = null;
+    }
+    return { state: finished.intent_state, settled: finished.settled };
+  }
+
+  private async isPurchaseGrantStillLive(
+    entitlementId: string,
+    contract: PurchaseRoleDeliveryContract,
+  ): Promise<boolean> {
+    const { data, error } = await this.supabase
+      .from('entitlements')
+      .select('id, guild_id, customer_id, product_id, plan_id, order_id, type, status, source, granted_role_ids')
+      .eq('id', entitlementId)
+      .eq('guild_id', this.guild.id)
+      .eq('customer_id', contract.customerId)
+      .eq('product_id', contract.productId)
+      .eq('order_id', contract.orderId)
+      .maybeSingle();
+    if (error) {
+      throw new Error(`Failed to verify purchase entitlement after Discord delivery: ${error.message}`);
+    }
+
+    const verification = data as unknown;
+    const row = verification && typeof verification === 'object' && !Array.isArray(verification)
+      ? verification as Record<string, unknown>
+      : null;
+    const entitlementStatuses = [
+      'active',
+      'pending',
+      'grace_period',
+      'suspended',
+      'expired',
+      'cancelled',
+      'revoked',
+    ];
+    const orderStatuses = [
+      'pending',
+      'completed',
+      'refunded',
+      'disputed',
+      'cancelled',
+      'pending_review',
+    ];
+    if (
+      !row
+      || row.id !== entitlementId
+      || row.guild_id !== this.guild.id
+      || row.customer_id !== contract.customerId
+      || row.product_id !== contract.productId
+      || (row.plan_id ?? null) !== contract.planId
+      || row.order_id !== contract.orderId
+      || row.type !== contract.entitlementType
+      || (row.source !== 'purchase' && row.source !== null)
+      || typeof row.status !== 'string'
+      || !entitlementStatuses.includes(row.status)
+      || !exactRoleVectorsMatch(row.granted_role_ids, contract.grantedRoleIds)
+    ) {
+      throw new Error('Purchase entitlement verification returned malformed or mismatched data');
+    }
+
+    const { data: parentOrderValue, error: orderError } = await this.supabase
+      .from('orders')
+      .select('id, guild_id, customer_id, product_id, plan_id, status')
+      .eq('id', contract.orderId)
+      .eq('guild_id', this.guild.id)
+      .eq('customer_id', contract.customerId)
+      .eq('product_id', contract.productId)
+      .maybeSingle();
+    if (orderError) {
+      throw new Error(`Failed to verify parent order after Discord delivery: ${orderError.message}`);
+    }
+    const parentOrder = parentOrderValue as unknown;
+    const order = parentOrder && typeof parentOrder === 'object' && !Array.isArray(parentOrder)
+      ? parentOrder as Record<string, unknown>
+      : null;
+    if (
+      !order
+      || order.id !== contract.orderId
+      || order.guild_id !== this.guild.id
+      || order.customer_id !== contract.customerId
+      || order.product_id !== contract.productId
+      || (order.plan_id ?? null) !== contract.planId
+      || typeof order.status !== 'string'
+      || !orderStatuses.includes(order.status)
+    ) {
+      throw new Error('Purchase parent-order verification returned malformed or mismatched data');
+    }
+
+    // Discord delivery can race a customer relink. A well-formed missing or
+    // changed mapping is authoritative evidence that this old Discord target
+    // no longer owns the paid grant; malformed data and lookup errors remain
+    // retryable uncertainty.
+    const { data: customerValue, error: customerError } = await this.supabase
+      .from('customers')
+      .select('id, guild_id, discord_id')
+      .eq('id', contract.customerId)
+      .eq('guild_id', this.guild.id)
+      .maybeSingle();
+    if (customerError) {
+      throw new Error(`Failed to verify customer after Discord delivery: ${customerError.message}`);
+    }
+    const customer = customerValue as unknown;
+    if (customer === null) return false;
+    if (
+      typeof customer !== 'object'
+      || Array.isArray(customer)
+      || (customer as Record<string, unknown>).id !== contract.customerId
+      || (customer as Record<string, unknown>).guild_id !== this.guild.id
+      || typeof (customer as Record<string, unknown>).discord_id !== 'string'
+      || ((customer as Record<string, unknown>).discord_id as string).length === 0
+    ) {
+      throw new Error('Purchase customer verification returned malformed or mismatched data');
+    }
+
+    if ((customer as Record<string, unknown>).discord_id !== contract.discordId) return false;
+
+    return ['active', 'pending', 'grace_period', 'suspended'].includes(row.status as string)
+      && order.status === 'completed';
+  }
+
+  async reconcilePurchaseGrantedRoles(
+    entitlementId: string,
+    contract: PurchaseRoleDeliveryContract,
+    attempt: PurchaseRoleDeliveryAttempt,
+  ): Promise<PurchaseRoleReconciliationOutcome> {
+    if (
+      entitlementId.length === 0
+      || entitlementId.trim() !== entitlementId
+      || ![
+        contract.customerId,
+        contract.productId,
+        contract.orderId,
+        contract.discordId,
+      ].every((value) => value.length > 0 && value.trim() === value)
+      || (
+        contract.planId !== null
+        && (contract.planId.length === 0 || contract.planId.trim() !== contract.planId)
+      )
+      || !['one_time', 'subscription'].includes(contract.entitlementType)
+      || (contract.entitlementType === 'subscription' && contract.planId === null)
+    ) {
+      throw new Error('Purchase role delivery contract is malformed');
+    }
+    const normalizedContract: PurchaseRoleDeliveryContract = {
+      ...contract,
+      grantedRoleIds: normalizeExactRoleVector(
+        contract.grantedRoleIds,
+        'Purchase granted role vector',
+      ),
+    };
+
+    // Fence before the first Discord write. This closes the common refund /
+    // stale-reconciliation race without weakening the post-write proof below.
+    // A durable delivery-intent token (owned by the queue layer) covers the
+    // unavoidable external-write crash gap between these two proofs.
+    const purchaseLiveBeforeDelivery = await this.isPurchaseGrantStillLive(
+      entitlementId,
+      normalizedContract,
+    );
+    if (!purchaseLiveBeforeDelivery) {
+      // This invocation has not introduced a Discord role. Entitlement
+      // metadata alone is not authority to remove a role that may have been
+      // assigned manually after an older delivery settled. Residue from a
+      // crashed delivery is handled only through its explicit unresolved,
+      // tokenized delivery intent.
+      return 'terminal';
+    }
+    const intentLiveBeforeDelivery = await this.assertRoleDeliveryAttemptLive(attempt);
+    if (!intentLiveBeforeDelivery) {
+      throw new PurchaseDeliveryMutationUncertainError(
+        normalizedContract.grantedRoleIds[0] ?? 'unknown',
+        'the exact delivery claim is no longer live',
+      );
+    }
+
+    try {
+      await this.addAndConfirmGrantedRoles(
+        normalizedContract.discordId,
+        normalizedContract.grantedRoleIds,
+        async (roleId, roleWasPresent) => this.attachPermanentRoleDelivery(
+          attempt,
+          roleId,
+          roleWasPresent,
+        ),
+        async (roleId) => this.releaseUnconsumedPermanentRoleClaim(attempt, roleId),
+        async (roleId) => this.confirmPermanentRoleDelivery(attempt, roleId),
+        async (roleId) => this.confirmPermanentRoleBaseline(attempt, roleId),
+      );
+    } catch (deliveryError) {
+      if (deliveryError instanceof PurchaseDeliveryTerminalFenceError) {
+        await this.executeOwnedPurchaseRoleCleanup(attempt.intentId, attempt);
+        return 'terminal';
+      }
+      // Confirmed ownership and provisional reservations are durable protocol
+      // state, not a whole-action success marker. Preserve them for the exact
+      // same-action retry/rebind instead of deleting a partially delivered
+      // role vector or attempting newly-added-only compensation.
+      throw deliveryError;
+    }
+
+    let purchaseStillLive = await this.isPurchaseGrantStillLive(
+      entitlementId,
+      normalizedContract,
+    );
+    if (purchaseStillLive) {
+      purchaseStillLive = await this.assertRoleDeliveryAttemptLive(attempt);
+      if (!purchaseStillLive) {
+        throw new PurchaseDeliveryMutationUncertainError(
+          normalizedContract.grantedRoleIds[0] ?? 'unknown',
+          'the exact delivery claim was lost before whole-action confirmation',
+        );
+      }
+    }
+
+    if (!purchaseStillLive) {
+      // Terminal evidence invokes the full exact-intent cleanup vector. This
+      // covers inherited/replayed ownership and excludes manual baselines;
+      // a newly-added-only list is neither complete nor authoritative.
+      await this.executeOwnedPurchaseRoleCleanup(attempt.intentId, attempt);
+      return 'terminal';
+    }
+
+    return 'live';
+  }
+
+  async ensurePurchaseGrantedRoles(
+    entitlementId: string,
+    contract: PurchaseRoleDeliveryContract,
+    attempt: PurchaseRoleDeliveryAttempt,
+  ): Promise<void> {
+    const outcome = await this.reconcilePurchaseGrantedRoles(entitlementId, contract, attempt);
+    if (outcome === 'terminal') {
+      throw new PurchaseRoleDeliveryTerminalNoopError(entitlementId);
     }
   }
 
-  private async revokeRoles(discordId: string, roleIds: string[]): Promise<void> {
-    if (!roleIds.length) return;
+  async reconcileNonCommerceGrantedRoles(
+    contract: NonCommerceRoleDeliveryContract,
+    attempt: PurchaseRoleDeliveryAttempt,
+  ): Promise<PurchaseRoleReconciliationOutcome> {
+    const normalizedRoleIds = normalizeExactRoleVector(
+      contract.grantedRoleIds,
+      'Non-commerce granted role vector',
+    );
+    if (
+      [
+        contract.customerId,
+        contract.productId,
+        contract.discordId,
+        contract.activationGeneration,
+      ].some((value) => value.length === 0 || value.trim() !== value)
+      || (contract.orderId !== null
+        && (contract.orderId.length === 0 || contract.orderId.trim() !== contract.orderId))
+      || (contract.planId !== null
+        && (contract.planId.length === 0 || contract.planId.trim() !== contract.planId))
+      || !['one_time', 'subscription'].includes(contract.entitlementType)
+      || !['manual', 'giveaway', 'automation'].includes(contract.entitlementSource)
+    ) {
+      throw new Error('Non-commerce role delivery contract is malformed');
+    }
+
+    if (!await this.assertRoleDeliveryAttemptLive(attempt)) {
+      throw new PurchaseDeliveryMutationUncertainError(
+        normalizedRoleIds[0] ?? 'unknown',
+        'the exact non-commerce delivery claim is no longer live',
+      );
+    }
     try {
-      const member = await this.guild.members.fetch(discordId);
-      for (const roleId of roleIds) {
-        if (member.roles.cache.has(roleId)) {
-          await member.roles.remove(roleId, 'Commerce: entitlement revoked');
+      await this.addAndConfirmGrantedRoles(
+        contract.discordId,
+        normalizedRoleIds,
+        async (roleId, roleWasPresent) => this.attachPermanentRoleDelivery(
+          attempt,
+          roleId,
+          roleWasPresent,
+        ),
+        async (roleId) => this.releaseUnconsumedPermanentRoleClaim(attempt, roleId),
+        async (roleId) => this.confirmPermanentRoleDelivery(attempt, roleId),
+        async (roleId) => this.confirmPermanentRoleBaseline(attempt, roleId),
+      );
+    } catch (deliveryError) {
+      if (deliveryError instanceof PurchaseDeliveryTerminalFenceError) {
+        await this.executeOwnedPurchaseRoleCleanup(attempt.intentId, attempt);
+        return 'terminal';
+      }
+      throw deliveryError;
+    }
+
+    if (!await this.assertRoleDeliveryAttemptLive(attempt)) {
+      await this.executeOwnedPurchaseRoleCleanup(attempt.intentId, attempt);
+      return 'terminal';
+    }
+    return 'live';
+  }
+
+  async ensureGrantedRoles(discordId: string, roleIds: string[]): Promise<void> {
+    await this.addAndConfirmGrantedRoles(discordId, roleIds);
+  }
+
+  private async addAndConfirmGrantedRoles(
+    discordId: string,
+    roleIds: string[],
+    attachRoleDelivery?: (
+      roleId: string,
+      roleWasPresent: boolean,
+    ) => Promise<RoleDeliveryAttachment>,
+    releaseUnconsumedRoleClaim?: (roleId: string) => Promise<void>,
+    confirmReservedRole?: (roleId: string) => Promise<RoleDeliveryPromotion>,
+    confirmManualBaseline?: (
+      roleId: string,
+    ) => Promise<RoleDeliveryBaselineConfirmation>,
+  ): Promise<void> {
+    if (!roleIds.length) return;
+
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    for (const roleId of [...new Set(roleIds)]) {
+      let attachment: RoleDeliveryAttachment | null = null;
+      let hasProvisionalReservation = false;
+      if (attachRoleDelivery) {
+        const roleWasPresent = member.roles.cache.has(roleId);
+        attachment = await attachRoleDelivery(roleId, roleWasPresent);
+        hasProvisionalReservation = attachment.disposition === 'reserve_add'
+          || attachment.disposition === 'reserve_inherited'
+          || attachment.disposition === 'reserved_replay';
+        if (attachment.disposition === 'terminal') {
+          throw new PurchaseDeliveryTerminalFenceError();
+        }
+        if (attachment.disposition === 'operator_held') {
+          throw new PurchaseDeliveryMutationUncertainError(
+            roleId,
+            'the durable delivery controller is held for operator recovery',
+          );
+        }
+        if (attachment.disposition === 'dependency_pending') {
+          throw new Error(
+            `Purchased role ${roleId} ownership dependency remains unresolved`,
+          );
+        }
+
+        // Every paid role is classified, including an already-present role.
+        // Re-read after that durable decision so a concurrent assignment or
+        // removal cannot be mistaken for this attempt's own Discord mutation.
+        member = await this.guild.members.fetch({ user: discordId, force: true });
+        if (attachment.disposition === 'manual_baseline') {
+          if (member.roles.cache.has(roleId)) {
+            if (!confirmManualBaseline) {
+              throw new Error('Paid role baseline confirmation callback is missing');
+            }
+            const baseline = await confirmManualBaseline(roleId);
+            if (!baseline.confirmed) {
+              if (baseline.disposition === 'contract_changed') {
+                throw new PurchaseDeliveryTerminalFenceError();
+              }
+              throw new Error(
+                `Purchased role ${roleId} baseline changed during confirmation`,
+              );
+            }
+            continue;
+          }
+
+          // The observed manual baseline disappeared before it could satisfy
+          // delivery. Reclassify the now-absent role; only the resulting
+          // durable reservation permits a Discord write.
+          attachment = await attachRoleDelivery(roleId, false);
+          hasProvisionalReservation = attachment.disposition === 'reserve_add'
+            || attachment.disposition === 'reserve_inherited'
+            || attachment.disposition === 'reserved_replay';
+          if (attachment.disposition === 'terminal') {
+            throw new PurchaseDeliveryTerminalFenceError();
+          }
+          if (attachment.disposition === 'operator_held') {
+            throw new PurchaseDeliveryMutationUncertainError(
+              roleId,
+              'the durable delivery controller is held for operator recovery',
+            );
+          }
+          if (attachment.disposition === 'dependency_pending') {
+            throw new Error(
+              `Purchased role ${roleId} ownership dependency remains unresolved`,
+            );
+          }
+          if (
+            attachment.disposition !== 'reserve_add'
+            || attachment.ownsRemoval
+            || !attachment.claimNewlyAcquired
+          ) {
+            throw new Error('Absent paid role did not acquire an exact add reservation');
+          }
+          member = await this.guild.members.fetch({ user: discordId, force: true });
+        }
+
+        // A newly-created absent-role reservation loses to a role that
+        // appeared before this invocation wrote Discord. Release the
+        // provisional reservation and preserve the concurrent/manual role.
+        if (
+          attachment.disposition === 'reserve_add'
+          && member.roles.cache.has(roleId)
+        ) {
+          if (!releaseUnconsumedRoleClaim) {
+            throw new Error('Paid role ownership release callback is missing');
+          }
+          await releaseUnconsumedRoleClaim(roleId);
+          attachment = await attachRoleDelivery(roleId, true);
+          if (attachment.disposition === 'terminal') {
+            throw new PurchaseDeliveryTerminalFenceError();
+          }
+          if (attachment.disposition === 'operator_held') {
+            throw new PurchaseDeliveryMutationUncertainError(
+              roleId,
+              'the durable delivery controller is held for operator recovery',
+            );
+          }
+          if (attachment.disposition === 'dependency_pending') {
+            throw new Error(
+              `Purchased role ${roleId} ownership dependency remains unresolved`,
+            );
+          }
+          member = await this.guild.members.fetch({ user: discordId, force: true });
+          if (attachment.disposition === 'manual_baseline') {
+            if (!member.roles.cache.has(roleId)) {
+              throw new Error(`Purchased role ${roleId} changed during baseline classification`);
+            }
+            if (!confirmManualBaseline) {
+              throw new Error('Paid role baseline confirmation callback is missing');
+            }
+            const baseline = await confirmManualBaseline(roleId);
+            if (!baseline.confirmed) {
+              if (baseline.disposition === 'contract_changed') {
+                throw new PurchaseDeliveryTerminalFenceError();
+              }
+              throw new Error(
+                `Purchased role ${roleId} baseline changed during confirmation`,
+              );
+            }
+            continue;
+          }
+          hasProvisionalReservation = attachment.disposition === 'reserve_add'
+            || attachment.disposition === 'reserve_inherited'
+            || attachment.disposition === 'reserved_replay';
+        }
+
+        // A reservation replay plus a present role is the add-before-promote
+        // crash/manual-add ambiguity. Never convert that provisional state
+        // into automatic removal authority.
+        if (
+          attachment.disposition === 'reserved_replay'
+          && member.roles.cache.has(roleId)
+        ) {
+          throw new PurchaseDeliveryMutationUncertainError(
+            roleId,
+            'a pre-existing provisional reservation now observes the role present',
+          );
         }
       }
-    } catch (err) {
-      log.error(`Failed to revoke roles from ${discordId}:`, err);
+
+      if (!member.roles.cache.has(roleId)) {
+        const mayAddWithReservation = attachment?.disposition === 'reserve_add'
+          || attachment?.disposition === 'reserve_inherited'
+          || attachment?.disposition === 'reserved_replay';
+        if (
+          attachRoleDelivery
+          && (!attachment || (!attachment.ownsRemoval && !mayAddWithReservation))
+        ) {
+          throw new Error('Paid role is absent without exact ownership or reservation');
+        }
+        try {
+          await member.roles.add(roleId, 'Commerce: entitlement granted');
+        } catch (addError) {
+          try {
+            member = await this.guild.members.fetch({ user: discordId, force: true });
+          } catch (readError) {
+            throw new PurchaseDeliveryMutationUncertainError(
+              roleId,
+              `${addError instanceof Error ? addError.message : String(addError)}; post-error read failed: ${
+                readError instanceof Error ? readError.message : String(readError)
+              }`,
+            );
+          }
+          if (member.roles.cache.has(roleId)) {
+            if (attachment?.disposition === 'owned_replay') {
+              continue;
+            }
+            throw new PurchaseDeliveryMutationUncertainError(roleId, addError);
+          }
+          if (hasProvisionalReservation && !releaseUnconsumedRoleClaim) {
+            throw new Error('Paid role ownership release callback is missing');
+          }
+          if (hasProvisionalReservation && releaseUnconsumedRoleClaim) {
+            await releaseUnconsumedRoleClaim(roleId);
+          }
+          throw addError;
+        }
+
+        try {
+          member = await this.guild.members.fetch({ user: discordId, force: true });
+        } catch (readError) {
+          throw new PurchaseDeliveryMutationUncertainError(roleId, readError);
+        }
+        if (!member.roles.cache.has(roleId)) {
+          if (hasProvisionalReservation && !releaseUnconsumedRoleClaim) {
+            throw new Error('Paid role ownership release callback is missing');
+          }
+          if (hasProvisionalReservation && releaseUnconsumedRoleClaim) {
+            await releaseUnconsumedRoleClaim(roleId);
+          }
+          throw new Error(`Discord did not confirm purchased role ${roleId}`);
+        }
+      }
+
+      if (
+        attachment
+        && (
+          attachment.disposition === 'reserve_add'
+          || attachment.disposition === 'reserve_inherited'
+          || attachment.disposition === 'reserved_replay'
+        )
+      ) {
+        if (!confirmReservedRole) {
+          throw new Error('Paid role ownership promotion callback is missing');
+        }
+        const promotion = await confirmReservedRole(roleId);
+        if (promotion.intentState !== 'open' || !promotion.ownsRemoval) {
+          throw new PurchaseDeliveryMutationUncertainError(
+            roleId,
+            'the provisional reservation could not be promoted',
+          );
+        }
+      }
     }
+
+    member = await this.guild.members.fetch({ user: discordId, force: true });
+    const missingRoleIds = [...new Set(roleIds)].filter(
+      (roleId) => !member.roles.cache.has(roleId),
+    );
+    if (missingRoleIds.length > 0) {
+      throw new Error(
+        `Discord did not confirm ${missingRoleIds.length} purchased role(s) for ${discordId}`,
+      );
+    }
+  }
+
+  private async classifyOtherLiveRoleOwner(
+    discordId: string,
+    roleId: string,
+    exclusions: RoleOwnerExclusions,
+  ): Promise<LiveRoleOwnerState> {
+    const temporaryRoleGrantIds = exclusions.temporaryRoleGrantIds ?? [];
+    if (
+      ![discordId, roleId].every((value) =>
+        value.length > 0 && value.trim() === value)
+      || temporaryRoleGrantIds.some((value) =>
+        typeof value !== 'string' || value.length === 0 || value.trim() !== value)
+      || new Set(temporaryRoleGrantIds).size !== temporaryRoleGrantIds.length
+    ) {
+      throw new Error('role ownership proof identity is malformed');
+    }
+    const { data, error } = await (
+      this.supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof this.supabase.rpc>
+    )('commerce_classify_live_role_owner', {
+      p_guild_id: this.guild.id,
+      p_discord_id: discordId,
+      p_role_id: roleId,
+      p_exclude_intent_id: exclusions.intentId ?? null,
+      p_exclude_entitlement_id: exclusions.entitlementId ?? null,
+      p_exclude_grant_ids: temporaryRoleGrantIds,
+    });
+    if (error) {
+      throw new Error(`authoritative role ownership classification failed: ${error.message}`);
+    }
+    if (data !== 'confirmed' && data !== 'pending' && data !== 'none') {
+      throw new Error('authoritative role ownership classification returned malformed evidence');
+    }
+    return data;
+  }
+
+  private async removeRepairAddedRoleAndConfirm(
+    discordId: string,
+    roleId: string,
+  ): Promise<void> {
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    if (!member.roles.cache.has(roleId)) return;
+    await member.roles.remove(
+      roleId,
+      'Commerce: compensate stale confirmed-owner repair',
+    );
+    member = await this.guild.members.fetch({ user: discordId, force: true });
+    if (member.roles.cache.has(roleId)) {
+      throw new Error(`Discord did not confirm stale repair compensation for ${roleId}`);
+    }
+  }
+
+  private async repairConfirmedRole(
+    discordId: string,
+    roleId: string,
+    exclusions: RoleOwnerExclusions,
+    reason: string,
+  ): Promise<LiveRoleOwnerState> {
+    let ownerState = await this.classifyOtherLiveRoleOwner(
+      discordId,
+      roleId,
+      exclusions,
+    );
+    if (ownerState !== 'confirmed') return ownerState;
+
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    if (member.roles.cache.has(roleId)) {
+      return this.classifyOtherLiveRoleOwner(discordId, roleId, exclusions);
+    }
+
+    ownerState = await this.classifyOtherLiveRoleOwner(
+      discordId,
+      roleId,
+      exclusions,
+    );
+    if (ownerState !== 'confirmed') return ownerState;
+
+    let addError: unknown = null;
+    try {
+      await member.roles.add(roleId, reason);
+    } catch (error) {
+      // A committed Discord add can lose its response. Continue to the
+      // authoritative post-add proof so stale access is still compensated.
+      addError = error;
+    }
+    try {
+      ownerState = await this.classifyOtherLiveRoleOwner(
+        discordId,
+        roleId,
+        exclusions,
+      );
+    } catch (classificationError) {
+      await this.removeRepairAddedRoleAndConfirm(discordId, roleId);
+      throw new Error(
+        `post-repair ownership classification failed; added access was removed (${String(classificationError)})`,
+      );
+    }
+    if (ownerState !== 'confirmed') {
+      await this.removeRepairAddedRoleAndConfirm(discordId, roleId);
+      return ownerState;
+    }
+
+    member = await this.guild.members.fetch({ user: discordId, force: true });
+    if (!member.roles.cache.has(roleId)) {
+      if (addError) {
+        throw new Error(
+          `Discord retained-role add failed and read-back did not confirm ${roleId} (${String(addError)})`,
+        );
+      }
+      throw new Error(`Discord did not confirm retained role ${roleId}`);
+    }
+    return 'confirmed';
+  }
+
+  private async revokeRolesSafely(
+    discordId: string,
+    roleIds: string[],
+    exclusions: RoleOwnerExclusions = {},
+    removalReason: string = 'Commerce: entitlement revoked',
+  ): Promise<{ removed: string[]; absent: string[]; retained: string[] }> {
+    if (!roleIds.length) return { removed: [], absent: [], retained: [] };
+
+    const uniqueRoleIds = [...new Set(roleIds)];
+    if (
+      uniqueRoleIds.length !== roleIds.length
+      || uniqueRoleIds.some((roleId) =>
+        typeof roleId !== 'string' || roleId.length === 0 || roleId.trim() !== roleId)
+    ) {
+      throw new Error('non-commerce role snapshot is malformed');
+    }
+
+    const retained = new Set<string>();
+    for (const roleId of uniqueRoleIds) {
+      const ownerState = await this.classifyOtherLiveRoleOwner(
+        discordId,
+        roleId,
+        exclusions,
+      );
+      if (ownerState === 'pending') {
+        // Finish the complete preflight before any Discord mutation. A
+        // provisional delivery may be between its DB reservation and Discord
+        // confirmation, so cleanup must retry after it resolves.
+        throw new Error(`role ownership for ${roleId} is pending; cleanup deferred`);
+      }
+      if (ownerState === 'confirmed') {
+        retained.add(roleId);
+      }
+    }
+
+    let member = await this.guild.members.fetch({ user: discordId, force: true });
+    const removed: string[] = [];
+    const absent: string[] = [];
+
+    // A role protected by another exact live owner is required access, not
+    // merely an instruction to skip removal. Repair it before any destructive
+    // mutation so a prior crashed attempt cannot leave that owner unserved.
+    for (const roleId of [...retained]) {
+      const repairedState = await this.repairConfirmedRole(
+        discordId,
+        roleId,
+        exclusions,
+        'Commerce: repair exact retained role owner',
+      );
+      if (repairedState === 'pending') {
+        throw new Error(`role ownership for ${roleId} became pending; cleanup deferred`);
+      }
+      if (repairedState === 'none') retained.delete(roleId);
+    }
+    member = await this.guild.members.fetch({ user: discordId, force: true });
+
+    for (const roleId of uniqueRoleIds) {
+      if (retained.has(roleId)) continue;
+      if (member.roles.cache.has(roleId)) {
+        try {
+          // Discord can commit the mutation and still reject locally if its
+          // response is lost. Treat the entire remove/confirm boundary as
+          // uncertain until the forced read-back proves absence.
+          await member.roles.remove(roleId, removalReason);
+          member = await this.guild.members.fetch({ user: discordId, force: true });
+          if (member.roles.cache.has(roleId)) {
+            throw new Error(`Discord did not confirm revoked role ${roleId}`);
+          }
+        } catch (removalError) {
+          try {
+            if (
+              await this.classifyOtherLiveRoleOwner(discordId, roleId, exclusions)
+                === 'confirmed'
+            ) {
+              await this.repairConfirmedRole(
+                discordId,
+                roleId,
+                exclusions,
+                'Commerce: repair confirmed owner after removal uncertainty',
+              );
+            }
+          } catch {
+            // Pending, none, unknown, and failed confirmation never authorize
+            // restoring access. Preserve the original removal failure.
+          }
+          throw new Error(
+            `Discord removal confirmation failed for ${roleId} (${String(removalError)})`,
+          );
+        }
+        removed.push(roleId);
+      } else {
+        absent.push(roleId);
+      }
+
+      let otherOwnerState: LiveRoleOwnerState;
+      try {
+        otherOwnerState = await this.classifyOtherLiveRoleOwner(
+          discordId,
+          roleId,
+          exclusions,
+        );
+      } catch (ownerLookupError) {
+        throw ownerLookupError;
+      }
+
+      if (otherOwnerState === 'pending') {
+        throw new Error(`role ownership for ${roleId} became pending; cleanup deferred`);
+      }
+
+      if (otherOwnerState === 'confirmed') {
+        otherOwnerState = await this.repairConfirmedRole(
+          discordId,
+          roleId,
+          exclusions,
+          'Commerce: repair role for concurrent exact owner',
+        );
+        if (otherOwnerState === 'pending') {
+          throw new Error(`role ownership for ${roleId} became pending; cleanup deferred`);
+        }
+        if (otherOwnerState === 'confirmed') {
+          retained.add(roleId);
+          const removedIndex = removed.indexOf(roleId);
+          if (removedIndex >= 0) removed.splice(removedIndex, 1);
+          const absentIndex = absent.indexOf(roleId);
+          if (absentIndex >= 0) absent.splice(absentIndex, 1);
+        }
+        member = await this.guild.members.fetch({ user: discordId, force: true });
+      }
+    }
+    return { removed, absent, retained: [...retained] };
   }
 }

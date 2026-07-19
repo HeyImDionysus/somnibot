@@ -35,32 +35,42 @@ import {
 } from './helpers';
 
 const ENTITLEMENT_ID = '00000000-0000-4000-a000-000000000001';
+const CUSTOMER_ID = '00000000-0000-4000-a000-000000000002';
+const PRODUCT_ID = '00000000-0000-4000-a000-000000000003';
+const ORDER_ID = '00000000-0000-4000-a000-000000000004';
 const NOW = new Date('2026-07-09T12:00:00.000Z');
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 function putReq(status: string) {
-  return buildRequest('/api/customers/cust-1/entitlements', {
+  return buildRequest(`/api/customers/${CUSTOMER_ID}/entitlements`, {
     method: 'PUT',
     body: { entitlement_id: ENTITLEMENT_ID, status },
   });
 }
 
+function invoke(status: string) {
+  return PUT(putReq(status) as never, {
+    params: Promise.resolve({ id: CUSTOMER_ID }),
+  });
+}
+
 function setup() {
   const mock = createMockSupabase();
-  const entitlementsQuery = registerTable(mock, 'entitlements');
-  entitlementsQuery.single.mockResolvedValue({
-    data: {
-      id: ENTITLEMENT_ID,
-      customer_id: 'cust-1',
-      product_id: 'prod-1',
-      order_id: 'ord-1',
-    },
+  mock.rpc.mockImplementation(async (_name: string, params: Record<string, unknown>) => ({
+    data: [{
+      entitlement_id: ENTITLEMENT_ID,
+      customer_id: CUSTOMER_ID,
+      product_id: PRODUCT_ID,
+      order_id: ORDER_ID,
+      status: params.p_status,
+      grace_period_ends_at: params.p_grace_period_ends_at,
+    }],
     error: null,
-  });
+  }));
   const alertsQuery = registerTable(mock, 'alerts');
   (createAdminSupabase as ReturnType<typeof vi.fn>).mockReturnValue(mock);
-  return { mock, entitlementsQuery, alertsQuery };
+  return { mock, alertsQuery };
 }
 
 beforeEach(() => {
@@ -77,25 +87,37 @@ afterEach(() => {
 
 describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () => {
   it('sets a grace deadline when manually transitioning into grace_period (CHECK-constraint-safe)', async () => {
-    const { entitlementsQuery } = setup();
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        customer_id: CUSTOMER_ID,
+        product_id: PRODUCT_ID,
+        order_id: ORDER_ID,
+        status: 'grace_period',
+        grace_period_ends_at: new Date(NOW.getTime() + THREE_DAYS_MS).toISOString(),
+      }],
+      error: null,
+    });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
 
-    expect(entitlementsQuery.update).toHaveBeenCalledWith(
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
       expect.objectContaining({
-        status: 'grace_period',
+        p_entitlement_id: ENTITLEMENT_ID,
+        p_customer_id: CUSTOMER_ID,
+        p_guild_id: 'guild-1',
+        p_status: 'grace_period',
         // Same default window as EntitlementService.suspend (3 days).
-        grace_period_ends_at: new Date(NOW.getTime() + THREE_DAYS_MS).toISOString(),
+        p_grace_period_ends_at: new Date(NOW.getTime() + THREE_DAYS_MS).toISOString(),
       }),
     );
-    // Guild-scoped, targeted at the requested entitlement.
-    expect(entitlementsQuery.eq).toHaveBeenCalledWith('id', ENTITLEMENT_ID);
-    expect(entitlementsQuery.eq).toHaveBeenCalledWith('guild_id', 'guild-1');
   });
 
   it("honors the guild's configured grace window (guild_config.grace_period_days) instead of hardcoding 3 days", async () => {
-    const { mock, entitlementsQuery, alertsQuery } = setup();
+    const { mock, alertsQuery } = setup();
     // Codex round-2 finding #1: the manual admin transition must read the
     // guild's configured window via the shared getGracePeriodDays helper — the
     // same source of truth EntitlementService.suspend uses — not a hardcoded 3.
@@ -104,17 +126,30 @@ describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () =>
       data: { grace_period_days: 7 },
     });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const expectedDeadline = new Date(NOW.getTime() + 7 * ONE_DAY_MS).toISOString();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        customer_id: CUSTOMER_ID,
+        product_id: PRODUCT_ID,
+        order_id: ORDER_ID,
+        status: 'grace_period',
+        grace_period_ends_at: expectedDeadline,
+      }],
+      error: null,
+    });
+
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
 
     // Deadline reflects the 7-day configured window, not the 3-day default —
     // a test that only asserted THREE_DAYS_MS would pass even against the
     // hardcoded bug this finding fixes.
-    const expectedDeadline = new Date(NOW.getTime() + 7 * ONE_DAY_MS).toISOString();
-    expect(entitlementsQuery.update).toHaveBeenCalledWith(
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
       expect.objectContaining({
-        status: 'grace_period',
-        grace_period_ends_at: expectedDeadline,
+        p_status: 'grace_period',
+        p_grace_period_ends_at: expectedDeadline,
       }),
     );
     // The lookup is scoped to the authenticated guild.
@@ -128,25 +163,118 @@ describe('PUT /api/customers/[id]/entitlements — grace_period deadline', () =>
   });
 
   it('clears the grace deadline on manual reactivation (parity with EntitlementService.reactivate)', async () => {
-    const { entitlementsQuery } = setup();
+    const { mock } = setup();
 
-    const res = await PUT(putReq('active') as never);
+    const res = await invoke('active');
     expect(res.status).toBe(200);
 
-    const payload = (entitlementsQuery.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(payload.status).toBe('active');
-    expect(payload.grace_period_ends_at).toBeNull();
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
+      expect.objectContaining({ p_status: 'active', p_grace_period_ends_at: null }),
+    );
   });
 
-  it('leaves the grace deadline untouched for terminal transitions (trace of when the window lapsed)', async () => {
-    const { entitlementsQuery } = setup();
+  it('delegates a terminal transition without supplying a replacement grace deadline', async () => {
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        customer_id: CUSTOMER_ID,
+        product_id: PRODUCT_ID,
+        order_id: ORDER_ID,
+        status: 'cancelled',
+        grace_period_ends_at: null,
+      }],
+      error: null,
+    });
 
-    const res = await PUT(putReq('cancelled') as never);
+    const res = await invoke('cancelled');
     expect(res.status).toBe(200);
 
-    const payload = (entitlementsQuery.update as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(payload.status).toBe('cancelled');
-    expect(payload).not.toHaveProperty('grace_period_ends_at');
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
+      expect.objectContaining({ p_status: 'cancelled', p_grace_period_ends_at: null }),
+    );
+  });
+
+  it("normalizes the operator 'revoked' action to the table's terminal expired status", async () => {
+    const { mock } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        customer_id: CUSTOMER_ID,
+        product_id: PRODUCT_ID,
+        order_id: ORDER_ID,
+        status: 'expired',
+        grace_period_ends_at: null,
+      }],
+      error: null,
+    });
+
+    const res = await invoke('revoked');
+    expect(res.status).toBe(200);
+
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
+      expect.objectContaining({ p_status: 'expired' }),
+    );
+  });
+});
+
+describe('PUT /api/customers/[id]/entitlements — atomic lifecycle authorization', () => {
+  it('returns a safe conflict and performs no alert side effect when the database rejects resurrection', async () => {
+    const { mock, alertsQuery } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: '23514',
+        message: 'paid entitlement lifecycle is authoritative',
+      },
+    });
+
+    const res = await invoke('active');
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      success: false,
+      error: 'This entitlement transition conflicts with its authoritative lifecycle',
+    });
+    expect(alertsQuery.insert).not.toHaveBeenCalled();
+    expect(alertsQuery.update).not.toHaveBeenCalled();
+  });
+
+  it('binds the entitlement transition to the customer id in the URL', async () => {
+    const { mock } = setup();
+
+    const res = await invoke('active');
+    expect(res.status).toBe(200);
+    expect(mock.rpc).toHaveBeenCalledWith(
+      'commerce_update_entitlement_status_admin',
+      expect.objectContaining({
+        p_entitlement_id: ENTITLEMENT_ID,
+        p_customer_id: CUSTOMER_ID,
+        p_guild_id: 'guild-1',
+      }),
+    );
+  });
+
+  it('fails closed when the status RPC returns cross-linked identity evidence', async () => {
+    const { mock, alertsQuery } = setup();
+    mock.rpc.mockResolvedValueOnce({
+      data: [{
+        entitlement_id: ENTITLEMENT_ID,
+        customer_id: '00000000-0000-4000-a000-000000000099',
+        product_id: PRODUCT_ID,
+        order_id: ORDER_ID,
+        status: 'active',
+        grace_period_ends_at: null,
+      }],
+      error: null,
+    });
+
+    const res = await invoke('active');
+    expect(res.status).toBe(500);
+    expect(alertsQuery.insert).not.toHaveBeenCalled();
+    expect(alertsQuery.update).not.toHaveBeenCalled();
   });
 });
 
@@ -154,7 +282,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
   it('raises the deduped operator alert when manually entering grace_period', async () => {
     const { alertsQuery } = setup();
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
 
     expect(alertsQuery.insert).toHaveBeenCalledWith(
@@ -165,9 +293,9 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
         title: expect.any(String),
         metadata: expect.objectContaining({
           entitlement_id: ENTITLEMENT_ID,
-          customer_id: 'cust-1',
-          product_id: 'prod-1',
-          order_id: 'ord-1',
+          customer_id: CUSTOMER_ID,
+          product_id: PRODUCT_ID,
+          order_id: ORDER_ID,
           grace_period_ends_at: new Date(NOW.getTime() + THREE_DAYS_MS).toISOString(),
           source: 'dashboard.entitlements.update',
         }),
@@ -184,7 +312,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
     async (status) => {
       const { alertsQuery } = setup();
 
-      const res = await PUT(putReq(status) as never);
+      const res = await invoke(status);
       expect(res.status).toBe(200);
 
       expect(alertsQuery.update).toHaveBeenCalledWith(
@@ -209,7 +337,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
       error: { code: '23505', message: 'duplicate key value violates unique constraint' },
     });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
   });
 
@@ -223,7 +351,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
       error: { code: '23505', message: 'duplicate key value violates unique constraint' },
     });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
 
     const newDeadline = new Date(NOW.getTime() + THREE_DAYS_MS).toISOString();
@@ -244,7 +372,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
     const { alertsQuery } = setup();
     alertsQuery.insert.mockResolvedValue({ error: null });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
     // A fresh insert means there was no pre-existing alert to refresh.
     expect(alertsQuery.update).not.toHaveBeenCalled();
@@ -256,7 +384,7 @@ describe('PUT /api/customers/[id]/entitlements — grace alert lifecycle (W2 rev
       error: { code: '42501', message: 'permission denied' },
     });
 
-    const res = await PUT(putReq('grace_period') as never);
+    const res = await invoke('grace_period');
     expect(res.status).toBe(200);
   });
 });

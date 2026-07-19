@@ -487,11 +487,12 @@ def process_migration(filepath: Path):
 
 
 # ============================================================
-# Manual type overrides for well-known JSONB columns
+# Manual type overrides for columns whose final type cannot be reconstructed
+# from the initial CREATE TABLE alone (for example, later CHECK replacements).
 # ============================================================
 # These override the generated JSONB types with more specific types
 # Format: (table_name, column_name) → ts_type
-JSONB_OVERRIDES: dict[tuple[str, str], str] = {
+TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     # guild_config
     ("guild_config", "interest_role_mapping"): "Record<string, string>",
     ("guild_config", "escalation_chain"): "EscalationStep[]",
@@ -541,6 +542,10 @@ JSONB_OVERRIDES: dict[tuple[str, str], str] = {
     # bot_action_queue
     ("bot_action_queue", "payload"): "Record<string, unknown>",
     ("bot_action_queue", "result"): "Record<string, unknown> | null",
+    ("bot_action_queue", "status"): "'staged' | 'pending' | 'processing' | 'completed' | 'failed'",
+    # orders
+    ("orders", "status"): "'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review'",
+    ("orders", "temporary_role_grants_snapshot"): "Array<{ role_id: string; duration_seconds: number }>",
     # fraud_signals
     ("fraud_signals", "evidence"): "Record<string, unknown>",
     # fraud_rules
@@ -651,8 +656,8 @@ def generate_row_interface(table: Table, name: str) -> str:
     lines = [f"export interface {name} {{"]
     for col in table.columns.values():
         override_key = (table.name, col.name)
-        if override_key in JSONB_OVERRIDES:
-            ts_type = JSONB_OVERRIDES[override_key]
+        if override_key in TYPE_OVERRIDES:
+            ts_type = TYPE_OVERRIDES[override_key]
         else:
             ts_type = col.to_ts_type()
         lines.append(f"  {col.name}: {ts_type};")
@@ -698,6 +703,19 @@ HELPER_TYPES = '''// ===========================================================
 
 // Generic JSON type for JSONB columns
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
+
+// Two-phase privacy RPC results. Both purge functions return JSONB so callers
+// must inspect purge_status instead of treating a successful RPC as completion.
+export type PrivacyPurgeStatus = 'pending_role_cleanup' | 'completed';
+
+export interface PrivacyPurgeRpcResult {
+  [key: string]: Json;
+  purge_status: PrivacyPurgeStatus;
+  pending_role_cleanup_count: number;
+}
+
+export type PurgeMemberDataRpcResult = PrivacyPurgeRpcResult;
+export type PurgeGuildDataRpcResult = PrivacyPurgeRpcResult;
 
 // Auto-Mod Rule Config Types
 export type AutoModRuleType =

@@ -12,8 +12,15 @@ import {
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { AUTOMATION_LIMITS , createLogger } from '@somnibot/shared';
 import { AutomationRateLimiter } from './rate-limiter.js';
+import { deterministicUuidV8 } from '../../utils/deterministic-uuid.js';
 
 const log = createLogger('ActionExecutor');
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DISCORD_SNOWFLAKE_PATTERN = /^\d{17,20}$/;
+
+function isExactUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
 
 export interface ActionContext {
   guild: Guild;
@@ -25,6 +32,8 @@ export interface ActionContext {
   guildId: string;
   rateLimiter: AutomationRateLimiter;
   automationId: string;
+  /** One identity shared by every action from the same engine event occurrence. */
+  occurrenceId: string;
   /** Template variables resolved from the trigger event */
   variables: Record<string, string>;
 }
@@ -51,14 +60,14 @@ export async function executeActions(
   let failed = 0;
   const errors: string[] = [];
 
-  for (const action of actions) {
+  for (const [actionIndex, action] of actions.entries()) {
     if (executed + failed >= AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION) {
       errors.push(`Action limit reached (${AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION})`);
       break;
     }
 
     try {
-      const result = await executeAction(action, ctx);
+      const result = await executeAction(action, ctx, actionIndex);
       if (result.success) {
         executed++;
       } else {
@@ -90,6 +99,7 @@ function resolveVars(template: string, variables: Record<string, string>): strin
 async function executeAction(
   action: AutomationAction,
   ctx: ActionContext,
+  actionIndex: number,
 ): Promise<ActionResult> {
   const { type, config } = action;
 
@@ -196,26 +206,82 @@ async function executeAction(
     case 'grant_entitlement': {
       if (!ctx.member) return { success: false, error: 'No user context for entitlement' };
       const productId = config.product_id as string;
+      const configuredPlanId = config.plan_id;
+      let planId = configuredPlanId === undefined || configuredPlanId === null
+        ? null
+        : configuredPlanId;
+      if (
+        !isExactUuid(productId)
+        || (planId !== null && !isExactUuid(planId))
+        || !isExactUuid(ctx.automationId)
+        || !isExactUuid(ctx.occurrenceId)
+        || !DISCORD_SNOWFLAKE_PATTERN.test(ctx.guildId)
+        || !DISCORD_SNOWFLAKE_PATTERN.test(ctx.member.id)
+      ) {
+        return { success: false, error: 'Malformed automation entitlement identity' };
+      }
 
       // Fetch product to get role/channel grants
-      const { data: product } = await ctx.supabase
+      const { data: product, error: productError } = await ctx.supabase
         .from('products')
-        .select('name, granted_role_ids, granted_channel_ids')
+        .select('id, type, granted_role_ids, granted_channel_ids')
         .eq('id', productId)
-        .single();
+        .eq('guild_id', ctx.guildId)
+        .maybeSingle();
 
-      if (!product) return { success: false, error: `Product ${productId} not found` };
+      if (productError) {
+        return { success: false, error: `Product lookup failed: ${productError.message}` };
+      }
+      if (!product || product.id !== productId) {
+        return { success: false, error: `Product ${productId} not found in this guild` };
+      }
+      if (product.type !== 'one_time' && product.type !== 'subscription') {
+        return { success: false, error: 'Product returned an invalid entitlement type' };
+      }
+      if (product.type === 'one_time' && planId !== null) {
+        return { success: false, error: 'A one-time product cannot use a subscription plan' };
+      }
+      if (product.type === 'subscription') {
+        let planQuery = ctx.supabase
+          .from('plans')
+          .select('id')
+          .eq('product_id', productId)
+          .eq('guild_id', ctx.guildId)
+          .eq('active', true);
+        if (planId !== null) {
+          planQuery = planQuery.eq('id', planId);
+        }
+        // Without an explicit plan, maybeSingle deliberately succeeds only
+        // when the product has exactly one active plan. Zero or multiple plans
+        // are ambiguous and must not manufacture an unscoped subscription.
+        const { data: plan, error: planError } = await planQuery.maybeSingle();
+        if (planError) {
+          return { success: false, error: `Plan lookup failed: ${planError.message}` };
+        }
+        if (!plan || !isExactUuid(plan.id) || (planId !== null && plan.id !== planId)) {
+          return {
+            success: false,
+            error: planId === null
+              ? 'Subscription product must resolve exactly one active plan'
+              : `Plan ${planId} is not active for this product`,
+          };
+        }
+        planId = plan.id;
+      }
 
       // Find or create customer record
-      let { data: customer } = await ctx.supabase
+      let { data: customer, error: customerError } = await ctx.supabase
         .from('customers')
         .select('id')
         .eq('guild_id', ctx.guildId)
         .eq('discord_id', ctx.member.id)
         .maybeSingle();
+      if (customerError) {
+        return { success: false, error: `Customer lookup failed: ${customerError.message}` };
+      }
 
       if (!customer) {
-        const { data: newCustomer } = await ctx.supabase
+        const { data: insertedCustomer, error: insertError } = await ctx.supabase
           .from('customers')
           .insert({
             guild_id: ctx.guildId,
@@ -223,36 +289,87 @@ async function executeAction(
             discord_username: ctx.member.user.username,
           })
           .select('id')
-          .single();
-        customer = newCustomer;
+          .maybeSingle();
+        // A response containing both data and an error is not authoritative.
+        // Discard it and use the same exact read-back as a unique-insert race.
+        customer = insertError ? null : insertedCustomer;
+
+        // A concurrent occurrence can win the unique (guild_id, discord_id)
+        // insert, and a committed insert can lose its response. Resolve both
+        // outcomes through the same exact scoped read-back before failing.
+        if (!customer) {
+          const { data: observedCustomer, error: observeError } = await ctx.supabase
+            .from('customers')
+            .select('id')
+            .eq('guild_id', ctx.guildId)
+            .eq('discord_id', ctx.member.id)
+            .maybeSingle();
+          if (observeError) {
+            return {
+              success: false,
+              error: `Customer create read-back failed: ${observeError.message}`,
+            };
+          }
+          customer = observedCustomer;
+        }
+
+        if (!customer && insertError) {
+          return { success: false, error: `Customer create failed: ${insertError.message}` };
+        }
       }
 
-      if (!customer) return { success: false, error: 'Failed to create customer record' };
+      if (!customer || !isExactUuid(customer.id)) {
+        return { success: false, error: 'Failed to resolve customer record' };
+      }
 
-      // Queue fulfillment via bot_action_queue so EntitlementService handles it
-      // (roles, events, audit log — all in one atomic operation)
-      const { error: queueError } = await ctx.supabase.from('bot_action_queue').insert({
-        guild_id: ctx.guildId,
-        action: 'fulfill_purchase',
-        payload: {
-          fulfillment_type: 'one_time_purchase',
-          guild_id: ctx.guildId,
-          customer_id: customer.id,
-          discord_id: ctx.member.id,
-          product_id: productId,
-          product_name: product.name,
-          order_id: `auto-${ctx.automationId}-${Date.now()}`,
-          order_number: `AUTO-${Date.now().toString().slice(-5)}`,
-          amount_cents: 0,
-          currency: 'USD',
-          granted_role_ids: product.granted_role_ids ?? [],
-          granted_channel_ids: product.granted_channel_ids ?? [],
-          entitlement_type: 'one_time',
+      // One event occurrence may deliberately contain multiple grant actions.
+      // The action index keeps them distinct; replaying the same occurrence
+      // derives the same UUID and lets the atomic RPC return the same grant.
+      const requestId = deterministicUuidV8('somnibot:automation-entitlement:v1', [
+        ctx.guildId,
+        ctx.automationId,
+        ctx.occurrenceId,
+        String(actionIndex),
+        ctx.member.id,
+        productId,
+      ]);
+      const rpc = ctx.supabase.rpc as unknown as (
+        name: string,
+        params: Record<string, unknown>,
+      ) => Promise<{ data: unknown; error: { message: string } | null }>;
+      const { data: grantRows, error: grantError } = await rpc(
+        'commerce_create_noncommerce_entitlement',
+        {
+          p_request_id: requestId,
+          p_guild_id: ctx.guildId,
+          p_customer_id: customer.id,
+          p_product_id: productId,
+          p_source: 'automation',
+          p_type: product.type,
+          p_plan_id: planId,
+          p_expires_at: null,
+          p_granted_role_ids: product.granted_role_ids ?? [],
+          p_granted_channel_ids: product.granted_channel_ids ?? [],
         },
-        status: 'pending',
-      });
+      );
+      if (grantError) {
+        return { success: false, error: `Entitlement grant failed: ${grantError.message}` };
+      }
 
-      if (queueError) return { success: false, error: `Entitlement queue failed: ${queueError.message}` };
+      const grant = Array.isArray(grantRows) && grantRows.length === 1
+        ? grantRows[0] as Record<string, unknown>
+        : null;
+      if (
+        !grant
+        || !isExactUuid(grant.entitlement_id)
+        || grant.order_id !== requestId
+        || grant.request_id !== requestId
+      ) {
+        return {
+          success: false,
+          error: 'Entitlement grant returned malformed replay identity evidence',
+        };
+      }
       return { success: true };
     }
 

@@ -13,6 +13,11 @@ import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
 import { dbError } from '@/lib/api/response';
 import { getGracePeriodDays } from '@somnibot/shared';
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
 
 export async function GET(
   _req: NextRequest,
@@ -66,11 +71,36 @@ export async function POST(
 
   const { id: customerId } = await params;
   const supabase = createAdminSupabase();
+
+  // The grant schema defaults omitted Discord ID lists to [], but the atomic
+  // grant RPC requires the request sets to exactly equal the product's
+  // canonical sets — so a defaulted [] would reject every role-bearing
+  // product. An omitted list means "grant the product's canonical access"
+  // (resolved from the product row below, mirroring the bot's giveaway
+  // fulfillment); an explicit list is forwarded verbatim so the RPC's
+  // authority check stays the judge. Distinguish the two on the raw body
+  // before Zod applies its defaults.
+  const rawBody: unknown = await req.clone().json().catch(() => null);
+  const rawBodyKeys = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+    ? Object.keys(rawBody as Record<string, unknown>)
+    : [];
+  const roleIdsProvided = rawBodyKeys.includes('granted_role_ids');
+  const channelIdsProvided = rawBodyKeys.includes('granted_channel_ids');
+
   const parsed = await parseBody(req, schemas.entitlement.grant);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
 
-  const { product_id, type, source, expires_at, granted_role_ids, granted_channel_ids } = body;
+  const {
+    request_id,
+    product_id,
+    type,
+    plan_id,
+    source,
+    expires_at,
+    granted_role_ids,
+    granted_channel_ids,
+  } = body;
 
   if (!product_id) {
     return NextResponse.json({ success: false, error: 'Missing product_id' }, { status: 400 });
@@ -91,7 +121,7 @@ export async function POST(
 
   const { data: product } = await supabase
     .from('products')
-    .select('id')
+    .select('id, granted_role_ids, granted_channel_ids')
     .eq('id', product_id)
     .eq('guild_id', guildId)
     .maybeSingle();
@@ -100,58 +130,121 @@ export async function POST(
     return NextResponse.json({ success: false, error: 'Product not found' }, { status: 404 });
   }
 
-  // Create a manual order first
-  const { data: order, error: orderErr } = await supabase
-    .from('orders')
-    .insert({
-      order_number: `ORD-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`,
-      customer_id: customerId,
-      guild_id: guildId,
-      product_id,
-      amount_cents: 0,
-      currency: 'USD',
-      status: 'completed',
-      source: source ?? 'manual',
-    })
-    .select('id')
-    .single();
+  const grantedRoleIds = roleIdsProvided
+    ? granted_role_ids
+    : (product.granted_role_ids ?? []);
+  const grantedChannelIds = channelIdsProvided
+    ? granted_channel_ids
+    : (product.granted_channel_ids ?? []);
 
-  if (orderErr || !order) {
-    return dbError(orderErr ?? { message: 'Failed to create order' }, 'customers/entitlements');
+  if (type === 'subscription') {
+    const { data: plan, error: planError } = await supabase
+      .from('plans')
+      .select('id')
+      .eq('id', plan_id)
+      .eq('product_id', product_id)
+      .eq('guild_id', guildId)
+      .eq('active', true)
+      .maybeSingle();
+
+    if (planError) {
+      return dbError(planError, 'customers/entitlements');
+    }
+    if (!plan) {
+      return NextResponse.json(
+        { success: false, error: 'Active subscription plan not found for product' },
+        { status: 404 },
+      );
+    }
   }
 
-  const { data, error } = await supabase
-    .from('entitlements')
-    .insert({
-      customer_id: customerId,
-      guild_id: guildId,
-      product_id,
-      order_id: order.id,
-      type: type ?? 'one_time',
-      status: 'active',
-      source: source ?? 'manual',
-      granted_role_ids: granted_role_ids ?? [],
-      granted_channel_ids: granted_channel_ids ?? [],
-      starts_at: new Date().toISOString(),
-      expires_at: expires_at ?? null,
-    })
-    .select()
-    .single();
+  // The order and entitlement are one provenance contract. Two separate REST
+  // inserts left a completed zero-dollar order behind if the second write (or
+  // the process between writes) failed. The security-definer RPC validates the
+  // same guild/customer/product contract again inside one transaction and uses
+  // requestId as its replay identity, so a lost-response retry is exact.
+  // PostgreSQL renders UUIDs canonically in lowercase. Normalize caller input
+  // before comparing the returned replay identity so uppercase-but-valid UUIDs
+  // do not turn a successful atomic grant into a false malformed-response 500.
+  const requestId = request_id.toLowerCase();
+  const rpc = supabase.rpc as unknown as (
+    name: string,
+    params: Record<string, unknown>,
+  ) => Promise<{
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  }>;
+  const { data: grantRows, error } = await rpc(
+    'commerce_create_noncommerce_entitlement',
+    {
+      p_request_id: requestId,
+      p_guild_id: guildId,
+      p_customer_id: customerId,
+      p_product_id: product_id,
+      p_source: source,
+      p_type: type,
+      p_plan_id: plan_id ?? null,
+      p_expires_at: expires_at ?? null,
+      p_granted_role_ids: grantedRoleIds,
+      p_granted_channel_ids: grantedChannelIds,
+    },
+  );
 
   if (error) {
+    // The RPC raises 23514 when the requested grant contradicts the
+    // authoritative catalog contract (role/channel sets that differ from the
+    // product's canonical sets, type/plan shape, or guild/customer/product
+    // identity). That is a caller conflict, not an internal failure — same
+    // mapping as the PUT lifecycle handler below.
+    if (error.code === '23514') {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "This grant conflicts with the product's canonical access contract",
+        },
+        { status: 409 },
+      );
+    }
     return dbError(error, 'customers/entitlements');
   }
 
-  return NextResponse.json({ success: true, data });
+  const grant = Array.isArray(grantRows) && grantRows.length === 1
+    ? grantRows[0]
+    : null;
+  if (
+    !grant
+    || typeof grant !== 'object'
+    || !isUuid((grant as Record<string, unknown>).entitlement_id)
+    || (grant as Record<string, unknown>).order_id !== requestId
+    || (grant as Record<string, unknown>).request_id !== requestId
+  ) {
+    return dbError(
+      { message: 'Atomic noncommerce grant RPC returned malformed identity evidence' },
+      'customers/entitlements',
+    );
+  }
+
+  return NextResponse.json({
+    success: true,
+    data: {
+      id: (grant as Record<string, unknown>).entitlement_id,
+      order_id: (grant as Record<string, unknown>).order_id,
+      request_id: requestId,
+    },
+  });
 }
 
-export async function PUT(req: NextRequest) {
+export async function PUT(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
   const rateLimited = await checkAdminRateLimit(req, 'write');
   if (rateLimited) return rateLimited;
 
   const auth = await requireGuildOwner();
   if (!auth.ok) return auth.response;
   const { guildId } = auth.ctx;
+  const { id: customerId } = await params;
 
   const supabase = createAdminSupabase();
   const parsed = await parseBody(req, schemas.entitlement.update);
@@ -167,14 +260,13 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  const updateData: Record<string, unknown> = {
-    status,
-    updated_at: new Date().toISOString(),
-  };
+  // `revoked` is an operator action, not a legal entitlements.status value.
+  // Keep the API alias for callers, but persist the same terminal state used
+  // by EntitlementService.revoke('revoked') instead of surfacing a raw CHECK
+  // violation from the database.
+  const persistedStatus = status === 'revoked' ? 'expired' : status;
 
-  if (status === 'cancelled') {
-    updateData.cancelled_at = new Date().toISOString();
-  }
+  let gracePeriodEndsAt: string | null = null;
 
   // W2: the entitlements_grace_period_has_deadline CHECK requires every
   // grace_period row to carry a deadline — a deadline-less row is invisible
@@ -189,27 +281,59 @@ export async function PUT(req: NextRequest) {
     const graceDays = await getGracePeriodDays(supabase, guildId);
     const graceEnds = new Date();
     graceEnds.setDate(graceEnds.getDate() + graceDays);
-    updateData.grace_period_ends_at = graceEnds.toISOString();
-  } else if (status === 'active') {
-    // Mirrors EntitlementService.reactivate: returning to active clears the
-    // grace deadline. Terminal statuses keep it as a trace of when the
-    // window lapsed (parity with revoke() and the reconciliation sweep).
-    updateData.grace_period_ends_at = null;
+    gracePeriodEndsAt = graceEnds.toISOString();
   }
 
-  // V47-C2: scope by guild so another owner cannot toggle entitlement
-  // status (e.g. silently reactivate a refunded entitlement) by id alone.
-  const { data, error } = await supabase
-    .from('entitlements')
-    .update(updateData)
-    .eq('id', entitlement_id)
-    .eq('guild_id', guildId)
-    .select()
-    .single();
+  // Lock, classify, and transition in one database operation. In particular,
+  // an owner must not resurrect cancelled/expired paid access while its order
+  // remains completed; only the verified payment/subscription recovery flow
+  // may do that. The RPC also binds the URL customer id, closing the old route
+  // mismatch where /customers/A could update an entitlement owned by B.
+  const rpc = supabase.rpc as unknown as (
+    name: string,
+    params: Record<string, unknown>,
+  ) => Promise<{
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  }>;
+  const { data: statusRows, error } = await rpc(
+    'commerce_update_entitlement_status_admin',
+    {
+      p_entitlement_id: entitlement_id,
+      p_customer_id: customerId,
+      p_guild_id: guildId,
+      p_status: persistedStatus,
+      p_grace_period_ends_at: gracePeriodEndsAt,
+    },
+  );
 
   if (error) {
+    if (error.code === '23514') {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'This entitlement transition conflicts with its authoritative lifecycle',
+        },
+        { status: 409 },
+      );
+    }
     return dbError(error, 'customers/entitlements');
   }
+
+  const statusRow = Array.isArray(statusRows) ? statusRows[0] : statusRows;
+  if (
+    !statusRow
+    || typeof statusRow !== 'object'
+    || (statusRow as Record<string, unknown>).entitlement_id !== entitlement_id
+    || (statusRow as Record<string, unknown>).customer_id !== customerId
+    || (statusRow as Record<string, unknown>).status !== persistedStatus
+  ) {
+    return dbError(
+      { message: 'Atomic entitlement status RPC returned malformed identity evidence' },
+      'customers/entitlements',
+    );
+  }
+  const data = statusRow as Record<string, unknown>;
 
   // W2 review: manual status changes must replicate the
   // EntitlementService.suspend/reactivate alert lifecycle — otherwise a
@@ -219,14 +343,14 @@ export async function PUT(req: NextRequest) {
   if (status === 'grace_period') {
     const alertMessage =
       `Entitlement ${entitlement_id} was manually moved into a grace period ending ` +
-      `${updateData.grace_period_ends_at}. If payment is not recovered by then, ` +
+      `${gracePeriodEndsAt}. If access is not recovered by then, ` +
       'access will be revoked automatically.';
     const alertMetadata = {
       entitlement_id,
-      customer_id: data?.customer_id ?? null,
-      product_id: data?.product_id ?? null,
-      order_id: data?.order_id ?? null,
-      grace_period_ends_at: updateData.grace_period_ends_at,
+      customer_id: data.customer_id ?? null,
+      product_id: data.product_id ?? null,
+      order_id: data.order_id ?? null,
+      grace_period_ends_at: gracePeriodEndsAt,
       source: 'dashboard.entitlements.update',
     };
 
@@ -238,7 +362,7 @@ export async function PUT(req: NextRequest) {
       guild_id: guildId,
       alert_type: 'entitlement_grace_period',
       severity: 'warning',
-      title: 'Paid entitlement entered payment grace period',
+      title: 'Entitlement entered grace period',
       message: alertMessage,
       metadata: alertMetadata,
     });
@@ -274,7 +398,7 @@ export async function PUT(req: NextRequest) {
     }
   } else {
     // Every other status this route allows (active, cancelled, expired,
-    // revoked, pending) means the entitlement is no longer in grace —
+    // revoked -> expired, pending) means the entitlement is no longer in grace —
     // resolve any outstanding alert. Same entitlement-scoped filters as
     // EntitlementService.reactivate/revoke and the reconciliation sweep;
     // a no-op when none exists.

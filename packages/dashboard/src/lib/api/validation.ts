@@ -14,6 +14,12 @@
  */
 import { z, type ZodSchema } from 'zod';
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  ACTION_TYPES,
+  AUTOMATION_LIMITS,
+  CONDITION_TYPES,
+  TRIGGER_TYPES,
+} from '@somnibot/shared';
 
 // ── Parse helpers ───────────────────────────────────
 
@@ -68,41 +74,82 @@ const safeDescription = z.string().max(2000).trim().optional().default('');
 const colorHex = z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().nullable();
 const urlString = z.string().url().max(2048).optional().nullable();
 const snowflakeArray = z.array(snowflake).max(100).default([]);
+const uniqueSnowflakeArray = snowflakeArray.refine(
+  (values) => new Set(values).size === values.length,
+  'Discord ID lists cannot contain duplicates',
+);
+// Update semantics: omitted lists must stay omitted (no default([]) wipe).
+const optionalUniqueSnowflakeArray = z.array(snowflake).max(100)
+  .refine(
+    (values) => new Set(values).size === values.length,
+    'Discord ID lists cannot contain duplicates',
+  )
+  .optional();
 const jsonObj = z.record(z.unknown()).default({});
 
 // ── Automation schemas ──────────────────────────────
 
+const automationCondition = z.object({
+  type: z.enum(CONDITION_TYPES),
+  config: jsonObj,
+}).strict();
+
+const automationAction = z.object({
+  type: z.enum(ACTION_TYPES),
+  config: jsonObj,
+}).strict();
+
 const automationCreate = z.object({
   name: safeName,
   description: safeDescription,
-  trigger_type: z.string().min(1).max(64),
+  trigger_type: z.enum(TRIGGER_TYPES),
   trigger_config: jsonObj,
-  conditions: z.array(z.record(z.unknown())).max(50).default([]),
-  actions: z.array(z.record(z.unknown())).max(50).default([]),
-  target_user_ids: snowflakeArray,
-  target_channel_ids: snowflakeArray,
-  exclude_user_ids: snowflakeArray,
-  exclude_channel_ids: snowflakeArray,
+  conditions: z.array(automationCondition)
+    .max(AUTOMATION_LIMITS.MAX_CONDITIONS_PER_AUTOMATION)
+    .default([]),
+  actions: z.array(automationAction)
+    .max(AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION)
+    .default([]),
+  target_user_ids: uniqueSnowflakeArray,
+  target_channel_ids: uniqueSnowflakeArray,
+  exclude_user_ids: uniqueSnowflakeArray,
+  exclude_channel_ids: uniqueSnowflakeArray,
 });
 
 const automationUpdate = z.object({
   id: uuid,
   name: safeName.optional(),
   description: z.string().max(2000).trim().optional(),
-  trigger_type: z.string().min(1).max(64).optional(),
+  trigger_type: z.enum(TRIGGER_TYPES).optional(),
   trigger_config: jsonObj.optional(),
-  conditions: z.array(z.record(z.unknown())).max(50).optional(),
-  actions: z.array(z.record(z.unknown())).max(50).optional(),
+  conditions: z.array(automationCondition)
+    .max(AUTOMATION_LIMITS.MAX_CONDITIONS_PER_AUTOMATION)
+    .optional(),
+  actions: z.array(automationAction)
+    .max(AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION)
+    .optional(),
   enabled: z.boolean().optional(),
-  target_user_ids: z.array(snowflake).max(100).optional(),
-  target_channel_ids: z.array(snowflake).max(100).optional(),
-  exclude_user_ids: z.array(snowflake).max(100).optional(),
-  exclude_channel_ids: z.array(snowflake).max(100).optional(),
+  target_user_ids: optionalUniqueSnowflakeArray,
+  target_channel_ids: optionalUniqueSnowflakeArray,
+  exclude_user_ids: optionalUniqueSnowflakeArray,
+  exclude_channel_ids: optionalUniqueSnowflakeArray,
 });
 
 const automationTemplateDeploySchema = z.object({
   template_id: z.string().min(1).max(64),
-  overrides: z.record(z.unknown()).optional(),
+  overrides: z.object({
+    name: safeName.optional(),
+    conditions: z.array(automationCondition)
+      .max(AUTOMATION_LIMITS.MAX_CONDITIONS_PER_AUTOMATION)
+      .optional(),
+    actions: z.array(automationAction)
+      .max(AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION)
+      .optional(),
+    target_user_ids: uniqueSnowflakeArray.optional(),
+    target_channel_ids: uniqueSnowflakeArray.optional(),
+    exclude_user_ids: uniqueSnowflakeArray.optional(),
+    exclude_channel_ids: uniqueSnowflakeArray.optional(),
+  }).strict().optional(),
 });
 
 // ── Custom command schemas ──────────────────────────
@@ -182,6 +229,32 @@ const embedUpdate = z.object({
 
 // ── Product schemas ─────────────────────────────────
 
+const reservedCommerceMetadataKeys = [
+  'grant_role_id',
+  'historical_grant_role_ids',
+  'role_duration_hours',
+] as const;
+
+const productMetadata = z.record(z.unknown()).superRefine((metadata, ctx) => {
+  for (const key of reservedCommerceMetadataKeys) {
+    if (Object.prototype.hasOwnProperty.call(metadata, key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message:
+          `Commerce metadata key "${key}" is no longer supported; migrate role grants to canonical granted_role_ids.`,
+      });
+    }
+  }
+});
+
+const productPlanDefinition = z.object({
+  name: safeName.optional(),
+  interval_unit: z.enum(['DAY', 'WEEK', 'MONTH', 'YEAR']).optional(),
+  interval_count: z.number().int().min(1).max(12).optional(),
+  price_cents: z.number().int().min(0).max(999999).optional(),
+}).strict();
+
 const productCreate = z.object({
   name: safeName,
   description: safeDescription,
@@ -193,8 +266,8 @@ const productCreate = z.object({
   granted_channel_ids: snowflakeArray,
   active: z.boolean().default(true),
   sort_order: z.number().int().min(0).max(999).default(0),
-  metadata: z.record(z.unknown()).optional(),
-  plans: z.array(z.record(z.unknown())).optional(),
+  metadata: productMetadata.optional(),
+  plans: z.array(productPlanDefinition).max(50).optional(),
 });
 
 // STRICT update schema — mass-assignment guard.
@@ -230,14 +303,19 @@ const productUpdate = productCreate
 const planCreate = z.object({
   product_id: uuid,
   name: safeName,
-  paypal_plan_id: z.string().max(64).optional(),
+  paypal_plan_id: z.string().trim().min(1).max(64).nullable().optional(),
   interval_unit: z.string().max(32),
   interval_count: z.number().int().min(1).max(12).default(1),
   price_cents: z.number().int().min(0).max(999999),
   currency: z.string().length(3).default('USD'),
   trial_days: z.number().int().min(0).max(365).optional(),
   active: z.boolean().default(true),
-});
+}).strict();
+
+const planUpdate = planCreate
+  .partial()
+  .extend({ id: uuid })
+  .strict();
 
 // ── Promotion schemas ───────────────────────────────
 
@@ -262,6 +340,10 @@ const promotionCreate = z.object({
 // ── Entitlement schemas ─────────────────────────────
 
 const entitlementGrant = z.object({
+  // Reuse this UUID when retrying a request whose response was lost. The
+  // atomic grant RPC uses it as the durable order identity and rejects any
+  // replay whose contract differs.
+  request_id: uuid,
   product_id: uuid,
   // Must mirror the entitlements table CHECK (type IN ('one_time','subscription'))
   // and EntitlementService.grant's 'one_time' | 'subscription' union. 'free' was
@@ -269,17 +351,34 @@ const entitlementGrant = z.object({
   // CHECK violation surfaced as a generic 500. Nothing grants a 'free'
   // entitlement (no UI/bot/docs/tests reference it), so it is removed here.
   type: z.enum(['one_time', 'subscription']).default('one_time'),
-  // Must mirror the entitlements.source (and orders.source) CHECK constraint
-  // in the initial schema — ('purchase', 'giveaway', 'manual', 'automation'),
-  // the same union as EntitlementService.grant. The previous enum accepted
-  // 'gift'/'promotion', which passed validation but died at insert with a
-  // raw DB CHECK violation. COMPLIANCE: do NOT add new values here — the
-  // bot's commerce-role-guard deny-lists non-purchase sources; any new
-  // source needs a real-money-or-not decision there first.
-  source: z.enum(['purchase', 'giveaway', 'manual', 'automation']).default('manual'),
+  // Subscription grants must identify the exact active product plan. Picking a
+  // plan implicitly would make retries depend on mutable catalog ordering.
+  plan_id: uuid.optional().nullable(),
+  // This is the owner-only manual grant surface, not a payment finalizer.
+  // Accepting `purchase` manufactured a zero-dollar completed order without
+  // payment evidence or a paid role-delivery intent, so the route returned
+  // success for access that the authoritative paid classifier could never
+  // grant or repair. Real purchases enter through the PayPal finalizers;
+  // admin grants must remain in the explicitly non-purchase sources.
+  source: z.enum(['giveaway', 'manual', 'automation']).default('manual'),
   expires_at: z.string().datetime().optional().nullable(),
-  granted_role_ids: snowflakeArray,
-  granted_channel_ids: snowflakeArray,
+  granted_role_ids: uniqueSnowflakeArray,
+  granted_channel_ids: uniqueSnowflakeArray,
+}).superRefine((value, ctx) => {
+  if (value.type === 'subscription' && !value.plan_id) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Subscription entitlement grants require plan_id',
+      path: ['plan_id'],
+    });
+  }
+  if (value.type === 'one_time' && value.plan_id) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'One-time entitlement grants cannot include plan_id',
+      path: ['plan_id'],
+    });
+  }
 });
 
 const entitlementUpdate = z.object({
@@ -290,8 +389,10 @@ const entitlementUpdate = z.object({
 // ── Order refund schema ─────────────────────────────
 
 const orderRefund = z.object({
-  reason: z.string().max(500).optional(),
-  revoke_entitlements: z.boolean().default(true),
+  reason: z.string().trim().min(1).max(255).optional(),
+  // A full owner refund always revokes the purchased access. Accepting false
+  // while the finalizer revoked access anyway made the API contract lie.
+  revoke_entitlements: z.literal(true).default(true),
 });
 
 // ── Moderation schemas ──────────────────────────────
@@ -569,6 +670,26 @@ const syncConfig = z.object({
   sync_auto_repair_everyone: z.boolean().optional(),
 }).refine(obj => Object.keys(obj).length > 0, 'At least one field required');
 
+// ── Economy role-income schemas ─────────────────────
+// Passive game currency paid for holding a Discord role. COMPLIANCE WALL:
+// the route rejects any role granted by a paid product (real money must never
+// buy wagerable currency) — see commerce-income-wall.ts.
+
+const economyRoleIncomeUpsert = z.object({
+  role_id: snowflake,
+  // Must be POSITIVE: a zero-amount rule is not a real income rule, and at
+  // collection time it would burn the per-role cooldown and then fail
+  // `creditWallet` (which rejects non-positive amounts), so the user loses the
+  // cooldown for no payout. Reject it at config; the bot also skips any
+  // stray zero-amount rule defensively.
+  amount: z.number().int().min(1).max(1_000_000_000),
+  interval_minutes: z.number().int().min(1).max(525_600), // 1 min … 1 year
+});
+
+const economyRoleIncomeDelete = z.object({
+  role_id: snowflake,
+});
+
 // ── Music schemas ───────────────────────────────────
 
 const musicConfig = z.object({
@@ -673,6 +794,7 @@ export const schemas = {
   },
   plan: {
     create: planCreate,
+    update: planUpdate,
   },
   promotion: {
     create: promotionCreate,
@@ -736,6 +858,10 @@ export const schemas = {
   },
   music: {
     config: musicConfig,
+  },
+  economyRoleIncome: {
+    upsert: economyRoleIncomeUpsert,
+    delete: economyRoleIncomeDelete,
   },
   productFile: {
     create: productFileCreate,

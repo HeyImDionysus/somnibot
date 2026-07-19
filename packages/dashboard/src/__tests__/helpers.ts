@@ -14,6 +14,7 @@ function createQueryChain() {
     gte: vi.fn().mockReturnThis(),
     lte: vi.fn().mockReturnThis(),
     in: vi.fn().mockReturnThis(),
+    or: vi.fn().mockReturnThis(),
     is: vi.fn().mockReturnThis(),
     maybeSingle: vi.fn().mockResolvedValue({ data: null }),
     single: vi.fn().mockResolvedValue({ data: null }),
@@ -40,6 +41,7 @@ export function createMockSupabase() {
     from: vi.fn().mockImplementation((table: string) => {
       return _tables[table] ?? _query;
     }),
+    rpc: vi.fn(),
     auth: { getUser: vi.fn(), getSession: vi.fn() },
     _query,
     _tables,

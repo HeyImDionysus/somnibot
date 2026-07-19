@@ -5,8 +5,8 @@
  * economy_add_balance, economy_subtract_balance, economy_bank_deposit,
  * economy_bank_withdraw. All against a real Supabase instance.
  *
- * Note: economy_add_balance only upserts the wallet column (not total_earned).
- * economy_subtract_balance only debits wallet (not total_spent).
+ * Note: economy_add_balance initializes the wallet canonically and updates
+ * total_earned. economy_subtract_balance only debits wallet (not total_spent).
  * economy_bank_deposit returns 0 (not clamp) if wallet < amount.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -47,13 +47,14 @@ describe('economy_add_balance RPC', () => {
 
     const { data } = await supa
       .from('economy_wallets')
-      .select('wallet, bank')
+      .select('wallet, bank, total_earned')
       .eq('guild_id', GUILD_ID)
       .eq('user_id', USER_A)
       .single();
 
     expect(data!.wallet).toBe(1000);
     expect(data!.bank).toBe(0);
+    expect(data!.total_earned).toBe(1000);
   });
 
   it('adds to existing wallet balance', async () => {
@@ -65,12 +66,13 @@ describe('economy_add_balance RPC', () => {
 
     const { data } = await supa
       .from('economy_wallets')
-      .select('wallet')
+      .select('wallet, total_earned')
       .eq('guild_id', GUILD_ID)
       .eq('user_id', USER_A)
       .single();
 
     expect(data!.wallet).toBe(1500);
+    expect(data!.total_earned).toBe(1500);
   });
 });
 

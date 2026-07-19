@@ -14,12 +14,38 @@ import { notifyBot } from '@/lib/notify-bot';
 import { getPayPalRuntimeConfig, getPayPalToken, type PayPalRuntimeConfig } from '@/lib/paypal';
 import { parseBody, schemas } from '@/lib/api/validation';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError } from '@/lib/api/response';
+import { dbError, apiError, apiServerError } from '@/lib/api/response';
+import {
+  assertProductRolesNotIncomeEarning,
+  COMMERCE_INCOME_WALL_MESSAGE,
+  evaluateEffectivePostWriteProduct,
+  isCommerceIncomeWallConflictError,
+  loadProductPlans,
+  loadProductTemporaryRoleIds,
+  type PlanWallFields,
+} from '@/lib/api/commerce-income-wall';
+
 // ── PayPal Helpers ─────────────────────────────────────
 
 type PayPalSyncResult =
   | { ok: true; id: string }
   | { ok: false; error: string };
+
+interface PreparedPlan {
+  id: string;
+  name: string;
+  intervalUnit: string;
+  intervalCount: number;
+  priceCents: number;
+  paypalPlanId: string | null;
+}
+
+function commerceWriteError(error: { message: string; code?: string }) {
+  if (isCommerceIncomeWallConflictError(error)) {
+    return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
+  }
+  return dbError(error, 'store/products');
+}
 
 function paypalNotReadyResponse(message: string) {
   return NextResponse.json(
@@ -254,27 +280,67 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  interface PlanDefinition {
-    name?: string;
-    interval_unit?: string;
-    interval_count?: number;
-    price_cents?: number;
-  }
-
-  let normalizedPlanDefs = Array.isArray(planDefs)
-    ? planDefs.map((rawPlan) => rawPlan as PlanDefinition)
-    : [];
+  const normalizedPlanDefs = (type === 'subscription' ? (planDefs ?? []) : []).map(
+    (planDef) => ({
+      name: planDef.name,
+      intervalUnit: planDef.interval_unit ?? 'MONTH',
+      intervalCount: planDef.interval_count ?? 1,
+      priceCents: planDef.price_cents ?? price_cents,
+    }),
+  );
   const hasPaidSubscriptionPlan = type === 'subscription'
-    && normalizedPlanDefs.some((planDef) => (planDef.price_cents ?? price_cents) > 0);
+    && normalizedPlanDefs.some((planDef) => planDef.priceCents > 0);
   const requiresPayPal = type !== 'free' && (price_cents > 0 || hasPaidSubscriptionPlan);
 
   if (type === 'subscription' && requiresPayPal && normalizedPlanDefs.length === 0) {
-    normalizedPlanDefs = [{
+    normalizedPlanDefs.push({
       name: `${name} — MONTH`,
-      interval_unit: 'MONTH',
-      interval_count: 1,
-      price_cents,
-    }];
+      intervalUnit: 'MONTH',
+      intervalCount: 1,
+      priceCents: price_cents,
+    });
+  }
+
+  // Freeze stable local plan IDs before the wall check. Every plan that this
+  // request will create at PayPal is represented as PayPal-backed now, before
+  // any external side effect. This includes an explicit zero-price plan under
+  // a positive-price subscription parent.
+  const preparedPlans: PreparedPlan[] = normalizedPlanDefs.map((planDef) => {
+    const id = crypto.randomUUID();
+    return {
+      id,
+      name: planDef.name ?? `${name} — ${planDef.intervalUnit}`,
+      intervalUnit: planDef.intervalUnit,
+      intervalCount: planDef.intervalCount,
+      priceCents: planDef.priceCents,
+      paypalPlanId: requiresPayPal ? `pending-paypal-plan:${id}` : null,
+    };
+  });
+
+  try {
+    const evaluation = evaluateEffectivePostWriteProduct(
+      {
+        type,
+        active: active ?? true,
+        price_cents,
+        granted_role_ids: granted_role_ids ?? [],
+      },
+      preparedPlans.map<PlanWallFields>((plan) => ({
+        id: plan.id,
+        active: true,
+        price_cents: plan.priceCents,
+        paypal_plan_id: plan.paypalPlanId,
+      })),
+      [],
+    );
+    const wall = await assertProductRolesNotIncomeEarning(
+      supabase,
+      guildId,
+      evaluation,
+    );
+    if (!wall.ok) return apiError(wall.message, 409);
+  } catch (err) {
+    return apiServerError(err, 'store/products');
   }
 
   let paypalProductId: string | null = null;
@@ -290,27 +356,25 @@ export async function POST(req: NextRequest) {
     paypalProductId = paypalProduct.id;
   }
 
-  const createdPlans: { name: string; paypalPlanId: string }[] = [];
-
   if (type === 'subscription' && requiresPayPal && paypalProductId) {
-    for (const planDef of normalizedPlanDefs) {
-      const planName = planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`;
+    for (const plan of preparedPlans) {
       const paypalPlan = await createPayPalBillingPlan(
         paypalProductId,
-        planName,
-        planDef.price_cents ?? price_cents,
+        plan.name,
+        plan.priceCents,
         currency ?? 'USD',
-        planDef.interval_unit ?? 'MONTH',
-        planDef.interval_count ?? 1,
+        plan.intervalUnit,
+        plan.intervalCount,
       );
       if (!paypalPlan.ok) {
         return paypalNotReadyResponse(paypalPlan.error);
       }
-      createdPlans.push({ name: planName, paypalPlanId: paypalPlan.id });
+      plan.paypalPlanId = paypalPlan.id;
     }
   }
 
-  // 2. Create product in database
+  // Create the product only after PayPal and the friendly wall precheck pass.
+  // Reserved legacy role metadata has already been rejected by validation.
   const { data, error } = await supabase
     .from('products')
     .insert({
@@ -332,36 +396,41 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
+  }
+  if (!data) {
+    return apiServerError(new Error('product insert returned no row'), 'store/products');
   }
 
-  // 3. Auto-create PayPal Billing Plans for subscription products
+  // Persist the exact local IDs and PayPal-backed plan set evaluated above.
   const savedPlans: { id: string; paypalPlanId: string }[] = [];
 
   if (type === 'subscription' && requiresPayPal && paypalProductId) {
-    for (const [index, planDef] of normalizedPlanDefs.entries()) {
-      const { data: plan } = await supabase
+    for (const planDef of preparedPlans) {
+      const { data: plan, error: planError } = await supabase
         .from('plans')
         .insert({
+          id: planDef.id,
           product_id: data.id,
           guild_id: guildId,
-          name: createdPlans[index]?.name ?? planDef.name ?? `${name} — ${planDef.interval_unit ?? 'MONTH'}`,
-          paypal_plan_id: createdPlans[index]?.paypalPlanId ?? null,
-          interval_unit: planDef.interval_unit ?? 'MONTH',
-          interval_count: planDef.interval_count ?? 1,
-          price_cents: planDef.price_cents ?? price_cents,
+          name: planDef.name,
+          paypal_plan_id: planDef.paypalPlanId,
+          interval_unit: planDef.intervalUnit,
+          interval_count: planDef.intervalCount,
+          price_cents: planDef.priceCents,
           currency: currency ?? 'USD',
           active: true,
         })
         .select('id')
         .single();
 
-      if (plan) {
-        const createdPlan = createdPlans[index];
-        if (createdPlan) {
-          savedPlans.push({ id: plan.id, paypalPlanId: createdPlan.paypalPlanId });
-        }
+      if (planError) {
+        return commerceWriteError(planError);
       }
+      if (!plan || !planDef.paypalPlanId) {
+        return apiServerError(new Error('plan insert returned no row'), 'store/products');
+      }
+      savedPlans.push({ id: plan.id, paypalPlanId: planDef.paypalPlanId });
     }
   }
 
@@ -402,6 +471,62 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Missing product id' }, { status: 400 });
   }
 
+  const WALL_TRIGGER_FIELDS = [
+    'granted_role_ids',
+    'type',
+    'active',
+    'price_cents',
+  ] as const;
+  if (WALL_TRIGGER_FIELDS.some((f) => f in updates)) {
+    const { data: existing, error: existingErr } = await supabase
+      .from('products')
+      .select('type, granted_role_ids, active, price_cents')
+      .eq('id', id)
+      .eq('guild_id', guildId)
+      .maybeSingle();
+    if (existingErr) {
+      return dbError(existingErr, 'store/products');
+    }
+    if (!existing) {
+      return apiError('Product not found for this guild', 404);
+    }
+
+    const pick = <K extends string>(key: K, fallback: unknown) =>
+      (key in updates ? (updates as Record<string, unknown>)[key] : fallback);
+
+    const effectiveType = pick('type', existing.type) as string | undefined;
+    const effectiveActive = pick('active', existing.active) as boolean | undefined;
+    const effectivePrice = pick('price_cents', existing.price_cents) as number | undefined;
+    const effectiveRoles = pick('granted_role_ids', existing.granted_role_ids) as
+      | string[]
+      | undefined;
+
+    try {
+      const plans = effectiveType === 'subscription'
+        ? await loadProductPlans(supabase, guildId, id)
+        : [];
+      const temporaryRoleIds = await loadProductTemporaryRoleIds(supabase, guildId, id);
+      const evaluation = evaluateEffectivePostWriteProduct(
+        {
+          type: effectiveType as string,
+          active: effectiveActive as boolean,
+          price_cents: effectivePrice as number,
+          granted_role_ids: effectiveRoles as string[],
+        },
+        plans,
+        temporaryRoleIds,
+      );
+      const wall = await assertProductRolesNotIncomeEarning(
+        supabase,
+        guildId,
+        evaluation,
+      );
+      if (!wall.ok) return apiError(wall.message, 409);
+    } catch (err) {
+      return apiServerError(err, 'store/products');
+    }
+  }
+
   // `updates` contains ONLY the writable product columns: schemas.product.update
   // is a `.strict()` schema, so any other key (paypal_product_id, guild_id,
   // created_at, plans, …) is rejected by parseBody above before we get here.
@@ -417,7 +542,7 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
   }
 
   // Notify bot so it hot-reloads product changes
@@ -450,7 +575,7 @@ export async function DELETE(req: NextRequest) {
     .eq('guild_id', guildId);
 
   if (error) {
-    return dbError(error, 'store/products');
+    return commerceWriteError(error);
   }
 
   // Notify bot so deactivated product is no longer purchasable

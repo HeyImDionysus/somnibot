@@ -47,7 +47,15 @@ import {
 
 const WEBHOOK_PROCESSING_STALE_MS = 5 * 60 * 1000;
 const RESUMABLE_FAILED_EVENT_TYPES = new Set([
+  // Capture/activation handlers freeze order grants and use a staged outbox
+  // keyed by the provider id, so any partial database/queue failure resumes
+  // the exact snapshot without duplicating totals, license keys, or actions.
+  'PAYMENT.CAPTURE.COMPLETED',
+  'BILLING.SUBSCRIPTION.ACTIVATED',
   'BILLING.SUBSCRIPTION.EXPIRED',
+  // Subscription sale persistence is idempotent on paypal_payment_id. A
+  // resumed 23505 validates every immutable payment field before succeeding.
+  'PAYMENT.SALE.COMPLETED',
   // W2 refund semantics: refund handling is idempotent (payment_refunds
   // unique refund id + payments.status flipped only after all effects), and
   // an out-of-order refund (arriving before its capture/sale-completed

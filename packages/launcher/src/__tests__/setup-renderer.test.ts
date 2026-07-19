@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(__dirname, '..');
 
 function readSourceFile(relativePath: string): string {
-  return readFileSync(path.join(srcDir, relativePath), 'utf8');
+  return readFileSync(path.join(srcDir, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('launcher setup renderer wiring', () => {

@@ -112,6 +112,7 @@ async function handleWarnModal(
 
   // Emit event
   eventBus.emit('infraction.created', guild.id, {
+    infractionId: infraction.id,
     userId: targetUserId,
     moderatorId: moderator.id,
     type: 'warn',

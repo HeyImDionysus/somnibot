@@ -6,6 +6,7 @@
  * bot-relevant configuration.
  */
 import { createAdminSupabase } from '@/lib/supabase/admin';
+import type { ConfigReloadAuditEvent } from '@somnibot/shared';
 
 export type ConfigSection =
   | 'welcome'
@@ -38,7 +39,7 @@ export async function notifyBot(
   section: ConfigSection,
   changes?: Record<string, unknown>,
   changedBy: string = 'dashboard',
-  auditEvent?: { type: string; data: Record<string, unknown> },
+  auditEvent?: ConfigReloadAuditEvent,
 ): Promise<void> {
   // V10 Audit M-1: Guard against empty/unset DISCORD_GUILD_ID.
   // Previously used a top-level non-null assertion that silently inserted

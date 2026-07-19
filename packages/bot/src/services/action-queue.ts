@@ -25,20 +25,33 @@
  * delay commerce processing.
  */
 
-import { ChannelType, EmbedBuilder, PermissionsBitField, type Guild, type GuildChannel, type TextChannel } from 'discord.js';
+import {
+  ChannelType,
+  EmbedBuilder,
+  PermissionsBitField,
+  type Guild,
+  type GuildChannel,
+  type GuildMember,
+  type TextChannel,
+} from 'discord.js';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { writeGuildSnapshot } from './guild-snapshot.js';
 import { writeAuditLog } from './audit.js';
+import { codePointLength, sqlSpaceTrim } from '../utils/prize-snapshot.js';
 import {
   CommerceFulfillmentService,
   RECEIPT_DELIVERY_ACTION,
   classifyDeliveryError,
   writeReceiptDeliveryAlert,
-  type DeliveryFailureKind,
   type FulfillmentPayload,
   type ReceiptDeliveryPayload,
 } from './commerce-fulfillment.js';
 import { deliverReceiptDM } from '../features/commerce/receipt-builder.js';
+import { EntitlementService } from '../features/commerce/entitlement-service.js';
+import {
+  GiveawayFulfillmentService,
+  GiveawayPrizeContractError,
+} from './giveaway-fulfillment.js';
 import {
   ACTION_QUEUE_LANES,
   COMMERCE_LANE_ACTIONS,
@@ -51,11 +64,16 @@ import {
   type ActionQueueLane,
 } from './action-queue-lanes.js';
 import { eventBus } from './event-bus.js';
+import {
+  parseActionQueuePlatformEvent,
+  parseConfigReloadAuditEvent,
+} from './action-queue-event-ingress.js';
 import { runReconciliation } from './reconciliation.js';
 import { repairDriftItem, acceptDriftItem, ignoreDriftItem, clearAllDrift } from '../sync/repair-actions.js';
-import { createLogger, type DriftItem, type PlatformEventMap, type PlatformEventType } from '@somnibot/shared';
+import { createLogger, type DriftItem } from '@somnibot/shared';
 
 const log = createLogger('ActionQueue');
+export const ACTION_QUEUE_CLAIM_PROTOCOL_VERSION = 2;
 
 // ============================================================
 // Types
@@ -67,8 +85,21 @@ interface ActionRow {
   action: string;
   payload: Record<string, unknown>;
   status: string;
+  next_retry_at?: string | null;
   /** 'commerce' | 'game' — stamped by the DB trigger at insert. */
   lane?: string;
+}
+
+interface ClaimedActionRow extends ActionRow {
+  status: 'processing';
+  retry_count: number;
+  claim_token: string;
+  lane: ActionQueueLane;
+}
+
+export interface ClaimedActionContext {
+  actionId: string;
+  claimToken: string;
 }
 
 /**
@@ -87,6 +118,100 @@ interface ActionResult {
   data?: Record<string, unknown>;
   error?: string;
   retryable?: boolean;
+  claimTransition?: 'deferred';
+}
+
+type ActionHandler = (
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+  context: ClaimedActionContext,
+) => Promise<ActionResult>;
+
+function parseClaimedActionRow(
+  value: unknown,
+  requestedActionId: string,
+  guildId: string,
+): ClaimedActionRow | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    row.id !== requestedActionId
+    || row.guild_id !== guildId
+    || typeof row.action !== 'string'
+    || row.action.length === 0
+    || row.action.trim() !== row.action
+    || !row.payload
+    || typeof row.payload !== 'object'
+    || Array.isArray(row.payload)
+    || row.status !== 'processing'
+    || !Number.isSafeInteger(row.retry_count)
+    || Number(row.retry_count) < 0
+    || typeof row.claim_token !== 'string'
+    || row.claim_token.length === 0
+    || row.claim_token.trim() !== row.claim_token
+    || (row.lane !== 'commerce' && row.lane !== 'game')
+    || row.lane !== laneForAction(row.action)
+  ) {
+    return null;
+  }
+  return row as unknown as ClaimedActionRow;
+}
+
+type RetryClaimDisposition =
+  | 'requeued'
+  | 'completed'
+  | 'operator_held'
+  | 'stale_claim'
+  | 'intent_raced';
+
+function parseRetryClaimTransition(
+  value: unknown,
+): { applied: boolean; disposition: RetryClaimDisposition } | null {
+  if (!Array.isArray(value) || value.length !== 1) return null;
+  const row = value[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const evidence = row as Record<string, unknown>;
+  if (
+    typeof evidence.applied !== 'boolean'
+    || typeof evidence.disposition !== 'string'
+    || ![
+      'requeued',
+      'completed',
+      'operator_held',
+      'stale_claim',
+      'intent_raced',
+    ].includes(evidence.disposition)
+  ) {
+    return null;
+  }
+  const disposition = evidence.disposition as RetryClaimDisposition;
+  const combinationMatches = disposition === 'requeued'
+    ? evidence.applied === true
+    : evidence.applied === false;
+  return combinationMatches
+    ? { applied: evidence.applied, disposition }
+    : null;
+}
+
+type FinalClaimDisposition = 'completed' | 'completed_from_evidence' | 'failed';
+
+function parseFinalClaimTransition(
+  value: unknown,
+  handlerSuccess: boolean,
+): FinalClaimDisposition | null {
+  if (!Array.isArray(value) || value.length !== 1) return null;
+  const row = value[0];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+  const evidence = row as Record<string, unknown>;
+  if (evidence.applied !== true || typeof evidence.disposition !== 'string') return null;
+  if (handlerSuccess) {
+    return evidence.disposition === 'completed' ? 'completed' : null;
+  }
+  return evidence.disposition === 'failed'
+    || evidence.disposition === 'completed_from_evidence'
+    ? evidence.disposition
+    : null;
 }
 
 // ============================================================
@@ -458,11 +583,12 @@ async function handleFulfillment(
   guild: Guild,
   supabase: SupabaseClient,
   payload: Record<string, unknown>,
+  context: ClaimedActionContext,
 ): Promise<ActionResult> {
   const fulfillmentService = new CommerceFulfillmentService(guild, supabase, eventBus);
   const fulfillmentPayload = payload as unknown as FulfillmentPayload;
 
-  const result = await fulfillmentService.fulfill(fulfillmentPayload);
+  const result = await fulfillmentService.fulfill(fulfillmentPayload, context);
 
   if (result.success) {
     return {
@@ -479,6 +605,365 @@ async function handleFulfillment(
       error: result.errors.join('; '),
     };
   }
+}
+
+export async function handleGiveawayPrizeFulfillment(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  if (
+    !['giveaway_atomic_end', 'giveaway_atomic_reroll'].includes(
+      payload.source as string,
+    )
+    || payload.guild_id !== guild.id
+    || typeof payload.giveaway_id !== 'string'
+    || !UUID_PATTERN.test(payload.giveaway_id)
+    || typeof payload.winner_id !== 'string'
+    || !/^\d{17,20}$/.test(payload.winner_id)
+    || typeof payload.product_id !== 'string'
+    || !UUID_PATTERN.test(payload.product_id)
+  ) {
+    return {
+      success: false,
+      error: 'Missing or malformed durable giveaway prize identity',
+      retryable: false,
+    };
+  }
+
+  try {
+    const service = new GiveawayFulfillmentService(guild, supabase, eventBus);
+    const result = await service.fulfillQueuedProductPrize({
+      giveawayId: payload.giveaway_id,
+      winnerId: payload.winner_id,
+      productId: payload.product_id,
+    });
+    return {
+      success: true,
+      data: {
+        giveawayId: result.giveawayId,
+        winnerId: result.winnerId,
+        productId: result.productId,
+        entitlementId: result.entitlementId,
+        requestId: result.requestId,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      retryable: !(error instanceof GiveawayPrizeContractError),
+    };
+  }
+}
+
+export async function handleGiveawayWinnerNotification(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+): Promise<ActionResult> {
+  const allowed = new Set([
+    'source',
+    'guild_id',
+    'giveaway_id',
+    'winner_id',
+    'product_id',
+    'delivery_kind',
+    'prize_snapshot',
+  ]);
+  if (
+    Object.keys(payload).some((field) => !allowed.has(field))
+    || !['giveaway_atomic_end', 'giveaway_atomic_reroll'].includes(
+      payload.source as string,
+    )
+    || payload.guild_id !== guild.id
+    || typeof payload.giveaway_id !== 'string'
+    || !UUID_PATTERN.test(payload.giveaway_id)
+    || typeof payload.winner_id !== 'string'
+    || !/^\d{17,20}$/.test(payload.winner_id)
+    || !['manual', 'product'].includes(payload.delivery_kind as string)
+    || (payload.delivery_kind === 'product'
+      && (typeof payload.product_id !== 'string' || !UUID_PATTERN.test(payload.product_id)))
+    || (payload.delivery_kind === 'manual' && payload.product_id !== null)
+    || typeof payload.prize_snapshot !== 'string'
+    || payload.prize_snapshot.length === 0
+    // btrim/left replica: SQL snapshots may legally carry edge tabs or
+    // newlines and count length in code points, not UTF-16 units.
+    || sqlSpaceTrim(payload.prize_snapshot) !== payload.prize_snapshot
+    || codePointLength(payload.prize_snapshot) > 1_000
+  ) {
+    return {
+      success: false,
+      error: 'Missing or malformed durable giveaway notification identity',
+      retryable: false,
+    };
+  }
+
+  try {
+    const service = new GiveawayFulfillmentService(guild, supabase, eventBus);
+    const result = await service.notifyQueuedWinner({
+      source: payload.source as 'giveaway_atomic_end' | 'giveaway_atomic_reroll',
+      giveawayId: payload.giveaway_id,
+      winnerId: payload.winner_id,
+      productId: payload.product_id as string | null,
+      deliveryKind: payload.delivery_kind as 'manual' | 'product',
+      prizeSnapshot: payload.prize_snapshot,
+    });
+    return {
+      success: true,
+      data: {
+        giveawayId: result.giveawayId,
+        winnerId: result.winnerId,
+        deliveryKind: result.deliveryKind,
+        entitlementId: result.entitlementId,
+        messageId: result.messageId,
+        nonce: result.nonce,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      retryable: !(error instanceof GiveawayPrizeContractError),
+    };
+  }
+}
+
+type ReconcileEntitlementRolesPayload = {
+  mode: 'ensure_live' | 'ensure_live_request' | 'cleanup';
+  action_id: string;
+  target_delivery_intent_id?: string;
+  guild_id: string;
+  entitlement_id?: string;
+  customer_id?: string;
+  old_discord_id?: string;
+  discord_id?: string;
+  order_id?: string;
+  product_id?: string;
+  plan_id?: string | null;
+  entitlement_type?: 'one_time' | 'subscription';
+  source?: 'purchase' | null;
+  entitlement_status?: 'active' | 'pending' | 'grace_period' | 'suspended';
+  granted_role_ids?: string[];
+};
+
+function isExactNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value;
+}
+
+function exactUniqueRoleVector(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every(isExactNonBlankString)
+    && new Set(value).size === value.length;
+}
+
+export async function handleReconcileEntitlementRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payloadValue: Record<string, unknown>,
+  context: ClaimedActionContext,
+): Promise<ActionResult> {
+  const payload = payloadValue as ReconcileEntitlementRolesPayload;
+  if (
+    !['ensure_live', 'ensure_live_request', 'cleanup'].includes(payload.mode)
+    || !isExactNonBlankString(payload.action_id)
+    || payload.action_id !== context.actionId
+    || payload.guild_id !== guild.id
+  ) {
+    return {
+      success: false,
+      error: 'Missing or mismatched durable paid-role reconciliation identity',
+      retryable: false,
+    };
+  }
+
+  if (payload.mode === 'ensure_live_request') {
+    if (
+      !isExactNonBlankString(payload.entitlement_id)
+      || !isExactNonBlankString(payload.customer_id)
+      || !isExactNonBlankString(payload.old_discord_id)
+      || !isExactNonBlankString(payload.discord_id)
+      || payload.old_discord_id === payload.discord_id
+    ) {
+      return { success: false, error: 'Malformed paid-role ensure request', retryable: false };
+    }
+
+    const { data, error } = await (
+      supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof supabase.rpc>
+    )('commerce_ensure_live_role_delivery_action', {
+      p_entitlement_id: payload.entitlement_id,
+    });
+    if (error) {
+      return {
+        success: false,
+        error: `Paid-role ensure request failed: ${error.message}`,
+      };
+    }
+    if (!Array.isArray(data) || data.length > 1) {
+      return {
+        success: false,
+        error: 'Paid-role ensure request returned malformed carrier cardinality',
+        retryable: false,
+      };
+    }
+    const carrier = data[0] as Record<string, unknown> | undefined;
+    if (
+      carrier !== undefined
+      && (
+        carrier == null
+        || typeof carrier !== 'object'
+        || Array.isArray(carrier)
+        || !isExactNonBlankString(carrier.action_id)
+        || typeof carrier.action_status !== 'string'
+        || !['pending', 'processing'].includes(carrier.action_status)
+      )
+    ) {
+      return {
+        success: false,
+        error: 'Paid-role ensure request returned malformed carrier identity',
+        retryable: false,
+      };
+    }
+    return {
+      success: true,
+      data: {
+        actionId: payload.action_id,
+        entitlementId: payload.entitlement_id,
+        outcome: carrier !== undefined
+          ? 'ensure_queued'
+          : 'ensure_deferred_or_terminal',
+      },
+    };
+  }
+
+  const service = new EntitlementService(guild, supabase, eventBus);
+  if (payload.mode === 'cleanup') {
+    if (!isExactNonBlankString(payload.target_delivery_intent_id)) {
+      return { success: false, error: 'Missing paid-role cleanup target intent', retryable: false };
+    }
+    try {
+      const finished = await service.executeOwnedPurchaseRoleCleanup(
+        payload.target_delivery_intent_id,
+        context,
+      );
+      if (!finished.settled) {
+        return {
+          success: false,
+          error: 'Paid role cleanup remains unresolved after confirmed mutation',
+        };
+      }
+      return {
+        success: true,
+        data: {
+          deliveryIntentId: payload.target_delivery_intent_id,
+          outcome: 'settled_cleanup',
+        },
+      };
+    } catch (err) {
+      return {
+        success: false,
+        error: `Paid role cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  if (
+    !isExactNonBlankString(payload.entitlement_id)
+    || !isExactNonBlankString(payload.customer_id)
+    || !isExactNonBlankString(payload.discord_id)
+    || !isExactNonBlankString(payload.order_id)
+    || !isExactNonBlankString(payload.product_id)
+    || (payload.entitlement_type !== 'one_time' && payload.entitlement_type !== 'subscription')
+    || (payload.source !== 'purchase' && payload.source !== null)
+    || !['active', 'pending', 'grace_period', 'suspended'].includes(
+      String(payload.entitlement_status),
+    )
+    || !exactUniqueRoleVector(payload.granted_role_ids)
+    || (
+      payload.entitlement_type === 'subscription'
+      && !isExactNonBlankString(payload.plan_id)
+    )
+    || (payload.entitlement_type === 'one_time' && payload.plan_id !== null)
+  ) {
+    return { success: false, error: 'Malformed paid-role ensure payload', retryable: false };
+  }
+
+  const contract = {
+    customerId: payload.customer_id,
+    productId: payload.product_id,
+    orderId: payload.order_id,
+    planId: payload.plan_id ?? null,
+    discordId: payload.discord_id,
+    grantedRoleIds: payload.granted_role_ids,
+    entitlementType: payload.entitlement_type,
+  };
+  const begun = await service.beginPurchaseRoleDeliveryAttempt(
+    payload.entitlement_id,
+    contract,
+    context,
+  );
+  if (begun.state === 'confirmed_live') {
+    return {
+      success: true,
+      data: { actionId: payload.action_id, outcome: 'live_confirmed' },
+    };
+  }
+  if (begun.state === 'terminal') {
+    if (begun.cleanupNeeded) {
+      const cleanup = await service.executeOwnedPurchaseRoleCleanup(
+        begun.intentId,
+        context,
+      );
+      if (!cleanup.settled) {
+        return {
+          success: false,
+          error: 'Paid role terminal cleanup remains unresolved',
+        };
+      }
+    }
+    return {
+      success: true,
+      data: { actionId: payload.action_id, outcome: 'terminal_noop' },
+    };
+  }
+
+  const outcome = await service.reconcilePurchaseGrantedRoles(
+    payload.entitlement_id,
+    contract,
+    begun.attempt,
+  );
+  const activeAttempt = service.getActivePurchaseRoleDeliveryAttempt();
+  const finalized = activeAttempt?.intentId === begun.attempt.intentId
+    ? await service.finishPurchaseRoleDeliveryAttempt(
+      begun.attempt,
+      outcome === 'live' ? 'live' : 'compensated',
+    )
+    : { state: 'settled', settled: true, authorityEmpty: true };
+  const validOwnedLive =
+    finalized.state === 'open'
+    && !finalized.settled
+    && !finalized.authorityEmpty;
+  const validZeroAuthorityLive =
+    finalized.state === 'settled'
+    && finalized.settled
+    && finalized.authorityEmpty;
+  if (outcome === 'live' && !validOwnedLive && !validZeroAuthorityLive) {
+    return { success: false, error: 'Paid role ensure intent did not become confirmed and idle' };
+  }
+  if (outcome === 'terminal' && (!finalized.settled || !finalized.authorityEmpty)) {
+    return { success: false, error: 'Paid role terminal compensation did not settle' };
+  }
+  return {
+    success: true,
+    data: {
+      actionId: payload.action_id,
+      outcome: outcome === 'live' ? 'live_confirmed' : 'terminal_compensated',
+    },
+  };
 }
 
 // ── Receipt Delivery Handler ──────────────────────────
@@ -545,6 +1030,18 @@ async function handleConfigReload(
   const changes = payload.changes as Record<string, unknown> | undefined;
   const changedBy = payload.changed_by as string | undefined;
 
+  const rawAuditEvent = payload.audit_event;
+  const auditEvent = rawAuditEvent === undefined
+    ? null
+    : parseConfigReloadAuditEvent(rawAuditEvent);
+  if (rawAuditEvent !== undefined && auditEvent === null) {
+    return {
+      success: false,
+      error: 'Malformed or disallowed config_reload audit event',
+      retryable: false,
+    };
+  }
+
   // Emit config.changed so the bot reloads
   eventBus.emit('config.changed', guild.id, {
     section: section ?? 'unknown',
@@ -554,17 +1051,8 @@ async function handleConfigReload(
 
   // If the dashboard attached an audit event, emit it on the event bus
   // so AuditService can log automation/webhook CRUD operations (Finding #4).
-  const auditEvent = payload.audit_event as { type: string; data: Record<string, unknown> } | undefined;
-  if (auditEvent?.type && auditEvent.data) {
-    try {
-      eventBus.emit(
-        auditEvent.type as PlatformEventType,
-        guild.id,
-        auditEvent.data as unknown as PlatformEventMap[PlatformEventType],
-      );
-    } catch (err) {
-      log.warn('Failed to emit audit event from config_reload:', { type: auditEvent.type, error: String(err) });
-    }
+  if (auditEvent) {
+    eventBus.emit(auditEvent.type, guild.id, auditEvent.data);
   }
 
   return { success: true, data: { section, reloaded: true } };
@@ -728,64 +1216,1365 @@ async function handleTestWelcome(
 /**
  * Revoke Discord roles from a member (e.g., after a refund).
  */
-async function handleRevokeRoles(
+const LIVE_ROLE_OWNER_STATUSES = ['active', 'pending', 'grace_period', 'suspended'];
+const TEMP_ROLE_ID_PATTERN = /^\d{17,20}$/;
+const MAX_TEMP_ROLE_DURATION_SECONDS = 315_360_000;
+
+type RevokeOwnershipIdentity = {
+  guildId: string;
+  discordId: string;
+  entitlementId: string;
+  customerId: string;
+  orderId: string;
+  productId: string;
+  terminalStatus: 'cancelled' | 'expired' | 'revoked';
+};
+
+type NonCommerceRevokeIdentity = {
+  guildId: string;
+  discordId: string;
+  entitlementId: string;
+  customerId: string;
+  orderId: string | null;
+  productId: string;
+  entitlementType: 'one_time' | 'subscription';
+  planId: string | null;
+  entitlementSource: 'manual' | 'giveaway' | 'automation';
+  entitlementStatus: 'cancelled' | 'expired';
+};
+
+type ClassifiedRoleOwnerTarget = {
+  guildId: string;
+  discordId: string;
+  entitlementId: string;
+};
+
+type NonCommerceLiveIdentity = {
+  guildId: string;
+  newDiscordId: string;
+  entitlementId: string;
+  customerId: string;
+  orderId: string | null;
+  productId: string;
+  entitlementType: 'one_time' | 'subscription';
+  planId: string | null;
+  entitlementSource: 'manual' | 'giveaway' | 'automation';
+  entitlementStatus: 'active' | 'pending' | 'grace_period' | 'suspended';
+};
+
+type NonCommerceRelinkIdentity = NonCommerceLiveIdentity & {
+  oldDiscordId: string;
+  relinkGeneration: string;
+  previousActivationGeneration: string | null;
+};
+
+type NonCommerceActivationIdentity = NonCommerceLiveIdentity & {
+  activationGeneration: string;
+};
+
+type ClassifiedRoleOwnerState = 'confirmed' | 'pending' | 'none';
+type ClassifiedRoleRepairState = ClassifiedRoleOwnerState | 'member_absent';
+
+const NON_COMMERCE_REVOKE_SOURCE = 'noncommerce_entitlement_status_trigger';
+const NON_COMMERCE_RELINK_SOURCE = 'noncommerce_entitlement_customer_relink_trigger';
+const NON_COMMERCE_ACTIVATION_SOURCE = 'noncommerce_entitlement_activation_trigger';
+const NON_COMMERCE_ENTITLEMENT_SOURCES = new Set(['manual', 'giveaway', 'automation']);
+const LIVE_ENTITLEMENT_STATUSES = new Set(['active', 'pending', 'grace_period', 'suspended']);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUnknownDiscordMember(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as Record<string, unknown>;
+  const rawError = record.rawError && typeof record.rawError === 'object'
+    ? record.rawError as Record<string, unknown>
+    : null;
+  // HTTP 404 is shared by other Discord failures such as Unknown Guild
+  // (10004). Only the exact Unknown Member code is authoritative absence.
+  return String(record.code ?? rawError?.code ?? '') === '10007';
+}
+
+async function fetchCleanupMember(
   guild: Guild,
-  _supabase: SupabaseClient,
+  discordId: string,
+): Promise<GuildMember | null> {
+  try {
+    return await guild.members.fetch({ user: discordId, force: true });
+  } catch (error) {
+    if (isUnknownDiscordMember(error)) return null;
+    throw error;
+  }
+}
+
+function exactSingleRpcRow(value: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(value) || value.length !== 1) return null;
+  const row = value[0];
+  return row && typeof row === 'object' && !Array.isArray(row)
+    ? row as Record<string, unknown>
+    : null;
+}
+
+const REVOKE_IDENTITY_FIELDS = [
+  'entitlement_id',
+  'customer_id',
+  'order_id',
+  'product_id',
+] as const;
+
+const REVOKE_ACTION_SOURCES = new Set([
+  'entitlement_status_trigger',
+  'entitlement_terminal_migration_backfill',
+]);
+
+const TERMINAL_REASON_TO_STATUS = {
+  entitlement_cancelled: 'cancelled',
+  entitlement_expired: 'expired',
+  entitlement_revoked: 'revoked',
+} as const;
+
+function parseNonCommerceRevokeIdentity(
   payload: Record<string, unknown>,
+  guildId: string,
+  tempRoleGrantIds: string[],
+): { identity: NonCommerceRevokeIdentity | null; error?: string } {
+  if (payload.source !== NON_COMMERCE_REVOKE_SOURCE) return { identity: null };
+  if (tempRoleGrantIds.length !== 0) {
+    return { identity: null, error: 'Non-commerce revoke cannot carry temporary ownership' };
+  }
+  const required = [
+    'discord_id',
+    'entitlement_id',
+    'customer_id',
+    'product_id',
+    'entitlement_type',
+    'entitlement_source',
+    'entitlement_status',
+  ] as const;
+  for (const field of required) {
+    const value = payload[field];
+    if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+      return { identity: null, error: `Invalid non-commerce revoke ${field}` };
+    }
+  }
+  if (
+    payload.guild_id !== guildId
+    || !NON_COMMERCE_ENTITLEMENT_SOURCES.has(payload.entitlement_source as string)
+    || !['cancelled', 'expired'].includes(payload.entitlement_status as string)
+    || !Object.hasOwn(payload, 'order_id')
+    || (payload.order_id !== null
+      && (typeof payload.order_id !== 'string' || !UUID_PATTERN.test(payload.order_id)))
+    || !Object.hasOwn(payload, 'plan_id')
+    || !['one_time', 'subscription'].includes(payload.entitlement_type as string)
+    || (payload.plan_id !== null
+      && (typeof payload.plan_id !== 'string' || !UUID_PATTERN.test(payload.plan_id)))
+  ) {
+    return { identity: null, error: 'Invalid non-commerce revoke identity payload' };
+  }
+  const expectedReason = `entitlement_${payload.entitlement_status as string}`;
+  if (payload.reason !== expectedReason) {
+    return { identity: null, error: 'Invalid non-commerce revoke terminal reason' };
+  }
+  return {
+    identity: {
+      guildId,
+      discordId: payload.discord_id as string,
+      entitlementId: payload.entitlement_id as string,
+      customerId: payload.customer_id as string,
+      orderId: payload.order_id as string | null,
+      productId: payload.product_id as string,
+      entitlementType: payload.entitlement_type as NonCommerceRevokeIdentity['entitlementType'],
+      planId: payload.plan_id as string | null,
+      entitlementSource: payload.entitlement_source as NonCommerceRevokeIdentity['entitlementSource'],
+      entitlementStatus: payload.entitlement_status as NonCommerceRevokeIdentity['entitlementStatus'],
+    },
+  };
+}
+
+function parseNonCommerceRelinkIdentity(
+  payload: Record<string, unknown>,
+  guildId: string,
+  tempRoleGrantIds: string[],
+): { identity: NonCommerceRelinkIdentity | null; error?: string } {
+  // `old_discord_id` is historical and cannot be reconstructed after commit.
+  // The database permits this source only from its transaction-local relink
+  // carrier trigger; the worker then revalidates every still-derivable field
+  // and current customer mapping before either Discord mutation.
+  if (payload.source !== NON_COMMERCE_RELINK_SOURCE) return { identity: null };
+  if (tempRoleGrantIds.length !== 0) {
+    return { identity: null, error: 'Non-commerce relink cannot carry temporary ownership' };
+  }
+  const allowed = new Set([
+    'source',
+    'guild_id',
+    'old_discord_id',
+    'discord_id',
+    'entitlement_id',
+    'customer_id',
+    'order_id',
+    'product_id',
+    'entitlement_source',
+    'entitlement_status',
+    'entitlement_type',
+    'plan_id',
+    'role_ids',
+    'temporary_role_grant_ids',
+    'reason',
+    'relink_generation',
+    'previous_activation_generation',
+  ]);
+  if (Object.keys(payload).some((field) => !allowed.has(field))) {
+    return { identity: null, error: 'Invalid non-commerce relink payload fields' };
+  }
+  const required = [
+    'old_discord_id',
+    'discord_id',
+    'entitlement_id',
+    'customer_id',
+    'product_id',
+    'entitlement_type',
+    'entitlement_source',
+    'entitlement_status',
+    'relink_generation',
+  ] as const;
+  for (const field of required) {
+    if (!isExactNonBlankString(payload[field])) {
+      return { identity: null, error: `Invalid non-commerce relink ${field}` };
+    }
+  }
+  if (
+    payload.guild_id !== guildId
+    || payload.old_discord_id === payload.discord_id
+    || !NON_COMMERCE_ENTITLEMENT_SOURCES.has(payload.entitlement_source as string)
+    || !LIVE_ENTITLEMENT_STATUSES.has(payload.entitlement_status as string)
+    || payload.reason !== 'entitlement_customer_relinked'
+    || !UUID_PATTERN.test(payload.relink_generation as string)
+    || !Object.hasOwn(payload, 'previous_activation_generation')
+    || (payload.previous_activation_generation !== null
+      && (typeof payload.previous_activation_generation !== 'string'
+        || !UUID_PATTERN.test(payload.previous_activation_generation)))
+    || !Object.hasOwn(payload, 'order_id')
+    || (payload.order_id !== null
+      && (typeof payload.order_id !== 'string' || !UUID_PATTERN.test(payload.order_id)))
+    || !Object.hasOwn(payload, 'plan_id')
+    || !['one_time', 'subscription'].includes(payload.entitlement_type as string)
+    || (payload.plan_id !== null
+      && (typeof payload.plan_id !== 'string' || !UUID_PATTERN.test(payload.plan_id)))
+  ) {
+    return { identity: null, error: 'Invalid non-commerce relink identity payload' };
+  }
+  return {
+    identity: {
+      guildId,
+      oldDiscordId: payload.old_discord_id as string,
+      newDiscordId: payload.discord_id as string,
+      entitlementId: payload.entitlement_id as string,
+      customerId: payload.customer_id as string,
+      orderId: payload.order_id as string | null,
+      productId: payload.product_id as string,
+      entitlementType: payload.entitlement_type as NonCommerceRelinkIdentity['entitlementType'],
+      planId: payload.plan_id as string | null,
+      entitlementSource: payload.entitlement_source as NonCommerceRelinkIdentity['entitlementSource'],
+      entitlementStatus: payload.entitlement_status as NonCommerceRelinkIdentity['entitlementStatus'],
+      relinkGeneration: payload.relink_generation as string,
+      previousActivationGeneration: payload.previous_activation_generation as string | null,
+    },
+  };
+}
+
+function parseNonCommerceActivationIdentity(
+  payload: Record<string, unknown>,
+  guildId: string,
+  tempRoleGrantIds: string[],
+): { identity: NonCommerceActivationIdentity | null; error?: string } {
+  if (payload.source !== NON_COMMERCE_ACTIVATION_SOURCE) return { identity: null };
+  if (tempRoleGrantIds.length !== 0) {
+    return { identity: null, error: 'Non-commerce activation cannot carry temporary ownership' };
+  }
+  const allowed = new Set([
+    'source',
+    'guild_id',
+    'discord_id',
+    'entitlement_id',
+    'customer_id',
+    'order_id',
+    'product_id',
+    'entitlement_source',
+    'entitlement_status',
+    'entitlement_type',
+    'plan_id',
+    'role_ids',
+    'temporary_role_grant_ids',
+    'reason',
+    'activation_generation',
+  ]);
+  if (Object.keys(payload).some((field) => !allowed.has(field))) {
+    return { identity: null, error: 'Invalid non-commerce activation payload fields' };
+  }
+  const required = [
+    'discord_id',
+    'entitlement_id',
+    'customer_id',
+    'product_id',
+    'entitlement_type',
+    'entitlement_source',
+    'entitlement_status',
+    'activation_generation',
+  ] as const;
+  for (const field of required) {
+    if (!isExactNonBlankString(payload[field])) {
+      return { identity: null, error: `Invalid non-commerce activation ${field}` };
+    }
+  }
+  if (
+    payload.guild_id !== guildId
+    || !NON_COMMERCE_ENTITLEMENT_SOURCES.has(payload.entitlement_source as string)
+    || !LIVE_ENTITLEMENT_STATUSES.has(payload.entitlement_status as string)
+    || payload.reason !== 'entitlement_activated'
+    || !UUID_PATTERN.test(payload.activation_generation as string)
+    || !Object.hasOwn(payload, 'order_id')
+    || (payload.order_id !== null
+      && (typeof payload.order_id !== 'string' || !UUID_PATTERN.test(payload.order_id)))
+    || !Object.hasOwn(payload, 'plan_id')
+    || !['one_time', 'subscription'].includes(payload.entitlement_type as string)
+    || (payload.plan_id !== null
+      && (typeof payload.plan_id !== 'string' || !UUID_PATTERN.test(payload.plan_id)))
+  ) {
+    return { identity: null, error: 'Invalid non-commerce activation identity payload' };
+  }
+  return {
+    identity: {
+      guildId,
+      newDiscordId: payload.discord_id as string,
+      entitlementId: payload.entitlement_id as string,
+      customerId: payload.customer_id as string,
+      orderId: payload.order_id as string | null,
+      productId: payload.product_id as string,
+      entitlementType: payload.entitlement_type as NonCommerceActivationIdentity['entitlementType'],
+      planId: payload.plan_id as string | null,
+      entitlementSource: payload.entitlement_source as NonCommerceActivationIdentity['entitlementSource'],
+      entitlementStatus: payload.entitlement_status as NonCommerceActivationIdentity['entitlementStatus'],
+      activationGeneration: payload.activation_generation as string,
+    },
+  };
+}
+
+function parseRevokeOwnershipIdentity(
+  payload: Record<string, unknown>,
+  guildId: string,
+): { identity: RevokeOwnershipIdentity | null; error?: string } {
+  const hasCompleteCore = REVOKE_IDENTITY_FIELDS.every((field) => Object.hasOwn(payload, field));
+  if (!hasCompleteCore) return { identity: null, error: 'Invalid revoke_roles identity payload' };
+
+  if (typeof payload.source !== 'string' || !REVOKE_ACTION_SOURCES.has(payload.source)) {
+    return { identity: null, error: 'Invalid revoke_roles action source' };
+  }
+
+  const terminalStatus = typeof payload.reason === 'string'
+    ? TERMINAL_REASON_TO_STATUS[payload.reason as keyof typeof TERMINAL_REASON_TO_STATUS]
+    : undefined;
+  if (!terminalStatus) {
+    return { identity: null, error: 'Invalid revoke_roles terminal reason' };
+  }
+
+  for (const field of REVOKE_IDENTITY_FIELDS) {
+    const value = payload[field];
+    if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+      return { identity: null, error: `Invalid revoke_roles ${field}` };
+    }
+  }
+
+  if (
+    Object.hasOwn(payload, 'guild_id')
+    && (
+      typeof payload.guild_id !== 'string'
+      || payload.guild_id.length === 0
+      || payload.guild_id.trim() !== payload.guild_id
+      || payload.guild_id !== guildId
+    )
+  ) {
+    return { identity: null, error: 'revoke_roles guild_id does not match the action guild' };
+  }
+  return {
+    identity: {
+      guildId,
+      discordId: payload.discord_id as string,
+      entitlementId: payload.entitlement_id as string,
+      customerId: payload.customer_id as string,
+      orderId: payload.order_id as string,
+      productId: payload.product_id as string,
+      terminalStatus,
+    },
+  };
+}
+
+async function validateRevokeOrigin(
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleIds: string[],
+  tempRoleGrantIds: string[],
+): Promise<void> {
+  const { data, error } = await supabase
+    .from('entitlements')
+    .select('id, guild_id, customer_id, order_id, product_id, plan_id, type, status, source, granted_role_ids')
+    .eq('id', identity.entitlementId)
+    .eq('guild_id', identity.guildId)
+    .eq('customer_id', identity.customerId)
+    .eq('order_id', identity.orderId)
+    .eq('product_id', identity.productId)
+    .maybeSingle();
+
+  if (error) throw new Error(`revoke origin lookup failed: ${error.message}`);
+
+  const origin = data as Record<string, unknown> | null;
+  const grantedRoleIds = Array.isArray(origin?.granted_role_ids)
+    ? origin.granted_role_ids
+    : null;
+  const grantedRoleIdSet = grantedRoleIds ? new Set(grantedRoleIds) : null;
+  const hasExpectedStatus = origin?.status === identity.terminalStatus
+    || (
+      typeof origin?.status === 'string'
+      && LIVE_ROLE_OWNER_STATUSES.includes(origin.status)
+    );
+  if (
+    !origin
+    || origin.id !== identity.entitlementId
+    || origin.guild_id !== identity.guildId
+    || origin.customer_id !== identity.customerId
+    || origin.order_id !== identity.orderId
+    || origin.product_id !== identity.productId
+    || !hasExpectedStatus
+    || (origin.source !== 'purchase' && origin.source !== null)
+    || !grantedRoleIds
+    || !grantedRoleIds.every((roleId) =>
+      typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
+    || grantedRoleIdSet?.size !== grantedRoleIds.length
+  ) {
+    throw new Error('revoke origin lookup returned a malformed or mismatched entitlement');
+  }
+
+  const { data: orderData, error: orderError } = await supabase
+    .from('orders')
+    .select('id, guild_id, customer_id, product_id, temporary_role_grants_snapshot, grant_snapshot_frozen_at')
+    .eq('id', identity.orderId)
+    .eq('guild_id', identity.guildId)
+    .eq('customer_id', identity.customerId)
+    .eq('product_id', identity.productId)
+    .maybeSingle();
+  if (orderError) throw new Error(`revoke order contract lookup failed: ${orderError.message}`);
+
+  const order = orderData as Record<string, unknown> | null;
+  const frozenAt = order?.grant_snapshot_frozen_at;
+  const frozenSnapshot = order?.temporary_role_grants_snapshot;
+  if (
+    !order
+    || order.id !== identity.orderId
+    || order.guild_id !== identity.guildId
+    || order.customer_id !== identity.customerId
+    || order.product_id !== identity.productId
+    || (
+      frozenAt !== null
+      && (
+        typeof frozenAt !== 'string'
+        || frozenAt.length === 0
+        || !Number.isFinite(Date.parse(frozenAt))
+      )
+    )
+    || !Array.isArray(frozenSnapshot)
+  ) {
+    throw new Error('revoke order contract lookup returned malformed or mismatched data');
+  }
+
+  const frozenDurations = new Map<string, number>();
+  if (frozenAt === null) {
+    if (frozenSnapshot.length !== 0) {
+      throw new Error('legacy revoke order contains an unfrozen temporary-role snapshot');
+    }
+  } else {
+    for (const entry of frozenSnapshot) {
+      const snapshot = entry as Record<string, unknown> | null;
+      if (
+        !snapshot
+        || typeof snapshot.role_id !== 'string'
+        || !TEMP_ROLE_ID_PATTERN.test(snapshot.role_id)
+        || !Number.isSafeInteger(snapshot.duration_seconds)
+        || Number(snapshot.duration_seconds) <= 0
+        || Number(snapshot.duration_seconds) > MAX_TEMP_ROLE_DURATION_SECONDS
+        || frozenDurations.has(snapshot.role_id)
+      ) {
+        throw new Error('revoke order temporary-role snapshot is malformed');
+      }
+      frozenDurations.set(snapshot.role_id, Number(snapshot.duration_seconds));
+    }
+  }
+
+  const { data: tempGrantData, error: tempGrantError } = await supabase
+    .from('temp_role_grants')
+    .select('id, guild_id, user_id, role_id, order_id, source, source_id, duration_seconds, grant_status, remove_on_expiry')
+    .eq('order_id', identity.orderId)
+    .eq('guild_id', identity.guildId)
+    .order('id', { ascending: true });
+  if (tempGrantError) {
+    throw new Error(`revoke temporary-role provenance lookup failed: ${tempGrantError.message}`);
+  }
+  if (!Array.isArray(tempGrantData)) {
+    throw new Error('revoke temporary-role provenance lookup returned malformed data');
+  }
+
+  if (frozenAt === null && tempGrantData.length !== 0) {
+    throw new Error('legacy revoke order has unverified temporary-role provenance');
+  }
+
+  const expectedRoleIds = new Set<string>(grantedRoleIds as string[]);
+  const capturedTempGrantIds = new Set(tempRoleGrantIds);
+  const validatedCapturedGrantIds = new Set<string>();
+  for (const rawGrant of tempGrantData) {
+    const grant = rawGrant as Record<string, unknown> | null;
+    if (
+      !grant
+      || typeof grant.id !== 'string'
+      || grant.id.length === 0
+      || grant.guild_id !== identity.guildId
+      || grant.user_id !== identity.discordId
+      || grant.order_id !== identity.orderId
+      || (
+        (grant.grant_status === 'removed' && grant.source !== 'commerce_reconciled')
+        || (grant.grant_status !== 'removed' && grant.source !== 'commerce_purchase')
+      )
+      || grant.source_id !== identity.productId
+      || typeof grant.remove_on_expiry !== 'boolean'
+      || (
+        grant.grant_status !== 'pending'
+        && grant.grant_status !== 'applied'
+        && grant.grant_status !== 'removed'
+      )
+      || typeof grant.role_id !== 'string'
+      || frozenDurations.get(grant.role_id) !== grant.duration_seconds
+    ) {
+      throw new Error('revoke temporary-role provenance lookup returned a mismatched grant');
+    }
+    if (grant.remove_on_expiry && capturedTempGrantIds.has(grant.id)) {
+      expectedRoleIds.add(grant.role_id);
+      validatedCapturedGrantIds.add(grant.id);
+    } else if (
+      grant.remove_on_expiry
+      && (grant.grant_status === 'pending' || grant.grant_status === 'applied')
+    ) {
+      // A live removal-owned row existing at action creation must have been
+      // frozen into the payload. Removed rows not captured by a later refund
+      // are historical tombstones and do not reclaim a manually re-added role.
+      throw new Error('revoke payload omitted live temporary-role provenance');
+    } else if (capturedTempGrantIds.has(grant.id)) {
+      throw new Error('revoke payload captured temporary-role provenance without removal ownership');
+    }
+  }
+
+  if (validatedCapturedGrantIds.size !== tempRoleGrantIds.length) {
+    throw new Error('revoke temporary-role grant IDs do not match durable provenance');
+  }
+
+  if (
+    expectedRoleIds.size !== roleIds.length
+    || !roleIds.every((roleId) => expectedRoleIds.has(roleId))
+  ) {
+    throw new Error('revoke role set does not match the exact entitlement and temporary-role contract');
+  }
+}
+
+async function classifyRoleOwner(
+  supabase: SupabaseClient,
+  identity: ClassifiedRoleOwnerTarget,
+  roleId: string,
+): Promise<ClassifiedRoleOwnerState> {
+  const { data, error } = await supabase.rpc('commerce_classify_live_role_owner', {
+    p_guild_id: identity.guildId,
+    p_discord_id: identity.discordId,
+    p_role_id: roleId,
+    p_exclude_intent_id: null,
+    // The terminal origin cannot qualify. Keeping it visible closes every
+    // reactivation race: once it becomes live again, the same truth matrix
+    // classifies it as pending/confirmed instead of deleting its access.
+    p_exclude_entitlement_id: null,
+    p_exclude_grant_ids: [],
+  });
+  if (error) throw new Error(`authoritative ownership classification failed: ${error.message}`);
+  if (data !== 'confirmed' && data !== 'pending' && data !== 'none') {
+    throw new Error('authoritative ownership classification returned malformed evidence');
+  }
+  return data;
+}
+
+async function removeClassifiedRepairAddedRole(
+  guild: Guild,
+  identity: ClassifiedRoleOwnerTarget,
+  roleId: string,
+  missingMemberIsAbsence = false,
+): Promise<void> {
+  let member = missingMemberIsAbsence
+    ? await fetchCleanupMember(guild, identity.discordId)
+    : await guild.members.fetch({ user: identity.discordId, force: true });
+  if (!member) return;
+  if (!member.roles.cache.has(roleId)) return;
+  await member.roles.remove(roleId, 'SomniBot — compensate stale classified-owner repair');
+  member = missingMemberIsAbsence
+    ? await fetchCleanupMember(guild, identity.discordId)
+    : await guild.members.fetch({ user: identity.discordId, force: true });
+  if (!member) return;
+  if (member.roles.cache.has(roleId)) {
+    throw new Error('Discord did not confirm classified-owner repair compensation');
+  }
+}
+
+async function repairConfirmedClassifiedRole(
+  guild: Guild,
+  supabase: SupabaseClient,
+  identity: ClassifiedRoleOwnerTarget,
+  roleId: string,
+  reason: string,
+  missingMemberIsAbsence = false,
+): Promise<ClassifiedRoleRepairState> {
+  let ownerState = await classifyRoleOwner(supabase, identity, roleId);
+  if (ownerState !== 'confirmed') return ownerState;
+  let member = missingMemberIsAbsence
+    ? await fetchCleanupMember(guild, identity.discordId)
+    : await guild.members.fetch({ user: identity.discordId, force: true });
+  if (!member) return 'member_absent';
+  if (member.roles.cache.has(roleId)) {
+    return classifyRoleOwner(supabase, identity, roleId);
+  }
+  ownerState = await classifyRoleOwner(supabase, identity, roleId);
+  if (ownerState !== 'confirmed') return ownerState;
+
+  let addError: unknown = null;
+  try {
+    await member.roles.add(roleId, reason);
+  } catch (error) {
+    // A committed Discord add can lose its acknowledgement. Continue through
+    // the post-add classifier so stale access is still compensated.
+    addError = error;
+  }
+  try {
+    ownerState = await classifyRoleOwner(supabase, identity, roleId);
+  } catch (classificationError) {
+    await removeClassifiedRepairAddedRole(
+      guild,
+      identity,
+      roleId,
+      missingMemberIsAbsence,
+    );
+    throw new Error(
+      `post-repair ownership classification failed; added access was removed (${String(classificationError)})`,
+    );
+  }
+  if (ownerState !== 'confirmed') {
+    await removeClassifiedRepairAddedRole(
+      guild,
+      identity,
+      roleId,
+      missingMemberIsAbsence,
+    );
+    return ownerState;
+  }
+  member = missingMemberIsAbsence
+    ? await fetchCleanupMember(guild, identity.discordId)
+    : await guild.members.fetch({ user: identity.discordId, force: true });
+  if (!member) return 'member_absent';
+  if (!member.roles.cache.has(roleId)) {
+    if (addError) {
+      throw new Error(
+        `Discord classified-owner repair add failed and read-back did not confirm ${roleId} (${String(addError)})`,
+      );
+    }
+    throw new Error('Discord did not confirm classified retained role');
+  }
+  return 'confirmed';
+}
+
+async function handlePaidRevokeRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  identity: RevokeOwnershipIdentity,
+  roleIds: string[],
+  reason: string,
 ): Promise<ActionResult> {
-  const discordId = payload.discord_id as string;
-  const roleIds = payload.role_ids as string[];
-  const reason = (payload.reason as string) || 'Role revocation';
-
-  if (!discordId) return { success: false, error: 'Missing discord_id' };
-  if (!roleIds || !Array.isArray(roleIds) || roleIds.length === 0) {
-    return { success: false, error: 'Missing or empty role_ids' };
+  const target: ClassifiedRoleOwnerTarget = {
+    guildId: identity.guildId,
+    discordId: identity.discordId,
+    entitlementId: identity.entitlementId,
+  };
+  const retained = new Set<string>();
+  const memberAbsentResult = (): ActionResult => ({
+    success: true,
+    data: {
+      discordId: identity.discordId,
+      removed: [],
+      retained: [],
+      absent: [...roleIds],
+      failed: [],
+      reason,
+    },
+  });
+  try {
+    // Complete the full owner preflight before Discord access. The classifier
+    // intentionally remains non-excluding so a reactivated origin is visible.
+    for (const roleId of roleIds) {
+      const ownerState = await classifyRoleOwner(supabase, target, roleId);
+      if (ownerState === 'pending') {
+        return {
+          success: false,
+          error: `Paid role ownership for ${roleId} is pending`,
+          retryable: true,
+          data: { discordId: identity.discordId, removed: [], retained: [], failed: roleIds, reason },
+        };
+      }
+      if (ownerState === 'confirmed') retained.add(roleId);
+    }
+    for (const roleId of [...retained]) {
+      const repairedState = await repairConfirmedClassifiedRole(
+        guild,
+        supabase,
+        target,
+        roleId,
+        `SomniBot — repair confirmed paid role owner (${reason})`,
+        true,
+      );
+      if (repairedState === 'member_absent') return memberAbsentResult();
+      if (repairedState === 'pending') {
+        return {
+          success: false,
+          error: `Paid role ownership for ${roleId} became pending`,
+          retryable: true,
+          data: { discordId: identity.discordId, removed: [], retained: [], failed: roleIds, reason },
+        };
+      }
+      if (repairedState === 'none') retained.delete(roleId);
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: `Role ownership verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      retryable: true,
+      data: { discordId: identity.discordId, removed: [], retained: [], failed: roleIds, reason },
+    };
   }
 
-  const member = await guild.members.fetch(discordId).catch(() => null);
-  if (!member) {
-    return { success: false, error: `Member ${discordId} not found in guild` };
+  let member: GuildMember | null;
+  try {
+    member = await fetchCleanupMember(guild, identity.discordId);
+  } catch {
+    return {
+      success: false,
+      error: `Member ${identity.discordId} could not be verified in guild`,
+      retryable: true,
+    };
   }
-
+  if (!member) return memberAbsentResult();
   const removed: string[] = [];
+  const absent: string[] = [];
   const failed: string[] = [];
 
   for (const roleId of roleIds) {
-    if (member.roles.cache.has(roleId)) {
+    try {
+      const preRemovalState = await classifyRoleOwner(supabase, target, roleId);
+      if (preRemovalState === 'pending') {
+        failed.push(roleId);
+        continue;
+      }
+      if (preRemovalState === 'confirmed') {
+        const repairedState = await repairConfirmedClassifiedRole(
+          guild,
+          supabase,
+          target,
+          roleId,
+          `SomniBot — repair concurrent paid role owner (${reason})`,
+          true,
+        );
+        if (repairedState === 'member_absent') return memberAbsentResult();
+        if (repairedState === 'pending') {
+          failed.push(roleId);
+          continue;
+        }
+        if (repairedState === 'confirmed') {
+          retained.add(roleId);
+          member = await fetchCleanupMember(guild, identity.discordId);
+          if (!member) return memberAbsentResult();
+          continue;
+        }
+      }
+      retained.delete(roleId);
+    } catch {
+      failed.push(roleId);
+      continue;
+    }
+
+    if (!member) return memberAbsentResult();
+    const currentMember = member;
+    if (currentMember.roles.cache.has(roleId)) {
       try {
-        await member.roles.remove(roleId, `SomniBot — ${reason}`);
+        await currentMember.roles.remove(roleId, `SomniBot — ${reason}`);
+        member = await fetchCleanupMember(guild, identity.discordId);
+        if (!member) return memberAbsentResult();
+        if (member.roles.cache.has(roleId)) {
+          throw new Error('Discord still reports paid role after removal');
+        }
         removed.push(roleId);
       } catch {
+        // A rejected response may conceal a committed removal. Restore only
+        // after a fresh confirmed proof, never from pending/error/unknown.
+        try {
+          const recoveryState = await repairConfirmedClassifiedRole(
+            guild,
+            supabase,
+            target,
+            roleId,
+            `SomniBot — repair paid removal uncertainty for confirmed owner (${reason})`,
+            true,
+          );
+          if (recoveryState === 'member_absent') return memberAbsentResult();
+          if (recoveryState === 'confirmed') {
+            retained.add(roleId);
+            member = await fetchCleanupMember(guild, identity.discordId);
+            if (!member) return memberAbsentResult();
+            continue;
+          }
+        } catch {
+          // Preserve a retry without speculatively adding access.
+        }
         failed.push(roleId);
+        continue;
+      }
+    } else {
+      absent.push(roleId);
+    }
+
+    let postRemovalState: ClassifiedRoleRepairState;
+    try {
+      postRemovalState = await classifyRoleOwner(supabase, target, roleId);
+    } catch {
+      failed.push(roleId);
+      continue;
+    }
+    if (postRemovalState === 'pending') {
+      failed.push(roleId);
+      continue;
+    }
+    if (postRemovalState === 'confirmed') {
+      try {
+        postRemovalState = await repairConfirmedClassifiedRole(
+          guild,
+          supabase,
+          target,
+          roleId,
+          `SomniBot — repair post-removal paid role owner (${reason})`,
+          true,
+        );
+      } catch {
+        failed.push(roleId);
+        continue;
+      }
+      if (postRemovalState === 'member_absent') return memberAbsentResult();
+      if (postRemovalState === 'pending') {
+        failed.push(roleId);
+        continue;
+      }
+      if (postRemovalState === 'confirmed') {
+        retained.add(roleId);
+        const removedIndex = removed.indexOf(roleId);
+        if (removedIndex >= 0) removed.splice(removedIndex, 1);
+        const absentIndex = absent.indexOf(roleId);
+        if (absentIndex >= 0) absent.splice(absentIndex, 1);
+        member = await fetchCleanupMember(guild, identity.discordId);
+        if (!member) return memberAbsentResult();
       }
     }
   }
 
-  log.info(`Revoked ${removed.length} roles from ${discordId} (${reason})`);
-
-  // Any role that could not be removed must NOT be treated as done. This action
-  // is the durable fallback the reconciliation grace-expiry sweep queues when
-  // its inline removal failed — and that sweep already flipped the entitlement
-  // to 'expired', so it will never revisit this member. If we returned success
-  // with a non-empty `failed`, the queue would mark the action completed and a
-  // transient Discord/API error would leave the paid role granted forever.
-  // Fail (retryable) so the queue's backoff re-runs the handler; the per-role
-  // `member.roles.cache.has` guard above makes the retry idempotent — already
-  // removed roles are skipped, only the still-attached ones are re-attempted.
   if (failed.length > 0) {
-    log.warn(`Failed to revoke ${failed.length} roles from ${discordId}:`, failed);
     return {
       success: false,
-      error: `Failed to revoke ${failed.length} of ${roleIds.length} role(s) from ${discordId}`,
+      error: `Failed to converge ${failed.length} paid role cleanup(s)`,
       retryable: true,
-      data: { discordId, removed, failed, reason },
+      data: { discordId: identity.discordId, removed, retained: [...retained], absent, failed, reason },
     };
   }
-
   return {
     success: true,
-    data: { discordId, removed, failed, reason },
+    data: { discordId: identity.discordId, removed, retained: [...retained], absent, failed, reason },
   };
+}
+
+async function handleNonCommerceActivationRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  identity: NonCommerceActivationIdentity,
+  roleIds: string[],
+  reason: string,
+  context: ClaimedActionContext,
+): Promise<ActionResult> {
+  const service = new EntitlementService(guild, supabase, eventBus);
+  const contract = {
+    customerId: identity.customerId,
+    productId: identity.productId,
+    orderId: identity.orderId,
+    planId: identity.planId,
+    discordId: identity.newDiscordId,
+    grantedRoleIds: roleIds,
+    entitlementType: identity.entitlementType,
+    entitlementSource: identity.entitlementSource,
+    activationGeneration: identity.activationGeneration,
+  };
+  try {
+    const begun = await service.beginNonCommerceRoleDeliveryAttempt(
+      identity.entitlementId,
+      contract,
+      context,
+    );
+    if (begun.state === 'superseded' || begun.state === 'unproven') {
+      return {
+        success: true,
+        data: {
+          entitlementId: identity.entitlementId,
+          activationGeneration: identity.activationGeneration,
+          outcome: begun.state,
+          reason,
+        },
+      };
+    }
+    if (begun.state === 'operator_held') {
+      return {
+        success: false,
+        error: `Non-commerce activation intent ${begun.intentId} requires operator recovery`,
+        retryable: true,
+      };
+    }
+    if (begun.state === 'confirmed_live') {
+      return {
+        success: true,
+        data: {
+          entitlementId: identity.entitlementId,
+          activationGeneration: identity.activationGeneration,
+          deliveryIntentId: begun.intentId,
+          outcome: 'live_confirmed_replay',
+          reason,
+        },
+      };
+    }
+    if (begun.state === 'terminal') {
+      if (begun.cleanupNeeded) {
+        const cleanup = await service.executeOwnedPurchaseRoleCleanup(
+          begun.intentId,
+          context,
+        );
+        if (!cleanup.settled) {
+          throw new Error('Non-commerce activation terminal cleanup remains unresolved');
+        }
+      }
+      return {
+        success: true,
+        data: {
+          entitlementId: identity.entitlementId,
+          activationGeneration: identity.activationGeneration,
+          deliveryIntentId: begun.intentId,
+          outcome: 'terminal_noop',
+          reason,
+        },
+      };
+    }
+
+    let outcome = await service.reconcileNonCommerceGrantedRoles(
+      contract,
+      begun.attempt,
+    );
+    let finalized = service.getActivePurchaseRoleDeliveryAttempt()?.intentId
+      === begun.attempt.intentId
+      ? await service.finishPurchaseRoleDeliveryAttempt(
+        begun.attempt,
+        outcome === 'live' ? 'live' : 'compensated',
+      )
+      : {
+        state: 'settled',
+        settled: true,
+        authorityEmpty: true,
+        disposition: 'settled' as const,
+      };
+    if (finalized.disposition === 'run_origin_cleanup') {
+      const cleanup = await service.executeOwnedPurchaseRoleCleanup(
+        begun.attempt.intentId,
+        context,
+      );
+      if (!cleanup.settled) {
+        throw new Error('Non-commerce activation origin cleanup remains unresolved');
+      }
+      outcome = 'terminal';
+      finalized = {
+        state: 'settled',
+        settled: true,
+        authorityEmpty: true,
+        disposition: 'settled',
+      };
+    }
+    const validOwnedLive = finalized.state === 'open'
+      && !finalized.settled
+      && !finalized.authorityEmpty;
+    const validZeroAuthorityLive = finalized.state === 'settled'
+      && finalized.settled
+      && finalized.authorityEmpty;
+    if (outcome === 'live' && !validOwnedLive && !validZeroAuthorityLive) {
+      throw new Error('Non-commerce activation intent did not become confirmed and idle');
+    }
+    if (outcome === 'terminal' && (!finalized.settled || !finalized.authorityEmpty)) {
+      throw new Error('Non-commerce activation terminal compensation did not settle');
+    }
+    return {
+      success: true,
+      data: {
+        entitlementId: identity.entitlementId,
+        activationGeneration: identity.activationGeneration,
+        deliveryIntentId: begun.attempt.intentId,
+        outcome: outcome === 'live' ? 'live_confirmed' : 'terminal_compensated',
+        reason,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      retryable: true,
+      data: {
+        entitlementId: identity.entitlementId,
+        activationGeneration: identity.activationGeneration,
+        reason,
+      },
+    };
+  }
+}
+
+type NonCommerceCleanupDisposition =
+  | 'ready'
+  | 'settled_noop'
+  | 'destination_pending'
+  | 'destination_unproven'
+  | 'superseded'
+  | 'unproven'
+  | 'operator_held';
+
+async function requestNonCommerceRelinkActivation(
+  supabase: SupabaseClient,
+  context: ClaimedActionContext,
+): Promise<{ activationActionId: string | null; disposition: 'enqueued' | 'superseded' }> {
+  const { data, error } = await (
+    supabase.rpc as (
+      fn: string,
+      params: Record<string, unknown>,
+    ) => ReturnType<typeof supabase.rpc>
+  )('commerce_request_noncommerce_relink_activation', {
+    p_action_id: context.actionId,
+    p_claim_token: context.claimToken,
+  });
+  if (error) throw new Error(`Non-commerce relink activation request failed: ${error.message}`);
+  const row = exactSingleRpcRow(data);
+  if (
+    !row
+    || (row.activation_action_id !== null && !isExactNonBlankString(row.activation_action_id))
+    || (row.disposition !== 'enqueued' && row.disposition !== 'superseded')
+    || (row.disposition === 'enqueued' && !isExactNonBlankString(row.activation_action_id))
+  ) {
+    throw new Error('Non-commerce relink activation request returned malformed evidence');
+  }
+  return {
+    activationActionId: row.activation_action_id as string | null,
+    disposition: row.disposition,
+  };
+}
+
+async function prepareNonCommerceRoleCleanup(
+  supabase: SupabaseClient,
+  context: ClaimedActionContext,
+): Promise<{ intentId: string | null; disposition: NonCommerceCleanupDisposition }> {
+  const { data, error } = await (
+    supabase.rpc as (
+      fn: string,
+      params: Record<string, unknown>,
+    ) => ReturnType<typeof supabase.rpc>
+  )('commerce_prepare_noncommerce_role_delivery_cleanup', {
+    p_action_id: context.actionId,
+    p_claim_token: context.claimToken,
+  });
+  if (error) throw new Error(`Non-commerce role cleanup preparation failed: ${error.message}`);
+  const row = exactSingleRpcRow(data);
+  const dispositions: NonCommerceCleanupDisposition[] = [
+    'ready',
+    'settled_noop',
+    'destination_pending',
+    'destination_unproven',
+    'superseded',
+    'unproven',
+    'operator_held',
+  ];
+  if (
+    !row
+    || (row.intent_id !== null && !isExactNonBlankString(row.intent_id))
+    || typeof row.disposition !== 'string'
+    || !dispositions.includes(row.disposition as NonCommerceCleanupDisposition)
+    || (['ready', 'settled_noop', 'operator_held'].includes(row.disposition)
+      && !isExactNonBlankString(row.intent_id))
+  ) {
+    throw new Error('Non-commerce role cleanup preparation returned malformed evidence');
+  }
+  return {
+    intentId: row.intent_id as string | null,
+    disposition: row.disposition as NonCommerceCleanupDisposition,
+  };
+}
+
+async function deferNonCommerceRelinkCleanup(
+  supabase: SupabaseClient,
+  context: ClaimedActionContext,
+): Promise<'deferred' | 'stale_claim'> {
+  const { data, error } = await (
+    supabase.rpc as (
+      fn: string,
+      params: Record<string, unknown>,
+    ) => ReturnType<typeof supabase.rpc>
+  )('commerce_defer_noncommerce_relink_cleanup', {
+    p_action_id: context.actionId,
+    p_claim_token: context.claimToken,
+  });
+  if (error) throw new Error(`Non-commerce relink cleanup deferral failed: ${error.message}`);
+  const row = exactSingleRpcRow(data);
+  if (
+    !row
+    || typeof row.applied !== 'boolean'
+    || (row.disposition !== 'deferred' && row.disposition !== 'stale_claim')
+    || row.applied !== (row.disposition === 'deferred')
+  ) {
+    throw new Error('Non-commerce relink cleanup deferral returned malformed evidence');
+  }
+  return row.disposition;
+}
+
+async function handleNonCommerceCleanupCarrier(
+  guild: Guild,
+  supabase: SupabaseClient,
+  identity: NonCommerceRevokeIdentity | NonCommerceRelinkIdentity,
+  reason: string,
+  context: ClaimedActionContext,
+  kind: 'terminal' | 'relink',
+): Promise<ActionResult> {
+  try {
+    let activationActionId: string | null = null;
+    const prepared = await prepareNonCommerceRoleCleanup(supabase, context);
+    if (prepared.disposition === 'destination_pending') {
+      if (kind !== 'relink') {
+        throw new Error('Terminal non-commerce cleanup returned a relink-only dependency');
+      }
+      const activation = await requestNonCommerceRelinkActivation(supabase, context);
+      activationActionId = activation.activationActionId;
+      if (activation.disposition === 'superseded') {
+        return {
+          success: true,
+          data: {
+            entitlementId: identity.entitlementId,
+            outcome: 'superseded',
+            reason,
+          },
+        };
+      }
+      const deferred = await deferNonCommerceRelinkCleanup(supabase, context);
+      return {
+        success: false,
+        error: deferred === 'deferred'
+          ? 'Waiting for current non-commerce destination activation'
+          : 'Non-commerce cleanup claim was no longer current',
+        retryable: true,
+        claimTransition: 'deferred',
+        data: {
+          entitlementId: identity.entitlementId,
+          activationActionId,
+          outcome: deferred,
+          reason,
+        },
+      };
+    }
+    if (prepared.disposition === 'operator_held') {
+      return {
+        success: false,
+        error: `Non-commerce cleanup intent ${prepared.intentId} requires operator recovery`,
+        retryable: true,
+      };
+    }
+    if (
+      prepared.disposition === 'settled_noop'
+      || prepared.disposition === 'destination_unproven'
+      || prepared.disposition === 'superseded'
+      || prepared.disposition === 'unproven'
+    ) {
+      return {
+        success: true,
+        data: {
+          entitlementId: identity.entitlementId,
+          deliveryIntentId: prepared.intentId,
+          activationActionId,
+          outcome: prepared.disposition,
+          reason,
+        },
+      };
+    }
+    if (!prepared.intentId) {
+      throw new Error('Ready non-commerce cleanup omitted its exact delivery intent');
+    }
+    const service = new EntitlementService(guild, supabase, eventBus);
+    const cleanup = await service.executeOwnedPurchaseRoleCleanup(
+      prepared.intentId,
+      context,
+    );
+    if (!cleanup.settled) {
+      throw new Error('Non-commerce exact-owned role cleanup remains unresolved');
+    }
+    return {
+      success: true,
+      data: {
+        entitlementId: identity.entitlementId,
+        deliveryIntentId: prepared.intentId,
+        activationActionId,
+        outcome: 'settled_cleanup',
+        reason,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      retryable: true,
+      data: { entitlementId: identity.entitlementId, reason },
+    };
+  }
+}
+
+export async function handleRevokeRoles(
+  guild: Guild,
+  supabase: SupabaseClient,
+  payload: Record<string, unknown>,
+  context: ClaimedActionContext = { actionId: '', claimToken: '' },
+): Promise<ActionResult> {
+  const discordId = payload.discord_id;
+  const rawRoleIds = payload.role_ids;
+  const rawTempRoleGrantIds = payload.temporary_role_grant_ids;
+  const reason = typeof payload.reason === 'string' && payload.reason.length > 0
+    ? payload.reason
+    : 'Role revocation';
+
+  if (typeof discordId !== 'string' || discordId.length === 0 || discordId.trim() !== discordId) {
+    return { success: false, error: 'Missing required valid discord_id', retryable: false };
+  }
+  if (
+    !Array.isArray(rawRoleIds)
+    || rawRoleIds.length === 0
+    || !rawRoleIds.every((roleId) =>
+      typeof roleId === 'string' && roleId.length > 0 && roleId.trim() === roleId)
+  ) {
+    return { success: false, error: 'Missing required valid role_ids', retryable: false };
+  }
+  if (new Set(rawRoleIds as string[]).size !== rawRoleIds.length) {
+    return { success: false, error: 'Duplicate role_ids are not allowed', retryable: false };
+  }
+  const roleIds = [...new Set(rawRoleIds as string[])];
+  if (
+    !Array.isArray(rawTempRoleGrantIds)
+    || !rawTempRoleGrantIds.every((grantId) =>
+      typeof grantId === 'string' && grantId.length > 0 && grantId.trim() === grantId)
+    || new Set(rawTempRoleGrantIds).size !== rawTempRoleGrantIds.length
+  ) {
+    return { success: false, error: 'Missing required valid temporary_role_grant_ids', retryable: true };
+  }
+  const tempRoleGrantIds = rawTempRoleGrantIds as string[];
+
+  const nonCommerceActivationIdentity = parseNonCommerceActivationIdentity(
+    payload,
+    guild.id,
+    tempRoleGrantIds,
+  );
+  if (nonCommerceActivationIdentity.error) {
+    return { success: false, error: nonCommerceActivationIdentity.error, retryable: false };
+  }
+  if (nonCommerceActivationIdentity.identity) {
+    return handleNonCommerceActivationRoles(
+      guild,
+      supabase,
+      nonCommerceActivationIdentity.identity,
+      roleIds,
+      reason,
+      context,
+    );
+  }
+
+  const nonCommerceRelinkIdentity = parseNonCommerceRelinkIdentity(
+    payload,
+    guild.id,
+    tempRoleGrantIds,
+  );
+  if (nonCommerceRelinkIdentity.error) {
+    return { success: false, error: nonCommerceRelinkIdentity.error, retryable: false };
+  }
+  if (nonCommerceRelinkIdentity.identity) {
+    return handleNonCommerceCleanupCarrier(
+      guild,
+      supabase,
+      nonCommerceRelinkIdentity.identity,
+      reason,
+      context,
+      'relink',
+    );
+  }
+
+  const nonCommerceIdentity = parseNonCommerceRevokeIdentity(
+    payload,
+    guild.id,
+    tempRoleGrantIds,
+  );
+  if (nonCommerceIdentity.error) {
+    return { success: false, error: nonCommerceIdentity.error, retryable: false };
+  }
+  if (nonCommerceIdentity.identity) {
+    return handleNonCommerceCleanupCarrier(
+      guild,
+      supabase,
+      nonCommerceIdentity.identity,
+      reason,
+      context,
+      'terminal',
+    );
+  }
+
+  const parsedIdentity = parseRevokeOwnershipIdentity(payload, guild.id);
+  if (parsedIdentity.error) {
+    return { success: false, error: parsedIdentity.error, retryable: true };
+  }
+
+  if (!parsedIdentity.identity) {
+    return { success: false, error: 'Invalid revoke_roles identity payload', retryable: true };
+  }
+  try {
+    await validateRevokeOrigin(
+      supabase,
+      parsedIdentity.identity,
+      roleIds,
+      tempRoleGrantIds,
+    );
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Role ownership verification failed: ${detail}`,
+      retryable: true,
+      data: { discordId, removed: [], retained: [], failed: roleIds, reason },
+    };
+  }
+  return handlePaidRevokeRoles(
+    guild,
+    supabase,
+    parsedIdentity.identity,
+    roleIds,
+    reason,
+  );
 }
 
 /**
@@ -847,19 +2636,18 @@ async function handleEmitAuditEvent(
   _supabase: SupabaseClient,
   payload: Record<string, unknown>,
 ): Promise<ActionResult> {
-  const eventType = payload.event_type as string;
-  const eventData = payload.event_data as Record<string, unknown>;
-  if (!eventType || !eventData) {
-    return { success: false, error: 'Missing event_type or event_data' };
+  const event = parseActionQueuePlatformEvent(payload);
+  if (!event) {
+    return {
+      success: false,
+      error: 'Malformed or disallowed action-queue platform event',
+      retryable: false,
+    };
   }
 
-  eventBus.emit(
-    eventType as PlatformEventType,
-    guild.id,
-    eventData as unknown as PlatformEventMap[PlatformEventType],
-  );
+  eventBus.emit(event.type, guild.id, event.data);
 
-  return { success: true, data: { eventType } };
+  return { success: true, data: { eventType: event.type } };
 }
 
 /**
@@ -1025,10 +2813,7 @@ async function handleSyncClearAllDrift(
   return { success: true };
 }
 
-const ACTION_HANDLERS: Record<
-  string,
-  (guild: Guild, supabase: SupabaseClient, payload: Record<string, unknown>) => Promise<ActionResult>
-> = {
+const ACTION_HANDLERS: Record<string, ActionHandler> = {
   create_role: handleCreateRole,
   update_role: handleUpdateRole,
   delete_role: handleDeleteRole,
@@ -1045,8 +2830,10 @@ const ACTION_HANDLERS: Record<
   config_reload: handleConfigReload,
   send_embed: handleSendEmbed,
   test_welcome: handleTestWelcome,
-  fulfill_giveaway_prize: handleFulfillment,
+  fulfill_giveaway_prize: handleGiveawayPrizeFulfillment,
+  notify_giveaway_winner: handleGiveawayWinnerNotification,
   run_reconciliation: handleRunReconciliation,
+  reconcile_entitlement_roles: handleReconcileEntitlementRoles,
   revoke_roles: handleRevokeRoles,
   market_item_reconcile: handleMarketItemReconcile,
   bulk_role_add: handleBulkRoleAdd,
@@ -1090,58 +2877,6 @@ export function redactPayloadForAudit(
   return redacted;
 }
 
-/**
- * Final-failure handling for receipt/license-key delivery: a paid customer
- * has not received their goods, so this must never disappear silently.
- * Dead-letters the action to `action_queue_dlq` (dashboard-visible, manually
- * retryable — same shape as the stale-recovery DLQ writes below) and raises
- * an operator alert with the actionable next step.
- */
-async function deadLetterReceiptDelivery(
-  guild: Guild,
-  supabase: SupabaseClient,
-  action: ActionRow,
-  result: ActionResult,
-  attempts: number,
-): Promise<void> {
-  const payload = action.payload as unknown as Partial<ReceiptDeliveryPayload>;
-  const kind: DeliveryFailureKind = result.retryable === false ? 'permanent' : 'transient';
-
-  let payloadPreserved = false;
-  try {
-    // Lane is intentionally NOT written here: the BEFORE INSERT trigger on
-    // action_queue_dlq (migration 20260710020000) derives it from `action`,
-    // and lane is a pure function of the action type, so the original lane
-    // is always preserved. Writing the column from code would make this
-    // insert fail (undefined column) if the bot ever runs ahead of the
-    // migration — and this row is the only remaining copy of the payload.
-    const { error } = await supabase.from('action_queue_dlq').insert({
-      guild_id: guild.id,
-      action: action.action,
-      payload: action.payload ?? {},
-      error_message: result.error ?? 'Receipt delivery failed',
-      retry_count: attempts,
-      max_retries: HANDLER_MAX_RETRIES,
-      original_id: action.id,
-    });
-    if (error) throw new Error(error.message);
-    payloadPreserved = true;
-  } catch (dlqErr) {
-    log.error(`Failed to write DLQ entry for ${action.id}:`, dlqErr);
-  }
-
-  await writeReceiptDeliveryAlert(supabase, {
-    guildId: guild.id,
-    orderNumber: payload.order_number ?? 'unknown',
-    productName: payload.product_name ?? 'unknown',
-    discordId: payload.discord_id ?? 'unknown',
-    kind,
-    attempts,
-    lastError: result.error ?? 'unknown',
-    payloadPreserved,
-  });
-}
-
 async function processAction(
   guild: Guild,
   supabase: SupabaseClient,
@@ -1158,106 +2893,176 @@ async function processAction(
   // V5 Audit §6.P3a: Use unknown-schema cast to call RPCs not in generated types.
   const { data: claimed, error: claimErr } = await (
     supabase.rpc as (fn: string, params: Record<string, unknown>) => ReturnType<typeof supabase.rpc>
-  )('bot_action_queue_claim', { p_action_id: action.id });
+  )('bot_action_queue_claim', {
+    p_action_id: action.id,
+    p_protocol_version: ACTION_QUEUE_CLAIM_PROTOCOL_VERSION,
+  });
   if (claimErr) {
     log.error(`Claim RPC failed for ${action.id}:`, claimErr.message);
     return;
   }
-  const claimedRow = Array.isArray(claimed) ? claimed[0] : claimed;
-  if (!claimedRow) {
+  const claimedValue = Array.isArray(claimed) ? claimed[0] : claimed;
+  if (!claimedValue) {
     log.info(`Skipping ${action.id} — already claimed by another worker`);
     return;
   }
 
-  log.info(`Processing: ${action.action} (${action.id})`);
+  // Realtime and sweeps provide only a candidate id. The pre-claim row may
+  // already be stale; action, payload, lane, retry generation, and token all
+  // come exclusively from the atomic claim result.
+  const claimedAction = parseClaimedActionRow(claimedValue, action.id, guild.id);
+  if (!claimedAction) {
+    log.error(`Claim RPC returned malformed or mismatched evidence for ${action.id}`);
+    return;
+  }
 
-  const handler = ACTION_HANDLERS[action.action];
+  log.info(`Processing: ${claimedAction.action} (${claimedAction.id})`);
+
+  const handler = ACTION_HANDLERS[claimedAction.action];
   let result: ActionResult;
 
   if (!handler) {
-    if (action.action === 'refresh_snapshot') {
+    if (claimedAction.action === 'refresh_snapshot') {
       await writeGuildSnapshot(guild, supabase);
       result = { success: true };
     } else {
-      result = { success: false, error: `Unknown action: ${action.action}` };
+      result = { success: false, error: `Unknown action: ${claimedAction.action}` };
     }
   } else {
     try {
-      result = await handler(guild, supabase, action.payload);
+      result = await handler(guild, supabase, claimedAction.payload, {
+        actionId: claimedAction.id,
+        claimToken: claimedAction.claim_token,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(`Error processing ${action.action}:`, msg);
+      log.error(`Error processing ${claimedAction.action}:`, msg);
       result = { success: false, error: msg };
     }
+  }
+
+  // Some dependency waits atomically relinquish this exact claim in SQL and
+  // return the row to pending without consuming its retry budget. The local
+  // worker must not retry or finalize a claim token that the database already
+  // retired; the periodic sweep will pick it up after next_retry_at.
+  if (result.claimTransition === 'deferred') {
+    log.info(`Deferred ${claimedAction.action} (${claimedAction.id}) to its durable dependency`);
+    return;
   }
 
   // V5 Audit §6.5: On transient failures, schedule an immediate retry with
   // exponential backoff (30s → 60s → 120s) before giving up and marking as
   // failed. The stale-recovery sweep catches crash failures (5-min timeout),
   // but handler-level errors should retry sooner.
+  let retryFinalDisposition: FinalClaimDisposition | null = null;
   if (!result.success) {
-    const { data: currentRow } = await supabase
-      .from('bot_action_queue')
-      .select('retry_count')
-      .eq('id', action.id)
-      .maybeSingle();
-
-    const retryCount = (currentRow?.retry_count ?? 0) + 1;
+    const retryCount = claimedAction.retry_count + 1;
     const isTransient = result.retryable !== false &&
                         !result.error?.includes('Unknown action') &&
                         !result.error?.includes('Missing required');
 
     if (isTransient && retryCount <= HANDLER_MAX_RETRIES) {
       const backoffMs = Math.min(30_000 * Math.pow(2, retryCount - 1), 120_000);
-      log.info(`Scheduling retry #${retryCount} for ${action.id} in ${backoffMs / 1000}s`);
 
       // next_retry_at persists the backoff schedule: the row goes back to
       // 'pending' for crash-safety, but sweeps must not pick it up before
       // the backoff elapses (the in-process setTimeout below is the primary
       // retry path; the periodic sweep is the catch-up if the process dies).
-      await supabase
-        .from('bot_action_queue')
-        .update({
-          status: 'pending',
-          retry_count: retryCount,
-          error_message: result.error ?? null,
-          next_retry_at: new Date(Date.now() + backoffMs).toISOString(),
-        })
-        .eq('id', action.id);
+      const retryParams = {
+        p_action_id: claimedAction.id,
+        p_claim_token: claimedAction.claim_token,
+        p_error: result.error ?? null,
+        p_next_retry_at: new Date(Date.now() + backoffMs).toISOString(),
+      };
+      let retryTransition: ReturnType<typeof parseRetryClaimTransition> = null;
+      for (let transitionAttempt = 0; transitionAttempt < 2; transitionAttempt++) {
+        const { data: retryEvidence, error: retryError } = await (
+          supabase.rpc as (
+            fn: string,
+            params: Record<string, unknown>,
+          ) => ReturnType<typeof supabase.rpc>
+        )('bot_action_queue_retry_claim', retryParams);
+        if (retryError) {
+          log.warn(`Retry transition failed for ${claimedAction.id}: ${retryError.message}`);
+          return;
+        }
+        retryTransition = parseRetryClaimTransition(retryEvidence);
+        if (!retryTransition) {
+          log.warn(`Retry transition returned malformed evidence for ${claimedAction.id}`);
+          return;
+        }
+        if (retryTransition.disposition !== 'intent_raced') break;
+      }
 
-      // Re-process after backoff (non-blocking). Retries run under the same
-      // per-lane budget as fresh work — a burst of retrying game jobs must
-      // not consume commerce capacity either.
-      setTimeout(() => {
-        scheduler
-          .run(laneOf(action), () => processAction(guild, supabase, action, scheduler))
-          .catch((e) => {
-            log.error(`Retry #${retryCount} failed for ${action.id}:`, e);
-          });
-      }, backoffMs);
+      if (!retryTransition || retryTransition.disposition === 'intent_raced') {
+        log.warn(`Retry transition could not resolve an intent race for ${claimedAction.id}`);
+        return;
+      }
+      if (retryTransition.disposition === 'stale_claim') {
+        log.warn(`Retry claim was no longer current for ${claimedAction.id}`);
+        return;
+      }
+      if (retryTransition.disposition === 'completed') {
+        // The handler response was lost or stale, but exact durable delivery
+        // evidence atomically completed the queue row. Do not call the claim
+        // finalizer again against a row that is already terminal.
+        retryFinalDisposition = 'completed_from_evidence';
+      } else if (retryTransition.disposition === 'operator_held') {
+        // SQL atomically failed/dead-lettered the unsafe claim and signalled
+        // its durable operator hold. Preserve that final failure in audit.
+        retryFinalDisposition = 'failed';
+      } else {
+        // `requeued` is the sole transition that permits a local retry timer.
+        // Any false/stale/evidence disposition above deliberately bypasses it.
+        log.info(
+          `Scheduling retry #${retryCount} for ${claimedAction.id} `
+          + `in ${backoffMs / 1000}s`,
+        );
+        setTimeout(() => {
+          scheduler
+            .run(claimedAction.lane, () => processAction(guild, supabase, claimedAction, scheduler))
+            .catch((e) => {
+              log.error(`Retry #${retryCount} failed for ${claimedAction.id}:`, e);
+            });
+        }, backoffMs);
 
-      return; // Don't mark as failed yet — retry scheduled
+        return; // Don't mark as failed yet — retry scheduled
+      }
     }
 
-    // This failure is FINAL (permanent error or retry budget exhausted).
-    // Receipt/license-key delivery means a paid customer has not received
-    // their goods — dead-letter it and alert the operator instead of
-    // dropping it silently.
-    if (action.action === RECEIPT_DELIVERY_ACTION) {
-      await deadLetterReceiptDelivery(guild, supabase, action, result, retryCount);
-    }
+    // This failure is FINAL. Token-aware finalization below must win before
+    // any dead-letter/audit side effect is emitted.
   }
 
-  // Mark completed/failed
-  await supabase
-    .from('bot_action_queue')
-    .update({
-      status: result.success ? 'completed' : 'failed',
-      result: result.data ?? null,
-      error_message: result.error ?? null,
-      completed_at: new Date().toISOString(),
-    })
-    .eq('id', action.id);
+  // Mark completed/failed only if this exact claim generation remains
+  // current. A successful paid delivery may retain a confirmed, idle OPEN
+  // intent as long-lived removal authority; the SQL finalizer accepts that
+  // exact state as well as a zero-authority settled tombstone.
+  let finalDisposition: FinalClaimDisposition | null = retryFinalDisposition;
+  if (finalDisposition === null) {
+    const { data: finishApplied, error: finishError } = await (
+      supabase.rpc as (
+        fn: string,
+        params: Record<string, unknown>,
+      ) => ReturnType<typeof supabase.rpc>
+    )('bot_action_queue_finish_claim', {
+      p_action_id: claimedAction.id,
+      p_claim_token: claimedAction.claim_token,
+      p_success: result.success,
+      p_result: result.data ?? null,
+      p_error: result.error ?? null,
+    });
+    if (finishError) {
+      log.warn(`Final claim transition failed for ${claimedAction.id}: ${finishError.message}`);
+      return;
+    }
+    finalDisposition = parseFinalClaimTransition(finishApplied, result.success);
+  }
+  if (finalDisposition === null) {
+    log.warn(`Final claim was no longer current for ${claimedAction.id}`);
+    return;
+  }
+  const finalSuccess = finalDisposition !== 'failed';
 
   // Audit log. The payload is redacted first: deliver_receipt / fulfill_*
   // payloads carry the plaintext license key (by design, for retryability),
@@ -1266,24 +3071,25 @@ async function processAction(
     guildId: guild.id,
     actorType: 'dashboard',
     actorId: 'action-queue',
-    action: `bot.${action.action}`,
+    action: `bot.${claimedAction.action}`,
     details: {
-      actionId: action.id,
-      payload: redactPayloadForAudit(action.payload),
+      actionId: claimedAction.id,
+      payload: redactPayloadForAudit(claimedAction.payload),
       result: result.data,
+      finalDisposition,
     },
-    success: result.success,
-    errorMessage: result.error,
+    success: finalSuccess,
+    errorMessage: finalSuccess ? undefined : result.error,
   });
 
   // Always refresh snapshot after any mutation
-  if (action.action !== 'refresh_snapshot') {
+  if (claimedAction.action !== 'refresh_snapshot') {
     await writeGuildSnapshot(guild, supabase);
   }
 
   log.info(
-    `[ActionQueue] ${result.success ? '✅' : '❌'} ${action.action}: ` +
-      (result.success ? JSON.stringify(result.data) : result.error),
+    `[ActionQueue] ${finalSuccess ? '✅' : '❌'} ${claimedAction.action}: ` +
+      (finalSuccess ? JSON.stringify(result.data) : result.error),
   );
 }
 
@@ -1295,7 +3101,7 @@ async function processAction(
  * Start listening for bot action queue items.
  *
  * 1. Process any existing pending actions (in case we missed them while offline)
- * 2. Subscribe to Realtime INSERT events on bot_action_queue
+ * 2. Subscribe to Realtime INSERT events and staged→pending UPDATE releases
  * 3. Once the subscription is SUBSCRIBED, sweep pending rows again — rows
  *    inserted between step 1's snapshot and the subscription going live
  *    (e.g. deliver_receipt re-delivery rows queued by step 1 itself) are
@@ -1359,77 +3165,58 @@ async function recoverStaleActions(
     log.error('Stale recovery failed:', error.message);
     return;
   }
-  const rows: Array<{ id: string; action: string; was_failed: boolean }> = recovered ?? [];
+  if (!Array.isArray(recovered)) {
+    log.error('Stale recovery returned malformed evidence');
+    return;
+  }
+  const rows: Array<{
+    id: string;
+    action: string;
+    disposition: 'completed' | 'requeued' | 'failed' | 'operator_held';
+  }> = [];
+  const recoveredIds = new Set<string>();
+  for (const value of recovered) {
+    const row = value as Record<string, unknown> | null;
+    if (
+      !row
+      || !isExactNonBlankString(row.id)
+      || !isExactNonBlankString(row.action)
+      || typeof row.disposition !== 'string'
+      || !['completed', 'requeued', 'failed', 'operator_held'].includes(
+        row.disposition,
+      )
+      || recoveredIds.has(row.id)
+    ) {
+      log.error('Stale recovery returned malformed or duplicate evidence');
+      return;
+    }
+    recoveredIds.add(row.id);
+    rows.push(row as unknown as (typeof rows)[number]);
+  }
   if (rows.length === 0) return;
 
-  const failedRows = rows.filter((r) => r.was_failed);
-  const failedCount = failedRows.length;
-  const requeuedCount = rows.length - failedCount;
+  const failedCount = rows.filter((row) => row.disposition === 'failed').length;
+  const operatorHeldCount = rows.filter((row) => row.disposition === 'operator_held').length;
+  const completedCount = rows.filter((row) => row.disposition === 'completed').length;
+  const requeued = rows.filter((row) => row.disposition === 'requeued');
+  const requeuedCount = requeued.length;
   if (failedCount > 0) {
-    log.warn(`DLQ: ${failedCount} action(s) failed after exhausting retries`);
-    // V53 Phase 2: Write failed actions to DLQ table for dashboard visibility
-    for (const row of failedRows) {
-      let fullRow: {
-        action: string;
-        payload: unknown;
-        error_message: string | null;
-        retry_count: number | null;
-      } | null = null;
-      let payloadPreserved = false;
-      try {
-        // Fetch full action row for payload + error
-        const { data } = await supabase
-          .from('bot_action_queue')
-          .select('action, payload, error_message, retry_count')
-          .eq('id', row.id)
-          .maybeSingle();
-        fullRow = data;
-        if (fullRow) {
-          // Lane preserved via the DLQ's BEFORE INSERT trigger (it derives
-          // lane from `action`, which is exactly the original row's lane) —
-          // not written from code, so this insert cannot break if the bot
-          // runs ahead of the lane migration.
-          const { error: dlqInsertError } = await supabase.from('action_queue_dlq').insert({
-            guild_id: guild.id,
-            action: fullRow.action,
-            payload: fullRow.payload ?? {},
-            error_message: fullRow.error_message ?? 'Unknown error after max retries',
-            retry_count: fullRow.retry_count ?? 0,
-            max_retries: ACTION_QUEUE_MAX_RETRIES,
-            original_id: row.id,
-          });
-          payloadPreserved = !dlqInsertError;
-        }
-      } catch (dlqErr) {
-        log.error(`Failed to write DLQ entry for ${row.id}:`, dlqErr);
-      }
-
-      // Receipt/license-key delivery must never fail silently: exhaustion can
-      // also happen through THIS crash-recovery path (bot died mid-delivery
-      // repeatedly), not just the in-process retry path in processAction —
-      // surface the same operator alert here.
-      if (row.action === RECEIPT_DELIVERY_ACTION) {
-        const payload = (fullRow?.payload ?? {}) as Partial<ReceiptDeliveryPayload>;
-        await writeReceiptDeliveryAlert(supabase, {
-          guildId: guild.id,
-          orderNumber: payload.order_number ?? 'unknown',
-          productName: payload.product_name ?? 'unknown',
-          discordId: payload.discord_id ?? 'unknown',
-          kind: 'transient',
-          attempts: fullRow?.retry_count ?? ACTION_QUEUE_MAX_RETRIES,
-          lastError:
-            fullRow?.error_message ?? 'Stale processing recovery: retry budget exhausted',
-          payloadPreserved,
-        });
-      }
-    }
+    log.warn(`DLQ: ${failedCount} stale action(s) failed after exhausting retries`);
+  }
+  if (operatorHeldCount > 0) {
+    log.warn(
+      `Held ${operatorHeldCount} stale role-delivery action(s) for exact operator recovery`,
+    );
+  }
+  if (completedCount > 0) {
+    log.info(`Completed ${completedCount} stale action(s) from durable success evidence`);
   }
   if (requeuedCount > 0) {
     log.info(`Re-queued ${requeuedCount} stale action(s) for processing`);
-    // The recovery RPC flipped them back to 'pending', but Realtime only
-    // fires on INSERT — re-fetch and feed them through processAction so
-    // they get picked up immediately on this worker instead of waiting
-    // for the next restart.
+    // The recovery RPC flipped them back to 'pending'. Realtime UPDATE now
+    // observes that release too, but re-fetch and feed them explicitly so
+    // recovery remains immediate even during a subscription outage; the
+    // atomic claim deduplicates the two paths.
     //
     // Lane priority must hold at the QUERY level, not in memory: the RPC
     // returns EVERY stale row (uncapped), so a game flood can hand back more
@@ -1441,7 +3228,6 @@ async function recoverStaleActions(
     // test), so partition the ids by lane FIRST and spend the fetch budget
     // on commerce ids before any game id. Game rows left over stay
     // 'pending' and are picked up by the next lane-ordered sweep.
-    const requeued = rows.filter((r) => !r.was_failed);
     const commerceIds: string[] = [];
     const gameIds: string[] = [];
     for (const r of requeued) {
@@ -1708,7 +3494,8 @@ export async function startActionQueueListener(
   }, STALE_RECOVERY_INTERVAL_MS);
   staleRecoveryTimer.unref?.();
 
-  // V11 Audit H-5: Subscribe to new inserts with automatic reconnection.
+  // V11 Audit H-5: Subscribe to new inserts and pending-state releases with
+  // automatic reconnection.
   // The Supabase Realtime subscription can silently disconnect (server
   // restart, network blip). On error/timeout/closed we resubscribe after
   // a delay, with exponential backoff capped at 30s.
@@ -1716,6 +3503,24 @@ export async function startActionQueueListener(
   const MAX_RECONNECT_DELAY = 30_000;
 
   function subscribeToQueue(): void {
+    const dispatchPendingAction = async (payload: { new: Record<string, unknown> }) => {
+      const action = payload.new as unknown as ActionRow;
+      if (action.status !== 'pending') return;
+
+      // A handler retry also UPDATEs a row back to pending, but with a future
+      // next_retry_at. Do not let Realtime bypass its durable backoff. Staged
+      // outbox releases have no future retry and dispatch immediately.
+      const nextRetryAt = action.next_retry_at ? Date.parse(action.next_retry_at) : Number.NaN;
+      if (Number.isFinite(nextRetryAt) && nextRetryAt > Date.now()) return;
+
+      // Realtime callbacks are fire-and-forget, so admission goes through the
+      // shared per-lane scheduler. The atomic claim deduplicates INSERT/UPDATE
+      // deliveries against startup, reconnect, and periodic sweeps.
+      await scheduler.run(laneOf(action), () =>
+        processAction(guild, supabase, action, scheduler),
+      );
+    };
+
     supabase
       .channel(`bot-action-queue-${Date.now()}`)
       .on(
@@ -1726,23 +3531,17 @@ export async function startActionQueueListener(
           table: 'bot_action_queue',
           filter: `guild_id=eq.${guild.id}`,
         },
-        async (payload) => {
-          const action = payload.new as ActionRow;
-          if (action.status === 'pending') {
-            // Realtime dispatches each INSERT callback fire-and-forget
-            // (phoenix invokes bindings without awaiting them), so a
-            // game-job flood becomes N concurrent handler invocations that
-            // would otherwise occupy every in-process slot. Admission goes
-            // through the per-lane budgets: game events over budget wait
-            // in-process WITHOUT claiming their rows (they stay 'pending'
-            // and crash-safe), while commerce events are admitted
-            // immediately under the commerce budget — waiting here can not
-            // delay dispatch of later events.
-            await scheduler.run(laneOf(action), () =>
-              processAction(guild, supabase, action, scheduler),
-            );
-          }
+        dispatchPendingAction,
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'bot_action_queue',
+          filter: `guild_id=eq.${guild.id}`,
         },
+        dispatchPendingAction,
       )
       .subscribe((status, err) => {
         if (status === 'SUBSCRIBED') {
@@ -1750,7 +3549,7 @@ export async function startActionQueueListener(
           reconnectDelay = 1_000; // reset backoff on success
           // Rows inserted after the startup sweep read its snapshot but
           // before this subscription became active are invisible to both
-          // paths — Realtime only fires for future INSERTs. The startup
+          // paths — Realtime only fires for future changes. The startup
           // sweep itself creates such rows: a fulfill_purchase processed
           // from the offline backlog whose receipt DM fails inserts a new
           // pending deliver_receipt row, which would otherwise sit pending

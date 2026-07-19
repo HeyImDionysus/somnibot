@@ -166,6 +166,55 @@ describe('getPayPalTokenResult', () => {
   });
 });
 
+describe('getSubscriptionAmount', () => {
+  it('returns the exact provider plan, amount, and normalized currency', async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ access_token: 'tok_subscription' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          plan_id: 'P-PROVIDER-PLAN-1',
+          billing_info: {
+            last_payment: { amount: { value: '10.25', currency_code: 'eur' } },
+          },
+        }),
+      });
+
+    const { getSubscriptionAmount } = await import('@/lib/paypal');
+    await expect(getSubscriptionAmount('I-SUBSCRIPTION-1')).resolves.toEqual({
+      amountCents: 1_025,
+      currency: 'EUR',
+      planId: 'P-PROVIDER-PLAN-1',
+    });
+  });
+
+  it.each(['10.00junk', '1.001'])(
+    'rejects a non-exact provider amount of %s',
+    async (value) => {
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({ access_token: 'tok_subscription' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve({
+            plan_id: 'P-PROVIDER-PLAN-1',
+            billing_info: {
+              last_payment: { amount: { value, currency_code: 'USD' } },
+            },
+          }),
+        });
+
+      const { getSubscriptionAmount } = await import('@/lib/paypal');
+      await expect(getSubscriptionAmount('I-SUBSCRIPTION-1')).resolves.toBeNull();
+    },
+  );
+});
+
 describe('PAYPAL_API_BASE', () => {
   it('exports the API base URL', async () => {
     const { PAYPAL_API_BASE } = await import('@/lib/paypal');

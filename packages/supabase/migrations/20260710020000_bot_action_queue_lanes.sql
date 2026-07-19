@@ -59,7 +59,8 @@ AS $$
       'fulfill_suspension',
       'fulfill_giveaway_prize',
       'deliver_receipt',
-      'revoke_roles'
+      'revoke_roles',
+      'reconcile_entitlement_roles'
     ) THEN 'commerce'
     ELSE 'game'
   END;

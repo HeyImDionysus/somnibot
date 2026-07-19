@@ -17,6 +17,9 @@ vi.mock('@somnibot/shared', () => ({
     ROLE_GRANT_DELAY_MS: 1000,
     MAX_CHAIN_DEPTH: 3,
   },
+  isTriggerType: (value: unknown) => ['member.joined', 'message.sent'].includes(String(value)),
+  isConditionType: () => true,
+  isActionType: () => true,
 }));
 vi.mock('../services/audit.js', () => ({ writeAuditLog: vi.fn(async () => {}) }));
 vi.mock('../services/event-bus.js', () => ({

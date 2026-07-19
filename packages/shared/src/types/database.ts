@@ -16,6 +16,19 @@
 // Generic JSON type for JSONB columns
 export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
 
+// Two-phase privacy RPC results. Both purge functions return JSONB so callers
+// must inspect purge_status instead of treating a successful RPC as completion.
+export type PrivacyPurgeStatus = 'pending_role_cleanup' | 'completed';
+
+export interface PrivacyPurgeRpcResult {
+  [key: string]: Json;
+  purge_status: PrivacyPurgeStatus;
+  pending_role_cleanup_count: number;
+}
+
+export type PurgeMemberDataRpcResult = PrivacyPurgeRpcResult;
+export type PurgeGuildDataRpcResult = PrivacyPurgeRpcResult;
+
 // Auto-Mod Rule Config Types
 export type AutoModRuleType =
   | 'word_filter'
@@ -834,6 +847,87 @@ export interface DbProduct {
   updated_at: string;
 }
 
+export interface DbCommerceProductTempRoleConfig {
+  id: string;
+  product_id: string;
+  guild_id: string;
+  role_id: string;
+  duration_seconds: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbCommerceLegacySubscriptionGrantContract {
+  order_id: string;
+  source_queue_id: string;
+  guild_id: string;
+  customer_id: string;
+  discord_id: string;
+  product_id: string;
+  product_name: string;
+  order_number: string;
+  plan_id: string;
+  paypal_subscription_id: string;
+  paypal_plan_id: string;
+  amount_cents: number;
+  currency: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  persisted_at: string;
+}
+
+export type CommerceRoleMetadataMigrationIssueType =
+  | 'invalid_role_id'
+  | 'invalid_duration'
+  | 'orphan_duration'
+  | 'unsupported_product_type'
+  | 'ambiguous_permanent_history'
+  | 'ambiguous_historical_role'
+  | 'invalid_historical_roles';
+
+export interface DbCommerceRoleMetadataMigrationIssue {
+  id: string;
+  product_id: string;
+  guild_id: string;
+  role_id: string | null;
+  issue_type: CommerceRoleMetadataMigrationIssueType;
+  details: Record<string, unknown>;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export interface DbCommerceTempRoleMigrationIssue {
+  id: string;
+  temp_role_grant_id: string;
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  source: string | null;
+  source_id: string | null;
+  issue_type: 'missing_order_provenance';
+  resolved_at: string | null;
+  created_at: string;
+}
+
+export interface DbTempRoleGrant {
+  id: string;
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  expires_at: string;
+  source: string;
+  source_id: string | null;
+  created_at: string;
+  order_id: string | null;
+  grant_status: 'pending' | 'applied' | 'removed';
+  duration_seconds: number | null;
+  remove_on_expiry: boolean;
+  applied_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
+}
+
 export interface DbProductFile {
   id: string;
   product_id: string | null;
@@ -926,9 +1020,16 @@ export interface DbOrder {
   discount_cents: number;
   promotion_id: string | null;
   source: 'purchase' | 'giveaway' | 'manual' | 'automation';
-  status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled';
+  status: 'pending' | 'completed' | 'refunded' | 'disputed' | 'cancelled' | 'pending_review';
   created_at: string;
   updated_at: string;
+  granted_role_ids_snapshot: string[];
+  granted_channel_ids_snapshot: string[];
+  temporary_role_grants_snapshot: Array<{
+    role_id: string;
+    duration_seconds: number;
+  }>;
+  grant_snapshot_frozen_at: string | null;
 }
 
 // — Commerce — Licensing —
@@ -952,6 +1053,7 @@ export interface DbLicenseKey {
   updated_at: string;
   failed_attempts: number;
   last_failed_at: string | null;
+  commerce_required_order_status: 'completed' | null;
 }
 
 export interface DbEntitlement {
@@ -973,6 +1075,7 @@ export interface DbEntitlement {
   cancelled_at: string | null;
   created_at: string;
   updated_at: string;
+  commerce_required_order_status: 'completed' | null;
 }
 
 export interface DbProductLicenseConfig {
@@ -1003,6 +1106,7 @@ export interface DbLicenseSession {
   last_seen_at: string;
   deactivated_at: string | null;
   deactivation_reason: 'user_deactivated' | 'admin_revoked' | 'device_limit' | 'heartbeat_timeout' | 'entitlement_revoked' | null;
+  commerce_required_license_status: 'active' | null;
 }
 
 export interface DbLicenseValidation {
@@ -1031,6 +1135,9 @@ export interface DbPayment {
   created_at: string;
   // V19 Audit: added missing schema fields
   provider: string | null;
+  paypal_resource_type: 'capture' | 'sale' | null;
+  commerce_required_order_status: 'completed' | 'refunded' | null;
+  commerce_settled_capture_order_id: string | null;
 }
 
 // — Commerce — Giveaways —
@@ -1113,10 +1220,11 @@ export interface DbBotActionQueue {
   guild_id: string;
   action: string;
   payload: Record<string, unknown>;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'staged' | 'pending' | 'processing' | 'completed' | 'failed';
   // 20260710020000: processing lane — stamped by a BEFORE INSERT trigger
   // from `action` (commerce = paid-store work, prioritized over game).
   lane: 'commerce' | 'game';
+  idempotency_key: string | null;
   result: Record<string, unknown> | null;
   error_message: string | null;
   created_at: string;
@@ -1503,6 +1611,30 @@ export interface DbEconomyRoleIncome {
   role_id: string;
   amount: number;
   interval_minutes: number;
+  created_at: string;
+}
+
+export interface DbEconomyRoleIncomeClaim {
+  guild_id: string;
+  user_id: string;
+  role_id: string;
+  next_available_at: string;
+  last_request_id: string;
+  updated_at: string;
+}
+
+export interface DbEconomyRoleIncomeRequest {
+  guild_id: string;
+  user_id: string;
+  request_id: string;
+  result: {
+    status: 'credited' | 'cooldown' | 'no_eligible_roles' | 'verification_unavailable';
+    amount_cents: number;
+    balance_cents: number | null;
+    credited_role_ids: string[];
+    blocked_role_ids: string[];
+    next_available_at: string | null;
+  };
   created_at: string;
 }
 
@@ -2172,4 +2304,48 @@ export interface DbPaymentRefund {
   amount_cents: number | null;
   currency: string | null;
   created_at: string;
+  paypal_resource_type: 'capture' | 'sale' | null;
+  is_terminal_event_witness: boolean;
+}
+
+// ── Admin Refund Attempts (commerce_admin_refund_operations) ─
+// Append-only PayPal request attempts. Terminal failures remain as durable
+// history; request_id is always the same UUID as attempt_id.
+
+export type CommerceAdminRefundAttemptStatus =
+  | 'prepared'
+  | 'pending'
+  | 'provider_completed'
+  | 'failed'
+  | 'cancelled'
+  | 'completed';
+
+export interface DbCommerceAdminRefundOperation {
+  attempt_id: string;
+  request_id: string;
+  order_id: string;
+  guild_id: string;
+  customer_id: string;
+  product_id: string;
+  plan_id: string | null;
+  actor_id: string;
+  paypal_order_id: string | null;
+  payment_id: string | null;
+  paypal_payment_id: string | null;
+  resource_type: 'capture' | null;
+  order_amount_cents: number;
+  existing_refunded_cents: number;
+  refund_amount_cents: number;
+  currency: string;
+  reason: string;
+  provider_required: boolean;
+  status: CommerceAdminRefundAttemptStatus;
+  provider_status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | null;
+  paypal_refund_id: string | null;
+  provider_reported_amount_cents: number | null;
+  provider_reported_currency: string | null;
+  created_at: string;
+  updated_at: string;
+  provider_outcome_at: string | null;
+  completed_at: string | null;
 }

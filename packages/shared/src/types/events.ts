@@ -9,6 +9,8 @@ export interface PlatformEvent<T extends string = string, D = unknown> {
   guildId: string;
   timestamp: number;
   data: D;
+  /** Stable identity for one real source occurrence across retries and restarts. */
+  occurrenceId?: string;
   /** Automation chain depth — tracks how many automations deep this event is. */
   _chainDepth?: number;
 }
@@ -32,6 +34,7 @@ export interface MemberLeftData {
 export interface MemberVerifiedData {
   discordId: string;
   username: string;
+  memberNumber: number;
 }
 
 export interface RoleChangedData {
@@ -59,6 +62,8 @@ export interface PurchaseCompletedData {
 }
 
 export interface SubscriptionChangedData {
+  /** Durable commerce lifecycle action/order identity for this transition. */
+  lifecycleId: string;
   discordId: string;
   productId: string;
   planId: string;
@@ -74,6 +79,7 @@ export interface TicketEventData {
 }
 
 export interface InfractionCreatedData {
+  infractionId: string;
   userId: string;
   moderatorId: string;
   type: 'warn' | 'mute' | 'kick' | 'ban';
@@ -120,6 +126,7 @@ export interface ReactionAddedData {
   discordId: string;
   username: string;
   emoji: string;
+  emojiId: string | null;
   channelId: string;
   messageId: string;
 }
@@ -139,6 +146,7 @@ export interface VoiceLeftData {
 }
 
 export interface ButtonClickedData {
+  interactionId: string;
   discordId: string;
   username: string;
   buttonId: string;
@@ -361,6 +369,8 @@ export interface PlatformEventMap {
   'giveaway.ended': GiveawayEndedData;
   'button.clicked': ButtonClickedData;
   'reaction.added': ReactionAddedData;
+  /** Internal state observation used to distinguish a later real re-add. */
+  'reaction.removed': ReactionAddedData;
   'voice.joined': VoiceJoinedData;
   'voice.left': VoiceLeftData;
   'track.started': TrackStartedData;
@@ -387,3 +397,55 @@ export interface PlatformEventMap {
 }
 
 export type PlatformEventType = keyof PlatformEventMap;
+
+/**
+ * Event types that a dashboard-owned config-reload row may ask the bot to
+ * publish. This deliberately excludes automation triggers and every other
+ * internal platform event.
+ */
+export const CONFIG_RELOAD_AUDIT_EVENT_TYPES = [
+  'automation.created',
+  'automation.updated',
+  'automation.deleted',
+] as const satisfies readonly PlatformEventType[];
+
+export type ConfigReloadAuditEventType = (typeof CONFIG_RELOAD_AUDIT_EVENT_TYPES)[number];
+export type ConfigReloadAuditEvent = {
+  [T in ConfigReloadAuditEventType]: { type: T; data: PlatformEventMap[T] };
+}[ConfigReloadAuditEventType];
+
+/**
+ * Complete allowlist for the action-queue platform-event bridge. The first
+ * five entries are audit events. `subscription.expired` is the one existing
+ * lifecycle event produced durably by the PayPal webhook worker.
+ */
+export const ACTION_QUEUE_PLATFORM_EVENT_TYPES = [
+  ...CONFIG_RELOAD_AUDIT_EVENT_TYPES,
+  'webhook.received',
+  'webhook.replayed',
+  'subscription.expired',
+] as const satisfies readonly PlatformEventType[];
+
+export type ActionQueuePlatformEventType = (typeof ACTION_QUEUE_PLATFORM_EVENT_TYPES)[number];
+export type ActionQueuePlatformEvent = {
+  [T in ActionQueuePlatformEventType]: { type: T; data: PlatformEventMap[T] };
+}[ActionQueuePlatformEventType];
+
+const CONFIG_RELOAD_AUDIT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  CONFIG_RELOAD_AUDIT_EVENT_TYPES,
+);
+const ACTION_QUEUE_PLATFORM_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  ACTION_QUEUE_PLATFORM_EVENT_TYPES,
+);
+
+export function isConfigReloadAuditEventType(
+  value: unknown,
+): value is ConfigReloadAuditEventType {
+  return typeof value === 'string' && CONFIG_RELOAD_AUDIT_EVENT_TYPE_SET.has(value);
+}
+
+export function isActionQueuePlatformEventType(
+  value: unknown,
+): value is ActionQueuePlatformEventType {
+  return typeof value === 'string' && ACTION_QUEUE_PLATFORM_EVENT_TYPE_SET.has(value);
+}

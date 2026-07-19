@@ -30,6 +30,78 @@ interface PayPalTokenResponse {
   expires_in: number;
 }
 
+interface PendingCheckoutOrder {
+  id: string;
+  customer_id: string;
+  guild_id: string;
+  product_id: string;
+  plan_id: string | null;
+  paypal_order_id: string | null;
+  paypal_subscription_id: string | null;
+  amount_cents: number;
+  currency: string;
+  status: string;
+}
+
+function isExactPendingCheckoutOrder(
+  value: unknown,
+  expected: Omit<PendingCheckoutOrder, 'id' | 'status'>,
+): value is PendingCheckoutOrder {
+  if (!value || typeof value !== 'object') return false;
+  const order = value as Partial<PendingCheckoutOrder>;
+  return (
+    typeof order.id === 'string'
+    && order.id.length > 0
+    && order.status === 'pending'
+    && order.customer_id === expected.customer_id
+    && order.guild_id === expected.guild_id
+    && order.product_id === expected.product_id
+    && (order.plan_id ?? null) === expected.plan_id
+    && (order.paypal_order_id ?? null) === expected.paypal_order_id
+    && (order.paypal_subscription_id ?? null) === expected.paypal_subscription_id
+    && order.amount_cents === expected.amount_cents
+    && order.currency === expected.currency
+  );
+}
+
+async function freezeCheckoutGrantSnapshot(
+  supabase: SupabaseClient,
+  order: PendingCheckoutOrder,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc('commerce_freeze_order_grant_snapshot', {
+    p_order_id: order.id,
+    p_guild_id: order.guild_id,
+    p_customer_id: order.customer_id,
+    p_product_id: order.product_id,
+  });
+  if (error) {
+    log.error('Failed to freeze checkout grant snapshot:', error.message);
+    return false;
+  }
+  if (
+    !data
+    || typeof data !== 'object'
+    || (data as Record<string, unknown>).order_id !== order.id
+    || typeof (data as Record<string, unknown>).grant_snapshot_frozen_at !== 'string'
+  ) {
+    log.error('Checkout grant snapshot returned malformed identity');
+    return false;
+  }
+  return true;
+}
+
+async function cancelUnexposedCheckoutOrder(
+  supabase: SupabaseClient,
+  orderId: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from('orders')
+    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+    .eq('id', orderId)
+    .eq('status', 'pending');
+  if (error) log.error('Failed to cancel unexposed checkout order:', error.message);
+}
+
 /**
  * Get a PayPal access token using client credentials.
  */
@@ -84,6 +156,23 @@ export async function handleBuyButton(
 
   if (!product) {
     await interaction.editReply({ content: '❌ Product not found or no longer available.' });
+    return;
+  }
+
+  // BUYABILITY guard — enforce the checkout column of the compliance
+  // decision matrix (packages/dashboard/src/lib/api/commerce-income-wall.ts):
+  // only priced one-time products and subscription products may start a
+  // real-money checkout. Without this, a `free`-typed product would fall into
+  // the subscription branch below and could charge real money through an
+  // attached PayPal plan, and a zero-price one-time product would attempt a
+  // $0.00 PayPal order — both outside what the dashboard's compliance walls
+  // model as "buyable", so both are refused at the point of sale.
+  if (product.type !== 'one_time' && product.type !== 'subscription') {
+    await interaction.editReply({ content: '❌ This product cannot be purchased.' });
+    return;
+  }
+  if (product.type === 'one_time' && (product.price_cents ?? 0) <= 0) {
+    await interaction.editReply({ content: '❌ This product cannot be purchased.' });
     return;
   }
 
@@ -210,17 +299,39 @@ export async function handleBuyButton(
     const { data: seqResult } = await supabase.rpc('generate_order_number') as { data: string | null; error: unknown };
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
-    await supabase.from('orders').insert({
-      order_number: orderNumber,
+    const expectedOrder = {
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
+      plan_id: null,
       paypal_order_id: orderData.id,
+      paypal_subscription_id: null,
       amount_cents: product.price_cents,
       currency: product.currency,
+    };
+    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
+      order_number: orderNumber,
+      ...expectedOrder,
       status: 'pending',
       source: 'purchase',
-    });
+    })
+      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
+      .single();
+
+    if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      log.error('Failed to persist one-time checkout order:', pendingOrderError?.message ?? 'identity mismatch');
+      await interaction.editReply({
+        content: '❌ Checkout could not be safely recorded. No payment link was opened; please try again.',
+      });
+      return;
+    }
+    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
+      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
+      await interaction.editReply({
+        content: '❌ Checkout configuration changed before it could be secured. No payment link was opened; please try again.',
+      });
+      return;
+    }
 
     await interaction.editReply({
       embeds: [
@@ -242,21 +353,35 @@ export async function handleBuyButton(
       ],
     });
   } else {
-    // Subscription — fetch plan. MUST be guild-scoped: plan rows carry their
-    // creator's guild_id, and without this filter a zero-price active plan
-    // injected by another guild (pointing at this product_id with an
-    // attacker-controlled paypal_plan_id) would sort first and hijack checkout.
-    const { data: plan } = await supabase
-      .from('plans')
-      .select('*')
-      .eq('product_id', productId)
-      .eq('guild_id', guildId)
-      .eq('active', true)
-      .order('price_cents', { ascending: true })
-      .limit(1)
-      .single();
+    // The database selector is the single checkout truth: active, guild- and
+    // product-scoped, backed by a nonblank PayPal plan, then deterministic by
+    // (price_cents ASC, id ASC). In particular, a zero local price remains a
+    // valid PayPal-backed subscription rather than falling through to a more
+    // expensive row or being mistaken for an unchargeable plan.
+    const { data: selectedPlans, error: planError } = await supabase.rpc(
+      'commerce_select_checkout_plan',
+      {
+        p_guild_id: guildId,
+        p_product_id: productId,
+      },
+    );
+    if (planError) {
+      log.error('Subscription checkout plan selection failed:', planError.message);
+      await interaction.editReply({
+        content: '❌ Subscription plan verification failed. Please try again.',
+      });
+      return;
+    }
 
-    if (!plan?.paypal_plan_id) {
+    const plan = Array.isArray(selectedPlans) && selectedPlans.length === 1
+      ? selectedPlans[0]
+      : null;
+    if (
+      !plan
+      || typeof plan.id !== 'string'
+      || typeof plan.paypal_plan_id !== 'string'
+      || plan.paypal_plan_id.trim().length === 0
+    ) {
       await interaction.editReply({ content: '❌ No active subscription plan found for this product.' });
       return;
     }
@@ -311,18 +436,39 @@ export async function handleBuyButton(
     const { data: seqResult } = await supabase.rpc('generate_order_number') as { data: string | null; error: unknown };
     const orderNumber = seqResult || `ORD-${Date.now().toString(36).toUpperCase()}`;
 
-    await supabase.from('orders').insert({
-      order_number: orderNumber,
+    const expectedOrder = {
       customer_id: customerId,
       guild_id: guildId,
       product_id: productId,
       plan_id: plan.id,
+      paypal_order_id: null,
       paypal_subscription_id: subData.id,
       amount_cents: plan.price_cents,
       currency: plan.currency,
+    };
+    const { data: pendingOrder, error: pendingOrderError } = await supabase.from('orders').insert({
+      order_number: orderNumber,
+      ...expectedOrder,
       status: 'pending',
       source: 'purchase',
-    });
+    })
+      .select('id,customer_id,guild_id,product_id,plan_id,paypal_order_id,paypal_subscription_id,amount_cents,currency,status')
+      .single();
+
+    if (pendingOrderError || !isExactPendingCheckoutOrder(pendingOrder, expectedOrder)) {
+      log.error('Failed to persist subscription checkout order:', pendingOrderError?.message ?? 'identity mismatch');
+      await interaction.editReply({
+        content: '❌ Checkout could not be safely recorded. No subscription link was opened; please try again.',
+      });
+      return;
+    }
+    if (!(await freezeCheckoutGrantSnapshot(supabase, pendingOrder))) {
+      await cancelUnexposedCheckoutOrder(supabase, pendingOrder.id);
+      await interaction.editReply({
+        content: '❌ Checkout configuration changed before it could be secured. No subscription link was opened; please try again.',
+      });
+      return;
+    }
 
     await interaction.editReply({
       embeds: [

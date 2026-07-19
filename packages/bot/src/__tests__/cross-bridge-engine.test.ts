@@ -137,14 +137,24 @@ describe('CrossFeatureBridge', () => {
     expect(supa.from).toHaveBeenCalledWith('level_unlock_configs');
   });
 
-  it('purchase.completed event grants XP bonus', async () => {
+  it('purchase.completed does not grant XP or mutate commerce roles', async () => {
     bridge.start();
+    supa.rpc.mockClear();
+    supa.from.mockClear();
     eventBus.emit('purchase.completed', {
       type: 'purchase.completed', guildId: 'guild-1', timestamp: Date.now(),
-      data: { discordId: 'user-5', username: 'buyer', amount: 10, productName: 'Widget' },
+      data: {
+        discordId: 'user-5',
+        username: 'buyer',
+        amount: 10,
+        productId: 'product-1',
+        productName: 'Widget',
+      },
     });
     await new Promise((r) => setTimeout(r, 50));
-      expect(supa.rpc).toHaveBeenCalled();
+    expect(eventBus.listenerCount('purchase.completed')).toBe(0);
+    expect(supa.rpc).not.toHaveBeenCalled();
+    expect(supa.from).not.toHaveBeenCalled();
   });
 
   it('ticket.closed event logs resolution', async () => {

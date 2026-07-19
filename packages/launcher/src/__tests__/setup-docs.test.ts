@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..', '..');
 
 function readRepoFile(relativePath: string): string {
-  return readFileSync(path.join(repoRoot, relativePath), 'utf8');
+  return readFileSync(path.join(repoRoot, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 describe('setup documentation alignment', () => {

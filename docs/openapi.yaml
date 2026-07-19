@@ -227,9 +227,56 @@ paths:
           description: Success
     post:
       summary: 'POST /api/customers/{id}/entitlements'
+      description: 'Create an atomic zero-dollar non-commerce order and entitlement. Reuse request_id for every retry of the same grant. Omitted granted_role_ids/granted_channel_ids default to the product''s canonical sets; explicit lists are forwarded verbatim and must equal the canonical sets exactly.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, product_id]
+              properties:
+                request_id:
+                  type: string
+                  format: uuid
+                  description: 'Caller-generated replay identity; reuse after a lost response.'
+                product_id:
+                  type: string
+                  format: uuid
+                type:
+                  type: string
+                  enum: [one_time, subscription]
+                  default: one_time
+                plan_id:
+                  type: string
+                  format: uuid
+                  description: 'Required when type is subscription; forbidden for one_time.'
+                source:
+                  type: string
+                  enum: [manual, giveaway, automation]
+                  default: manual
+                expires_at:
+                  type: string
+                  format: date-time
+                granted_role_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: 'Omit to grant the product''s canonical role set. If supplied, must equal it exactly.'
+                granted_channel_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: 'Omit to grant the product''s canonical channel set. If supplied, must equal it exactly.'
       responses:
         '200':
-          description: Success
+          description: 'Success — { id, order_id, request_id }'
+        '400':
+          description: 'Validation failed (bad JSON, missing product_id, malformed lists)'
+        '404':
+          description: 'Customer, product, or active subscription plan not found in this guild'
+        '409':
+          description: 'Grant conflicts with the product''s canonical access contract (RPC 23514)'
     put:
       summary: 'PUT /api/customers/{id}/entitlements'
       responses:
@@ -806,9 +853,37 @@ paths:
   /api/orders/{id}/refund:
     post:
       summary: 'POST /api/orders/{id}/refund'
+      description: 'Drive one durable, attempt-keyed owner refund. Every non-2xx/422 outcome is safely retryable with the same order id; the attempt is resumed, never duplicated.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+                  default: 'Admin refund'
+                revoke_entitlements:
+                  const: true
+                  default: true
+                  description: 'A full owner refund always revokes the purchased access; false is rejected.'
       responses:
         '200':
-          description: Success
+          description: 'Completed — { success: true, status: completed }'
+        '202':
+          description: 'REFUND_PENDING — PayPal is still processing; access unchanged'
+        '400':
+          description: 'INVALID_ORDER_ID or validation failure'
+        '409':
+          description: 'ORDER_NOT_REFUNDABLE — order cannot be refunded from the owner order list'
+        '422':
+          description: 'PROVIDER_FAILED or PROVIDER_CANCELLED — PayPal terminally rejected the refund; customer access remains active'
+        '500':
+          description: 'LOCAL_FINALIZATION_PENDING (provider refunded, access cleanup pending — retry to finish), REFUND_STATE_SAVE_FAILED, or REFUND_PREPARATION_FAILED'
+        '502':
+          description: 'PROVIDER_REQUEST_UNCONFIRMED — PayPal status unconfirmed; retry safely'
   /api/orders/{id}:
     get:
       summary: 'GET /api/orders/{id}'

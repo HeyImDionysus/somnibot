@@ -62,7 +62,11 @@ __pycache__/
 
 # Testing
 coverage/
+/pytest-cache-files-*/
 
 # Supabase
+packages/supabase/.branches/
 packages/supabase/.temp/
+/supabase/.branches/
+/supabase/.temp/
 packages/bot/coverage-detail/

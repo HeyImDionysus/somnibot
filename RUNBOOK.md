@@ -254,9 +254,27 @@ SELECT cleanup_old_records('webhook_events', 30);
 ```
 
 ### User Data Deletion
+
+Both privacy RPCs are two-phase and return a JSON object. A successful SQL call
+does **not** by itself mean deletion is complete.
+
 ```sql
-SELECT purge_member_data('guild-id', 'user-id');  -- Covers 20+ tables
+SELECT purge_member_data('guild-id', 'user-id'); -- Member-scoped deletion
+SELECT purge_guild_data('guild-id');              -- Whole-guild deletion
 ```
+
+Interpret `purge_status` in the returned JSON:
+
+- `pending_role_cleanup`: the database committed the access revocation and the
+  exact Discord-role cleanup work. Do not report deletion as complete. Let the
+  bot finish the referenced commerce queue work and resolve any unretried exact
+  cleanup DLQ item, then run the same RPC again.
+- `completed`: exact role cleanup has settled and the retained identity and
+  protocol tombstones were deleted or anonymized. This is the only completion
+  signal.
+
+Never bypass the pending state by deleting or rewriting queue payloads; those
+payloads are immutable evidence of which Discord mutations the bot owns.
 
 ## Common Issues
 

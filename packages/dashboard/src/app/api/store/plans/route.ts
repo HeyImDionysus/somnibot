@@ -1,52 +1,135 @@
 /**
- * /api/store/plans — Subscription plan CRUD.
+ * /api/store/plans — subscription plan CRUD.
  *
- * GET: List all plans (optionally filtered by product_id)
- * POST: Create a new plan
- * PUT: Update a plan
- * DELETE: Delete a plan by ID
+ * Every mutation evaluates complete post-write plan sets for the affected
+ * source and destination products before writing. The database trigger remains
+ * authoritative for concurrent writes and direct database changes.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { requireGuildOwner } from '@/lib/api/require-owner';
 import { parseBody, schemas } from '@/lib/api/validation';
-import { z } from 'zod';
 import { checkAdminRateLimit } from '@/lib/api/admin-rate-limit';
-import { dbError, apiError } from '@/lib/api/response';
+import { dbError, apiError, apiServerError } from '@/lib/api/response';
+import {
+  assertProductRolesNotIncomeEarning,
+  COMMERCE_INCOME_WALL_MESSAGE,
+  evaluateEffectivePostWriteProduct,
+  isCommerceIncomeWallConflictError,
+  loadProductPlans,
+  loadProductTemporaryRoleIds,
+  type PlanWallFields,
+  type ProductWallFields,
+} from '@/lib/api/commerce-income-wall';
 
-/**
- * Verify the target product exists AND belongs to the caller's guild.
- *
- * Every plan write that binds a plan to a product (POST create, PUT
- * product_id change) must pass this check regardless of the plan's
- * price/active state. The plan row always carries the CALLER'S guild_id but
- * product_id comes straight from the request body — without this check, a
- * plan created in guild B can attach to guild A's product, and the bot's
- * checkout (cheapest active plan for the product) would happily select it.
- *
- * Returns null when the write may proceed, or a 404/500 error response.
- */
-async function requireGuildProduct(
+interface GuildProductRow extends ProductWallFields {
+  id: string;
+  temporaryRoleIds: string[];
+}
+
+interface GuildPlanRow extends PlanWallFields {
+  product_id: string;
+}
+
+type ProductLoadResult =
+  | { ok: true; value: GuildProductRow }
+  | { ok: false; response: NextResponse };
+
+type PlanLoadResult =
+  | { ok: true; value: GuildPlanRow }
+  | { ok: false; response: NextResponse };
+
+function commerceWriteError(error: { message: string; code?: string }) {
+  if (isCommerceIncomeWallConflictError(error)) {
+    return apiError(COMMERCE_INCOME_WALL_MESSAGE, 409);
+  }
+  return dbError(error, 'store/plans');
+}
+
+async function loadGuildProduct(
   supabase: SupabaseClient,
   guildId: string,
   productId: string,
-): Promise<NextResponse | null> {
-  const { data: product, error } = await supabase
+): Promise<ProductLoadResult> {
+  const { data, error } = await supabase
     .from('products')
-    .select('id')
+    .select('id, type, active, price_cents, granted_role_ids')
     .eq('id', productId)
     .eq('guild_id', guildId)
     .maybeSingle();
-  if (error) {
-    return dbError(error, 'store/plans');
+
+  if (error) return { ok: false, response: dbError(error, 'store/plans') };
+  if (!data) {
+    return {
+      ok: false,
+      response: apiError('Product not found for this guild', 404),
+    };
   }
-  if (!product) {
-    return apiError('Product not found for this guild', 404);
+  if (typeof data.id !== 'string' || data.id !== productId) {
+    return {
+      ok: false,
+      response: apiServerError(new Error('product lookup returned invalid identity'), 'store/plans'),
+    };
   }
-  return null;
+  try {
+    const temporaryRoleIds = await loadProductTemporaryRoleIds(supabase, guildId, productId);
+    return {
+      ok: true,
+      value: { ...(data as unknown as ProductWallFields), id: productId, temporaryRoleIds },
+    };
+  } catch (err) {
+    return { ok: false, response: apiServerError(err, 'store/plans') };
+  }
 }
 
+async function loadGuildPlan(
+  supabase: SupabaseClient,
+  guildId: string,
+  planId: string,
+): Promise<PlanLoadResult> {
+  const { data, error } = await supabase
+    .from('plans')
+    .select('id, product_id, active, price_cents, paypal_plan_id')
+    .eq('id', planId)
+    .eq('guild_id', guildId)
+    .maybeSingle();
+
+  if (error) return { ok: false, response: dbError(error, 'store/plans') };
+  if (!data) {
+    return {
+      ok: false,
+      response: apiError('Plan not found for this guild', 404),
+    };
+  }
+  if (
+    typeof data.id !== 'string' ||
+    data.id !== planId ||
+    typeof data.product_id !== 'string' ||
+    data.product_id.length === 0
+  ) {
+    return {
+      ok: false,
+      response: apiServerError(new Error('plan lookup returned invalid identity'), 'store/plans'),
+    };
+  }
+  return { ok: true, value: data as unknown as GuildPlanRow };
+}
+
+async function checkPostWriteProduct(
+  supabase: SupabaseClient,
+  guildId: string,
+  product: GuildProductRow,
+  plans: PlanWallFields[],
+): Promise<NextResponse | null> {
+  const evaluation = evaluateEffectivePostWriteProduct(
+    product,
+    plans,
+    product.temporaryRoleIds,
+  );
+  const wall = await assertProductRolesNotIncomeEarning(supabase, guildId, evaluation);
+  return wall.ok ? null : apiError(wall.message, 409);
+}
 
 export async function GET(req: NextRequest) {
   const auth = await requireGuildOwner();
@@ -62,18 +145,12 @@ export async function GET(req: NextRequest) {
     .select('*')
     .eq('guild_id', guildId)
     .order('price_cents', { ascending: true })
+    .order('id', { ascending: true })
     .limit(500);
 
-  if (productId) {
-    query = query.eq('product_id', productId);
-  }
-
+  if (productId) query = query.eq('product_id', productId);
   const { data, error } = await query;
-
-  if (error) {
-    return dbError(error, 'store/plans');
-  }
-
+  if (error) return dbError(error, 'store/plans');
   return NextResponse.json({ success: true, data: data ?? [] });
 }
 
@@ -89,52 +166,49 @@ export async function POST(req: NextRequest) {
   const parsed = await parseBody(req, schemas.plan.create);
   if (!parsed.ok) return parsed.response;
   const body = parsed.data;
+  const id = crypto.randomUUID();
 
-  const {
-    product_id,
-    name,
-    paypal_plan_id,
-    interval_unit,
-    interval_count,
-    price_cents,
-    currency,
-    trial_days,
-    active,
-  } = body;
+  try {
+    const productResult = await loadGuildProduct(supabase, guildId, body.product_id);
+    if (!productResult.ok) return productResult.response;
 
-  if (!product_id || !name || !interval_unit || price_cents == null) {
-    return NextResponse.json(
-      { success: false, error: 'Missing required fields: product_id, name, interval_unit, price_cents' },
-      { status: 400 },
+    const currentPlans = await loadProductPlans(supabase, guildId, body.product_id);
+    const candidate: PlanWallFields = {
+      id,
+      active: body.active ?? true,
+      price_cents: body.price_cents,
+      paypal_plan_id: body.paypal_plan_id ?? null,
+    };
+    const blocked = await checkPostWriteProduct(
+      supabase,
+      guildId,
+      productResult.value,
+      [...currentPlans, candidate],
     );
+    if (blocked) return blocked;
+  } catch (err) {
+    return apiServerError(err, 'store/plans');
   }
-
-  // Cross-guild injection guard: ALWAYS verify product ownership before
-  // insert — for zero-price and inactive plans too, not only chargeable ones.
-  const notOwned = await requireGuildProduct(supabase, guildId, product_id);
-  if (notOwned) return notOwned;
 
   const { data, error } = await supabase
     .from('plans')
     .insert({
-      product_id,
+      id,
+      product_id: body.product_id,
       guild_id: guildId,
-      name,
-      paypal_plan_id: paypal_plan_id ?? null,
-      interval_unit,
-      interval_count: interval_count ?? 1,
-      price_cents,
-      currency: currency ?? 'USD',
-      trial_days: trial_days ?? 0,
-      active: active ?? true,
+      name: body.name,
+      paypal_plan_id: body.paypal_plan_id ?? null,
+      interval_unit: body.interval_unit,
+      interval_count: body.interval_count ?? 1,
+      price_cents: body.price_cents,
+      currency: body.currency ?? 'USD',
+      trial_days: body.trial_days ?? 0,
+      active: body.active ?? true,
     })
     .select()
     .single();
 
-  if (error) {
-    return dbError(error, 'store/plans');
-  }
-
+  if (error) return commerceWriteError(error);
   return NextResponse.json({ success: true, data });
 }
 
@@ -147,22 +221,80 @@ export async function PUT(req: NextRequest) {
   const { guildId } = auth.ctx;
 
   const supabase = createAdminSupabase();
-
-  // Validate with plan.create schema (all fields optional for update) + required id
-  const planUpdateSchema = schemas.plan.create.partial().extend({ id: z.string().uuid() });
-  const parsed = await parseBody(req, planUpdateSchema);
+  const parsed = await parseBody(req, schemas.plan.update);
   if (!parsed.ok) return parsed.response;
   const { id, ...updates } = parsed.data;
 
-  if (!id) {
-    return NextResponse.json({ success: false, error: 'Missing plan id' }, { status: 400 });
-  }
+  const existingResult = await loadGuildPlan(supabase, guildId, id);
+  if (!existingResult.ok) return existingResult.response;
+  const existing = existingResult.value;
 
-  // Cross-guild injection guard on re-parenting: changing product_id must
-  // never point this guild's plan at another guild's product.
-  if (updates.product_id) {
-    const notOwned = await requireGuildProduct(supabase, guildId, updates.product_id);
-    if (notOwned) return notOwned;
+  const effectiveProductId = updates.product_id ?? existing.product_id;
+  const effectivePlan: PlanWallFields = {
+    id,
+    active: 'active' in updates ? updates.active as boolean : existing.active,
+    price_cents:
+      'price_cents' in updates ? updates.price_cents as number : existing.price_cents,
+    paypal_plan_id:
+      'paypal_plan_id' in updates
+        ? updates.paypal_plan_id ?? null
+        : existing.paypal_plan_id,
+  };
+
+  try {
+    const sourceProductResult = await loadGuildProduct(
+      supabase,
+      guildId,
+      existing.product_id,
+    );
+    if (!sourceProductResult.ok) return sourceProductResult.response;
+    const sourcePlans = await loadProductPlans(supabase, guildId, existing.product_id);
+    if (!sourcePlans.some((plan) => plan.id === id)) {
+      throw new Error('plans lookup failed: edited plan missing from source plan set');
+    }
+
+    if (effectiveProductId === existing.product_id) {
+      const sourcePostWrite = sourcePlans.map((plan) =>
+        plan.id === id ? effectivePlan : plan,
+      );
+      const blocked = await checkPostWriteProduct(
+        supabase,
+        guildId,
+        sourceProductResult.value,
+        sourcePostWrite,
+      );
+      if (blocked) return blocked;
+    } else {
+      const destinationProductResult = await loadGuildProduct(
+        supabase,
+        guildId,
+        effectiveProductId,
+      );
+      if (!destinationProductResult.ok) return destinationProductResult.response;
+      const destinationPlans = await loadProductPlans(
+        supabase,
+        guildId,
+        effectiveProductId,
+      );
+
+      const sourceBlocked = await checkPostWriteProduct(
+        supabase,
+        guildId,
+        sourceProductResult.value,
+        sourcePlans.filter((plan) => plan.id !== id),
+      );
+      if (sourceBlocked) return sourceBlocked;
+
+      const destinationBlocked = await checkPostWriteProduct(
+        supabase,
+        guildId,
+        destinationProductResult.value,
+        [...destinationPlans, effectivePlan],
+      );
+      if (destinationBlocked) return destinationBlocked;
+    }
+  } catch (err) {
+    return apiServerError(err, 'store/plans');
   }
 
   const { data, error } = await supabase
@@ -173,10 +305,7 @@ export async function PUT(req: NextRequest) {
     .select()
     .single();
 
-  if (error) {
-    return dbError(error, 'store/plans');
-  }
-
+  if (error) return commerceWriteError(error);
   return NextResponse.json({ success: true, data });
 }
 
@@ -191,9 +320,28 @@ export async function DELETE(req: NextRequest) {
   const supabase = createAdminSupabase();
   const { searchParams } = new URL(req.url);
   const id = searchParams.get('id');
+  if (!id) return apiError('Missing plan id', 400);
 
-  if (!id) {
-    return NextResponse.json({ success: false, error: 'Missing plan id' }, { status: 400 });
+  const existingResult = await loadGuildPlan(supabase, guildId, id);
+  if (!existingResult.ok) return existingResult.response;
+  const existing = existingResult.value;
+
+  try {
+    const productResult = await loadGuildProduct(supabase, guildId, existing.product_id);
+    if (!productResult.ok) return productResult.response;
+    const currentPlans = await loadProductPlans(supabase, guildId, existing.product_id);
+    if (!currentPlans.some((plan) => plan.id === id)) {
+      throw new Error('plans lookup failed: deleted plan missing from source plan set');
+    }
+    const blocked = await checkPostWriteProduct(
+      supabase,
+      guildId,
+      productResult.value,
+      currentPlans.filter((plan) => plan.id !== id),
+    );
+    if (blocked) return blocked;
+  } catch (err) {
+    return apiServerError(err, 'store/plans');
   }
 
   const { error } = await supabase
@@ -202,9 +350,6 @@ export async function DELETE(req: NextRequest) {
     .eq('id', id)
     .eq('guild_id', guildId);
 
-  if (error) {
-    return dbError(error, 'store/plans');
-  }
-
+  if (error) return commerceWriteError(error);
   return NextResponse.json({ success: true });
 }

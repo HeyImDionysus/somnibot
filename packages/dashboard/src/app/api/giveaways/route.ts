@@ -67,6 +67,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Canonical prize form: the winner-notification contract compares
+  // btrim(left(btrim(prize), 1000)) snapshots, so store that form directly
+  // (code-point slice — never cut mid-surrogate).
+  const canonicalPrize = Array.from(String(prize).trim()).slice(0, 1_000).join('').trim();
+  if (canonicalPrize.length === 0) {
+    return NextResponse.json(
+      { success: false, error: 'Prize cannot be empty' },
+      { status: 400 },
+    );
+  }
+
   // Max 25 active giveaways
   const { count } = await supabase
     .from('giveaways')
@@ -86,7 +97,7 @@ export async function POST(req: NextRequest) {
     .insert({
       guild_id: guildId,
       channel_id,
-      prize,
+      prize: canonicalPrize,
       winner_count: winner_count ?? 1,
       ends_at,
       required_role_id: required_role_id ?? null,
@@ -128,6 +139,20 @@ export async function PUT(req: NextRequest) {
   }
 
   const updates = typedPick(body, ['prize', 'winner_count', 'ends_at', 'required_role_id', 'required_level', 'prize_product_id', 'prize_license_count', 'status', 'winners']);
+
+  // Prize edits get the same canonical form as creation: a raw edit with
+  // edge whitespace btrim cannot strip would permanently dead-letter every
+  // winner notification for this giveaway at the snapshot contract check.
+  if (typeof updates.prize === 'string') {
+    const canonical = Array.from(updates.prize.trim()).slice(0, 1_000).join('').trim();
+    if (canonical.length === 0) {
+      return NextResponse.json(
+        { success: false, error: 'Prize cannot be empty' },
+        { status: 400 },
+      );
+    }
+    updates.prize = canonical;
+  }
 
   // If ending the giveaway
   if (body.status === 'ended' && !body.ended_at) {

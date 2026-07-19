@@ -33,7 +33,8 @@ function makeChain(data: any = null) {
 
 function makeSupa() {
   return {
-    from: vi.fn(() => makeChain()),
+    from: vi.fn((table: string) =>
+      table === 'reconciliation_runs' ? makeChain({ id: 'run-1' }) : makeChain()),
     rpc: vi.fn(async () => ({ data: null, error: null })),
   } as any;
 }

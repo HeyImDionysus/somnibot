@@ -17,6 +17,36 @@ import {
 import type { SomniClient } from '../../client.js';
 import type { EconomyManager } from './economy-manager.js';
 
+const COLLECT_INCOME_RPC_TIMEOUT_MS = 8_000;
+
+type RoleIncomeRpcResult = {
+  status: 'credited' | 'cooldown' | 'no_eligible_roles' | 'verification_unavailable';
+  amount_cents: number;
+  balance_cents: number | null;
+  credited_role_ids: string[];
+  blocked_role_ids: string[];
+  next_available_at: string | null;
+};
+
+function isRoleIncomeRpcResult(value: unknown): value is RoleIncomeRpcResult {
+  if (!value || typeof value !== 'object') return false;
+
+  const result = value as Partial<RoleIncomeRpcResult>;
+  return (
+    result.status !== undefined
+    && ['credited', 'cooldown', 'no_eligible_roles', 'verification_unavailable'].includes(result.status)
+    && typeof result.amount_cents === 'number'
+    && Number.isFinite(result.amount_cents)
+    && (result.balance_cents === null
+      || (typeof result.balance_cents === 'number' && Number.isFinite(result.balance_cents)))
+    && Array.isArray(result.credited_role_ids)
+    && result.credited_role_ids.every((roleId) => typeof roleId === 'string')
+    && Array.isArray(result.blocked_role_ids)
+    && result.blocked_role_ids.every((roleId) => typeof roleId === 'string')
+    && (result.next_available_at === null || typeof result.next_available_at === 'string')
+  );
+}
+
 // ── Command builders ──────────────────────────────────────
 
 export function buildEconomyCommands() {
@@ -542,67 +572,88 @@ async function handleEconLeaderboard(interaction: ChatInputCommandInteraction, m
 }
 
 async function handleCollectIncome(interaction: ChatInputCommandInteraction, mgr: EconomyManager): Promise<void> {
-  // Check role-based income
-  const client = interaction.client as SomniClient;
-  const cfg = await mgr.loadConfig();
+  // Discord interactions must be acknowledged within three seconds. The RPC
+  // performs every eligibility, cooldown, idempotency, and wallet mutation in
+  // one database transaction, so defer before any database work.
+  await interaction.deferReply({ ephemeral: true });
 
-  const { data: roleIncomes } = await client.supabase
-    ? await (async () => {
-        // Access supabase from the client
-        const supabase = client.supabase;
-        return supabase
-          .from('economy_role_income')
-          .select('role_id, amount, interval_minutes')
-          .eq('guild_id', interaction.guildId!)
-          .limit(1000);
-      })()
-    : { data: [] };
-
-  if (!roleIncomes || roleIncomes.length === 0) {
-    await interaction.reply({ content: '❌ No role income is configured on this server.', ephemeral: true });
-    return;
-  }
-
+  const guildId = interaction.guildId;
   const member = interaction.member;
-  if (!member || !('roles' in member)) {
-    await interaction.reply({ content: '❌ Could not check your roles.', ephemeral: true });
+  if (!guildId || !member || !('roles' in member)) {
+    await interaction.editReply({ content: '❌ Could not verify your Discord roles. Please try again.' });
     return;
   }
 
-  const memberRoles = member.roles;
-  const roleCache = 'cache' in memberRoles ? (memberRoles as { cache: Map<string, unknown> }).cache : new Map();
-  let totalIncome = 0;
-  let collected = 0;
+  const client = interaction.client as SomniClient;
+  const discordRoleIds = Array.isArray(member.roles)
+    ? member.roles
+    : [...member.roles.cache.keys()];
+  const abortController = new AbortController();
+  let timeoutHandle: NodeJS.Timeout | undefined;
 
-  for (const ri of roleIncomes) {
-    if (!roleCache.has(ri.role_id)) continue;
+  try {
+    const cfg = await mgr.loadConfig();
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        abortController.abort();
+        reject(new Error('economy_collect_role_income timed out'));
+      }, COLLECT_INCOME_RPC_TIMEOUT_MS);
+    });
 
-    // Check cooldown per role
-    const cooldownKey = `economy:${interaction.guildId}:${interaction.user.id}:role_income:${ri.role_id}`;
-    const lastCollect = await mgr['valkey'].get(cooldownKey);
-    if (lastCollect) continue; // Still on cooldown
+    const rpc = client.supabase
+      .rpc('economy_collect_role_income', {
+        p_guild_id: guildId,
+        p_user_id: interaction.user.id,
+        p_discord_role_ids: discordRoleIds,
+        // Discord snowflakes are stable strings. Passing the interaction ID
+        // directly lets the database return the same result for a replay.
+        p_request_id: interaction.id,
+      })
+      .abortSignal(abortController.signal);
 
-    totalIncome += ri.amount;
-    collected++;
+    const { data, error } = await Promise.race([rpc, timeout]);
+    if (error || !isRoleIncomeRpcResult(data)) {
+      await interaction.editReply({
+        content: '⚠️ Role income verification is temporarily unavailable. Please try again.',
+      });
+      return;
+    }
 
-    // Set cooldown
-    const cooldownMs = ri.interval_minutes * 60 * 1000;
-    await mgr['valkey'].set(cooldownKey, '1', 'PX', cooldownMs);
+    switch (data.status) {
+      case 'credited': {
+        const roleCount = data.credited_role_ids.length;
+        const balance = data.balance_cents === null
+          ? ''
+          : `\n💰 Balance: **${data.balance_cents.toLocaleString()}**`;
+        await interaction.editReply({
+          content: `${cfg.currency_emoji} Collected **${data.amount_cents.toLocaleString()} ${cfg.currency_name}** from ${roleCount} role${roleCount === 1 ? '' : 's'}!${balance}`,
+        });
+        return;
+      }
+      case 'cooldown': {
+        const nextAtMs = data.next_available_at === null ? Number.NaN : Date.parse(data.next_available_at);
+        const nextAt = Number.isFinite(nextAtMs)
+          ? ` Try again <t:${Math.floor(nextAtMs / 1000)}:R>.`
+          : '';
+        await interaction.editReply({ content: `⏰ Role income is still on cooldown.${nextAt}` });
+        return;
+      }
+      case 'no_eligible_roles':
+        await interaction.editReply({ content: '❌ No eligible role income is available for your current Discord roles.' });
+        return;
+      case 'verification_unavailable':
+        await interaction.editReply({
+          content: '⚠️ Role income verification is temporarily unavailable. Please try again.',
+        });
+        return;
+    }
+  } catch {
+    await interaction.editReply({
+      content: '⚠️ Role income verification is temporarily unavailable. Please try again.',
+    });
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
-
-  if (collected === 0) {
-    await interaction.reply({ content: '⏰ No role income available to collect right now.', ephemeral: true });
-    return;
-  }
-
-  const updated = await mgr.creditWallet(interaction.user.id, totalIncome);
-  if (!updated) {
-    await interaction.reply({ content: '❌ Failed to credit role income. Please try again.', ephemeral: true });
-    return;
-  }
-  await interaction.reply({
-    content: `${cfg.currency_emoji} Collected **${totalIncome.toLocaleString()} ${cfg.currency_name}** from ${collected} role${collected > 1 ? 's' : ''}!\n💰 Balance: **${updated.wallet.toLocaleString()}**`,
-  });
 }
 
 // ── Helpers ───────────────────────────────────────────────

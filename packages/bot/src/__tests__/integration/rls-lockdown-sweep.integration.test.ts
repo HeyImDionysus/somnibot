@@ -12,7 +12,7 @@
  * product_files).
  *
  * Parameterized over the full locked-table list (one suite, not one
- * file per table — wave-1 review feedback):
+ * file per table — wave-1 review feedback), plus later service-only tables:
  *   - catalog assertions: table exists (guards against list typos
  *     making the suite vacuously pass), RLS enabled, zero grants for
  *     anon/authenticated, zero policies scoped to anything but
@@ -37,6 +37,13 @@ import {
  * SENSITIVE_TABLES in .github/workflows/ci.yml (db-security-audit).
  */
 const LOCKED_TABLES = [
+  // Atomic role-income request/claim state is bot-only.
+  'economy_role_income_claims',
+  'economy_role_income_requests',
+  // Typed commerce role config and migration quarantine are service-only.
+  'commerce_product_temp_role_config',
+  'commerce_role_metadata_migration_issues',
+  'commerce_temp_role_migration_issues',
   // Tier 1 — role-unscoped USING(true) + legacy anon grant (anon could
   // read AND write these before the migration)
   'button_roles',

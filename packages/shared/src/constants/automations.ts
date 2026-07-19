@@ -47,6 +47,13 @@ export const TRIGGER_TYPES = [
 
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
 
+const TRIGGER_TYPE_SET: ReadonlySet<string> = new Set(TRIGGER_TYPES);
+
+/** Runtime guard for every persisted or remotely supplied trigger type. */
+export function isTriggerType(value: unknown): value is TriggerType {
+  return typeof value === 'string' && TRIGGER_TYPE_SET.has(value);
+}
+
 export interface TriggerMeta {
   type: TriggerType;
   label: string;
@@ -105,6 +112,13 @@ export const CONDITION_TYPES = [
 
 export type ConditionType = (typeof CONDITION_TYPES)[number];
 
+const CONDITION_TYPE_SET: ReadonlySet<string> = new Set(CONDITION_TYPES);
+
+/** Runtime guard for persisted automation condition types. */
+export function isConditionType(value: unknown): value is ConditionType {
+  return typeof value === 'string' && CONDITION_TYPE_SET.has(value);
+}
+
 export interface ConditionMeta {
   type: ConditionType;
   label: string;
@@ -154,6 +168,13 @@ export const ACTION_TYPES = [
 ] as const;
 
 export type ActionType = (typeof ACTION_TYPES)[number];
+
+const ACTION_TYPE_SET: ReadonlySet<string> = new Set(ACTION_TYPES);
+
+/** Runtime guard for every persisted or remotely supplied action type. */
+export function isActionType(value: unknown): value is ActionType {
+  return typeof value === 'string' && ACTION_TYPE_SET.has(value);
+}
 
 export interface ActionMeta {
   type: ActionType;

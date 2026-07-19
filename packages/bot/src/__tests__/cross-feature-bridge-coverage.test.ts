@@ -154,9 +154,20 @@ describe('CrossFeatureBridge', () => {
   });
 
   describe('purchase.completed event', () => {
-    it('grants XP bonus on purchase', async () => {
+    it('does not install a purchase-to-XP or purchase-to-role mutation path', async () => {
       bridge.start();
-      await eventBus._emit('purchase.completed', { userId: 'u1', amount: 999, sku: 'premium' });
+      supabase.rpc.mockClear();
+      supabase.from.mockClear();
+
+      await eventBus._emit('purchase.completed', {
+        discordId: 'u1',
+        productId: 'product-1',
+        amount: 999,
+      });
+
+      expect(eventBus._listeners['purchase.completed']).toBeUndefined();
+      expect(supabase.rpc).not.toHaveBeenCalled();
+      expect(supabase.from).not.toHaveBeenCalled();
     });
   });
 

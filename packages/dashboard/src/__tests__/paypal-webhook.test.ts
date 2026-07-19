@@ -108,8 +108,8 @@ describe('POST /api/paypal/webhook', () => {
     expect(data.error).toMatch(/payload/i);
   });
 
-  it('accepts valid replay with correct secret', async () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  it('keeps an unresolved but authenticated capture replayable', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockUpsertSuccess();
 
     const req = makeReplayRequest({
@@ -123,14 +123,18 @@ describe('POST /api/paypal/webhook', () => {
           discord_id: 'discord-1',
         }),
         amount: { value: '10.00', currency_code: 'USD' },
+        supplementary_data: { related_ids: { order_id: 'PAYPAL-ORDER-123' } },
       },
       id: 'EVT-REPLAY-1',
     });
 
     const res = await POST(req as never);
-    expect(res.status).toBe(200);
-    expect(logSpy).toHaveBeenCalledWith('[Webhook] No pending order found for payment');
-    logSpy.mockRestore();
+    expect(res.status).toBe(500);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[Webhook] Error processing PAYMENT.CAPTURE.COMPLETED:',
+      expect.any(Error),
+    );
+    errorSpy.mockRestore();
   });
 
   it('rejects replay with wrong secret', async () => {

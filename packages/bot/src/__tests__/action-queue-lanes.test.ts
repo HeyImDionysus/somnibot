@@ -119,8 +119,10 @@ describe('laneForAction', () => {
     'fulfill_cancellation',
     'fulfill_suspension',
     'fulfill_giveaway_prize',
+    'notify_giveaway_winner',
     'deliver_receipt',
     'revoke_roles',
+    'reconcile_entitlement_roles',
   ])('classifies %s into the commerce lane', (action) => {
     expect(laneForAction(action)).toBe('commerce');
     expect(COMMERCE_LANE_ACTIONS.has(action)).toBe(true);
@@ -153,7 +155,7 @@ describe('laneForAction', () => {
     expect([...ACTION_QUEUE_LANES].sort()).toEqual([...ACTION_QUEUE_LANES]);
   });
 
-  it('mirrors the SQL classification list in migration 20260710020000 exactly', () => {
+  it('mirrors the final SQL classification list exactly', () => {
     // The DB trigger (bot_action_queue_lane_for_action) is the authoritative
     // classifier; COMMERCE_LANE_ACTIONS is the TypeScript mirror used for
     // in-process scheduling and legacy-row fallback. If the two lists drift,
@@ -162,7 +164,7 @@ describe('laneForAction', () => {
     const testDir = dirname(fileURLToPath(import.meta.url));
     const migrationPath = resolve(
       testDir,
-      '../../../supabase/migrations/20260710020000_bot_action_queue_lanes.sql',
+      '../../../supabase/migrations/20260711030000_canonicalize_commerce_role_metadata.sql',
     );
     const sql = readFileSync(migrationPath, 'utf8');
 
@@ -251,7 +253,11 @@ describe('LaneScheduler', () => {
  * depth checks) are answered from the seeded rows without consuming rows.
  */
 function makeLaneSupa(seedRows: any[] = [], opts: {
-  staleFailed?: Array<{ id: string; action: string; was_failed: boolean }>;
+  staleFailed?: Array<{
+    id: string;
+    action: string;
+    disposition: 'completed' | 'requeued' | 'failed' | 'operator_held';
+  }>;
   staleRow?: Record<string, unknown> | null;
   /** Simulate a pre-migration DB: any lane-ordered query errors. */
   laneColumnMissing?: boolean;
@@ -261,7 +267,11 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
   const alertUpdates: any[] = [];
   const failedSweepQueries: string[][] = [];
   const servedIds = new Set<string>();
-  const realtime: { handler: ((payload: { new: any }) => Promise<void>) | null } = { handler: null };
+  const claimCandidates = new Map(seedRows.map((row) => [row.id as string, row]));
+  const realtime: {
+    handler: ((payload: { new: any }) => Promise<void>) | null;
+    handlers: Partial<Record<'INSERT' | 'UPDATE', (payload: { new: any }) => Promise<void>>>;
+  } = { handler: null, handlers: {} };
 
   const genericChain = () => {
     const chain: any = {};
@@ -361,17 +371,44 @@ function makeLaneSupa(seedRows: any[] = [], opts: {
     rpc: vi.fn(async (name: string, params: Record<string, unknown>) => {
       if (name === 'bot_action_queue_claim') {
         claimOrder.push(params.p_action_id as string);
-        return { data: [{ id: params.p_action_id }], error: null };
+        const candidate = claimCandidates.get(params.p_action_id as string);
+        return {
+          data: candidate ? [{
+            ...candidate,
+            status: 'processing',
+            retry_count: candidate.retry_count ?? 0,
+            claim_token: `claim-${candidate.id}`,
+            lane: laneForAction(candidate.action),
+          }] : null,
+          error: null,
+        };
       }
       if (name === 'bot_action_queue_recover_stale') {
         return { data: opts.staleFailed ?? [], error: null };
+      }
+      if (name === 'bot_action_queue_retry_claim') {
+        return { data: [{ applied: true, disposition: 'requeued' }], error: null };
+      }
+      if (name === 'bot_action_queue_finish_claim') {
+        return {
+          data: [{
+            applied: true,
+            disposition: params.p_success === true ? 'completed' : 'failed',
+          }],
+          error: null,
+        };
       }
       return { data: null, error: null };
     }),
     channel: vi.fn(() => {
       const chan: any = {
-        on: vi.fn((_ev: string, _filter: unknown, handler: (payload: { new: any }) => Promise<void>) => {
-          realtime.handler = handler;
+        on: vi.fn((_ev: string, filter: { event?: 'INSERT' | 'UPDATE' }, handler: (payload: { new: any }) => Promise<void>) => {
+          const authoritativeHandler = async (payload: { new: any }) => {
+            if (payload.new?.id) claimCandidates.set(payload.new.id, payload.new);
+            await handler(payload);
+          };
+          if (filter.event) realtime.handlers[filter.event] = authoritativeHandler;
+          if (filter.event === 'INSERT') realtime.handler = authoritativeHandler;
           return chan;
         }),
         subscribe: vi.fn((cb: Function) => { cb?.('SUBSCRIBED'); return 'subscribed'; }),
@@ -547,8 +584,12 @@ describe('stale recovery lane priority', () => {
     }));
     // Worst case: the RPC returns every game stub BEFORE the commerce stubs.
     const staleFailed = [
-      ...gameRows.map((r) => ({ id: r.id, action: r.action, was_failed: false })),
-      ...commerceRows.map((r) => ({ id: r.id, action: r.action, was_failed: false })),
+      ...gameRows.map((r) => ({
+        id: r.id, action: r.action, disposition: 'requeued' as const,
+      })),
+      ...commerceRows.map((r) => ({
+        id: r.id, action: r.action, disposition: 'requeued' as const,
+      })),
     ];
     const supa = makeLaneSupa([...gameRows, ...commerceRows], { staleFailed });
 
@@ -570,6 +611,43 @@ describe('stale recovery lane priority', () => {
 // ── Realtime flood: per-lane concurrency budgets ───────────
 
 describe('Realtime lane budgets', () => {
+  it('dispatches staged-to-pending UPDATE releases while ignoring staged and future-backoff rows', async () => {
+    const supa = makeLaneSupa([]);
+    await startActionQueueListener(makeGuild(), supa);
+
+    const updateHandler = supa.__realtime.handlers.UPDATE;
+    expect(updateHandler).toBeTypeOf('function');
+    const baseRow = {
+      id: 'staged-release-1',
+      guild_id: 'guild-1',
+      action: 'deliver_receipt',
+      lane: 'commerce',
+      payload: {
+        guild_id: 'guild-1', discord_id: 'user-1', order_id: 'order-1',
+        order_number: 'ORD-STAGED', product_name: 'VIP Pass',
+        amount_cents: 999, currency: 'USD',
+      },
+      created_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+
+    await updateHandler!({ new: { ...baseRow, status: 'staged' } });
+    await updateHandler!({
+      new: {
+        ...baseRow,
+        id: 'future-retry-1',
+        status: 'pending',
+        next_retry_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    expect(supa.__claimOrder).toEqual([]);
+
+    await updateHandler!({ new: { ...baseRow, status: 'pending', next_retry_at: null } });
+
+    expect(supa.__claimOrder).toEqual(['staged-release-1']);
+    expect(mockDeliverReceiptDM).toHaveBeenCalledTimes(1);
+  });
+
   it('a game event flood cannot consume commerce processing capacity', async () => {
     const guild = makeGuild();
     // bulk_send_dm handlers hang at members.fetch — simulates slow game jobs
@@ -755,8 +833,8 @@ describe('per-lane pending-depth alerts', () => {
 // payloads (incl. the only copy of a paid customer's license key — PR #265).
 // These tests pin that deploy-skew-safe design.
 
-describe('DLQ lane derivation (trigger-stamped, never written from code)', () => {
-  it('dead-letters a final receipt-delivery failure without writing the lane column', async () => {
+describe('SQL-owned final DLQ transitions', () => {
+  it('does not duplicate a final receipt-delivery DLQ write in bot code', async () => {
     mockDeliverReceiptDM.mockRejectedValue(
       Object.assign(new Error('Cannot send messages to this user'), { code: 50007 }),
     );
@@ -773,19 +851,17 @@ describe('DLQ lane derivation (trigger-stamped, never written from code)', () =>
 
     await startActionQueueListener(guild, supa);
 
-    const dlqRows = supa.__inserts['action_queue_dlq'] ?? [];
-    expect(dlqRows).toContainEqual(
-      expect.objectContaining({ action: 'deliver_receipt', original_id: 'act-dlq-commerce' }),
-    );
-    for (const row of dlqRows) {
-      expect(row).not.toHaveProperty('lane');
-    }
+    expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
   });
 
-  it('dead-letters stale-recovery failures without writing the lane column', async () => {
+  it('does not duplicate a stale-recovery DLQ write in bot code', async () => {
     const guild = makeGuild();
     const supa = makeLaneSupa([], {
-      staleFailed: [{ id: 'stale-game-1', action: 'market_item_reconcile', was_failed: true }],
+      staleFailed: [{
+        id: 'stale-game-1',
+        action: 'market_item_reconcile',
+        disposition: 'failed',
+      }],
       staleRow: {
         action: 'market_item_reconcile',
         payload: { user_id: 'u1', item_id: 'i1', quantity: 2 },
@@ -796,12 +872,6 @@ describe('DLQ lane derivation (trigger-stamped, never written from code)', () =>
 
     await startActionQueueListener(guild, supa);
 
-    const dlqRows = supa.__inserts['action_queue_dlq'] ?? [];
-    expect(dlqRows).toContainEqual(
-      expect.objectContaining({ action: 'market_item_reconcile', original_id: 'stale-game-1' }),
-    );
-    for (const row of dlqRows) {
-      expect(row).not.toHaveProperty('lane');
-    }
+    expect(supa.__inserts['action_queue_dlq']).toBeUndefined();
   });
 });

@@ -7,8 +7,8 @@
  *    clobbered back to expired;
  *  - every transition writes an audit_logs row and resolves the operator
  *    "entitlement in grace" alert;
- *  - role revocation that fails inline is queued as a durable
- *    `revoke_roles` bot action instead of being silently dropped;
+ *  - paid role revocation is owned by the status trigger's durable,
+ *    identity-rich `revoke_roles` action rather than duplicated inline;
  *  - a failure in the earlier active-entitlement sweep must not prevent
  *    the grace-expiry sweep from running.
  */
@@ -60,7 +60,10 @@ function makeSupabase(respond: Responder) {
       });
     }
     for (const m of ['order', 'limit', 'range']) {
-      chain[m] = vi.fn(() => chain);
+      chain[m] = vi.fn((...args: unknown[]) => {
+        ctx.filters.push([m, ...args]);
+        return chain;
+      });
     }
     chain.single = vi.fn(async () => respond(ctx));
     chain.then = (resolve?: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
@@ -99,8 +102,11 @@ const GRACE_ENT = {
   customer_id: 'c1',
   granted_role_ids: ['r1'],
   product_id: 'p1',
+  order_id: 'order-1',
   license_key_id: 'lk1',
   grace_period_ends_at: '2026-07-08T00:00:00.000Z',
+  source: 'purchase',
+  type: 'subscription',
 };
 
 /**
@@ -111,15 +117,21 @@ function makeResponder(overrides: {
   graceRows?: unknown[];
   updateResult?: { data?: unknown; error?: unknown };
   activeSweepError?: Error;
-  queueError?: { message: string };
 } = {}): { respond: Responder } {
   const respond: Responder = (ctx) => {
     if (ctx.table === 'reconciliation_runs') {
       return ctx.op === 'insert' ? { data: { id: 'run1' }, error: null } : { data: null, error: null };
     }
+    if (ctx.table === 'commerce_role_delivery_intents') {
+      return { data: [], error: null };
+    }
     if (ctx.table === 'entitlements' && ctx.op === 'select') {
       const statusFilter = ctx.filters.find(([m, col]) => m === 'eq' && col === 'status');
-      if (statusFilter?.[2] === 'active') {
+      const statusSet = ctx.filters.find(([m, col]) => m === 'in' && col === 'status')?.[2];
+      if (
+        statusFilter?.[2] === 'active'
+        || (Array.isArray(statusSet) && statusSet.includes('active'))
+      ) {
         if (overrides.activeSweepError) throw overrides.activeSweepError;
         return { data: [], error: null };
       }
@@ -132,10 +144,7 @@ function makeResponder(overrides: {
       return overrides.updateResult ?? { data: [{ id: 'e1' }], error: null };
     }
     if (ctx.table === 'customers') {
-      return { data: [{ id: 'c1', discord_id: 'u1' }], error: null };
-    }
-    if (ctx.table === 'bot_action_queue') {
-      return { data: null, error: overrides.queueError ?? null };
+      return { data: [{ id: 'c1', guild_id: 'g1', discord_id: 'u1' }], error: null };
     }
     if (ctx.table === 'license_sessions') {
       return { data: [], error: null };
@@ -154,7 +163,7 @@ afterEach(() => {
 });
 
 describe('runReconciliation — grace-period expiry', () => {
-  it('transitions a lapsed grace entitlement with a status-guarded update, audit trail, alert resolution, and role revocation', async () => {
+  it('transitions a lapsed grace entitlement with a guarded update and leaves paid role removal to the trigger', async () => {
     const { respond } = makeResponder();
     const supabase = makeSupabase(respond);
     const guild = makeGuild();
@@ -199,8 +208,10 @@ describe('runReconciliation — grace-period expiry', () => {
     expect(alertResolve!.filters).toContainEqual(['eq', 'alert_type', 'entitlement_grace_period']);
     expect(alertResolve!.filters).toContainEqual(['eq', 'metadata->>entitlement_id', 'e1']);
 
-    // Roles revoked inline; nothing queued because it succeeded.
-    expect(guild.member.roles.remove).toHaveBeenCalledWith('r1', expect.stringContaining('grace'));
+    // The real database status update atomically writes the identity-rich queue
+    // row. This unit mock does not execute triggers; it proves reconciliation
+    // performs no competing Discord mutation or partial fallback insert.
+    expect(guild.member.roles.remove).not.toHaveBeenCalled();
     expect(supabase.calls.find((c) => c.table === 'bot_action_queue')).toBeUndefined();
   });
 
@@ -253,7 +264,34 @@ describe('runReconciliation — grace-period expiry', () => {
     expect(guild.member.roles.remove).not.toHaveBeenCalled();
   });
 
-  it('queues a durable revoke_roles action when inline role removal fails', async () => {
+  it('preserves a malformed grace row before any terminal transition', async () => {
+    const { respond } = makeResponder({
+      graceRows: [{ ...GRACE_ENT, granted_role_ids: ['r1', 'r1'] }],
+    });
+    const supabase = makeSupabase(respond);
+
+    const findings = await runReconciliation(makeGuild() as never, supabase as never);
+
+    expect(findings.grace_periods_expired).toBe(0);
+    expect(findings.errors.some((error) => error.includes('row is malformed'))).toBe(true);
+    expect(supabase.calls.find(
+      (ctx) => ctx.table === 'entitlements' && ctx.op === 'update',
+    )).toBeUndefined();
+  });
+
+  it('does not count malformed transition evidence as an expired entitlement', async () => {
+    const { respond } = makeResponder({
+      updateResult: { data: [{ id: 'different-entitlement' }], error: null },
+    });
+    const supabase = makeSupabase(respond);
+
+    const findings = await runReconciliation(makeGuild() as never, supabase as never);
+
+    expect(findings.grace_periods_expired).toBe(0);
+    expect(findings.errors.some((error) => error.includes('malformed evidence'))).toBe(true);
+  });
+
+  it('does not duplicate paid revocation even when Discord removal would fail', async () => {
     const { respond } = makeResponder();
     const supabase = makeSupabase(respond);
     const guild = makeGuild({ removeError: new Error('Missing Permissions') });
@@ -261,39 +299,30 @@ describe('runReconciliation — grace-period expiry', () => {
     const findings = await runReconciliation(guild as never, supabase as never);
 
     expect(findings.grace_periods_expired).toBe(1);
-    const queued = supabase.calls.find((c) => c.table === 'bot_action_queue' && c.op === 'insert');
-    expect(queued).toBeDefined();
-    expect(queued!.values).toMatchObject({
-      guild_id: 'g1',
-      action: 'revoke_roles',
-      status: 'pending',
-      payload: expect.objectContaining({
-        discord_id: 'u1',
-        role_ids: ['r1'],
-        reason: 'grace_period_expired',
-        entitlement_id: 'e1',
-      }),
-    });
+    expect(guild.member.roles.remove).not.toHaveBeenCalled();
+    expect(supabase.calls.find((c) => c.table === 'bot_action_queue')).toBeUndefined();
   });
 
-  it('queues revocation for the full role set when the member fetch fails transiently', async () => {
-    const { respond } = makeResponder();
+  it('records an explicit operator finding when direct non-commerce cleanup cannot run', async () => {
+    const { respond } = makeResponder({
+      graceRows: [{ ...GRACE_ENT, source: 'manual' }],
+    });
     const supabase = makeSupabase(respond);
     const guild = makeGuild({ fetchError: new Error('connect ETIMEDOUT') });
 
     const findings = await runReconciliation(guild as never, supabase as never);
 
     expect(findings.grace_periods_expired).toBe(1);
-    const queued = supabase.calls.find((c) => c.table === 'bot_action_queue' && c.op === 'insert');
-    expect(queued).toBeDefined();
-    expect(queued!.values).toMatchObject({
-      action: 'revoke_roles',
-      payload: expect.objectContaining({ role_ids: ['r1'] }),
-    });
+    expect(supabase.calls.find((c) => c.table === 'bot_action_queue')).toBeUndefined();
+    expect(findings.errors).toContain(
+      'Entitlement e1: non-commerce role revocation requires operator reconciliation for role(s): r1',
+    );
   });
 
-  it('does not queue revocation when the member has left the guild (roles are gone with membership)', async () => {
-    const { respond } = makeResponder();
+  it('preserves anomalous non-commerce access for explicit operator reconciliation', async () => {
+    const { respond } = makeResponder({
+      graceRows: [{ ...GRACE_ENT, source: 'manual' }],
+    });
     const supabase = makeSupabase(respond);
     const guild = makeGuild({ fetchError: new Error('Unknown Member') });
 
@@ -301,19 +330,24 @@ describe('runReconciliation — grace-period expiry', () => {
 
     expect(findings.grace_periods_expired).toBe(1);
     expect(supabase.calls.find((c) => c.table === 'bot_action_queue')).toBeUndefined();
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+    expect(findings.errors.some((error) => error.includes('operator reconciliation'))).toBe(true);
     // Transition + audit still happened.
     expect(supabase.calls.find((c) => c.table === 'audit_logs' && c.op === 'insert')).toBeDefined();
   });
 
-  it('records a queue-insert failure in findings.errors instead of dropping the revocation silently', async () => {
-    const { respond } = makeResponder({ queueError: { message: 'insert failed' } });
+  it('records direct non-commerce role-removal failure in findings.errors', async () => {
+    const { respond } = makeResponder({
+      graceRows: [{ ...GRACE_ENT, source: 'manual' }],
+    });
     const supabase = makeSupabase(respond);
     const guild = makeGuild({ removeError: new Error('Missing Permissions') });
 
     const findings = await runReconciliation(guild as never, supabase as never);
 
     expect(findings.grace_periods_expired).toBe(1);
-    expect(findings.errors.some((e) => e.includes('insert failed'))).toBe(true);
+    expect(findings.errors.some((e) => e.includes('operator reconciliation'))).toBe(true);
+    expect(supabase.calls.find((c) => c.table === 'bot_action_queue')).toBeUndefined();
   });
 
   it('still expires lapsed grace entitlements when the active-entitlement sweep throws', async () => {
@@ -351,5 +385,244 @@ describe('runReconciliation — grace-period expiry', () => {
     const update = supabase.calls.find((c) => c.table === 'entitlements' && c.op === 'update');
     expect(update).toBeDefined();
     expect(update!.filters).toContainEqual(['lt', 'grace_period_ends_at', frozen.toISOString()]);
+  });
+
+  it('uses strict ID keysets to scan beyond 1000 rows in all three reconciliation lanes', async () => {
+    const activeFirst = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `active-${String(index).padStart(4, '0')}`,
+      customer_id: 'c1',
+      granted_role_ids: [],
+      product_id: 'p1',
+      customers: { id: 'c1', guild_id: 'g1', discord_id: 'u1' },
+    }));
+    const activeLast = { ...activeFirst[0], id: 'active-1000' };
+    const graceFirst = Array.from({ length: 1_000 }, (_, index) => ({
+      ...GRACE_ENT,
+      id: `grace-${String(index).padStart(4, '0')}`,
+      customer_id: `customer-${String(index).padStart(4, '0')}`,
+    }));
+    const graceLast = { ...GRACE_ENT, id: 'grace-1000', customer_id: 'customer-1000' };
+    const sessionFirst = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `session-${String(index).padStart(4, '0')}`,
+      last_seen_at: new Date().toISOString(),
+      license_key_id: `key-${index}`,
+      license_keys: { product_id: `product-${String(index).padStart(4, '0')}`, guild_id: 'g1' },
+    }));
+    const sessionLast = {
+      id: 'session-1000',
+      last_seen_at: new Date().toISOString(),
+      license_key_id: 'key-1000',
+      license_keys: { product_id: 'product-1000', guild_id: 'g1' },
+    };
+
+    const respond: Responder = (ctx) => {
+      if (ctx.table === 'reconciliation_runs') {
+        return ctx.op === 'insert' ? { data: { id: 'run-keyset' }, error: null } : { data: null, error: null };
+      }
+      if (ctx.table === 'commerce_role_delivery_intents') {
+        return { data: [], error: null };
+      }
+      if (ctx.table === 'entitlements' && ctx.op === 'select') {
+        const status = ctx.filters.find(([method, column]) => method === 'eq' && column === 'status')?.[2];
+        const statuses = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'status',
+        )?.[2];
+        const cursor = ctx.filters.find(([method, column]) => method === 'gt' && column === 'id')?.[2];
+        if (status === 'active' || (Array.isArray(statuses) && statuses.includes('active'))) {
+          return { data: cursor === undefined ? activeFirst : [activeLast], error: null };
+        }
+        if (status === 'grace_period') {
+          return { data: cursor === undefined ? graceFirst : [graceLast], error: null };
+        }
+      }
+      if (ctx.table === 'entitlements' && ctx.op === 'update') {
+        return { data: [], error: null };
+      }
+      if (ctx.table === 'customers') {
+        const customerIds = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'id',
+        )?.[2] as string[] | undefined;
+        return {
+          data: (customerIds ?? []).map((customerId) => ({
+            id: customerId,
+            guild_id: 'g1',
+            discord_id: `discord-${customerId}`,
+          })),
+          error: null,
+        };
+      }
+      if (ctx.table === 'license_sessions' && ctx.op === 'select') {
+        const cursor = ctx.filters.find(([method, column]) => method === 'gt' && column === 'id')?.[2];
+        return { data: cursor === undefined ? sessionFirst : [sessionLast], error: null };
+      }
+      if (ctx.table === 'product_license_config') {
+        const productIds = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'product_id',
+        )?.[2] as string[] | undefined;
+        return {
+          data: (productIds ?? []).map((productId) => ({
+            product_id: productId,
+            offline_grace_period_seconds: 86_400,
+          })),
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    };
+    const supabase = makeSupabase(respond);
+
+    const findings = await runReconciliation(makeGuild() as never, supabase as never);
+
+    expect(findings.entitlements_checked).toBe(1_001);
+    const activeQueries = supabase.calls.filter((ctx) =>
+      ctx.table === 'entitlements'
+      && ctx.op === 'select'
+      && ctx.filters.some(
+        ([method, column, value]) => method === 'in'
+          && column === 'status'
+          && Array.isArray(value)
+          && value.includes('active'),
+      ));
+    const graceQueries = supabase.calls.filter((ctx) =>
+      ctx.table === 'entitlements'
+      && ctx.op === 'select'
+      && ctx.filters.some(([method, column, value]) => method === 'eq' && column === 'status' && value === 'grace_period'));
+    const sessionQueries = supabase.calls.filter((ctx) =>
+      ctx.table === 'license_sessions' && ctx.op === 'select');
+
+    expect(activeQueries).toHaveLength(2);
+    expect(activeQueries[1].filters).toContainEqual(['gt', 'id', 'active-0999']);
+    expect(graceQueries).toHaveLength(2);
+    expect(graceQueries[1].filters).toContainEqual(['gt', 'id', 'grace-0999']);
+    const customerQueries = supabase.calls.filter((ctx) => ctx.table === 'customers');
+    expect(customerQueries).toHaveLength(3);
+    expect((customerQueries[0].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(500);
+    expect((customerQueries[1].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(500);
+    expect((customerQueries[2].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(1);
+    expect(sessionQueries).toHaveLength(2);
+    expect(sessionQueries[1].filters).toContainEqual(['gt', 'id', 'session-0999']);
+    expect(sessionQueries[0].filters).toContainEqual(['eq', 'license_keys.guild_id', 'g1']);
+    const configQueries = supabase.calls.filter((ctx) => ctx.table === 'product_license_config');
+    expect(configQueries).toHaveLength(3);
+    expect((configQueries[0].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(500);
+    expect((configQueries[1].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(500);
+    expect((configQueries[2].filters.find(([method]) => method === 'in')?.[2] as string[])).toHaveLength(1);
+    for (const query of [...activeQueries, ...graceQueries, ...sessionQueries]) {
+      expect(query.filters).toContainEqual(['order', 'id', { ascending: true }]);
+      expect(query.filters).toContainEqual(['limit', 1_000]);
+      expect(query.filters.some(([method]) => method === 'range')).toBe(false);
+    }
+  });
+
+  it('fails all three scans closed on null or non-increasing keyset pages', async () => {
+    const respond: Responder = (ctx) => {
+      if (ctx.table === 'reconciliation_runs') {
+        return ctx.op === 'insert' ? { data: { id: 'run-malformed' }, error: null } : { data: null, error: null };
+      }
+      if (ctx.table === 'commerce_role_delivery_intents') {
+        return { data: [], error: null };
+      }
+      if (ctx.table === 'entitlements' && ctx.op === 'select') {
+        const status = ctx.filters.find(([method, column]) => method === 'eq' && column === 'status')?.[2];
+        const statuses = ctx.filters.find(
+          ([method, column]) => method === 'in' && column === 'status',
+        )?.[2];
+        if (status === 'active' || (Array.isArray(statuses) && statuses.includes('active'))) {
+          return { data: null, error: null };
+        }
+        if (status === 'grace_period') {
+          return {
+            data: [
+              { ...GRACE_ENT, id: 'grace-2' },
+              { ...GRACE_ENT, id: 'grace-1' },
+            ],
+            error: null,
+          };
+        }
+      }
+      if (ctx.table === 'license_sessions' && ctx.op === 'select') {
+        return { data: null, error: null };
+      }
+      return { data: null, error: null };
+    };
+    const supabase = makeSupabase(respond);
+    const guild = makeGuild();
+
+    const findings = await runReconciliation(guild as never, supabase as never);
+
+    expect(findings.errors.some((error) => error.includes('Active entitlement query returned a malformed result'))).toBe(true);
+    expect(findings.errors.some((error) => error.includes('Grace-period query returned a malformed or non-increasing'))).toBe(true);
+    expect(findings.errors.some((error) => error.includes('License-session query returned a malformed result'))).toBe(true);
+    expect(findings.entitlements_checked).toBe(0);
+    expect(findings.grace_periods_expired).toBe(0);
+    expect(findings.sessions_timed_out).toBe(0);
+    expect(supabase.calls.find((ctx) => ctx.table === 'entitlements' && ctx.op === 'update')).toBeUndefined();
+    expect(supabase.calls.find((ctx) => ctx.table === 'license_sessions' && ctx.op === 'update')).toBeUndefined();
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a cross-guild joined license session without deactivating it', async () => {
+    const respond: Responder = (ctx) => {
+      if (ctx.table === 'reconciliation_runs') {
+        return ctx.op === 'insert' ? { data: { id: 'run-cross-guild' }, error: null } : { data: null, error: null };
+      }
+      if (ctx.table === 'entitlements') return { data: [], error: null };
+      if (ctx.table === 'license_sessions' && ctx.op === 'select') {
+        return {
+          data: [{
+            id: 'session-other-guild',
+            last_seen_at: '2000-01-01T00:00:00.000Z',
+            license_key_id: 'key-other-guild',
+            license_keys: { product_id: 'product-other', guild_id: 'g2' },
+          }],
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    };
+    const supabase = makeSupabase(respond);
+
+    const findings = await runReconciliation(makeGuild() as never, supabase as never);
+
+    const sessionSelect = supabase.calls.find(
+      (ctx) => ctx.table === 'license_sessions' && ctx.op === 'select',
+    );
+    expect(sessionSelect?.filters).toContainEqual(['eq', 'license_keys.guild_id', 'g1']);
+    expect(findings.sessions_timed_out).toBe(0);
+    expect(findings.errors.some((error) => error.includes('cross-guild row'))).toBe(true);
+    expect(supabase.calls.find(
+      (ctx) => ctx.table === 'license_sessions' && ctx.op === 'update',
+    )).toBeUndefined();
+  });
+
+  it('does not count a timed-out session when its guarded update errors', async () => {
+    const respond: Responder = (ctx) => {
+      if (ctx.table === 'reconciliation_runs') {
+        return ctx.op === 'insert' ? { data: { id: 'run-update-error' }, error: null } : { data: null, error: null };
+      }
+      if (ctx.table === 'entitlements') return { data: [], error: null };
+      if (ctx.table === 'license_sessions' && ctx.op === 'select') {
+        return {
+          data: [{
+            id: 'session-stale',
+            last_seen_at: '2000-01-01T00:00:00.000Z',
+            license_key_id: 'key-stale',
+            license_keys: { product_id: 'product-stale', guild_id: 'g1' },
+          }],
+          error: null,
+        };
+      }
+      if (ctx.table === 'product_license_config') return { data: [], error: null };
+      if (ctx.table === 'license_sessions' && ctx.op === 'update') {
+        return { data: null, error: { message: 'database unavailable' } };
+      }
+      return { data: null, error: null };
+    };
+    const supabase = makeSupabase(respond);
+
+    const findings = await runReconciliation(makeGuild() as never, supabase as never);
+
+    expect(findings.sessions_timed_out).toBe(0);
+    expect(findings.errors.some((error) => error.includes('timeout update failed'))).toBe(true);
   });
 });

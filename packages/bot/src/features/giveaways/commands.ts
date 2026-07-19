@@ -13,6 +13,7 @@ import {
 } from 'discord.js';
 import type { GiveawayManager } from './giveaway-manager.js';
 import { createLogger } from '@somnibot/shared';
+import { codePointSlice } from '../../utils/prize-snapshot.js';
 
 const log = createLogger('GiveawayCmds');
 
@@ -26,7 +27,7 @@ export function buildGiveawayCommands() {
         .setName('start')
         .setDescription('Start a new giveaway')
         .addStringOption((opt) =>
-          opt.setName('prize').setDescription('What the winner gets').setRequired(true))
+          opt.setName('prize').setDescription('What the winner gets').setRequired(true).setMaxLength(1_000))
         .addIntegerOption((opt) =>
           opt.setName('duration').setDescription('Duration in minutes').setRequired(true).setMinValue(1).setMaxValue(43200))
         .addIntegerOption((opt) =>
@@ -76,7 +77,16 @@ export async function handleGiveawayCommand(
   try {
     switch (sub) {
       case 'start': {
-        const prize = interaction.options.getString('prize', true);
+        // Canonical prize form — the winner-notification contract compares
+        // btrim(left(btrim(prize), 1000)) snapshots; slice by code points so
+        // an astral-heavy prize is never cut mid-surrogate.
+        const prize = codePointSlice(
+          interaction.options.getString('prize', true).trim(), 1_000,
+        ).trim();
+        if (prize.length === 0) {
+          await interaction.reply({ content: '❌ Prize cannot be empty.', ephemeral: true });
+          return;
+        }
         const durationMin = interaction.options.getInteger('duration', true);
         const winners = interaction.options.getInteger('winners') ?? 1;
         const requiredRole = interaction.options.getRole('required_role');

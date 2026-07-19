@@ -197,6 +197,7 @@ export async function handleMemberUpdate(
         client.eventBus.emit('member.verified', newMember.guild.id, {
           discordId: newMember.id,
           username: newMember.user.tag,
+          memberNumber: newMember.guild.memberCount,
         });
 
         // Execute the welcome flow
