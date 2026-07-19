@@ -31,14 +31,47 @@ export class LoopbackGuardError extends Error {
   }
 }
 
+/**
+ * Throws unless `url` points at a local Supabase host. Shared by Gate C (the
+ * env check) and the injector's client-target cross-check, so both use the
+ * exact same host allowlist.
+ */
+export function assertSupabaseUrlIsLocal(url: string, context: string): void {
+  let host: string;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    throw new LoopbackGuardError(`${context} must be a valid URL`);
+  }
+  if (!LOCAL_SUPABASE_HOSTS.has(host)) {
+    throw new LoopbackGuardError(
+      `${context} host "${host}" is not local; refusing to run against a remote database`,
+    );
+  }
+}
+
 export interface LoopbackEnv {
   NODE_ENV?: string;
   SUPABASE_URL?: string;
   DISCORD_GUILD_ID?: string;
   SOMNIBOT_E2E_DISPOSABLE_GUILD_ID?: string;
   SOMNIBOT_LOOPBACK_E2E_CONFIRMATION?: string;
+  // The production commerce path selects the PayPal endpoint from
+  // PAYPAL_API_BASE (default sandbox) + PAYPAL_CLIENT_ID/SECRET — NOT from
+  // PAYPAL_ENV. Gate E guards the variables the dispatcher actually reads.
+  PAYPAL_API_BASE?: string;
+  PAYPAL_CLIENT_ID?: string;
+  PAYPAL_CLIENT_SECRET?: string;
   PAYPAL_ENV?: string;
 }
+
+/** PayPal API hosts treated as non-live (safe for loopback). */
+const SANDBOX_PAYPAL_HOSTS = new Set([
+  'api-m.sandbox.paypal.com',
+  'api.sandbox.paypal.com',
+  'localhost',
+  '127.0.0.1',
+]);
 
 /**
  * Throws LoopbackGuardError unless the environment is unambiguously a
@@ -61,21 +94,10 @@ export function assertLoopbackAllowed(env: LoopbackEnv = process.env): void {
   }
 
   // Gate C — Supabase must be local (never a hosted/production project).
-  const supabaseUrl = env.SUPABASE_URL;
-  if (!supabaseUrl) {
+  if (!env.SUPABASE_URL) {
     throw new LoopbackGuardError('SUPABASE_URL is required');
   }
-  let host: string;
-  try {
-    host = new URL(supabaseUrl).hostname;
-  } catch {
-    throw new LoopbackGuardError('SUPABASE_URL must be a valid URL');
-  }
-  if (!LOCAL_SUPABASE_HOSTS.has(host)) {
-    throw new LoopbackGuardError(
-      `SUPABASE_URL host "${host}" is not local; refusing to run against a remote database`,
-    );
-  }
+  assertSupabaseUrlIsLocal(env.SUPABASE_URL, 'SUPABASE_URL');
 
   // Gate D — the target guild must be the declared disposable guild, and both
   // must be present. This prevents driving real effects into a live guild.
@@ -92,11 +114,37 @@ export function assertLoopbackAllowed(env: LoopbackEnv = process.env): void {
     );
   }
 
-  // Gate E — commerce must never touch real PayPal (two-economies wall): if a
-  // PayPal environment is declared at all, it must be sandbox.
+  // Gate E — commerce must never touch real PayPal (two-economies wall).
+  // Guard the variable the dispatcher ACTUALLY uses: PAYPAL_API_BASE selects
+  // the endpoint (interaction-handler.ts) and defaults to sandbox when unset.
+  // If it is set, its host must be a sandbox/local host; and live credentials
+  // must never accompany a non-sandbox base.
+  const apiBase = env.PAYPAL_API_BASE;
+  if (apiBase !== undefined) {
+    let paypalHost: string;
+    try {
+      paypalHost = new URL(apiBase).hostname;
+    } catch {
+      throw new LoopbackGuardError('PAYPAL_API_BASE must be a valid URL');
+    }
+    if (!SANDBOX_PAYPAL_HOSTS.has(paypalHost)) {
+      throw new LoopbackGuardError(
+        `PAYPAL_API_BASE host "${paypalHost}" is not a sandbox/local host; refusing to run against live PayPal`,
+      );
+    }
+  }
+  // Belt and braces: real PayPal credentials must not be present unless the
+  // base is explicitly a sandbox host (the check above already rejects a live
+  // base, so this catches "live creds + default/unset base" misconfiguration).
+  if ((env.PAYPAL_CLIENT_ID || env.PAYPAL_CLIENT_SECRET) && apiBase === undefined) {
+    throw new LoopbackGuardError(
+      'PAYPAL_CLIENT_ID/SECRET are set without an explicit sandbox PAYPAL_API_BASE; set PAYPAL_API_BASE to a sandbox host or clear the credentials',
+    );
+  }
+  // PAYPAL_ENV is an additional advisory signal, not the enforcement point.
   if (env.PAYPAL_ENV !== undefined && env.PAYPAL_ENV !== 'sandbox') {
     throw new LoopbackGuardError(
-      `PAYPAL_ENV must be "sandbox" for loopback E2E, got "${env.PAYPAL_ENV}"`,
+      `PAYPAL_ENV, if set, must be "sandbox" for loopback E2E, got "${env.PAYPAL_ENV}"`,
     );
   }
 }

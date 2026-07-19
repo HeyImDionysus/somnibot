@@ -277,9 +277,15 @@ importers:
 
   packages/testkit:
     devDependencies:
+      '@somnibot/bot':
+        specifier: workspace:*
+        version: link:../bot
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.19
+      discord.js:
+        specifier: ^14.24.0
+        version: 14.26.4
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

@@ -10,10 +10,13 @@
   "scripts": {
     "build": "node ../../scripts/clean.mjs dist && tsc",
     "type-check": "tsc --noEmit",
+    "type-check:test": "tsc -p tsconfig.test.json",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@somnibot/bot": "workspace:*",
     "@types/node": "^22.0.0",
+    "discord.js": "^14.24.0",
     "typescript": "^5.7.0",
     "vitest": "^3.2.4"
   }
