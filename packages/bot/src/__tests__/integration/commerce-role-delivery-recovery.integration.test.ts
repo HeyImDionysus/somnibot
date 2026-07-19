@@ -156,7 +156,9 @@ async function cleanFixtures(): Promise<void> {
      WHERE guild_id = ${GUILD_ID}
   `;
   await sqlA`DELETE FROM public.alerts WHERE guild_id = ${GUILD_ID}`;
-  await sqlA`DELETE FROM public.audit_logs WHERE guild_id = ${GUILD_ID}`;
+  // audit_logs rows are immutable by design (trg_prevent_audit_log_delete);
+  // they accumulate for the run-unique guild and every audit assertion in
+  // this suite scopes by exact row id, so retained rows are harmless.
   await sqlA`
     UPDATE public.bot_action_queue
        SET status = 'completed',
@@ -857,8 +859,10 @@ afterAll(async () => {
   try {
     if (supa) {
       await cleanFixtures();
-      const { error } = await supa.from('guild').delete().eq('id', GUILD_ID);
-      expect(error).toBeNull();
+      // The guild row is intentionally retained: immutable audit_logs rows
+      // (see cleanFixtures) keep an FK to guild(id), so deleting the guild
+      // would fail once any audited commerce RPC ran. GUILD_ID is unique per
+      // run, so retention is rerun-safe.
     }
   } finally {
     await Promise.allSettled([
@@ -1008,15 +1012,28 @@ describe('exact bound carrier recovery', () => {
       await releaseRecovery.promise;
       return rows;
     });
-    await recoveryEntered.promise;
+    // Racing against the transaction promise surfaces an early rollback
+    // instead of hanging the gate forever.
+    await Promise.race([recoveryEntered.promise, recovery]);
 
+    // postgres.js queries are lazy; .execute() dispatches immediately so the
+    // claim can actually reach the row lock we are about to observe.
     const claim = sqlB<QueueClaim[]>`
       SELECT * FROM public.bot_action_queue_claim(${failed.actionId}::UUID, 2)
-    `;
-    await waitForDatabaseLock(
-      sqlBBackendPid,
-      'worker claim behind exact-carrier recovery',
-    );
+    `.execute();
+    try {
+      await waitForDatabaseLock(
+        sqlBBackendPid,
+        'worker claim behind exact-carrier recovery',
+      );
+    } catch (error) {
+      // Never leak the held sqlA transaction: open the gate and settle both
+      // in-flight promises before failing, or every later beforeEach hangs
+      // behind the single reserved sqlA connection.
+      releaseRecovery.open();
+      await Promise.allSettled([recovery, claim]);
+      throw error;
+    }
     releaseRecovery.open();
     const [recoveryRows, claimRows] = await Promise.all([recovery, claim]);
     expect(recoveryRows).toEqual([{
@@ -1136,8 +1153,10 @@ describe('intent-binding gap serialization', () => {
         )
       `;
     });
-    await actionLocked.promise;
+    await Promise.race([actionLocked.promise, beginTransaction]);
 
+    // .execute() dispatches the lazy postgres.js query immediately so it can
+    // block on the action row before we start observing pg_stat_activity.
     const finishing = sqlB<{ applied: boolean; disposition: string }[]>`
       SELECT * FROM public.bot_action_queue_finish_claim(
         ${actionId}::UUID,
@@ -1146,11 +1165,19 @@ describe('intent-binding gap serialization', () => {
         '{}'::JSONB,
         NULL::TEXT
       )
-    `;
-    await waitForDatabaseLock(
-      sqlBBackendPid,
-      'finish_claim behind a concurrently binding begin',
-    );
+    `.execute();
+    try {
+      await waitForDatabaseLock(
+        sqlBBackendPid,
+        'finish_claim behind a concurrently binding begin',
+      );
+    } catch (error) {
+      // Never leak the held sqlA transaction (max: 1 connection) — a leaked
+      // gate wedges every later beforeEach cleanFixtures call.
+      allowBegin.open();
+      await Promise.allSettled([beginTransaction, finishing]);
+      throw error;
+    }
     allowBegin.open();
     const [begun, finishRows] = await Promise.all([beginTransaction, finishing]);
     expect(begun).toHaveLength(1);
@@ -1209,17 +1236,23 @@ describe('intent-binding gap serialization', () => {
         )
       `;
     });
-    await actionLocked.promise;
+    await Promise.race([actionLocked.promise, beginTransaction]);
 
     const recovering = sqlB<{ id: string; action: string; disposition: string }[]>`
       SELECT * FROM public.bot_action_queue_recover_stale(
         ${GUILD_ID}::TEXT, 1, 5
       )
-    `;
-    await waitForDatabaseLock(
-      sqlBBackendPid,
-      'stale recovery behind a concurrently binding begin',
-    );
+    `.execute();
+    try {
+      await waitForDatabaseLock(
+        sqlBBackendPid,
+        'stale recovery behind a concurrently binding begin',
+      );
+    } catch (error) {
+      allowBegin.open();
+      await Promise.allSettled([beginTransaction, recovering]);
+      throw error;
+    }
     allowBegin.open();
     const [begun, recoveryRows] = await Promise.all([beginTransaction, recovering]);
     expect(begun).toHaveLength(1);
@@ -3051,15 +3084,18 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
           ${fixture.customerId}::UUID,
           ${GUILD_ID}
         )
-    `;
+    `.execute();
     try {
       await waitForDatabaseLock(
         sqlBBackendPid,
         'noncommerce relink observation behind terminal entitlement update',
       );
-    } finally {
+    } catch (error) {
       releaseTerminal.open();
+      await Promise.allSettled([observation, terminalTransaction]);
+      throw error;
     }
+    releaseTerminal.open();
     await terminalTransaction;
     if (terminalError) throw terminalError;
 
@@ -3128,15 +3164,18 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
           ${fixture.customerId}::UUID,
           ${GUILD_ID}
         )
-    `;
+    `.execute();
     try {
       await waitForDatabaseLock(
         sqlBBackendPid,
         'noncommerce live observation behind the canonical customer lock',
       );
-    } finally {
+    } catch (error) {
       releaseCustomerWriter.open();
+      await Promise.allSettled([observation, customerThenTerminalWriter]);
+      throw error;
     }
+    releaseCustomerWriter.open();
     await customerThenTerminalWriter;
     if (writerError) throw writerError;
 

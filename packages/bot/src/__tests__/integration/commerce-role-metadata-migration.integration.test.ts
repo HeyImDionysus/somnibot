@@ -38,7 +38,9 @@ const LEGACY_INVALID_PAYMENT_ID = '41000000-0000-4000-8000-000000000001';
 const LEGACY_INVALID_SALE_PAYMENT_ID = '41000000-0000-4000-8000-000000000002';
 const LEGACY_INVALID_REFUND_ID = '42000000-0000-4000-8000-000000000001';
 const LEGACY_REVOKE_PENDING_ID = '50000000-0000-4000-8000-000000000001';
-const LEGACY_REVOKE_PROCESSING_ID = '50000000-0000-4000-8000-000000000002';
+// The deploy fence requires a drained queue (no processing rows), so the
+// legacy worker's in-flight action is represented post-drain as 'failed'.
+const LEGACY_REVOKE_DRAINED_ID = '50000000-0000-4000-8000-000000000002';
 const LEGACY_REVOKE_FAILED_ID = '50000000-0000-4000-8000-000000000003';
 const LEGACY_REVOKE_DLQ_ID = '50000000-0000-4000-8000-000000000004';
 
@@ -231,9 +233,27 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
     action TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+    original_id TEXT,
     error_message TEXT,
     retried BOOLEAN NOT NULL DEFAULT false,
-    retried_at TIMESTAMPTZ
+    retried_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE ${FIXTURE_SCHEMA}.alerts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    guild_id TEXT NOT NULL REFERENCES ${FIXTURE_SCHEMA}.guild(id),
+    alert_type TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'warning',
+    title TEXT NOT NULL,
+    message TEXT,
+    metadata JSONB DEFAULT '{}'::JSONB,
+    acknowledged BOOLEAN DEFAULT false,
+    resolved BOOLEAN DEFAULT false,
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
   );
 
   CREATE TABLE ${FIXTURE_SCHEMA}.payment_refunds (
@@ -304,6 +324,19 @@ const PRE_MIGRATION_SCHEMA_SQL = `
   RETURNS SETOF ${FIXTURE_SCHEMA}.plans
   LANGUAGE sql
   AS 'SELECT * FROM ${FIXTURE_SCHEMA}.plans WHERE false';
+
+  -- Pre-030 privacy RPC stubs: the migration executes a plain
+  -- ALTER FUNCTION ... RENAME on purge_member_data(TEXT, TEXT) and a plain
+  -- DROP FUNCTION on purge_guild_data(TEXT), so both must pre-exist.
+  CREATE FUNCTION ${FIXTURE_SCHEMA}.purge_member_data(TEXT, TEXT)
+  RETURNS JSONB
+  LANGUAGE sql
+  AS 'SELECT ''{}''::JSONB';
+
+  CREATE FUNCTION ${FIXTURE_SCHEMA}.purge_guild_data(TEXT)
+  RETURNS void
+  LANGUAGE sql
+  AS 'SELECT';
 `;
 
 const LEGACY_FIXTURE_SQL = `
@@ -434,9 +467,9 @@ const LEGACY_FIXTURE_SQL = `
       'pending', NULL, now()
     ),
     (
-      '${LEGACY_REVOKE_PROCESSING_ID}', '${GUILD_ID}', 'revoke_roles',
+      '${LEGACY_REVOKE_DRAINED_ID}', '${GUILD_ID}', 'revoke_roles',
       '{"discord_id":"migration-fixture-user","role_ids":["${ROLE_TERMINAL}"],"reason":"subscription_expired","order_id":"${TERMINAL_ORDER_ID}","product_id":"${PRODUCT_TERMINAL}"}',
-      'processing', now(), NULL
+      'failed', NULL, NULL
     ),
     (
       '${LEGACY_REVOKE_FAILED_ID}', '${GUILD_ID}', 'revoke_roles',
@@ -494,29 +527,32 @@ describe('20260711030000 legacy metadata migration', () => {
     const metadata = migrationSource(
       '20260711030000_canonicalize_commerce_role_metadata.sql',
     );
-    const metadataLock = metadata.indexOf(
-      'LOCK TABLE public.products IN SHARE ROW EXCLUSIVE MODE',
-    );
-    const queueLock = metadata.indexOf(
-      'LOCK TABLE public.bot_action_queue IN SHARE ROW EXCLUSIVE MODE',
-    );
-    const dlqLock = metadata.indexOf(
-      'LOCK TABLE public.action_queue_dlq IN SHARE ROW EXCLUSIVE MODE',
+    // The 030 migration takes one canonical multi-table exclusive lock up
+    // front (NOWAIT), then refuses to deploy over an undrained queue, and
+    // only after both fences does classification/strip/constraint work run.
+    const metadataLock = metadata.indexOf('IN EXCLUSIVE MODE NOWAIT');
+    const lockList = metadata.indexOf('LOCK TABLE\n  public.orders,');
+    const queueInLockList = metadata.indexOf('  public.bot_action_queue,');
+    const dlqInLockList = metadata.indexOf('  public.action_queue_dlq\n');
+    const drainedQueueFence = metadata.indexOf(
+      'commerce role-delivery protocol deploy requires a drained action queue',
     );
     const classification = metadata.indexOf('-- Invalid grant_role_id values');
-    const legacyQueueClassification = metadata.indexOf(
-      '-- Predeployment workers accepted order-wide revoke payloads that lacked the',
+    const legacyQueueQuarantine = metadata.indexOf(
+      '-- Old broad revoke payloads cannot be upgraded into exact removal authority',
     );
     const strip = metadata.indexOf('-- Remove every reserved side-channel key');
     const constraint = metadata.indexOf('ADD CONSTRAINT products_no_legacy_role_metadata');
 
-    expect(metadataLock).toBeGreaterThan(-1);
-    expect(queueLock).toBeGreaterThan(metadataLock);
-    expect(dlqLock).toBeGreaterThan(queueLock);
-    expect(classification).toBeGreaterThan(metadataLock);
+    expect(lockList).toBeGreaterThan(-1);
+    expect(queueInLockList).toBeGreaterThan(lockList);
+    expect(dlqInLockList).toBeGreaterThan(queueInLockList);
+    expect(metadataLock).toBeGreaterThan(dlqInLockList);
+    expect(drainedQueueFence).toBeGreaterThan(metadataLock);
+    expect(classification).toBeGreaterThan(drainedQueueFence);
     expect(strip).toBeGreaterThan(classification);
     expect(constraint).toBeGreaterThan(strip);
-    expect(legacyQueueClassification).toBeGreaterThan(dlqLock);
+    expect(legacyQueueQuarantine).toBeGreaterThan(constraint);
   });
 
   it('canonicalizes permanent config and moves temporary config to the typed table', async () => {
@@ -859,56 +895,57 @@ describe('20260711030000 legacy metadata migration', () => {
     ]);
   });
 
-  it('backfills one exact pending revoke intent for an already-terminal paid entitlement', async () => {
-    const queue = await sql.unsafe<Array<{
-      guild_id: string;
-      action: string;
-      status: string;
-      idempotency_key: string;
-      payload: Record<string, unknown>;
-    }>>(`
-      SELECT guild_id, action, status, idempotency_key, payload
+  it('does not fabricate exact removal authority for an already-terminal paid entitlement', async () => {
+    // The migration's locked contract: legacy metadata is never upgraded into
+    // exact Discord removal authority. A terminal paid entitlement therefore
+    // gets NO backfilled revoke carrier — cleanup ownership stays unproven
+    // until an operator (or a real exact intent) resolves it.
+    const fabricated = await sql.unsafe<Array<{ count: number }>>(`
+      SELECT count(*)::INTEGER AS count
         FROM ${FIXTURE_SCHEMA}.bot_action_queue
-       WHERE idempotency_key =
-         'commerce:terminal-entitlement:${TERMINAL_ENTITLEMENT_ID}:revoke_roles'
+       WHERE idempotency_key LIKE '%terminal-entitlement:${TERMINAL_ENTITLEMENT_ID}%'
+          OR payload ->> 'entitlement_id' = '${TERMINAL_ENTITLEMENT_ID}'
     `);
+    expect(fabricated[0]!.count).toBe(0);
 
-    expect(queue).toEqual([
-      {
-        guild_id: GUILD_ID,
-        action: 'revoke_roles',
-        status: 'pending',
-        idempotency_key:
-          `commerce:terminal-entitlement:${TERMINAL_ENTITLEMENT_ID}:revoke_roles`,
-        payload: {
-          guild_id: GUILD_ID,
-          discord_id: 'migration-fixture-user',
-          role_ids: [ROLE_TERMINAL],
-          temporary_role_grant_ids: [],
-          reason: 'entitlement_expired',
-          entitlement_id: TERMINAL_ENTITLEMENT_ID,
-          customer_id: CUSTOMER_ID,
-          order_id: TERMINAL_ORDER_ID,
-          product_id: PRODUCT_TERMINAL,
-          source: 'entitlement_terminal_migration_backfill',
-        },
-      },
-    ]);
+    // No live revoke authority remains anywhere after deployment: every
+    // pre-protocol revoke row was quarantined, none re-issued.
+    const actionable = await sql.unsafe<Array<{ count: number }>>(`
+      SELECT count(*)::INTEGER AS count
+        FROM ${FIXTURE_SCHEMA}.bot_action_queue
+       WHERE action = 'revoke_roles'
+         AND status IN ('staged', 'pending', 'processing')
+    `);
+    expect(actionable[0]!.count).toBe(0);
+
+    // The terminal paid entitlement's role snapshot is untouched evidence.
+    const entitlement = await sql.unsafe<Array<{ granted_role_ids: string[] }>>(`
+      SELECT granted_role_ids
+        FROM ${FIXTURE_SCHEMA}.entitlements
+       WHERE id = '${TERMINAL_ENTITLEMENT_ID}'
+    `);
+    expect(entitlement[0]!.granted_role_ids).toEqual([ROLE_TERMINAL]);
   });
 
-  it('supersedes every actionable legacy revoke row with the canonical exact intent', async () => {
+  it('quarantines every actionable legacy revoke row instead of honoring it', async () => {
+    // Broad pre-protocol revoke payloads cannot prove Somnibot owns the roles
+    // they would remove. The migration retires each one as failed operator
+    // evidence and raises exactly one critical review alert per action.
     const legacyRows = await sql.unsafe<Array<{
       id: string;
       status: string;
-      result: Record<string, unknown>;
+      result: Record<string, unknown> | null;
       started_at: string | null;
+      completed_at: string | null;
       next_retry_at: string | null;
+      error_message: string;
     }>>(`
-      SELECT id::TEXT, status, result, started_at::TEXT, next_retry_at::TEXT
+      SELECT id::TEXT, status, result, started_at::TEXT,
+             completed_at::TEXT, next_retry_at::TEXT, error_message
         FROM ${FIXTURE_SCHEMA}.bot_action_queue
        WHERE id IN (
          '${LEGACY_REVOKE_PENDING_ID}',
-         '${LEGACY_REVOKE_PROCESSING_ID}',
+         '${LEGACY_REVOKE_DRAINED_ID}',
          '${LEGACY_REVOKE_FAILED_ID}'
        )
        ORDER BY id
@@ -917,15 +954,37 @@ describe('20260711030000 legacy metadata migration', () => {
     expect(legacyRows).toHaveLength(3);
     for (const row of legacyRows) {
       expect(row).toMatchObject({
-        status: 'completed',
+        status: 'failed',
         started_at: null,
         next_retry_at: null,
-        result: {
-          migration_disposition: 'superseded_by_canonical_revoke',
-        },
+        completed_at: expect.any(String),
+        error_message:
+          'Quarantined: exact role-delivery intent is required for Discord cleanup',
       });
-      expect(row.result.canonical_action_ids).toEqual([expect.any(String)]);
     }
+
+    const alerts = await sql.unsafe<Array<{
+      action_id: string;
+      alert_type: string;
+      severity: string;
+      resolved: boolean;
+    }>>(`
+      SELECT metadata ->> 'action_id' AS action_id,
+             alert_type, severity, resolved
+        FROM ${FIXTURE_SCHEMA}.alerts
+       WHERE alert_type = 'commerce_legacy_role_revoke_quarantined'
+       ORDER BY metadata ->> 'action_id'
+    `);
+    expect(alerts).toEqual([
+      LEGACY_REVOKE_PENDING_ID,
+      LEGACY_REVOKE_DRAINED_ID,
+      LEGACY_REVOKE_FAILED_ID,
+    ].sort().map((actionId) => ({
+      action_id: actionId,
+      alert_type: 'commerce_legacy_role_revoke_quarantined',
+      severity: 'critical',
+      resolved: false,
+    })));
 
     const dlq = await sql.unsafe<Array<{
       retried: boolean;
@@ -940,37 +999,35 @@ describe('20260711030000 legacy metadata migration', () => {
       expect.objectContaining({
         retried: true,
         retried_at: expect.any(String),
-        error_message: expect.stringContaining('Superseded by canonical'),
+        error_message: expect.stringContaining(
+          'Quarantined: exact role-delivery intent is required for Discord cleanup',
+        ),
       }),
     ]);
 
-    const actionableNoncanonical = await sql.unsafe<Array<{ count: number }>>(`
+    // Nothing actionable survives: neither live queue rows nor unretried DLQ
+    // buttons may carry pre-protocol revoke payloads out of the migration.
+    const actionable = await sql.unsafe<Array<{ count: number }>>(`
       SELECT (
         SELECT count(*)
           FROM ${FIXTURE_SCHEMA}.bot_action_queue AS queue
          WHERE queue.action = 'revoke_roles'
-           AND queue.status IN ('pending', 'processing', 'failed')
-           AND NOT (queue.payload ?& ARRAY[
-             'discord_id', 'role_ids', 'temporary_role_grant_ids',
-             'entitlement_id', 'customer_id', 'order_id', 'product_id',
-             'reason', 'source'
-           ])
+           AND queue.status IN ('staged', 'pending', 'processing')
       ) + (
         SELECT count(*)
           FROM ${FIXTURE_SCHEMA}.action_queue_dlq AS dlq
          WHERE dlq.action = 'revoke_roles'
            AND dlq.retried = false
-           AND NOT (dlq.payload ?& ARRAY[
-             'discord_id', 'role_ids', 'temporary_role_grant_ids',
-             'entitlement_id', 'customer_id', 'order_id', 'product_id',
-             'reason', 'source'
-           ])
       ) AS count
     `);
-    expect(actionableNoncanonical[0]!.count).toBe(0);
+    expect(actionable[0]!.count).toBe(0);
   });
 
-  it('aborts deployment for a full-key legacy revoke whose roles lack exact replacement', async () => {
+  it('quarantines even a full-key canonical-shaped legacy revoke instead of honoring it', async () => {
+    // A legacy queue row that already carries every canonical payload key is
+    // still pre-protocol data: nothing proves those role_ids are Somnibot's
+    // exact removal authority. Deployment must succeed while retiring the row
+    // to failed quarantine evidence — never replaying it against Discord.
     const unprovableSchema = 'commerce_metadata_unprovable_fixture';
     const unprovableQueueId = '50000000-0000-4000-8000-000000000099';
     const preMigration = PRE_MIGRATION_SCHEMA_SQL.replaceAll(
@@ -986,7 +1043,7 @@ describe('20260711030000 legacy metadata migration', () => {
     ).replaceAll('public.', `${unprovableSchema}.`);
 
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${unprovableSchema} CASCADE`);
-    let failingSql: Sql | null = null;
+    let applySql: Sql | null = null;
     try {
       await sql.unsafe(preMigration);
       await sql.unsafe(legacyFixture);
@@ -1003,19 +1060,52 @@ describe('20260711030000 legacy metadata migration', () => {
         )
       `);
 
-      // The migration owns an explicit transaction. Run the expected failure
-      // on a disposable connection so its aborted transaction cannot poison
-      // this suite's shared fixture connection or its cleanup query.
-      failingSql = postgres(getTestDbUrl(), { max: 1 });
-      await expect(failingSql.unsafe(source)).rejects.toMatchObject({
-        code: '23514',
-        message: 'legacy revoke_roles queue migration requires operator remediation',
-        detail: `queue_id=${unprovableQueueId}`,
-      });
+      // The migration owns an explicit transaction. Apply it on a disposable
+      // connection so an unexpected failure cannot poison this suite's shared
+      // fixture connection or its cleanup query.
+      applySql = postgres(getTestDbUrl(), { max: 1 });
+      await applySql.unsafe(source);
+
+      const quarantined = await sql.unsafe<Array<{
+        status: string;
+        started_at: string | null;
+        next_retry_at: string | null;
+        error_message: string;
+      }>>(`
+        SELECT status, started_at::TEXT, next_retry_at::TEXT, error_message
+          FROM ${unprovableSchema}.bot_action_queue
+         WHERE id = '${unprovableQueueId}'
+      `);
+      expect(quarantined).toEqual([
+        {
+          status: 'failed',
+          started_at: null,
+          next_retry_at: null,
+          error_message:
+            'Quarantined: exact role-delivery intent is required for Discord cleanup',
+        },
+      ]);
+
+      const alert = await sql.unsafe<Array<{ count: number }>>(`
+        SELECT count(*)::INTEGER AS count
+          FROM ${unprovableSchema}.alerts
+         WHERE alert_type = 'commerce_legacy_role_revoke_quarantined'
+           AND resolved = false
+           AND metadata ->> 'action_id' = '${unprovableQueueId}'
+      `);
+      expect(alert[0]!.count).toBe(1);
+
+      const actionable = await sql.unsafe<Array<{ count: number }>>(`
+        SELECT count(*)::INTEGER AS count
+          FROM ${unprovableSchema}.bot_action_queue
+         WHERE action = 'revoke_roles'
+           AND status IN ('staged', 'pending', 'processing')
+      `);
+      expect(actionable[0]!.count).toBe(0);
     } finally {
-      if (failingSql) {
+      if (applySql) {
         try {
-          await failingSql.unsafe('ROLLBACK');
+          await applySql.unsafe('ROLLBACK');
         } catch (error) {
           if (
             !error ||
@@ -1026,7 +1116,7 @@ describe('20260711030000 legacy metadata migration', () => {
             throw error;
           }
         } finally {
-          await failingSql.end();
+          await applySql.end();
         }
       }
       await sql.unsafe(`DROP SCHEMA IF EXISTS ${unprovableSchema} CASCADE`);

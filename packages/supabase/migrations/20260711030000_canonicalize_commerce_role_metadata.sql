@@ -2393,6 +2393,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+#variable_conflict use_column
 DECLARE
   v_intent public.commerce_role_delivery_intents%ROWTYPE;
   v_action public.bot_action_queue%ROWTYPE;
@@ -3552,6 +3553,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+#variable_conflict use_column
 DECLARE
   v_observed public.commerce_role_delivery_intents%ROWTYPE;
   v_intent public.commerce_role_delivery_intents%ROWTYPE;
@@ -4592,6 +4594,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+#variable_conflict use_column
 DECLARE
   v_observed public.commerce_role_delivery_intents%ROWTYPE;
   v_intent public.commerce_role_delivery_intents%ROWTYPE;
@@ -5833,6 +5836,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+#variable_conflict use_column
 DECLARE
   v_candidate RECORD;
   v_action public.bot_action_queue%ROWTYPE;
@@ -9903,8 +9907,10 @@ BEGIN
      SET status = 'refunded', updated_at = v_now
    WHERE paid_order.id = v_order.id
      AND paid_order.status = 'completed';
+  -- payments has no updated_at column (unlike orders/alerts); the admin
+  -- finalize path makes the same status-only flip.
   UPDATE public.payments AS payment
-     SET status = v_actual_status, updated_at = v_now
+     SET status = v_actual_status
    WHERE payment.id = v_payment.id
      AND payment.status = 'completed';
 
@@ -13030,6 +13036,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+#variable_conflict use_column
 DECLARE
   v_action public.bot_action_queue%ROWTYPE;
   v_head public.commerce_noncommerce_activation_heads%ROWTYPE;

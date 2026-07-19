@@ -40,7 +40,10 @@ function expectPgWallConflict(error: unknown): void {
 
 function nextName(prefix: string): string {
   sequence += 1;
-  return `${prefix}-${sequence}`;
+  // Globally-unique columns (orders.order_number, payments.paypal_payment_id,
+  // ...) must not collide with rows a previous run left behind: audit rows
+  // are append-only, so cleanup can never reclaim prior-run identifiers.
+  return `${prefix}-${RUN_ID}-${sequence}`;
 }
 
 function nextSnowflake(): string {
@@ -475,11 +478,11 @@ async function cleanFixtures(): Promise<void> {
     .in('guild_id', TEST_GUILDS);
   expect(alertDelete.error).toBeNull();
 
-  const auditDelete = await supa
-    .from('audit_logs')
-    .delete()
-    .in('guild_id', TEST_GUILDS);
-  expect(auditDelete.error).toBeNull();
+  // audit_logs is append-only by design (trg_prevent_audit_log_delete raises
+  // for every deleted row, with no sanctioned purge RPC). Audit rows written
+  // by earlier tests are retained; every audit assertion in this suite scopes
+  // to a per-test unique target/order id, so retained rows cannot leak
+  // between tests, and the per-run guild ids keep reruns isolated.
 
   const queueDelete = await supa
     .from('bot_action_queue')
@@ -555,6 +558,39 @@ async function cleanFixtures(): Promise<void> {
   expect(customerDelete.error).toBeNull();
 }
 
+/**
+ * Fabricate a stored capture payment/order status pair in one transaction.
+ *
+ * The deferred commerce_capture_payment_order_fk deliberately forbids new
+ * writes from committing half-applied or legacy pairs (e.g. payment
+ * 'completed' under an order that is not 'completed'), so raw sequential
+ * single-statement updates can never install them. Tests that need such
+ * stored states (legacy rows predating the FK, or corrupt crash artifacts)
+ * install them as replica-mode fixture surgery, exactly like the other
+ * legacy-state fixtures in this file.
+ */
+async function setCaptureSuccessorPair(
+  orderId: string,
+  paypalCaptureId: string,
+  paymentStatus: string,
+  orderStatus: string,
+): Promise<void> {
+  await sqlA.begin(async (tx) => {
+    await tx`SET LOCAL session_replication_role = replica`;
+    await tx`
+      UPDATE public.payments
+         SET status = ${paymentStatus}
+       WHERE paypal_payment_id = ${paypalCaptureId}
+    `;
+    await tx`
+      UPDATE public.orders
+         SET status = ${orderStatus},
+             updated_at = pg_catalog.clock_timestamp()
+       WHERE id = ${orderId}::UUID
+    `;
+  });
+}
+
 function makeGate(): { promise: Promise<void>; open: () => void } {
   let open!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -623,8 +659,9 @@ afterAll(async () => {
   try {
     if (supa) {
       await cleanFixtures();
-      const { error } = await supa.from('guild').delete().in('id', TEST_GUILDS);
-      expect(error).toBeNull();
+      // The retained append-only audit rows FK-reference these guild rows
+      // (audit_logs.guild_id -> guild.id, NO ACTION), so the guild rows must
+      // also be retained. Guild ids embed RUN_ID, so leftovers are inert.
     }
   } finally {
     // Cleanup assertions may fail after a migration regression. Always close
@@ -1326,11 +1363,16 @@ describe('commerce income wall database invariant', () => {
       .eq('id', entitlement!.id);
     expect(expirePurchaseEntitlement.error).toBeNull();
 
-    const terminalOrder = await supa
+    // With the entitlement expired only the settled capture still pins the
+    // order status: the deferred capture FK rejects an order-only rewrite, so
+    // the terminal flip must move the payment and order together, exactly as
+    // the production refund pipeline does in one transaction.
+    const terminalOrderOnly = await supa
       .from('orders')
       .update({ status: 'refunded' })
       .eq('id', order!.id);
-    expect(terminalOrder.error).toBeNull();
+    expect(terminalOrderOnly.error?.code).toBe('23503');
+    await setCaptureSuccessorPair(String(order!.id), captureId, 'refunded', 'refunded');
     const terminalOrderOwner = await supa.rpc('commerce_find_live_temp_role_owner', {
       p_guild_id: GUILD_A,
       p_user_id: discordId,
@@ -1351,11 +1393,7 @@ describe('commerce income wall database invariant', () => {
       parent_order_status: 'refunded',
       entitlement_is_live: false,
     });
-    const restoreCompletedOrder = await supa
-      .from('orders')
-      .update({ status: 'completed' })
-      .eq('id', order!.id);
-    expect(restoreCompletedOrder.error).toBeNull();
+    await setCaptureSuccessorPair(String(order!.id), captureId, 'completed', 'completed');
     const restoreLiveEntitlement = await supa
       .from('entitlements')
       .update({ status: 'active' })
@@ -1648,17 +1686,15 @@ describe('commerce income wall database invariant', () => {
     ] as const;
 
     for (const successor of validSuccessorStates) {
-      const paymentTransition = await supa
-        .from('payments')
-        .update({ status: successor.payment })
-        .eq('paypal_payment_id', captureId);
-      expect(paymentTransition.error).toBeNull();
-
-      const orderTransition = await supa
-        .from('orders')
-        .update({ status: successor.order, updated_at: new Date().toISOString() })
-        .eq('id', order!.id);
-      expect(orderTransition.error).toBeNull();
+      // Some tolerated replay pairs (e.g. completed/refunded) are legacy
+      // crash states the deferred capture FK forbids for new writes, so
+      // every pair is installed atomically as replica-mode fixture surgery.
+      await setCaptureSuccessorPair(
+        String(order!.id),
+        captureId,
+        successor.payment,
+        successor.order,
+      );
 
       const successorReplay = await supa.rpc('commerce_finalize_paypal_capture', finalizeArgs);
       expect(successorReplay.error).toBeNull();
@@ -1699,16 +1735,12 @@ describe('commerce income wall database invariant', () => {
         const replayPair = `${paymentStatus}:${orderStatus}`;
         if (validReplayPairs.has(replayPair)) continue;
 
-        const paymentTransition = await supa
-          .from('payments')
-          .update({ status: paymentStatus })
-          .eq('paypal_payment_id', captureId);
-        expect(paymentTransition.error).toBeNull();
-        const orderTransition = await supa
-          .from('orders')
-          .update({ status: orderStatus, updated_at: new Date().toISOString() })
-          .eq('id', order!.id);
-        expect(orderTransition.error).toBeNull();
+        await setCaptureSuccessorPair(
+          String(order!.id),
+          captureId,
+          paymentStatus,
+          orderStatus,
+        );
 
         const inconsistentReplay = await supa.rpc(
           'commerce_finalize_paypal_capture',
@@ -1722,16 +1754,7 @@ describe('commerce income wall database invariant', () => {
       }
     }
 
-    const restorePayment = await supa
-      .from('payments')
-      .update({ status: 'completed' })
-      .eq('paypal_payment_id', captureId);
-    expect(restorePayment.error).toBeNull();
-    const restoreOrder = await supa
-      .from('orders')
-      .update({ status: 'completed', updated_at: new Date().toISOString() })
-      .eq('id', order!.id);
-    expect(restoreOrder.error).toBeNull();
+    await setCaptureSuccessorPair(String(order!.id), captureId, 'completed', 'completed');
 
     const mismatchedCaptureReplay = await supa.rpc('commerce_finalize_paypal_capture', {
       ...finalizeArgs,
@@ -2309,11 +2332,29 @@ describe('commerce income wall database invariant', () => {
       .update({ status: 'pending_review', updated_at: new Date().toISOString() })
       .eq('id', order!.id);
     expect(restorePendingReviewOrder.error).toBeNull();
-    const unsupportedPaymentResolution = await supa
+    // A payment-only manual completion is structurally impossible: the
+    // deferred capture FK requires the parent order to be 'completed' in the
+    // same transaction. Assert the guard, then install the nearest reachable
+    // unsupported resolution (payment and order completed together) and show
+    // the capture replay still refuses to bless it.
+    const paymentOnlyResolution = await supa
       .from('payments')
       .update({ status: 'completed' })
       .eq('paypal_payment_id', captureId);
-    expect(unsupportedPaymentResolution.error).toBeNull();
+    expect(paymentOnlyResolution.error?.code).toBe('23503');
+    await sqlA.begin(async (tx) => {
+      await tx`
+        UPDATE public.payments
+           SET status = 'completed'
+         WHERE paypal_payment_id = ${captureId}
+      `;
+      await tx`
+        UPDATE public.orders
+           SET status = 'completed',
+               updated_at = pg_catalog.clock_timestamp()
+         WHERE id = ${order!.id}::UUID
+      `;
+    });
     const resolvedPaymentReplay = await supa.rpc('commerce_finalize_paypal_capture', finalizeArgs);
     expect(resolvedPaymentReplay.error?.message).toContain('successor state mismatch');
 
@@ -2927,11 +2968,15 @@ describe('commerce income wall database invariant', () => {
     // Simulate a local crash after the durable provider outcome. The failed
     // local transaction must not erase that outcome or partially revoke access.
     const rollbackConstraint = `test_refund_crash_${randomUUID().replaceAll('-', '')}`;
-    await sqlA`
+    // DDL cannot carry bind parameters ("could not determine data type of
+    // parameter $1"), so the fixture UUID is inlined. Both interpolations are
+    // safe: the constraint name is locally generated hex and the order id is
+    // a database-issued UUID.
+    await sqlA.unsafe(`
       ALTER TABLE public.orders
-      ADD CONSTRAINT ${sqlA(rollbackConstraint)}
-      CHECK (id <> ${fixture.orderId} OR status <> 'refunded')
-    `;
+      ADD CONSTRAINT ${rollbackConstraint}
+      CHECK (id <> '${fixture.orderId}'::uuid OR status <> 'refunded')
+    `);
     try {
       const interrupted = await supa.rpc('commerce_finalize_admin_refund', {
         p_attempt_id: attemptId,
@@ -4456,11 +4501,17 @@ describe('commerce income wall database invariant', () => {
     expect(corruptSaleRecord.error).toMatchObject({ code: '23514' });
 
     const malformedSale = await createSaleRefundFixture();
-    const removePlan = await supa
-      .from('orders')
-      .update({ plan_id: null })
-      .eq('id', malformedSale.orderId);
-    expect(removePlan.error).toBeNull();
+    // plan_id is immutable after the grant-snapshot freeze, so this legacy
+    // corruption is installed as replica-mode fixture surgery like the
+    // foreign-plan case below.
+    await sqlA.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`
+        UPDATE public.orders
+           SET plan_id = NULL
+         WHERE id = ${malformedSale.orderId}::UUID
+      `;
+    });
     const malformedSaleRecord = await supa.rpc('commerce_record_paypal_refund_event', {
       p_payment_id: malformedSale.paymentId,
       p_order_id: malformedSale.orderId,
@@ -4567,11 +4618,16 @@ describe('commerce income wall database invariant', () => {
     }
 
     const nullOrderFixture = await createPaidRefundFixture();
-    const clearLegacyOrderId = await supa
-      .from('orders')
-      .update({ paypal_order_id: null })
-      .eq('id', nullOrderFixture.orderId);
-    expect(clearLegacyOrderId.error).toBeNull();
+    // paypal_order_id is immutable after the grant-snapshot freeze; a legacy
+    // NULL provider order id is fabricated as replica-mode fixture surgery.
+    await sqlA.begin(async (tx) => {
+      await tx`SET LOCAL session_replication_role = replica`;
+      await tx`
+        UPDATE public.orders
+           SET paypal_order_id = NULL
+         WHERE id = ${nullOrderFixture.orderId}::UUID
+      `;
+    });
     const nullOrderPrepared = await supa.rpc('commerce_prepare_admin_refund', {
       p_order_id: nullOrderFixture.orderId,
       p_guild_id: GUILD_A,

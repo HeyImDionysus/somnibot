@@ -87,9 +87,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Clean up in reverse-dependency order
+  // Clean up in reverse-dependency order. audit_logs rows are immutable by
+  // design (delete-protection trigger) and are intentionally left in place.
   await supa.from('bot_action_queue').delete().eq('guild_id', GUILD_ID);
-  await supa.from('audit_logs').delete().eq('guild_id', GUILD_ID);
+  await supa.from('alerts').delete().eq('guild_id', GUILD_ID);
   await supa.from('entitlements').delete().eq('guild_id', GUILD_ID);
   await supa.from('license_keys').delete().eq('guild_id', GUILD_ID);
   const retentionOwner = postgres(getTestDbUrl(), { max: 1 });
@@ -104,7 +105,8 @@ afterAll(async () => {
   await supa.from('orders').delete().eq('guild_id', GUILD_ID);
   await supa.from('products').delete().eq('id', productId);
   await supa.from('customers').delete().eq('id', customerId);
-  await supa.from('guild').delete().eq('id', GUILD_ID);
+  // The guild row stays behind deliberately: this run's immutable audit_logs
+  // rows FK-reference it. GUILD_ID is unique per run, so reruns are safe.
 });
 
 describe('E2E commerce flow: purchase → fulfillment → refund', () => {
@@ -218,8 +220,10 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
       type: 'one_time',
       status: 'active',
       source: 'purchase',
-      granted_role_ids: ['role-e2e-premium'],
-      granted_channel_ids: ['chan-e2e-vip'],
+      // Snapshots must be snowflake-shaped Discord ids (canonical-snapshot
+      // contract); fake strings like 'role-e2e-premium' are not valid ids.
+      granted_role_ids: [GRANTED_ROLE_ID],
+      granted_channel_ids: [GRANTED_CHANNEL_ID],
     }).select().single();
 
     expect(error).toBeNull();
@@ -242,8 +246,8 @@ describe('E2E commerce flow: purchase → fulfillment → refund', () => {
         order_number: orderNumber,
         amount_cents: 1499,
         currency: 'USD',
-        granted_role_ids: ['role-e2e-premium'],
-        granted_channel_ids: ['chan-e2e-vip'],
+        granted_role_ids: [GRANTED_ROLE_ID],
+        granted_channel_ids: [GRANTED_CHANNEL_ID],
         entitlement_type: 'one_time',
         license_key_id: licenseKeyId,
       },

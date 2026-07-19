@@ -59,7 +59,9 @@ async function cleanFixtures(): Promise<void> {
      WHERE guild_id = ${GUILD_ID}
   `;
   await sqlA`DELETE FROM public.alerts WHERE guild_id = ${GUILD_ID}`;
-  await sqlA`DELETE FROM public.audit_logs WHERE guild_id = ${GUILD_ID}`;
+  // audit_logs rows are immutable by design (trg_prevent_audit_log_delete
+  // raises on every DELETE). Cleanup must never touch them; every audit
+  // assertion below scopes by the per-test entitlement target_id instead.
   await sqlA`
     UPDATE public.bot_action_queue
        SET status = 'completed',
@@ -203,10 +205,9 @@ beforeEach(async () => {
 afterAll(async () => {
   try {
     await cleanFixtures();
-    if (supa) {
-      const { error } = await supa.from('guild').delete().eq('id', GUILD_ID);
-      expect(error).toBeNull();
-    }
+    // The guild row stays behind deliberately: the suite's immutable
+    // audit_logs rows FK-reference it, and audit rows cannot be deleted.
+    // GUILD_ID is unique per run, so reruns are unaffected.
   } finally {
     await Promise.allSettled([
       sqlA.end({ timeout: 5 }),

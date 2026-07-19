@@ -314,7 +314,9 @@ afterAll(async () => {
     DELETE FROM public.commerce_role_delivery_intents
      WHERE guild_id IN ${sql(TEST_GUILD_IDS)}
   `;
-  await supa.from('audit_logs').delete().in('guild_id', TEST_GUILD_IDS);
+  // audit_logs rows are immutable by design (delete-protection trigger) and
+  // are intentionally left in place; cleanup scopes to non-audit tables only.
+  await supa.from('alerts').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('action_queue_dlq').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('bot_action_queue').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('temp_role_grants').delete().in('guild_id', TEST_GUILD_IDS);
@@ -329,7 +331,8 @@ afterAll(async () => {
   await supa.from('products').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('customers').delete().in('guild_id', TEST_GUILD_IDS);
   await supa.from('guild_config').delete().in('guild_id', TEST_GUILD_IDS);
-  await supa.from('guild').delete().in('id', TEST_GUILD_IDS);
+  // Guild rows with immutable audit_logs stay behind deliberately (the FK
+  // pins them); ids are unique per run, so reruns are unaffected.
   await sql?.end({ timeout: 5 });
 });
 
@@ -1637,11 +1640,9 @@ describe('economy_collect_role_income', () => {
                'public.purge_guild_data(text)'::pg_catalog.regprocedure
              AND dependency.deptype = 'n'
         ) AS guild_rpc_has_no_normal_dependents,
-        pg_catalog.has_function_privilege(
-          'service_role',
-          'public.commerce_enqueue_entitlement_role_revocation()',
-          'EXECUTE'
-        ) AS service_can_call_trigger_helper,
+        pg_catalog.to_regprocedure(
+          'public.commerce_enqueue_entitlement_role_revocation()'
+        ) IS NULL AS legacy_trigger_helper_dropped,
         pg_catalog.has_function_privilege(
           'service_role',
           'public.economy_get_or_create_wallet(text,text)',
@@ -1675,7 +1676,7 @@ describe('economy_collect_role_income', () => {
       service_can_call_member_base: false,
       bypass_helper_absent: true,
       guild_rpc_has_no_normal_dependents: true,
-      service_can_call_trigger_helper: false,
+      legacy_trigger_helper_dropped: true,
       service_can_initialize_wallet: true,
       anon_can_initialize_wallet: false,
       service_can_credit_wallet: true,
