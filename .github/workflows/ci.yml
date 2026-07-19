@@ -319,6 +319,38 @@ jobs:
         run: pnpm --filter @somnibot/e2e test -- --reporter=verbose
 
   # ──────────────────────────────────────────────────────────────────────────
+  # 6e. E2E Testkit (loopback harness) — guard + isolation
+  #     testkit drives the REAL production router against a disposable rig, so
+  #     its safety guard must be gated AND its production-isolation enforced:
+  #     the isolation check fails the build if any shipped source ever imports
+  #     it or any production package declares it as a runtime dependency.
+  # ──────────────────────────────────────────────────────────────────────────
+  test-testkit:
+    name: 🧪 Unit Tests (E2E Testkit)
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Assert testkit production isolation
+        run: node scripts/check-testkit-isolation.mjs
+      - name: Type-check testkit
+        run: pnpm --filter @somnibot/testkit type-check
+      - name: Run testkit tests
+        run: pnpm --filter @somnibot/testkit test -- --reporter=verbose
+
+  # ──────────────────────────────────────────────────────────────────────────
   # 7. Integration Tests — real Supabase (full migration stack)
   # ──────────────────────────────────────────────────────────────────────────
   test-integration:
@@ -796,6 +828,7 @@ jobs:
       - test-shared
       - test-launcher
       - test-e2e-contract
+      - test-testkit
       - test-integration
       - migration-lint
       - db-security-audit
@@ -814,6 +847,7 @@ jobs:
           echo "  test-shared:       ${{ needs.test-shared.result }}"
           echo "  test-launcher:     ${{ needs.test-launcher.result }}"
           echo "  test-e2e-contract: ${{ needs.test-e2e-contract.result }}"
+          echo "  test-testkit:      ${{ needs.test-testkit.result }}"
           echo "  test-integration:  ${{ needs.test-integration.result }}"
           echo "  migration-lint:    ${{ needs.migration-lint.result }}"
           echo "  db-security-audit: ${{ needs.db-security-audit.result }}"
@@ -833,6 +867,7 @@ jobs:
             "${{ needs.test-shared.result }}" \
             "${{ needs.test-launcher.result }}" \
             "${{ needs.test-e2e-contract.result }}" \
+            "${{ needs.test-testkit.result }}" \
             "${{ needs.test-integration.result }}" \
             "${{ needs.migration-lint.result }}" \
             "${{ needs.db-security-audit.result }}" \
