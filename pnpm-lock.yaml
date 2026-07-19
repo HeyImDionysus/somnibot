@@ -280,6 +280,9 @@ importers:
       '@somnibot/bot':
         specifier: workspace:*
         version: link:../bot
+      '@somnibot/e2e':
+        specifier: workspace:*
+        version: link:../e2e
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.19
