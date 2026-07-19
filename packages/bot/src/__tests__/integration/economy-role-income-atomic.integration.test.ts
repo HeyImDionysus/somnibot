@@ -1365,7 +1365,9 @@ describe('economy_collect_role_income', () => {
         action: targetAction,
         actor_id: unrelatedActor,
         target_id: 'deleted_user',
-        details: { existing: 'kept', anonymized: true },
+        // Erasure replaces details entirely: payload snapshots leave with
+        // the identity (owner anonymize contract) — prior keys are NOT kept.
+        details: { anonymized: true },
       },
     ]);
   });
