@@ -11,8 +11,6 @@ export interface PlatformEvent<T extends string = string, D = unknown> {
   data: D;
   /** Stable identity for one real source occurrence across retries and restarts. */
   occurrenceId?: string;
-  /** Durable causal parent when an automation action directly emits an event. */
-  _parentActionExecutionId?: string;
   /** Automation chain depth — tracks how many automations deep this event is. */
   _chainDepth?: number;
 }

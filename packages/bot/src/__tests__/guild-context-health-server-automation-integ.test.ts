@@ -9,7 +9,8 @@ import http from 'node:http';
 // Mock setup
 // ═══════════════════════════════════════
 
-vi.mock('@somnibot/shared', () => ({
+vi.mock('@somnibot/shared', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@somnibot/shared')>()),
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
   SOMNI_PALETTE: { PRIMARY: 0x5865F2 },
   AUTOMATION_LIMITS: {

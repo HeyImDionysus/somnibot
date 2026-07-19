@@ -59,6 +59,34 @@ BEGIN
 END;
 $$;
 
+-- temp_role_grants provenance columns must exist before any LANGUAGE sql
+-- function below references them (sql-language bodies are validated at
+-- creation time, unlike plpgsql). Existing rows were written after Discord
+-- mutation, so they are known-applied. New fulfillment explicitly inserts
+-- pending through the provenance RPC defined later in this file.
+ALTER TABLE public.temp_role_grants
+  ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES public.orders(id),
+  ADD COLUMN IF NOT EXISTS grant_status TEXT NOT NULL DEFAULT 'applied'
+    CHECK (grant_status IN ('pending', 'applied', 'removed')),
+  ADD COLUMN IF NOT EXISTS duration_seconds INTEGER
+    CHECK (
+      duration_seconds IS NULL
+      OR (duration_seconds > 0 AND duration_seconds <= 315360000)
+    ),
+  ADD COLUMN IF NOT EXISTS remove_on_expiry BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  ADD COLUMN IF NOT EXISTS last_error TEXT,
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- Persist the PayPal resource family instead of guessing from the shape of an
+-- opaque provider id.  Historical rows remain nullable and therefore require
+-- an exact capture/sale webhook replay before a lifecycle RPC may adopt them.
+-- Added here (not beside its constraints below) because LANGUAGE sql
+-- lifecycle functions later in this file reference it at creation time.
+ALTER TABLE public.payments
+  ADD COLUMN IF NOT EXISTS paypal_resource_type TEXT;
+
 -- Keep the database classifier in lock-step with the bot's commerce lane.
 -- CREATE OR REPLACE preserves the existing insert-trigger dependency while
 -- making the durable reconciliation action commerce-priority at deploy time.
@@ -7090,22 +7118,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.commerce_product_temp_role_
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.commerce_role_metadata_migration_issues
   TO service_role;
 
--- Existing rows were written after Discord mutation, so they are known-applied.
--- New fulfillment explicitly inserts pending through the RPC below.
-ALTER TABLE public.temp_role_grants
-  ADD COLUMN IF NOT EXISTS order_id UUID REFERENCES public.orders(id),
-  ADD COLUMN IF NOT EXISTS grant_status TEXT NOT NULL DEFAULT 'applied'
-    CHECK (grant_status IN ('pending', 'applied', 'removed')),
-  ADD COLUMN IF NOT EXISTS duration_seconds INTEGER
-    CHECK (
-      duration_seconds IS NULL
-      OR (duration_seconds > 0 AND duration_seconds <= 315360000)
-    ),
-  ADD COLUMN IF NOT EXISTS remove_on_expiry BOOLEAN NOT NULL DEFAULT false,
-  ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-  ADD COLUMN IF NOT EXISTS last_error TEXT,
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- (temp_role_grants provenance columns are added near the top of this file:
+-- the LANGUAGE sql owner/lifecycle functions above validate their bodies at
+-- creation time, so the columns must exist before those definitions run.)
 
 -- IF NOT EXISTS may have preserved the earlier two-state check from a partial
 -- migration attempt. Normalize it before any sweeper writes tombstones.
@@ -8777,12 +8792,9 @@ REVOKE ALL ON FUNCTION public.commerce_adopt_legacy_subscription_grant_contract(
 GRANT EXECUTE ON FUNCTION public.commerce_adopt_legacy_subscription_grant_contract(UUID, UUID)
   TO service_role;
 
--- Persist the PayPal resource family instead of guessing from the shape of an
--- opaque provider id.  Historical rows remain nullable and therefore require
--- an exact capture/sale webhook replay before a lifecycle RPC may adopt them.
-ALTER TABLE public.payments
-  ADD COLUMN IF NOT EXISTS paypal_resource_type TEXT;
-
+-- (payments.paypal_resource_type is added near the top of this file: the
+-- LANGUAGE sql lifecycle functions above validate their bodies at creation
+-- time, so the column must exist before those definitions run.)
 ALTER TABLE public.payments
   DROP CONSTRAINT IF EXISTS payments_resource_type_valid;
 ALTER TABLE public.payments
@@ -10529,11 +10541,13 @@ BEGIN
          p_payload ->> 'entitlement_status' IN ('expired', 'cancelled'),
          false
        )
-       OR p_payload ->> 'reason' IS DISTINCT FROM CASE
+       -- Parenthesized: plpgsql cuts an IF condition at the first depth-0
+       -- THEN, so a bare CASE ... THEN here truncates the expression.
+       OR p_payload ->> 'reason' IS DISTINCT FROM (CASE
          WHEN p_payload ->> 'entitlement_status' = 'cancelled'
            THEN 'entitlement_cancelled'
          ELSE 'entitlement_expired'
-       END THEN
+       END) THEN
       RETURN NULL;
     END IF;
     v_expected_key := 'noncommerce:terminal-entitlement:'

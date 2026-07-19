@@ -78,6 +78,13 @@ const uniqueSnowflakeArray = snowflakeArray.refine(
   (values) => new Set(values).size === values.length,
   'Discord ID lists cannot contain duplicates',
 );
+// Update semantics: omitted lists must stay omitted (no default([]) wipe).
+const optionalUniqueSnowflakeArray = z.array(snowflake).max(100)
+  .refine(
+    (values) => new Set(values).size === values.length,
+    'Discord ID lists cannot contain duplicates',
+  )
+  .optional();
 const jsonObj = z.record(z.unknown()).default({});
 
 // ── Automation schemas ──────────────────────────────
@@ -103,10 +110,10 @@ const automationCreate = z.object({
   actions: z.array(automationAction)
     .max(AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION)
     .default([]),
-  target_user_ids: snowflakeArray,
-  target_channel_ids: snowflakeArray,
-  exclude_user_ids: snowflakeArray,
-  exclude_channel_ids: snowflakeArray,
+  target_user_ids: uniqueSnowflakeArray,
+  target_channel_ids: uniqueSnowflakeArray,
+  exclude_user_ids: uniqueSnowflakeArray,
+  exclude_channel_ids: uniqueSnowflakeArray,
 });
 
 const automationUpdate = z.object({
@@ -122,10 +129,10 @@ const automationUpdate = z.object({
     .max(AUTOMATION_LIMITS.MAX_ACTIONS_PER_AUTOMATION)
     .optional(),
   enabled: z.boolean().optional(),
-  target_user_ids: z.array(snowflake).max(100).optional(),
-  target_channel_ids: z.array(snowflake).max(100).optional(),
-  exclude_user_ids: z.array(snowflake).max(100).optional(),
-  exclude_channel_ids: z.array(snowflake).max(100).optional(),
+  target_user_ids: optionalUniqueSnowflakeArray,
+  target_channel_ids: optionalUniqueSnowflakeArray,
+  exclude_user_ids: optionalUniqueSnowflakeArray,
+  exclude_channel_ids: optionalUniqueSnowflakeArray,
 });
 
 const automationTemplateDeploySchema = z.object({
