@@ -340,7 +340,7 @@ describe('commerce_revoke_entitlement_exact', () => {
             ${observed.id}::uuid,
             ${GUILD_ID}::text,
             ${observed.status}::text,
-            ${observed.updated_at}::timestamptz,
+            ${observed.updated_at}::text::timestamptz, -- text-first: a direct ::timestamptz cast makes postgres.js serialize via Date, truncating microseconds and breaking CAS evidence
             'cancelled'::text
           )
       `.execute();
@@ -437,7 +437,7 @@ describe('commerce_revoke_entitlement_exact', () => {
             ${observed.id}::uuid,
             ${GUILD_ID}::text,
             ${observed.status}::text,
-            ${observed.updated_at}::timestamptz,
+            ${observed.updated_at}::text::timestamptz, -- text-first: a direct ::timestamptz cast makes postgres.js serialize via Date, truncating microseconds and breaking CAS evidence
             'cancelled'::text
           )
       `.execute();
