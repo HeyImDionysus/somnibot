@@ -2956,8 +2956,10 @@ BEGIN
    WHERE paid_order.id = v_observed.order_id FOR SHARE;
   PERFORM 1 FROM public.customers AS customer
    WHERE customer.id = v_observed.customer_id FOR SHARE;
-  PERFORM 1 FROM public.entitlements AS entitlement
-   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
+  -- Canonical family order: role-owner advisory BEFORE the entitlements
+  -- share lock, matching the temp-role delivery path — a permanent-path
+  -- share-then-advisory order admits a three-party cycle with a temp
+  -- confirm and a racing revocation on the same entitlement.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(
       'commerce-role-owner:' || v_observed.guild_id || ':'
@@ -2965,6 +2967,8 @@ BEGIN
       0
     )
   );
+  PERFORM 1 FROM public.entitlements AS entitlement
+   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
   SELECT intent.* INTO v_intent
     FROM public.commerce_role_delivery_intents AS intent
    WHERE intent.id = p_intent_id
@@ -3108,8 +3112,10 @@ BEGIN
    WHERE paid_order.id = v_observed.order_id FOR SHARE;
   PERFORM 1 FROM public.customers AS customer
    WHERE customer.id = v_observed.customer_id FOR SHARE;
-  PERFORM 1 FROM public.entitlements AS entitlement
-   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
+  -- Canonical family order: role-owner advisory BEFORE the entitlements
+  -- share lock, matching the temp-role delivery path — a permanent-path
+  -- share-then-advisory order admits a three-party cycle with a temp
+  -- confirm and a racing revocation on the same entitlement.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(
       'commerce-role-owner:' || v_observed.guild_id || ':'
@@ -3117,6 +3123,8 @@ BEGIN
       0
     )
   );
+  PERFORM 1 FROM public.entitlements AS entitlement
+   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
   SELECT intent.* INTO v_intent
     FROM public.commerce_role_delivery_intents AS intent
    WHERE intent.id = p_intent_id
@@ -3218,8 +3226,10 @@ BEGIN
    WHERE paid_order.id = v_observed.order_id FOR SHARE;
   PERFORM 1 FROM public.customers AS customer
    WHERE customer.id = v_observed.customer_id FOR SHARE;
-  PERFORM 1 FROM public.entitlements AS entitlement
-   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
+  -- Canonical family order: role-owner advisory BEFORE the entitlements
+  -- share lock, matching the temp-role delivery path — a permanent-path
+  -- share-then-advisory order admits a three-party cycle with a temp
+  -- confirm and a racing revocation on the same entitlement.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(
       'commerce-role-owner:' || v_observed.guild_id || ':'
@@ -3227,6 +3237,8 @@ BEGIN
       0
     )
   );
+  PERFORM 1 FROM public.entitlements AS entitlement
+   WHERE entitlement.id = v_observed.entitlement_id FOR SHARE;
   SELECT intent.* INTO v_intent
     FROM public.commerce_role_delivery_intents AS intent
    WHERE intent.id = p_intent_id
@@ -14228,19 +14240,25 @@ BEGIN
            queue.payload
          ) IS NOT NULL
     ) AS candidate;
-  PERFORM customer.id
-    FROM public.customers AS customer
-   WHERE customer.id = ANY(v_customer_ids)
-     AND customer.guild_id = p_guild_id
-   ORDER BY customer.id
-   FOR UPDATE;
-
+  -- Canonical order: economy-role-income advisory BEFORE any customers row
+  -- lock. commerce_prepare_temp_role_grant and economy_collect_role_income
+  -- take this advisory first and then FOR SHARE the customer row — taking
+  -- the row lock first here is a two-party AB-BA deadlock with a concurrent
+  -- temp-role fulfillment for the same member. The key derives from
+  -- p_guild_id/p_user_id only, so it needs nothing from the row lock.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended(
       'economy-role-income:' || p_guild_id || ':' || p_user_id,
       0
     )
   );
+
+  PERFORM customer.id
+    FROM public.customers AS customer
+   WHERE customer.id = ANY(v_customer_ids)
+     AND customer.guild_id = p_guild_id
+   ORDER BY customer.id
+   FOR UPDATE;
 
   v_deleted := public.commerce_purge_member_data_base(
     p_guild_id,

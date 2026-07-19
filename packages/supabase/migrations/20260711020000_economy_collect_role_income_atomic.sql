@@ -306,24 +306,30 @@ BEGIN
   GET DIAGNOSTICS v_count = ROW_COUNT;
   v_deleted := v_deleted || pg_catalog.jsonb_build_object('tickets_anonymized', v_count);
 
+  -- Owner decision (anonymize-over-delete, 2026-07-18): member erasure
+  -- scrubs identity from EVERY audit row carrying the member's id — the
+  -- commerce lifecycle writer records the member's Discord id with
+  -- actor_type='system' and target_type='entitlement', which the old
+  -- user-actor/member-target predicate missed, leaving erased members'
+  -- snowflakes and payload snapshots behind under an anonymized=true
+  -- marker. Identity and payloads leave; the forensic skeleton (action,
+  -- actor type, time, outcome) stays, exactly like the guild-purge scrub.
   UPDATE public.audit_logs
      SET actor_id = CASE
-           WHEN actor_type = 'user' AND actor_id = p_user_id
-             THEN 'deleted_user'
+           WHEN actor_id = p_user_id THEN 'deleted_user'
            ELSE actor_id
          END,
          target_id = CASE
-           WHEN target_type = 'member' AND target_id = p_user_id
-             THEN 'deleted_user'
+           WHEN target_id = p_user_id THEN 'deleted_user'
            ELSE target_id
          END,
-         details = COALESCE(details, '{}'::JSONB)
-           || '{"anonymized": true}'::JSONB
+         details = pg_catalog.jsonb_build_object('anonymized', true),
+         before_state = NULL,
+         after_state = NULL,
+         error_message = NULL,
+         correlation_id = NULL
    WHERE guild_id = p_guild_id
-     AND (
-       (actor_type = 'user' AND actor_id = p_user_id)
-       OR (target_type = 'member' AND target_id = p_user_id)
-     );
+     AND (actor_id = p_user_id OR target_id = p_user_id);
 
   UPDATE public.giveaways
      SET entries = pg_catalog.array_remove(entries, p_user_id)

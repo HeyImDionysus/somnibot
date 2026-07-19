@@ -67,6 +67,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Canonical prize form: the winner-notification contract compares
+  // btrim(left(btrim(prize), 1000)) snapshots, so store that form directly.
+  const canonicalPrize = String(prize).trim().slice(0, 1_000).trim();
+  if (canonicalPrize.length === 0) {
+    return NextResponse.json(
+      { success: false, error: 'Prize cannot be empty' },
+      { status: 400 },
+    );
+  }
+
   // Max 25 active giveaways
   const { count } = await supabase
     .from('giveaways')
@@ -86,7 +96,7 @@ export async function POST(req: NextRequest) {
     .insert({
       guild_id: guildId,
       channel_id,
-      prize,
+      prize: canonicalPrize,
       winner_count: winner_count ?? 1,
       ends_at,
       required_role_id: required_role_id ?? null,

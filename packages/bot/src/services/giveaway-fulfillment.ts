@@ -281,7 +281,13 @@ export class GiveawayFulfillmentService {
       || giveaway.guild_id !== this.guild.id
       || giveaway.status !== 'ended'
       || giveaway.prize_product_id !== productId
-      || giveaway.prize !== prizeSnapshot
+      // giveaway_atomic_end/reroll snapshot the prize NORMALIZED —
+      // btrim(left(btrim(prize), 1000)) — so the stored prize must get the
+      // identical transform before the exact-match check, or any giveaway
+      // created with an untrimmed/oversized prize permanently fails every
+      // winner notification.
+      || typeof giveaway.prize !== 'string'
+      || giveaway.prize.trim().slice(0, 1_000).trim() !== prizeSnapshot
       || !Array.isArray(giveaway.winners)
       || giveaway.winners.some((value: unknown) =>
         typeof value !== 'string' || !DISCORD_SNOWFLAKE_PATTERN.test(value))
