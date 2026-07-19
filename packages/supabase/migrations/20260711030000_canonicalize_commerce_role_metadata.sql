@@ -753,7 +753,7 @@ BEGIN
   -- Encode its complete truth-table here so no future caller can smuggle an
   -- authority, completion, controller, or token mutation through the exception.
   -- This trigger intentionally runs as invoker: an UPDATE queued inside the
-  -- SECURITY DEFINER recovery RPC runs as that function's owner, while raw
+  -- definer-rights recovery RPC runs as that function's owner, while raw
   -- service-role DML does not. The exact transaction-local intent scope then
   -- prevents another owner-context UPDATE from borrowing the exception.
   SELECT pg_catalog.pg_get_userbyid(proc.proowner)
@@ -5294,7 +5294,7 @@ BEGIN
     -- These payloads are exact Discord role authority.  In particular,
     -- old_discord_id cannot be reconstructed after a customer relink, so a
     -- syntactically convincing direct INSERT must never be able to choose its
-    -- target.  Only the SECURITY DEFINER snapshot helpers may mint the exact
+    -- target.  Only the definer-rights snapshot helpers may mint the exact
     -- row, and their one-row transaction-local scope binds UUID, key, and the
     -- complete canonical JSONB payload.
      IF NEW.payload ->> 'source' IN (
@@ -15409,9 +15409,9 @@ REVOKE ALL ON FUNCTION public.commerce_guard_refund_ledger_immutable()
   FROM PUBLIC, anon, authenticated, service_role;
 
 -- Application service clients may inspect provider evidence, but canonical
--- SECURITY DEFINER state machines own every append so direct writes cannot
+-- definer-rights state machines own every append so direct writes cannot
 -- bypass refund amount, alert/audit, or terminal-witness contracts. They also
--- cannot rewrite or erase the durable proof. Table-owner SECURITY DEFINER
+-- cannot rewrite or erase the durable proof. Table-owner definer-rights
 -- retention and guild-purge routines retain their authority; this narrows only
 -- the broad GRANT ALL issued by the original ledger migration.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER

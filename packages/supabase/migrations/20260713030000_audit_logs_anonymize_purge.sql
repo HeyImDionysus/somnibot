@@ -22,7 +22,7 @@
 -- service_role loses UPDATE/DELETE/TRUNCATE (TRUNCATE bypasses row
 -- triggers entirely) so the never-delete contract holds even against a
 -- compromised service credential. All scrubs run inside table-owner
--- SECURITY DEFINER functions.
+-- definer-rights functions.
 -- =============================================================================
 BEGIN;
 
