@@ -1977,7 +1977,7 @@ describe('economy_collect_role_income', () => {
              after_state, error_message, correlation_id
         FROM public.audit_logs
        WHERE id IN ${sql(seeded.map((row) => row.id))}
-       ORDER BY action
+       ORDER BY action COLLATE "C"
     `;
     expect(survivors).toEqual([
       {

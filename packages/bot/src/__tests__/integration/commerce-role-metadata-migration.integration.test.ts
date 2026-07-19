@@ -318,6 +318,30 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     product_id UUID, created_at TIMESTAMPTZ
   );
 
+  -- giveaway_atomic_end/reroll declare public.giveaways%ROWTYPE, which the
+  -- plpgsql validator resolves at CREATE FUNCTION time during the migration
+  -- replay — the replica must pre-exist even though no test executes them.
+  CREATE TABLE ${FIXTURE_SCHEMA}.giveaways (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    guild_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT,
+    prize TEXT NOT NULL,
+    prize_product_id UUID,
+    prize_license_count INTEGER DEFAULT 1,
+    winner_count INTEGER NOT NULL DEFAULT 1,
+    ends_at TIMESTAMPTZ NOT NULL,
+    required_role_id TEXT,
+    required_level INTEGER,
+    required_entitlement_product_id UUID,
+    entries TEXT[] DEFAULT '{}',
+    winners TEXT[] DEFAULT '{}',
+    status TEXT NOT NULL,
+    ended_at TIMESTAMPTZ,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+  );
+
   CREATE FUNCTION ${FIXTURE_SCHEMA}.commerce_income_wall_lock_guild(TEXT)
   RETURNS void LANGUAGE sql AS 'SELECT';
 
@@ -700,7 +724,10 @@ describe('20260711030000 legacy metadata migration', () => {
       )
     `)).rejects.toMatchObject({
       code: '23514',
-      message: expect.stringContaining('payment capture set requires operator remediation'),
+      // The noncanonical provider id is rejected at the order boundary
+      // (paypal_order_id grammar check inside the refundability gate),
+      // before the capture-set gate is ever consulted.
+      message: expect.stringContaining('order is not refundable'),
     });
 
     const invalidOrderIds = [
@@ -937,7 +964,7 @@ describe('20260711030000 legacy metadata migration', () => {
        WHERE action = 'revoke_roles'
          AND status IN ('staged', 'pending', 'processing')
     `);
-    expect(actionable[0]!.count).toBe(0);
+    expect(Number(actionable[0]!.count)).toBe(0);
 
     // The terminal paid entitlement's role snapshot is untouched evidence.
     const entitlement = await sql.unsafe<Array<{ granted_role_ids: string[] }>>(`
@@ -1041,7 +1068,7 @@ describe('20260711030000 legacy metadata migration', () => {
            AND dlq.retried = false
       ) AS count
     `);
-    expect(actionable[0]!.count).toBe(0);
+    expect(Number(actionable[0]!.count)).toBe(0);
   });
 
   it('quarantines even a full-key canonical-shaped legacy revoke instead of honoring it', async () => {
@@ -1122,7 +1149,7 @@ describe('20260711030000 legacy metadata migration', () => {
          WHERE action = 'revoke_roles'
            AND status IN ('staged', 'pending', 'processing')
       `);
-      expect(actionable[0]!.count).toBe(0);
+      expect(Number(actionable[0]!.count)).toBe(0);
     } finally {
       if (applySql) {
         try {

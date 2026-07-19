@@ -118,8 +118,11 @@ function delay(ms: number): Promise<void> {
 }
 
 async function jsonbFingerprint(payload: Record<string, unknown>): Promise<string> {
+  // The parameter must reach PostgreSQL typed as TEXT: postgres.js
+  // re-serializes an already-stringified value when the placeholder's
+  // described type is json/jsonb, double-encoding it into a JSON string.
   const [row] = await sqlA<{ fingerprint: string }[]>`
-    SELECT pg_catalog.md5(${JSON.stringify(payload)}::JSONB::TEXT) AS fingerprint
+    SELECT pg_catalog.md5((${JSON.stringify(payload)}::TEXT)::JSONB::TEXT) AS fingerprint
   `;
   expect(row?.fingerprint).toMatch(/^[0-9a-f]{32}$/);
   return row!.fingerprint;
@@ -4023,6 +4026,17 @@ describe('noncommerce terminal entitlement cleanup carrier', () => {
     expect(protectedCarrierError).toBeNull();
     expect(protectedCarrier?.id).toBeTruthy();
     expect(protectedCarrier?.payload).toEqual(forgedPayload);
+    // Compare CANONICAL JSONB TEXTS, not object equality: toEqual coerces
+    // value forms (e.g. numeric 1 vs 1.0, null vs absent) that change the
+    // jsonb text and therefore the md5 in the key. Any divergence must show
+    // as a byte-level diff of the two canonical texts.
+    const [texts] = await sqlA<{ stored: string; forged: string }[]>`
+      SELECT queue.payload::TEXT AS stored,
+             (${JSON.stringify(forgedPayload)}::TEXT)::JSONB::TEXT AS forged
+        FROM public.bot_action_queue AS queue
+       WHERE queue.id = ${protectedCarrier!.id}
+    `;
+    expect(texts!.forged).toBe(texts!.stored);
     expect(protectedCarrier?.idempotency_key).toBe(forgedKey);
     const { data: unchanged, error: unchangedError } = await supa
       .from('entitlements')

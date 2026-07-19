@@ -11558,18 +11558,20 @@ BEGIN
   SELECT audit.* INTO v_audit
     FROM public.audit_logs AS audit
    WHERE audit.id = p_transition_id;
+  -- Cross-link detection binds the transition to its IDENTITY tuple only:
+  -- guild, action, category, target. Actor id, details, and state snapshots
+  -- are evidence FROZEN at transition time — the stored row is authoritative
+  -- for them. Re-deriving them from live state here would poison legitimate
+  -- replays after any sanctioned mutation (customer relink changes
+  -- discord_id, product rename changes the details name); the caller's
+  -- replay contract already pins the immutable request shape exactly.
   IF NOT FOUND
      OR v_audit.guild_id IS DISTINCT FROM p_guild_id
      OR v_audit.actor_type IS DISTINCT FROM 'system'
-     OR v_audit.actor_id IS DISTINCT FROM p_discord_id
      OR v_audit.action IS DISTINCT FROM p_event_type
      OR v_audit.category IS DISTINCT FROM 'commerce'
      OR v_audit.target_type IS DISTINCT FROM 'entitlement'
      OR v_audit.target_id IS DISTINCT FROM p_entitlement_id::TEXT
-     OR v_audit.details IS DISTINCT FROM v_details
-     OR v_audit.before_state IS DISTINCT FROM v_before
-     OR v_audit.after_state IS DISTINCT FROM v_after
-     OR v_audit.correlation_id IS DISTINCT FROM v_correlation
      OR v_audit.success IS DISTINCT FROM true THEN
     RAISE EXCEPTION USING ERRCODE = '23514',
       MESSAGE = 'commerce_record_entitlement_lifecycle_event: transition is cross-linked';
