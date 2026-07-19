@@ -11430,9 +11430,14 @@ BEGIN
       MESSAGE = 'commerce_observe_noncommerce_live_origin: exact identity is required';
   END IF;
 
-  -- Customer before entitlement is the global commerce identity order used by
-  -- privacy purge and relink writers. It prevents an observer from holding an
-  -- entitlement SHARE lock while waiting on a purge's customer lock. Terminal
+  -- Observers may take customer-share before entitlement-share ONLY because
+  -- both locks here are SHARE (compatible with every other share reader) and
+  -- the sole exclusive-customer writer, purge_member_data, acquires its
+  -- customer locks NOWAIT — it aborts with a retryable 40001 instead of
+  -- waiting, so no cycle can close through this observer. The canonical
+  -- WRITER order for the noncommerce-entitlement-customer triple is
+  -- entitlement -> advisory -> customer; do not copy this observer's
+  -- customer-first shape into anything that takes exclusive locks. Terminal
   -- entitlement writers do not row-lock the customer, so the second FOR SHARE
   -- still waits for an uncommitted terminal UPDATE and re-evaluates that tuple.
   SELECT customer.* INTO v_customer
