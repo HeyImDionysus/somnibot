@@ -139,6 +139,19 @@ function makeSupabase(overrides: Record<string, unknown> = {}) {
       return handler ? handler() : chainBuilder();
     }),
     rpc: vi.fn((name: string, params: unknown) => {
+      if (name === 'economy_pay') {
+        // Mirror the real RPC's return shape from the params so pay()'s mapping
+        // logic is exercised. The RPC's atomic/idempotent money movement is
+        // proven against real Postgres in the domain proof, not here.
+        const p = (params ?? {}) as { p_amount?: unknown; p_tax_pct?: unknown };
+        const amount = Number(p.p_amount);
+        const taxPct = Number(p.p_tax_pct) || 0;
+        const tax = taxPct > 0 ? Math.floor((amount * taxPct) / 100) : 0;
+        return Promise.resolve({
+          data: { status: 'sent', replayed: false, amount, tax, received: amount - tax, sender_balance: 0, receiver_balance: 0 },
+          error: null,
+        });
+      }
       const result = rpcResults[name];
       return Promise.resolve(result ?? { data: null, error: null });
     }),
@@ -624,30 +637,53 @@ describe('EconomyManager', () => {
 
   describe('pay', () => {
     it('transfers money between users', async () => {
-      const result = await em.pay('u1', 'u2', 200);
+      const result = await em.pay('u1', 'u2', 200, 'req-1');
       expect(result.success).toBe(true);
       expect(result.amount).toBe(200);
       expect(result.message).toContain('Sent');
     });
 
     it('prevents self-pay', async () => {
-      const result = await em.pay('u1', 'u1', 200);
+      const result = await em.pay('u1', 'u1', 200, 'req-1');
       expect(result.success).toBe(false);
       expect(result.message).toContain("can't pay yourself");
     });
 
     it('rejects non-positive amount', async () => {
-      const result = await em.pay('u1', 'u2', 0);
+      const result = await em.pay('u1', 'u2', 0, 'req-1');
       expect(result.success).toBe(false);
       expect(result.message).toContain('positive');
     });
 
+    it('refuses to transfer without an idempotency request id', async () => {
+      const result = await em.pay('u1', 'u2', 200, '');
+      expect(result.success).toBe(false);
+      // No economy_pay call is made when the idempotency key is missing.
+      expect(supabase.rpc).not.toHaveBeenCalledWith('economy_pay', expect.anything());
+    });
+
+    it('passes the interaction id to the RPC as the idempotency key', async () => {
+      await em.pay('u1', 'u2', 200, 'interaction-xyz');
+      expect(supabase.rpc).toHaveBeenCalledWith(
+        'economy_pay',
+        expect.objectContaining({
+          p_sender_id: 'u1',
+          p_receiver_id: 'u2',
+          p_amount: '200',
+          p_request_id: 'interaction-xyz',
+        }),
+      );
+    });
+
     it('fails on insufficient funds', async () => {
-      supabase.from.mockImplementation((table: string) => {
-        if (table === 'economy_wallets') return chainBuilder({ data: makeWallet({ wallet: 10 }) });
-        return chainBuilder({ data: supabase._configData });
+      supabase.rpc.mockImplementation(async (name: string) => {
+        if (name === 'economy_pay') {
+          return { data: { status: 'insufficient_funds', replayed: false, amount: 500, tax: 0, received: 500, sender_balance: 10 }, error: null };
+        }
+        return { data: makeWallet({ wallet: 10 }), error: null };
       });
-      const result = await em.pay('u1', 'u2', 500);
+      supabase.from.mockImplementation(() => chainBuilder({ data: makeWallet({ wallet: 10 }) }));
+      const result = await em.pay('u1', 'u2', 500, 'req-1');
       expect(result.success).toBe(false);
       expect(result.message).toContain("don't have enough");
     });
@@ -661,36 +697,34 @@ describe('EconomyManager', () => {
       });
       // Clear config cache
       em.invalidateConfig();
-      const result = await em.pay('u1', 'u2', 100);
+      const result = await em.pay('u1', 'u2', 100, 'req-1');
       expect(result.success).toBe(true);
       expect(result.message).toContain('Tax');
+      // 10% of 100 sinks as tax; the receiver gets 90.
+      expect(result.message).toContain('90');
     });
 
-    it('refunds sender when receiver credit fails', async () => {
-      // creditWallet is called multiple times. We need the one for receiver to fail.
-      // debitWallet calls getOrCreateWallet (which may call creditWallet internally
-      // only if wallet doesn't exist). Pay flow:
-      //   1. loadConfig
-      //   2. getOrCreateWallet(sender) — exists, returns directly
-      //   3. debitWallet(sender) → getOrCreateWallet → rpc(subtract)
-      //   4. creditWallet(receiver) → getOrCreateWallet → rpc(add) — FAIL here
-      //   5. creditWallet(sender) for refund → rpc(add)
-      let addBalanceCalls = 0;
+    it('reports a generic failure when the RPC errors (no silent coin loss)', async () => {
       supabase.rpc.mockImplementation(async (name: string) => {
-        if (name === 'economy_subtract_balance') return { data: null, error: null };
-        if (name === 'economy_add_balance') {
-          addBalanceCalls++;
-          // The 1st economy_add_balance call is receiver credit — fail it
-          if (addBalanceCalls === 1) {
-            return { data: null, error: { message: 'db down' } };
-          }
-          return { data: null, error: null };
-        }
-        return { data: null, error: null };
+        if (name === 'economy_pay') return { data: null, error: { message: 'db down' } };
+        return { data: makeWallet(), error: null };
       });
-      const result = await em.pay('u1', 'u2', 200);
+      const result = await em.pay('u1', 'u2', 200, 'req-1');
       expect(result.success).toBe(false);
-      expect(result.message).toContain('refunded');
+      expect(result.message).toContain('Payment failed');
+    });
+
+    it('reports a replayed transfer as success without re-crediting', async () => {
+      supabase.rpc.mockImplementation(async (name: string) => {
+        if (name === 'economy_pay') {
+          return { data: { status: 'sent', replayed: true, amount: 200, tax: 0, received: 200, sender_balance: 800 }, error: null };
+        }
+        return { data: makeWallet(), error: null };
+      });
+      const result = await em.pay('u1', 'u2', 200, 'req-replay');
+      expect(result.success).toBe(true);
+      expect(result.amount).toBe(200);
+      expect(result.message).toContain('Sent');
     });
   });
 
