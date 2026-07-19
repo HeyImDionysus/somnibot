@@ -93,6 +93,8 @@ vi.mock('../services/audit.js', () => ({ writeAuditLog: mockFn() }));
 
 import { registerEvents } from '../events/handler.js';
 import { handleBuyButton } from '../features/commerce/payment-handler.js';
+import { registeredCommands } from '../events/command-registry.js';
+import { REGISTRY_COMMAND_NAMES } from '../events/dispatch-manifest.js';
 
 // Build a client mock that captures event listeners
 function makeClient() {
@@ -791,5 +793,15 @@ describe('handler interaction routing', () => {
     });
     await setup2.fire('interactionCreate', interaction);
     expect(interaction.reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('disabled') }));
+  });
+
+  // Drift guard: the dispatch-manifest's REGISTRY_COMMAND_NAMES is a static
+  // mirror of handler.ts's registerCommand(...) calls. Importing handler.ts
+  // (via registerEvents above) populates the real registry, so its runtime
+  // contents MUST equal the manifest. This turns any drift — a registerCommand
+  // added/removed without updating the manifest — into a red test, keeping the
+  // manifest a faithful single source for the bidirectional validator.
+  it('dispatch-manifest REGISTRY_COMMAND_NAMES matches the live registry', () => {
+    expect([...registeredCommands()].sort()).toEqual([...REGISTRY_COMMAND_NAMES].sort());
   });
 });

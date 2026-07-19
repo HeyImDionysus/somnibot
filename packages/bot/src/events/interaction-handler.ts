@@ -13,6 +13,22 @@ import type { Interaction } from 'discord.js';
 import { createLogger } from '@somnibot/shared';
 import type { SomniClient } from '../client.js';
 import { lookupCommand } from './command-registry.js';
+// Single source of truth for the dispatcher's routing keys (PR4 — E2E harness).
+import {
+  SLASH,
+  MUSIC_COMMANDS,
+  ECONOMY_COMMANDS,
+  GATHERING_COMMANDS,
+  CRAFTING_COMMANDS,
+  GAME_COMMANDS,
+  PROFILE_COMMANDS,
+  BUTTON_PREFIX,
+  SELECT_LITERAL,
+  MODAL_PREFIX,
+  ECON_BUTTON,
+  USER_CONTEXT_MENU,
+  MESSAGE_CONTEXT_MENU,
+} from './dispatch-manifest.js';
 
 // Feature handler imports — buttons & UI
 import { handleTicketInteraction } from '../features/tickets/index.js';
@@ -102,16 +118,16 @@ function getManager<T>(client: SomniClient, key: string, guildId?: string): T | 
  */
 function isSetupInteraction(interaction: Interaction): boolean {
   if (interaction.isChatInputCommand()) {
-    return interaction.commandName === 'setup';
+    return interaction.commandName === SLASH.setup;
   }
   if (interaction.isButton()) {
-    return interaction.customId.startsWith('setup:');
+    return interaction.customId.startsWith(BUTTON_PREFIX.setup);
   }
   if (interaction.isStringSelectMenu()) {
-    return interaction.customId === 'setup:reconfigure';
+    return interaction.customId === SELECT_LITERAL.setupReconfigure;
   }
   if (interaction.isModalSubmit()) {
-    return interaction.customId.startsWith('setup:modal:');
+    return interaction.customId.startsWith(MODAL_PREFIX.setup);
   }
   return false;
 }
@@ -145,11 +161,11 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
   try {
     // ── Setup wizard ──
-    if (interaction.isButton() && interaction.customId.startsWith('setup:')) {
+    if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.setup)) {
       await handleSetupButton(interaction, client);
       return;
     }
-    if (interaction.isStringSelectMenu() && interaction.customId === 'setup:reconfigure') {
+    if (interaction.isStringSelectMenu() && interaction.customId === SELECT_LITERAL.setupReconfigure) {
       await handleReconfigureSelect(interaction, client);
       return;
     }
@@ -159,17 +175,17 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       const handled = await handleTicketInteraction(interaction, client);
       if (handled) return;
 
-      if (interaction.isButton() && interaction.customId.startsWith('giveaway_enter:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.giveawayEnter)) {
         const mgr = getManager<GiveawayManager>(client, 'giveawayManager', guildId);
         if (mgr && await mgr.handleEntry(interaction)) return;
       }
 
-      if (interaction.isButton() && interaction.customId.startsWith('btnrole:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.buttonRole)) {
         if (await handleButtonRoleInteraction(interaction, client.supabase)) return;
       }
 
       // Commerce buy buttons — gated by store_enabled
-      if (interaction.isButton() && interaction.customId.startsWith('store:buy:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.storeBuy)) {
         const { data: storeCfg } = await client.supabase
           .from('guild_config')
           .select('store_enabled')
@@ -190,10 +206,10 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
       }
 
       // Music buttons
-      if (interaction.isButton() && interaction.customId.startsWith('music:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.music)) {
         const musicMgr = getManager<MusicPlayerManager>(client, 'musicPlayer', guildId);
         if (musicMgr) {
-          if (interaction.customId.startsWith('music:queue_page:')) {
+          if (interaction.customId.startsWith(BUTTON_PREFIX.musicQueuePage)) {
             const page = parseInt(interaction.customId.split(':')[2] ?? '1', 10);
             const queue = await musicMgr.queueManager.getQueue(guildId);
             if (queue) {
@@ -211,25 +227,25 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
         }
       }
 
-      if (interaction.isButton() && interaction.customId.startsWith('adventure:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.adventure)) {
         await handleAdventureButton(interaction);
         return;
       }
 
-      if (interaction.isButton() && interaction.customId.startsWith('trivia:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.trivia)) {
         const trivMgr = getManager<TriviaManager>(client, 'trivia', guildId);
         if (trivMgr) await trivMgr.handleAnswer(interaction);
         return;
       }
 
-      if (interaction.isButton() && interaction.customId.startsWith('poll:')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.poll)) {
         const pollMgr = getManager<PollsManager>(client, 'polls', guildId);
         if (pollMgr) await pollMgr.handlePollVote(interaction);
         return;
       }
 
       // Economy quick-action buttons
-      if (interaction.isButton() && interaction.customId.startsWith('econ_')) {
+      if (interaction.isButton() && interaction.customId.startsWith(BUTTON_PREFIX.econ)) {
         await handleEconomyButton(interaction, client);
         return;
       }
@@ -250,13 +266,13 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
     // ── Context Menu Commands ──
     if (interaction.isUserContextMenuCommand()) {
       switch (interaction.commandName) {
-        case 'View Profile':
+        case USER_CONTEXT_MENU.viewProfile:
           await handleViewProfile(interaction, client.supabase, guildId);
           return;
-        case 'Warn User':
+        case USER_CONTEXT_MENU.warnUser:
           await handleWarnUser(interaction);
           return;
-        case 'View Purchases':
+        case USER_CONTEXT_MENU.viewPurchases:
           await handleViewPurchases(interaction, client.supabase, guildId);
           return;
       }
@@ -264,10 +280,10 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
     if (interaction.isMessageContextMenuCommand()) {
       switch (interaction.commandName) {
-        case 'Create Ticket':
+        case MESSAGE_CONTEXT_MENU.createTicket:
           await handleCreateTicketFromMessage(interaction);
           return;
-        case 'Report Message':
+        case MESSAGE_CONTEXT_MENU.reportMessage:
           await handleReportMessage(interaction);
           return;
       }
@@ -275,7 +291,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
     // ── Modal Submissions ──
     if (interaction.isModalSubmit()) {
-      if (interaction.customId.startsWith('setup:modal:')) {
+      if (interaction.customId.startsWith(MODAL_PREFIX.setup)) {
         await handleSetupModal(interaction, client);
         return;
       }
@@ -294,7 +310,7 @@ export async function handleInteraction(interaction: Interaction, client: SomniC
 
     // ── Help select menu ──
     if (interaction.isStringSelectMenu()) {
-      if (interaction.customId === 'help:category') {
+      if (interaction.customId === SELECT_LITERAL.helpCategory) {
         await handleHelpCategorySelect(interaction, client);
         return;
       }
@@ -334,19 +350,19 @@ async function handleSlashCommand(
   }
 
   // Level commands
-  if (interaction.commandName === 'rank') {
+  if (interaction.commandName === SLASH.rank) {
     const { handleRankCommand } = await import('../features/levels/commands.js');
     await handleRankCommand(interaction, client);
     return;
   }
-  if (interaction.commandName === 'leaderboard') {
+  if (interaction.commandName === SLASH.leaderboard) {
     const { handleLeaderboardCommand } = await import('../features/levels/commands.js');
     await handleLeaderboardCommand(interaction, client);
     return;
   }
 
   // Temp channel commands
-  if (interaction.commandName === 'voice') {
+  if (interaction.commandName === SLASH.voice) {
     const mgr = getManager<TempChannelManager>(client, 'tempChannelManager', guildId);
     if (mgr) { await handleTempChannelCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Temp channels are not enabled.', ephemeral: true }); }
@@ -354,7 +370,7 @@ async function handleSlashCommand(
   }
 
   // Giveaway commands
-  if (interaction.commandName === 'giveaway') {
+  if (interaction.commandName === SLASH.giveaway) {
     const mgr = getManager<GiveawayManager>(client, 'giveawayManager', guildId);
     if (mgr) { await handleGiveawayCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Giveaways are not enabled.', ephemeral: true }); }
@@ -362,8 +378,7 @@ async function handleSlashCommand(
   }
 
   // Music commands
-  const musicCommands = new Set(['play', 'skip', 'stop', 'queue', 'np', 'volume', 'loop', 'shuffle', 'seek', 'remove', 'pause', 'filter']);
-  if (musicCommands.has(interaction.commandName)) {
+  if (MUSIC_COMMANDS.has(interaction.commandName)) {
     const mgr = getManager<MusicPlayerManager>(client, 'musicPlayer', guildId);
     if (mgr) { await handleMusicCommand(interaction, mgr); }
     else { await interaction.reply({ content: '❌ Music system is not enabled.', ephemeral: true }); }
@@ -371,7 +386,7 @@ async function handleSlashCommand(
   }
 
   // Commerce commands — gated by store_enabled
-  if (interaction.commandName === 'store' || interaction.commandName === 'license') {
+  if (interaction.commandName === SLASH.store || interaction.commandName === SLASH.license) {
     const { data: storeFlagCfg } = await client.supabase
       .from('guild_config')
       .select('store_enabled')
@@ -381,7 +396,7 @@ async function handleSlashCommand(
       await interaction.reply({ content: '❌ The store is currently disabled.', ephemeral: true });
       return;
     }
-    if (interaction.commandName === 'store') {
+    if (interaction.commandName === SLASH.store) {
       await handleStoreCommand(interaction, client.supabase, guildId, process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com');
       return;
     }
@@ -390,18 +405,13 @@ async function handleSlashCommand(
   }
 
   // Timers command
-  if (interaction.commandName === 'timers') {
+  if (interaction.commandName === SLASH.timers) {
     await handleTimersCommand(interaction);
     return;
   }
 
   // Economy commands — gated by economy_enabled
-  const economyCommands = new Set([
-    'balance', 'daily', 'weekly', 'monthly', 'work', 'crime', 'beg', 'search',
-    'deposit', 'withdraw', 'pay', 'rob', 'passive', 'shop', 'buy', 'sell',
-    'inventory', 'use', 'economy-leaderboard', 'collect-income',
-  ]);
-  if (economyCommands.has(interaction.commandName)) {
+  if (ECONOMY_COMMANDS.has(interaction.commandName)) {
     const mgr = getManager<EconomyManager>(client, 'economy', guildId);
     if (mgr) { await handleEconomyCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The economy system is not enabled on this server.', ephemeral: true }); }
@@ -409,8 +419,7 @@ async function handleSlashCommand(
   }
 
   // Gathering commands — /hunt, /dig, /mine
-  const gatheringCommands = new Set(['hunt', 'dig', 'mine']);
-  if (gatheringCommands.has(interaction.commandName)) {
+  if (GATHERING_COMMANDS.has(interaction.commandName)) {
     const mgr = getManager<GatheringManager>(client, 'gathering', guildId);
     if (mgr) { await handleGatheringCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The gathering system is not enabled on this server.', ephemeral: true }); }
@@ -418,8 +427,7 @@ async function handleSlashCommand(
   }
 
   // Crafting commands — /craft, /recipes
-  const craftingCommands = new Set(['craft', 'recipes']);
-  if (craftingCommands.has(interaction.commandName)) {
+  if (CRAFTING_COMMANDS.has(interaction.commandName)) {
     const mgr = getManager<CraftingManager>(client, 'crafting', guildId);
     if (mgr) { await handleCraftingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The crafting system is not enabled on this server.', ephemeral: true }); }
@@ -427,7 +435,7 @@ async function handleSlashCommand(
   }
 
   // Farming
-  if (interaction.commandName === 'farm') {
+  if (interaction.commandName === SLASH.farm) {
     const mgr = getManager<FarmingManager>(client, 'farming', guildId);
     if (mgr) { await handleFarmingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The farming system is not enabled on this server.', ephemeral: true }); }
@@ -435,7 +443,7 @@ async function handleSlashCommand(
   }
 
   // Fishing
-  if (interaction.commandName === 'fish') {
+  if (interaction.commandName === SLASH.fish) {
     const mgr = getManager<FishingManager>(client, 'fishing', guildId);
     if (mgr) { await handleFishingCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The fishing system is not enabled on this server.', ephemeral: true }); }
@@ -443,7 +451,7 @@ async function handleSlashCommand(
   }
 
   // Adventures
-  if (interaction.commandName === 'adventure') {
+  if (interaction.commandName === SLASH.adventure) {
     const mgr = getManager<AdventureManager>(client, 'adventures', guildId);
     if (mgr) { await handleAdventureCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The adventure system is not enabled on this server.', ephemeral: true }); }
@@ -451,7 +459,7 @@ async function handleSlashCommand(
   }
 
   // Market
-  if (interaction.commandName === 'market') {
+  if (interaction.commandName === SLASH.market) {
     const mgr = getManager<MarketManager>(client, 'market', guildId);
     if (mgr) { await handleMarketCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 The market is not enabled on this server.', ephemeral: true }); }
@@ -459,7 +467,7 @@ async function handleSlashCommand(
   }
 
   // Trivia
-  if (interaction.commandName === 'trivia') {
+  if (interaction.commandName === SLASH.trivia) {
     const mgr = getManager<TriviaManager>(client, 'trivia', guildId);
     if (mgr) { await handleTriviaCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Trivia is not enabled on this server.', ephemeral: true }); }
@@ -467,8 +475,7 @@ async function handleSlashCommand(
   }
 
   // Mini-games
-  const gameNames = ['coinflip', 'slots', 'rps', 'dice', 'blackjack', 'highlow', 'scratch', 'guess'];
-  if (gameNames.includes(interaction.commandName)) {
+  if (GAME_COMMANDS.includes(interaction.commandName)) {
     const mgr = getManager<GamesManager>(client, 'games', guildId);
     if (mgr) { await handleGameCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Mini-games are not enabled on this server.', ephemeral: true }); }
@@ -476,7 +483,7 @@ async function handleSlashCommand(
   }
 
   // Lottery
-  if (interaction.commandName === 'lottery') {
+  if (interaction.commandName === SLASH.lottery) {
     const mgr = getManager<LotteryManager>(client, 'lottery', guildId);
     if (mgr) { await handleLotteryCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Lottery is not enabled on this server.', ephemeral: true }); }
@@ -484,13 +491,13 @@ async function handleSlashCommand(
   }
 
   // Polls & Predictions
-  if (interaction.commandName === 'poll') {
+  if (interaction.commandName === SLASH.poll) {
     const mgr = getManager<PollsManager>(client, 'polls', guildId);
     if (mgr) { await handlePollCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Polls are not enabled on this server.', ephemeral: true }); }
     return;
   }
-  if (interaction.commandName === 'predict') {
+  if (interaction.commandName === SLASH.predict) {
     const mgr = getManager<PollsManager>(client, 'polls', guildId);
     if (mgr) { await handlePredictCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Predictions are not enabled on this server.', ephemeral: true }); }
@@ -498,7 +505,7 @@ async function handleSlashCommand(
   }
 
   // Pets
-  if (interaction.commandName === 'pet') {
+  if (interaction.commandName === SLASH.pet) {
     const mgr = getManager<PetsManager>(client, 'pets', guildId);
     if (mgr) { await handlePetCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Pets are not enabled on this server.', ephemeral: true }); }
@@ -506,7 +513,7 @@ async function handleSlashCommand(
   }
 
   // Quests
-  if (interaction.commandName === 'quests') {
+  if (interaction.commandName === SLASH.quests) {
     const mgr = getManager<QuestsManager>(client, 'quests', guildId);
     if (mgr) { await handleQuestCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Quests are not enabled on this server.', ephemeral: true }); }
@@ -514,7 +521,7 @@ async function handleSlashCommand(
   }
 
   // Heist
-  if (interaction.commandName === 'heist') {
+  if (interaction.commandName === SLASH.heist) {
     const mgr = getManager<HeistManager>(client, 'heist', guildId);
     if (mgr) { await handleHeistCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Heists are not enabled on this server.', ephemeral: true }); }
@@ -522,7 +529,7 @@ async function handleSlashCommand(
   }
 
   // Achievements & Prestige
-  if (interaction.commandName === 'badges' || interaction.commandName === 'prestige') {
+  if (interaction.commandName === SLASH.badges || interaction.commandName === SLASH.prestige) {
     const mgr = getManager<AchievementsManager>(client, 'achievements', guildId);
     if (mgr) { await handleAchievementCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Achievements are not enabled on this server.', ephemeral: true }); }
@@ -530,7 +537,7 @@ async function handleSlashCommand(
   }
 
   // Profiles
-  if (['profile', 'title', 'bio'].includes(interaction.commandName)) {
+  if (PROFILE_COMMANDS.includes(interaction.commandName)) {
     const mgr = getManager<ProfilesManager>(client, 'profiles', guildId);
     if (mgr) { await handleProfileCommand(interaction, mgr); }
     else { await interaction.reply({ content: '🚫 Profiles are not available.', ephemeral: true }); }
@@ -559,7 +566,7 @@ async function handleEconomyButton(
   }
 
   switch (interaction.customId) {
-    case 'econ_daily': {
+    case ECON_BUTTON.daily: {
       await interaction.deferReply({ ephemeral: true });
       const cfg = await econMgr.loadConfig();
       const result = await econMgr.claimTimedReward(interaction.user.id, 'daily');
@@ -575,7 +582,7 @@ async function handleEconomyButton(
       }
       return;
     }
-    case 'econ_balance': {
+    case ECON_BUTTON.balance: {
       const user = interaction.user;
       const cfg = await econMgr.loadConfig();
       const wallet = await econMgr.getOrCreateWallet(user.id);
@@ -592,7 +599,7 @@ async function handleEconomyButton(
       await interaction.reply({ embeds: [embed], ephemeral: true });
       return;
     }
-    case 'econ_inventory': {
+    case ECON_BUTTON.inventory: {
       const items = await econMgr.getInventory(interaction.user.id);
       if (items.length === 0) {
         await interaction.reply({ content: '📦 Your inventory is empty.', ephemeral: true });
@@ -611,7 +618,7 @@ async function handleEconomyButton(
       }
       return;
     }
-    case 'econ_shop': {
+    case ECON_BUTTON.shop: {
       const cfg = await econMgr.loadConfig();
       const shopItems = await econMgr.getShopItems();
       if (shopItems.length === 0) {
@@ -631,7 +638,7 @@ async function handleEconomyButton(
       }
       return;
     }
-    case 'econ_timers': {
+    case ECON_BUTTON.timers: {
       const timersClient = interaction.client as SomniClient;
       const userId = interaction.user.id;
       // V10 Audit: guildId from outer scope (interaction.guildId) is correct.
