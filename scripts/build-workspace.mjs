@@ -10,6 +10,7 @@ import { runPnpm } from './lib/pnpm.mjs';
 const buildTargets = [
   '@somnibot/shared',
   '@somnibot/e2e',
+  '@somnibot/testkit',
   '@somnibot/bot',
   '@somnibot/dashboard',
   '@somnibot/license-sdk',
